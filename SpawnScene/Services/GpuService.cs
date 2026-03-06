@@ -28,7 +28,6 @@ public class GpuService : IBackgroundService, IAsyncDisposable
 
     private async Task GpuShare_OnDeviceRequested(GPUAdapterHook adapterHook, GPUDeviceReturnOverride args)
     {
-        _js.Log(">> Modifying device request: ", args.Options);
         var limits = adapterHook.Adapter.Limits;
         args.Options ??= _js.New<JSObject>("Object");
         var requiredLimits = args.Options.JSRef!.Get<JSObject?>("requiredLimits");
@@ -38,7 +37,6 @@ public class GpuService : IBackgroundService, IAsyncDisposable
         }
         requiredLimits.JSRef!.Set("maxStorageBufferBindingSize", limits.MaxStorageBufferBindingSize);
         requiredLimits.JSRef!.Set("maxBufferSize", limits.MaxBufferSize);
-        _js.Log("<< Modified device request: ", args.Options);
     }
 
     private async Task OnDeviceCreated(GPUAdapterHook adapterHook, GPUDeviceReturnOverride args)

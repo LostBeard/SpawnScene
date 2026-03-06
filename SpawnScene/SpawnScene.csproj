@@ -5,6 +5,12 @@
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<OverrideHtmlAssetPlaceholders>true</OverrideHtmlAssetPlaceholders>
+		<!-- Not compression needed -->
+		<CompressionEnabled>false</CompressionEnabled>
+		<!-- Disable IL trimming to preserve ILGPU kernel methods invoked via reflection -->
+		<PublishTrimmed>false</PublishTrimmed>
+		<!-- Disable AOT compilation - ILGPU needs IL reflection to work -->
+		<RunAOTCompilation>false</RunAOTCompilation>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -12,6 +18,13 @@
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.3" PrivateAssets="all" />
 		<PackageReference Include="SpawnDev.BlazorJS.OnnxRuntimeWeb" Version="1.1.0" />
 		<PackageReference Include="SpawnDev.ILGPU" Version="3.5.0" />
+	</ItemGroup>
+
+	<!-- Prevent the IL trimmer from removing types accessed via reflection in ILGPU's static constructors -->
+	<ItemGroup>
+		<TrimmerRootAssembly Include="ILGPU" />
+		<TrimmerRootAssembly Include="ILGPU.Algorithms" />
+		<TrimmerRootAssembly Include="SpawnDev.ILGPU" />
 	</ItemGroup>
 
 </Project>

@@ -1,0 +1,415 @@
+@page "/viewer"
+@using SpawnScene.Formats
+@using SpawnDev.BlazorJS
+@using SpawnDev.BlazorJS.JSObjects
+@implements IAsyncDisposable
+
+<PageTitle>Viewer — SpawnScene</PageTitle>
+
+<div class="viewer-container"
+     @onmousedown="OnMouseDown"
+     @onmouseup="OnMouseUp"
+     @onmousemove="OnMouseMove"
+     @onwheel="OnWheel"
+     @onwheel:preventDefault
+     @ondblclick="OnDoubleClick"
+     @onkeydown="OnKeyDown"
+     @onkeydown:preventDefault
+     @onkeyup="OnKeyUp"
+     tabindex="0"
+     @ref="_containerRef">
+
+    <canvas @ref="_canvasRef" class="viewer-canvas"
+            width="@_canvasWidth" height="@_canvasHeight"></canvas>
+
+    <div class="viewer-overlay">
+        <div class="viewer-badge">
+            @if (_sceneManager.HasScene)
+            {
+                <span>@_sceneManager.ActiveScene!.Count.ToString("N0") splats</span>
+            }
+            else
+            {
+                <span>No scene</span>
+            }
+        </div>
+        <div class="viewer-badge">
+            <span>@_renderService.Fps.ToString("F1") FPS</span>
+        </div>
+        @if (_gpuService.IsInitialized)
+        {
+            <div class="viewer-badge">
+                <span>@_gpuService.DeviceName</span>
+            </div>
+        }
+        @if (_isLoading)
+        {
+            <div class="viewer-badge" style="color: var(--accent-secondary);">
+                <span>Loading…</span>
+            </div>
+        }
+        @if (_renderTime > 0)
+        {
+            <div class="viewer-badge">
+                <span>@_renderTime.ToString("F0") ms</span>
+            </div>
+        }
+        <div class="viewer-badge">
+            <span>@_canvasWidth×@_canvasHeight</span>
+        </div>
+    </div>
+
+    <div class="viewer-controls-hint" style="position: absolute; bottom: var(--space-sm); left: var(--space-sm); opacity: 0.5; font-size: 11px; color: var(--text-muted); pointer-events: none;">
+        WASD: move • QE: up/down • Mouse drag: look • Shift: fast • Scroll: zoom • Dbl-click: reset
+    </div>
+
+    @if (!_sceneManager.HasScene && !_isLoading)
+    {
+        <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none;">
+            <div class="drop-zone" style="pointer-events: all; max-width: 420px;">
+                <div class="drop-zone-icon">📦</div>
+                <div class="drop-zone-text">
+                    Drop a <strong>.ply</strong> or <strong>.splat</strong> file here<br />
+                    <span class="text-xs text-muted-color" style="margin-top: var(--space-xs); display: inline-block;">
+                        or use the Import Images page to create a scene
+                    </span>
+                </div>
+                <div style="display: flex; gap: var(--space-sm); margin-top: var(--space-md);">
+                    <label class="btn btn-secondary" style="cursor: pointer;">
+                        Browse Files
+                        <InputFile OnChange="OnFileSelected" accept=".ply,.splat" style="display: none;" />
+                    </label>
+                    <button class="btn btn-primary" @onclick="LoadDemoScene">✨ Load Demo</button>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (!string.IsNullOrEmpty(_errorMessage))
+    {
+        <div style="position: absolute; top: var(--space-md); left: 50%; transform: translateX(-50%);
+                    background: var(--accent-danger); color: white; padding: var(--space-sm) var(--space-lg);
+                    border-radius: var(--radius-sm); font-size: var(--font-size-sm);">
+            @_errorMessage
+            <span style="margin-left: var(--space-md); cursor: pointer;" @onclick="() => _errorMessage = null">✕</span>
+        </div>
+    }
+</div>
+
+@code {
+    [Inject] private GpuService _gpuService { get; set; } = default!;
+    [Inject] private SceneManager _sceneManager { get; set; } = default!;
+    [Inject] private RenderService _renderService { get; set; } = default!;
+    [Inject] private HttpClient _http { get; set; } = default!;
+
+    private ElementReference _canvasRef;
+    private ElementReference _containerRef;
+    private CameraController? _cameraController;
+    private bool _isLoading;
+    private string? _errorMessage;
+    private double _renderTime;
+    private int _canvasWidth = 960;
+    private int _canvasHeight = 640;
+
+    // Continuous render loop via requestAnimationFrame
+    private bool _renderLoopRunning;
+    private ActionCallback<double>? _rafCallback;
+    private double _lastFrameTime;
+
+    // Resize handling
+    private ActionCallback? _resizeCallback;
+    private int _lastResizeWidth;
+    private int _lastResizeHeight;
+
+    protected override void OnInitialized()
+    {
+        _cameraController = new CameraController(_sceneManager);
+        _sceneManager.OnSceneChanged += OnSceneChanged;
+        _renderService.OnFpsUpdated += _ => InvokeAsync(StateHasChanged);
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            // Measure container and set canvas to 1:1 device pixel ratio
+            UpdateCanvasSize();
+
+            // Need to re-render with correct canvas size
+            StateHasChanged();
+            await Task.Yield();
+
+            await _renderService.AttachCanvasAsync(_canvasRef);
+            // If scene already loaded (e.g. navigating from depth-splat), initialize camera
+            if (_sceneManager.HasScene)
+            {
+                _cameraController?.FitToScene();
+            }
+            await DoRenderAsync();
+            StartRenderLoop();
+
+            // Listen for window resize events
+            _resizeCallback = new ActionCallback(OnWindowResize);
+            using var window = BlazorJSRuntime.JS.Get<Window>("window");
+            window.AddEventListener("resize", _resizeCallback);
+        }
+    }
+
+    /// <summary>
+    /// Read the container's actual pixel dimensions and apply devicePixelRatio
+    /// so the canvas has a 1:1 mapping to physical display pixels.
+    /// </summary>
+    private void UpdateCanvasSize()
+    {
+        using var container = new HTMLElement(_containerRef);
+        int cssWidth = container.ClientWidth;
+        int cssHeight = container.ClientHeight;
+
+        if (cssWidth <= 0 || cssHeight <= 0)
+        {
+            cssWidth = 960;
+            cssHeight = 640;
+        }
+
+        // Get device pixel ratio for 1:1 mapping
+        float dpr = BlazorJSRuntime.JS.Get<float>("devicePixelRatio");
+        if (dpr < 1f) dpr = 1f;
+        if (dpr > 3f) dpr = 3f; // Cap at 3x to avoid excessive GPU load
+
+        _canvasWidth = (int)(cssWidth * dpr);
+        _canvasHeight = (int)(cssHeight * dpr);
+
+        _lastResizeWidth = cssWidth;
+        _lastResizeHeight = cssHeight;
+
+        Console.WriteLine($"[Viewer] Canvas: {cssWidth}×{cssHeight} CSS → {_canvasWidth}×{_canvasHeight} pixels (DPR={dpr:F2})");
+    }
+
+    private async void OnWindowResize()
+    {
+        try
+        {
+            using var container = new HTMLElement(_containerRef);
+            int cssWidth = container.ClientWidth;
+            int cssHeight = container.ClientHeight;
+
+            // Skip if dimensions haven't actually changed
+            if (cssWidth == _lastResizeWidth && cssHeight == _lastResizeHeight) return;
+            _lastResizeWidth = cssWidth;
+            _lastResizeHeight = cssHeight;
+
+            float dpr = BlazorJSRuntime.JS.Get<float>("devicePixelRatio");
+            if (dpr < 1f) dpr = 1f;
+            if (dpr > 3f) dpr = 3f;
+
+            int newWidth = (int)(cssWidth * dpr);
+            int newHeight = (int)(cssHeight * dpr);
+
+            if (newWidth == _canvasWidth && newHeight == _canvasHeight) return;
+
+            _canvasWidth = newWidth;
+            _canvasHeight = newHeight;
+
+            Console.WriteLine($"[Viewer] Resize: {cssWidth}×{cssHeight} CSS → {_canvasWidth}×{_canvasHeight} pixels");
+
+            // Update renderer's internal textures for new canvas size
+            _renderService.HandleResize(_canvasWidth, _canvasHeight);
+
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Viewer] Resize error: {ex.Message}");
+        }
+    }
+
+    private void StartRenderLoop()
+    {
+        if (_renderLoopRunning) return;
+        _renderLoopRunning = true;
+        _lastFrameTime = 0;
+        _rafCallback ??= new ActionCallback<double>(OnAnimationFrame);
+        RequestFrame();
+    }
+
+    private void StopRenderLoop()
+    {
+        _renderLoopRunning = false;
+    }
+
+    private void RequestFrame()
+    {
+        if (!_renderLoopRunning || _rafCallback == null) return;
+        using var window = BlazorJSRuntime.JS.Get<Window>("window");
+        window.RequestAnimationFrame(_rafCallback);
+    }
+
+    private async void OnAnimationFrame(double timestamp)
+    {
+        if (!_renderLoopRunning) return;
+
+        float dt = _lastFrameTime > 0 ? (float)((timestamp - _lastFrameTime) / 1000.0) : 1f / 60f;
+        _lastFrameTime = timestamp;
+        dt = Math.Min(dt, 0.1f);
+
+        // Process WASD movement
+        bool moved = _cameraController?.Tick(dt) ?? false;
+
+        // Always render if scene is loaded (for smooth interaction)
+        if (_sceneManager.HasScene)
+        {
+            await DoRenderAsync();
+        }
+
+        RequestFrame();
+    }
+
+    private async Task OnFileSelected(InputFileChangeEventArgs e)
+    {
+        var file = e.File;
+        _isLoading = true;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            // Read file bytes (limit to 500MB)
+            const long maxSize = 500 * 1024 * 1024;
+            using var stream = file.OpenReadStream(maxAllowedSize: maxSize);
+            using var ms = new MemoryStream();
+            await stream.CopyToAsync(ms);
+            var bytes = ms.ToArray();
+
+            // Parse based on extension
+            GaussianScene scene;
+            var name = file.Name.ToLowerInvariant();
+
+            if (name.EndsWith(".ply"))
+            {
+                scene = PlyParser.Parse(bytes);
+            }
+            else if (name.EndsWith(".splat"))
+            {
+                scene = SplatParser.Parse(bytes);
+            }
+            else
+            {
+                throw new FormatException($"Unsupported file format: {file.Name}");
+            }
+
+            scene.SourceName = file.Name;
+            Console.WriteLine($"Loaded {scene.Count:N0} Gaussians from {file.Name}");
+
+            // Set the scene (triggers camera fit + re-render)
+            _sceneManager.ActiveScene = scene;
+            _cameraController?.FitToScene();
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Error loading file: {ex.Message}";
+            Console.WriteLine($"Load error: {ex}");
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadDemoScene()
+    {
+        _isLoading = true;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var bytes = await _http.GetByteArrayAsync("test_scene.ply");
+            var scene = PlyParser.Parse(bytes);
+            scene.SourceName = "demo_scene.ply";
+            Console.WriteLine($"Loaded demo: {scene.Count:N0} Gaussians");
+            _sceneManager.ActiveScene = scene;
+            _cameraController?.FitToScene();
+        }
+        catch (Exception ex)
+        {
+            _errorMessage = $"Error loading demo: {ex.Message}";
+            Console.WriteLine($"Demo load error: {ex}");
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    private async void OnSceneChanged()
+    {
+        _cameraController?.FitToScene();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task DoRenderAsync()
+    {
+        try
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            await _renderService.RenderFrameAsync();
+            sw.Stop();
+            _renderTime = sw.Elapsed.TotalMilliseconds;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Render error: {ex.Message}");
+        }
+    }
+
+    // --- Mouse Events ---
+    private void OnMouseDown(MouseEventArgs e)
+    {
+        _cameraController?.OnMouseDown((int)e.Button, e.ClientX, e.ClientY, e.ShiftKey);
+    }
+
+    private void OnMouseUp(MouseEventArgs e)
+    {
+        _cameraController?.OnMouseUp();
+    }
+
+    private void OnMouseMove(MouseEventArgs e)
+    {
+        if (e.Buttons == 0) return;
+        _cameraController?.OnMouseMove(e.ClientX, e.ClientY);
+    }
+
+    private void OnWheel(WheelEventArgs e)
+    {
+        _cameraController?.OnWheel(e.DeltaY);
+    }
+
+    private void OnDoubleClick(MouseEventArgs e)
+    {
+        _cameraController?.FitToScene();
+    }
+
+    // --- Keyboard Events ---
+    private void OnKeyDown(KeyboardEventArgs e)
+    {
+        _cameraController?.OnKeyDown(e.Key);
+    }
+
+    private void OnKeyUp(KeyboardEventArgs e)
+    {
+        _cameraController?.OnKeyUp(e.Key);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        StopRenderLoop();
+        _sceneManager.OnSceneChanged -= OnSceneChanged;
+        _rafCallback?.Dispose();
+        _rafCallback = null;
+        _resizeCallback?.Dispose();
+        _resizeCallback = null;
+        _cameraController?.Dispose();
+    }
+}

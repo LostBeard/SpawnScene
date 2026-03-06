@@ -1,0 +1,64 @@
+@inject GpuService GpuService
+
+<aside class="sidebar">
+    <div class="sidebar-header">
+        <div class="sidebar-logo">✦</div>
+        <div>
+            <div class="sidebar-title">SpawnScene</div>
+            <div class="sidebar-subtitle">3D from Images</div>
+        </div>
+    </div>
+
+    <nav class="nav-section">
+        <div class="nav-section-label">Navigate</div>
+        <NavLink class="nav-item" href="" Match="NavLinkMatch.All">
+            <span class="nav-icon">🏠</span>
+            <span>Home</span>
+        </NavLink>
+        <NavLink class="nav-item" href="depth-splat">
+            <span class="nav-icon">🔮</span>
+            <span>Depth Splat</span>
+        </NavLink>
+        <NavLink class="nav-item" href="viewer">
+            <span class="nav-icon">👁</span>
+            <span>Viewer</span>
+        </NavLink>
+    </nav>
+
+    <div class="sidebar-footer">
+        <div class="gpu-status">
+            <div class="gpu-status-dot @(_gpuStatusClass)"></div>
+            <span>@_gpuStatusText</span>
+        </div>
+    </div>
+</aside>
+
+@code {
+    private string _gpuStatusText = "Initializing GPU…";
+    private string _gpuStatusClass = "inactive";
+
+    protected override void OnAfterRender(bool firstRender)
+    {
+        if (firstRender)
+        {
+            _ = InitGpuAsync();
+        }
+    }
+
+    private async Task InitGpuAsync()
+    {
+        try
+        {
+            await GpuService.InitializeAsync();
+            _gpuStatusText = GpuService.DeviceName;
+            _gpuStatusClass = "";
+        }
+        catch (Exception ex)
+        {
+            _gpuStatusText = "GPU unavailable";
+            _gpuStatusClass = "inactive";
+            Console.WriteLine($"GPU initialization failed: {ex.Message}");
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+}

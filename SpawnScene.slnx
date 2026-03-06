@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="Notes.md" />
+    <File Path="README.md" />
+  </Folder>
+  <Project Path="SpawnScene/SpawnScene.csproj" />
+</Solution>

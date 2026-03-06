@@ -1,0 +1,112 @@
+@page "/"
+
+<PageTitle>SpawnScene</PageTitle>
+
+<div class="page-wrapper">
+    <div class="hero animate-in">
+        <h1 class="hero-title">SpawnScene</h1>
+        <p class="hero-subtitle">
+            Create stunning 3D Gaussian Splat scenes from ordinary photos — entirely in your browser.
+            No server, no uploads, just GPU power.
+        </p>
+        <div style="margin-top: var(--space-lg); display: flex; gap: var(--space-md);">
+            <a href="depth-splat" class="btn btn-primary">
+                🔮 Create Scene
+            </a>
+            <a href="viewer" class="btn btn-secondary">
+                👁 Open Viewer
+            </a>
+        </div>
+    </div>
+
+    <div class="feature-grid" style="margin: 0 auto;">
+        <div class="card feature-card animate-in animate-in-delay-1">
+            <div class="feature-icon">🧊</div>
+            <div class="feature-title">3D Gaussian Splatting</div>
+            <div class="feature-desc">
+                State-of-the-art neural 3D representation. Turn a single photo into
+                a photorealistic, interactive 3D scene.
+            </div>
+        </div>
+
+        <div class="card feature-card animate-in animate-in-delay-2">
+            <div class="feature-icon">⚡</div>
+            <div class="feature-title">GPU Accelerated</div>
+            <div class="feature-desc">
+                Powered by SpawnDev.ILGPU — depth estimation, Gaussian generation,
+                radix sorting, and rendering all run on the GPU via WebGPU.
+            </div>
+        </div>
+
+        <div class="card feature-card animate-in animate-in-delay-3">
+            <div class="feature-icon">🔒</div>
+            <div class="feature-title">Fully Client-Side</div>
+            <div class="feature-desc">
+                All processing happens in your browser using WebGPU compute.
+                Your images never leave your device. Zero backend required.
+            </div>
+        </div>
+
+        <div class="card feature-card animate-in animate-in-delay-4">
+            <div class="feature-icon">🎯</div>
+            <div class="feature-title">Zero-Copy Pipeline</div>
+            <div class="feature-desc">
+                Depth estimation → Gaussian generation → radix sort → render.
+                Data stays on the GPU from start to finish — no CPU round-trips.
+            </div>
+        </div>
+    </div>
+
+    <div class="pipeline-section animate-in animate-in-delay-5">
+        <h3 class="pipeline-title">How It Works</h3>
+        <div class="pipeline-steps">
+            <a href="/depth-splat" class="pipeline-step step-ready">
+                <div class="step-number">1</div>
+                <div class="step-content">
+                    <div class="step-name">Load Image</div>
+                    <div class="step-desc">Upload any photo</div>
+                </div>
+                <div class="step-arrow">→</div>
+            </a>
+
+            <a href="/depth-splat" class="pipeline-step step-ready">
+                <div class="step-number">2</div>
+                <div class="step-content">
+                    <div class="step-name">Estimate Depth</div>
+                    <div class="step-desc">DepthAnything V2 via ONNX on GPU</div>
+                </div>
+                <div class="step-arrow">→</div>
+            </a>
+
+            <a href="/depth-splat" class="pipeline-step step-ready">
+                <div class="step-number">3</div>
+                <div class="step-content">
+                    <div class="step-name">Generate Splats</div>
+                    <div class="step-desc">ILGPU kernel → 100K+ Gaussians</div>
+                </div>
+                <div class="step-arrow">→</div>
+            </a>
+
+            <a href="/viewer" class="pipeline-step step-ready">
+                <div class="step-number">4</div>
+                <div class="step-content">
+                    <div class="step-name">View in 3D</div>
+                    <div class="step-desc">Real-time splat renderer at 60 FPS</div>
+                </div>
+            </a>
+        </div>
+    </div>
+
+    <div class="tech-section animate-in animate-in-delay-6">
+        <h3 class="tech-title">Built With</h3>
+        <div class="tech-badges">
+            <span class="tech-badge">Blazor WebAssembly</span>
+            <span class="tech-badge">SpawnDev.BlazorJS</span>
+            <span class="tech-badge">SpawnDev.ILGPU</span>
+            <span class="tech-badge">ONNX Runtime Web</span>
+            <span class="tech-badge">WebGPU</span>
+            <span class="tech-badge">.NET 10</span>
+            <span class="tech-badge">C#</span>
+        </div>
+    </div>
+</div>

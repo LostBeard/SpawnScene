@@ -1,0 +1,499 @@
+@page "/depth-splat"
+@implements IAsyncDisposable
+
+<PageTitle>Depth Splat — SpawnScene</PageTitle>
+
+<div class="depth-splat-container">
+    <div class="depth-header">
+        <h2>🔮 Depth Splat</h2>
+        <p class="text-muted-color">Create Gaussian Splats from images using AI depth estimation (DepthAnythingV2).</p>
+    </div>
+
+    @* ── Step 1: Load Model ── *@
+    <div class="depth-section">
+        <h3>① Load Depth Model</h3>
+        @if (_depth.IsReady)
+        {
+            <div class="model-badge">✅ DepthAnythingV2 Small loaded</div>
+        }
+        else
+        {
+            <button class="btn btn-primary" @onclick="LoadModel" disabled="@_depth.IsLoading">
+                @if (_depth.IsLoading)
+                {
+                    <span class="spinner-inline"></span>
+                }
+                Load DepthAnythingV2 Small (~99 MB)
+            </button>
+        }
+    </div>
+
+    @* ── Step 2: Image Upload ── *@
+    <div class="depth-section">
+        <h3>② Upload Images</h3>
+        <div class="upload-area">
+            <label class="btn btn-secondary upload-label">
+                📁 Choose Images
+                <InputFile OnChange="OnFilesSelected" accept="image/*" multiple style="display: none;" />
+            </label>
+            <span class="text-muted-color">or load a sample:</span>
+            <button class="btn btn-secondary" @onclick="@(() => LoadSampleImage("samples/room.png", "🏠 Room"))" disabled="@_isProcessing">
+                🏠 Room
+            </button>
+            <button class="btn btn-secondary" @onclick="@(() => LoadSampleImage("samples/garden.png", "🌿 Garden"))" disabled="@_isProcessing">
+                🌿 Garden
+            </button>
+            <button class="btn btn-secondary" @onclick="@(() => LoadSampleImage("samples/living_room_hd.png", "🛋 Living Room HD"))" disabled="@_isProcessing">
+                🛋 Living Room HD
+            </button>
+            <button class="btn btn-secondary" @onclick="@(() => LoadSampleImage("samples/garden_hd.png", "🌳 Garden HD"))" disabled="@_isProcessing">
+                🌳 Garden HD
+            </button>
+            <button class="btn btn-secondary" @onclick="@(() => LoadSampleImage("samples/living-room-hd-2.jpg", "🛋 Living Room 5K"))" disabled="@_isProcessing">
+                🛋 Living Room 5K
+            </button>
+        </div>
+
+        @if (_images.Count > 0)
+        {
+            <div class="image-strip">
+                @for (int i = 0; i < _images.Count; i++)
+                {
+                    var idx = i;
+                    <div class="image-thumb @(idx == _selectedImageIdx ? "selected" : "")"
+                         @onclick="() => SelectImage(idx)">
+                        <canvas @ref="_thumbCanvases[idx]" width="120" height="80"></canvas>
+                        <div class="thumb-label">@(_images[idx].FileName)</div>
+                    </div>
+                }
+            </div>
+        }
+    </div>
+
+    @* ── Step 3: Depth Estimation ── *@
+    @if (_images.Count > 0 && _depth.IsReady)
+    {
+        <div class="depth-section">
+            <h3>③ Estimate Depth</h3>
+            <div class="btn-row">
+                <button class="btn btn-primary" @onclick="EstimateDepth" disabled="@_isProcessing">
+                    @if (_isProcessing)
+                    {
+                        <span class="spinner-inline"></span>
+                    }
+                    🧠 Estimate Depth @(_selectedImageIdx >= 0 ? $"(Image {_selectedImageIdx + 1})" : "(All)")
+                </button>
+                @if (_depthResults.Any(d => d != null))
+                {
+                    <button class="btn btn-primary" @onclick="EstimateAllDepths" disabled="@_isProcessing">
+                        🧠 Estimate All
+                    </button>
+                }
+            </div>
+        </div>
+    }
+
+    @* ── Depth Visualization ── *@
+    @if (_depthResults.Any(d => d != null))
+    {
+        <div class="depth-section">
+            <h3>Depth Preview</h3>
+            <div class="depth-preview-row">
+                <div class="preview-panel">
+                    <div class="preview-label">Original</div>
+                    <canvas @ref="_previewOriginal" width="@_previewW" height="@_previewH"></canvas>
+                </div>
+                <div class="preview-panel">
+                    <div class="preview-label">Depth Map</div>
+                    <canvas @ref="_previewDepth" width="@_previewW" height="@_previewH"></canvas>
+                </div>
+            </div>
+            <div class="depth-stats">
+                @if (_selectedImageIdx >= 0 && _selectedImageIdx < _depthResults.Count && _depthResults[_selectedImageIdx] != null)
+                {
+                    var dr = _depthResults[_selectedImageIdx]!;
+                    <span>Range: [@dr.MinDepth.ToString("F3"), @dr.MaxDepth.ToString("F3")]</span>
+                    <span>•</span>
+                    <span>Size: @dr.Width × @dr.Height</span>
+                }
+            </div>
+        </div>
+    }
+
+    @* ── Step 4: Generate Gaussians ── *@
+    @if (_depthResults.Any(d => d != null))
+    {
+        <div class="depth-section">
+            <h3>④ Generate Gaussians</h3>
+            <div class="controls-row">
+                <label>
+                    Subsample:
+                    <select @bind="_subsample">
+                        <option value="1">1 (full quality)</option>
+                        <option value="2">2 (high quality)</option>
+                        <option value="4">4 (balanced)</option>
+                        <option value="8">8 (fast)</option>
+                    </select>
+                </label>
+                <button class="btn btn-primary" @onclick="GenerateGaussiansAsync" disabled="@_isProcessing">
+                    🎯 Generate from Depth
+                </button>
+            </div>
+        </div>
+    }
+
+    @* ── Step 5: View ── *@
+    @if (_generatedScene != null)
+    {
+        <div class="depth-section">
+            <h3>⑤ View</h3>
+            <div class="stat-row">
+                <div class="stat">
+                    <span class="stat-value">@_generatedScene.Count</span>
+                    <span class="stat-label">Gaussians</span>
+                </div>
+            </div>
+            <div class="btn-row">
+                <button class="btn btn-secondary" @onclick="ViewInSplatViewer">
+                    👁 View in Splat Viewer
+                </button>
+            </div>
+        </div>
+    }
+
+    @* ── Status Bar ── *@
+    @if (!string.IsNullOrEmpty(_depth.Status))
+    {
+        <div class="status-bar @(_depth.IsLoading || _isProcessing ? "running" : "done")">
+            @if (_depth.IsLoading || _isProcessing)
+            {
+                <div class="spinner-inline"></div>
+            }
+            else
+            {
+                <span>✅</span>
+            }
+            <span>@_depth.Status</span>
+        </div>
+    }
+</div>
+
+@code {
+    [Inject] private DepthEstimationService _depth { get; set; } = default!;
+    [Inject] private DepthToGaussianKernel _gpuKernel { get; set; } = default!;
+    [Inject] private GpuGaussianRenderer _gpuRenderer { get; set; } = default!;
+    [Inject] private GpuDepthColorizer _depthColorizer { get; set; } = default!;
+    [Inject] private RenderService _renderService { get; set; } = default!;
+    [Inject] private SceneManager _sceneManager { get; set; } = default!;
+    [Inject] private NavigationManager _nav { get; set; } = default!;
+    [Inject] private HttpClient _http { get; set; } = default!;
+
+
+    private List<ImportedImage> _images = new();
+    private List<DepthResult?> _depthResults = new();
+    private List<ElementReference> _thumbCanvases = new();
+    private ElementReference _previewOriginal;
+    private ElementReference _previewDepth;
+    private int _selectedImageIdx = 0;
+    private int _subsample = 2;
+    private int _trainIterations = 100;
+    private bool _isProcessing;
+    private int _previewW = 400;
+    private int _previewH = 300;
+
+    protected override void OnInitialized()
+    {
+        _depth.OnStateChanged += async () => await InvokeAsync(StateHasChanged);
+    }
+
+    private async Task LoadModel()
+    {
+        await _depth.LoadModelAsync();
+    }
+
+    private async Task LoadSampleImage(string url, string name)
+    {
+        _isProcessing = true;
+        StateHasChanged();
+        try
+        {
+            var buffer = await _http.GetByteArrayAsync(url);
+
+            using var blob = new SpawnDev.BlazorJS.JSObjects.Blob(
+                new[] { buffer },
+                new SpawnDev.BlazorJS.JSObjects.BlobOptions { Type = "image/png" });
+            using var imageBitmap = await SpawnDev.BlazorJS.BlazorJSRuntime.JS.CallAsync<SpawnDev.BlazorJS.JSObjects.ImageBitmap>(
+                "createImageBitmap", blob);
+
+            int w = (int)imageBitmap.Width;
+            int h = (int)imageBitmap.Height;
+
+            using var canvas = new SpawnDev.BlazorJS.JSObjects.OffscreenCanvas(w, h);
+            using var ctx = canvas.Get2DContext();
+            ctx.JSRef!.CallVoid("drawImage", imageBitmap, 0, 0);
+            using var imageData = ctx.GetImageData(0, 0, w, h);
+            using var data = imageData.Data;
+
+            var pixels = data.ReadBytes();
+
+            _images.Add(new ImportedImage
+            {
+                FileName = name,
+                Width = w,
+                Height = h,
+                RgbaPixels = pixels,
+            });
+            _depthResults.Add(null);
+            _thumbCanvases.Add(new ElementReference());
+            _selectedImageIdx = _images.Count - 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Error loading sample: {ex.Message}");
+        }
+        finally
+        {
+            _isProcessing = false;
+        }
+        StateHasChanged();
+        await Task.Yield();
+        await DrawThumbnails();
+    }
+
+    private async Task OnFilesSelected(InputFileChangeEventArgs e)
+    {
+        _images.Clear();
+        _depthResults.Clear();
+        _thumbCanvases.Clear();
+
+        foreach (var file in e.GetMultipleFiles(20))
+        {
+            try
+            {
+                var buffer = new byte[file.Size];
+                await file.OpenReadStream(maxAllowedSize: 50 * 1024 * 1024).ReadExactlyAsync(buffer);
+
+                // Decode image using Blob + createImageBitmap (efficient, async)
+                using var blob = new SpawnDev.BlazorJS.JSObjects.Blob(
+                    new[] { buffer },
+                    new SpawnDev.BlazorJS.JSObjects.BlobOptions { Type = file.ContentType });
+                using var imageBitmap = await SpawnDev.BlazorJS.BlazorJSRuntime.JS.CallAsync<SpawnDev.BlazorJS.JSObjects.ImageBitmap>(
+                    "createImageBitmap", blob);
+
+                int w = (int)imageBitmap.Width;
+                int h = (int)imageBitmap.Height;
+
+                using var canvas = new SpawnDev.BlazorJS.JSObjects.OffscreenCanvas(w, h);
+                using var ctx = canvas.Get2DContext();
+                ctx.JSRef!.CallVoid("drawImage", imageBitmap, 0, 0);
+                using var imageData = ctx.GetImageData(0, 0, w, h);
+                using var data = imageData.Data;
+
+                // Bulk read all pixels at once
+                var pixels = data.ReadBytes();
+
+                _images.Add(new ImportedImage
+                {
+                    FileName = file.Name,
+                    Width = w,
+                    Height = h,
+                    RgbaPixels = pixels,
+                });
+                _depthResults.Add(null);
+                _thumbCanvases.Add(new ElementReference());
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[DepthSplat] Error loading {file.Name}: {ex.Message}");
+            }
+        }
+
+        if (_images.Count > 0)
+        {
+            _selectedImageIdx = 0;
+            _previewW = Math.Min(_images[0].Width, 512);
+            _previewH = (int)(_images[0].Height * (_previewW / (float)_images[0].Width));
+        }
+
+        StateHasChanged();
+        await Task.Yield();
+        await DrawThumbnails();
+    }
+
+    private async Task DrawThumbnails()
+    {
+        for (int i = 0; i < _images.Count && i < _thumbCanvases.Count; i++)
+        {
+            try
+            {
+                var image = _images[i];
+                using var canvas = new SpawnDev.BlazorJS.JSObjects.HTMLCanvasElement(_thumbCanvases[i]);
+                using var ctx = canvas.GetContext<SpawnDev.BlazorJS.JSObjects.CanvasRenderingContext2D>("2d");
+
+                int tw = canvas.Width;
+                int th = canvas.Height;
+
+                // Draw scaled image — create ImageData from Uint8ClampedArray
+                using var pixelArray = new SpawnDev.BlazorJS.JSObjects.Uint8ClampedArray(image.RgbaPixels);
+                using var imgData = new SpawnDev.BlazorJS.JSObjects.ImageData(pixelArray, image.Width, image.Height);
+
+                // Use a temp full-size canvas then draw scaled
+                using var tempCanvas = new SpawnDev.BlazorJS.JSObjects.OffscreenCanvas(image.Width, image.Height);
+                using var tempCtx = tempCanvas.Get2DContext();
+                tempCtx.PutImageData(imgData, 0, 0);
+
+                ctx.DrawImage(tempCanvas, 0, 0, tw, th);
+            }
+            catch { }
+        }
+    }
+
+    private void SelectImage(int idx)
+    {
+        _selectedImageIdx = idx;
+        if (_depthResults[idx] != null)
+        {
+            _ = DrawPreviews();
+        }
+    }
+
+    private async Task EstimateDepth()
+    {
+        if (_selectedImageIdx < 0 || _selectedImageIdx >= _images.Count) return;
+        _isProcessing = true;
+        StateHasChanged();
+
+        // Dispose previous GPU depth result before replacing
+        _depthResults[_selectedImageIdx]?.Dispose();
+        var result = await _depth.EstimateDepthAsync(_images[_selectedImageIdx]);
+        _depthResults[_selectedImageIdx] = result;
+
+        _isProcessing = false;
+        StateHasChanged();
+        await Task.Yield();
+        await DrawPreviews();
+    }
+
+    private async Task EstimateAllDepths()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+
+        for (int i = 0; i < _images.Count; i++)
+        {
+            if (_depthResults[i] != null) continue;
+            _selectedImageIdx = i;
+            StateHasChanged();
+            _depthResults[i] = await _depth.EstimateDepthAsync(_images[i]);
+        }
+
+        _isProcessing = false;
+        StateHasChanged();
+        await Task.Yield();
+        await DrawPreviews();
+    }
+
+    private async Task DrawPreviews()
+    {
+        if (_selectedImageIdx < 0 || _selectedImageIdx >= _images.Count) return;
+        var image = _images[_selectedImageIdx];
+        var dr = _depthResults[_selectedImageIdx];
+
+        try
+        {
+            // Draw original image (CPU path — RGBA pixels are the CPU image source data)
+            using var origCanvas = new SpawnDev.BlazorJS.JSObjects.HTMLCanvasElement(_previewOriginal);
+            using var origCtx = origCanvas.GetContext<SpawnDev.BlazorJS.JSObjects.CanvasRenderingContext2D>("2d");
+            using var pixelArray = new SpawnDev.BlazorJS.JSObjects.Uint8ClampedArray(image.RgbaPixels);
+            using var imgData = new SpawnDev.BlazorJS.JSObjects.ImageData(pixelArray, image.Width, image.Height);
+            using var tempCanvas = new SpawnDev.BlazorJS.JSObjects.OffscreenCanvas(image.Width, image.Height);
+            using var tempCtx = tempCanvas.Get2DContext();
+            tempCtx.PutImageData(imgData, 0, 0);
+            origCtx.DrawImage(tempCanvas, 0, 0, origCanvas.Width, origCanvas.Height);
+
+            if (dr?.RawDepthGpu == null) return;
+
+            // Draw depth map via GPU colorizer — no CPU readback.
+            // GpuDepthColorizer runs the Turbo kernel on GPU and blits to the canvas
+            // via WebGPUCanvasRenderer (fullscreen-triangle pass, zero CPU involvement).
+            await _depthColorizer.ColorizePresentAsync(dr, _previewDepth, _previewW, _previewH);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DepthSplat] Preview error: {ex.Message}");
+        }
+    }
+
+    private GaussianScene? _generatedScene;
+
+    private async Task GenerateGaussiansAsync()
+    {
+        _isProcessing = true;
+        StateHasChanged();
+
+        try
+        {
+            for (int i = 0; i < _images.Count; i++)
+            {
+                var dr = _depthResults[i];
+                if (dr?.RawDepthGpu == null) continue;
+
+                // GPU fast path: GeneratePackedGpuBufferAsync returns a MemoryBuffer owned
+                // here until we transfer it to the renderer (UploadSceneFromGpuBuffer).
+                var (packedBuf, splatCount) = await _gpuKernel.GeneratePackedGpuBufferAsync(
+                    dr, _images[i], _subsample);
+
+                if (splatCount == 0)
+                {
+                    packedBuf.Dispose();
+                    continue;
+                }
+
+                // Create a lightweight metadata scene (no CPU Gaussian array).
+                // GpuSplatCount lets the renderer/UI see the correct count.
+                _generatedScene = new GaussianScene
+                {
+                    GpuSplatCount = splatCount,
+                    SourceName = "depth-splat",
+                    Center = System.Numerics.Vector3.Zero,
+                    Extent = 1f,
+                };
+
+                // Upload packed buffer directly into the renderer pipeline.
+                // Transfers ownership of packedBuf → GpuSplatSorter (do NOT dispose here).
+                await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
+
+                // Inform RenderService the GPU buffer is already loaded so it skips
+                // the CPU UploadScene call when we set ActiveScene.
+                _renderService.SetActiveSceneGpuLoaded(_generatedScene);
+
+                Console.WriteLine($"[DepthSplat] GPU fast-path: {splatCount:N0} splats loaded into renderer");
+                break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[DepthSplat] GPU generation error: {ex.Message}");
+        }
+        finally
+        {
+            _isProcessing = false;
+            StateHasChanged();
+        }
+    }
+
+    private void ViewInSplatViewer()
+    {
+        if (_generatedScene == null) return;
+        // GPU data is already in the renderer — SetActiveSceneGpuLoaded was called above.
+        _sceneManager.ActiveScene = _generatedScene;
+        _nav.NavigateTo("/viewer");
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        // Dispose all GPU depth results when this page is torn down
+        foreach (var dr in _depthResults)
+            dr?.Dispose();
+    }
+}

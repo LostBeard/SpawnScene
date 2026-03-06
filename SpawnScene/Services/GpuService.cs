@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU;
@@ -13,14 +14,31 @@ namespace SpawnScene.Services;
 /// WebGPU is required — no fallbacks. All compute and data processing runs on
 /// the same GPUDevice, enabling zero-copy integration with ONNX Runtime Web.
 /// </summary>
-public class GpuService : IAsyncDisposable
+public class GpuService : IBackgroundService, IAsyncDisposable
 {
     private Context? _context;
     private bool _initialized;
-
-    public GpuService(GpuShareService gpuShare)
+    BlazorJSRuntime _js;
+    public GpuService(BlazorJSRuntime js, GpuShareService gpuShare)
     {
+        _js = js;
+        gpuShare.OnDeviceRequested += GpuShare_OnDeviceRequested;
         gpuShare.OnDeviceCreated += OnDeviceCreated;
+    }
+
+    private async Task GpuShare_OnDeviceRequested(GPUAdapterHook adapterHook, GPUDeviceReturnOverride args)
+    {
+        _js.Log(">> Modifying device request: ", args.Options);
+        var limits = adapterHook.Adapter.Limits;
+        args.Options ??= _js.New<JSObject>("Object");
+        var requiredLimits = args.Options.JSRef!.Get<JSObject?>("requiredLimits");
+        if (requiredLimits == null)
+        {
+            requiredLimits = _js.New<JSObject>("Object");
+        }
+        requiredLimits.JSRef!.Set("maxStorageBufferBindingSize", limits.MaxStorageBufferBindingSize);
+        requiredLimits.JSRef!.Set("maxBufferSize", limits.MaxBufferSize);
+        _js.Log("<< Modified device request: ", args.Options);
     }
 
     private async Task OnDeviceCreated(GPUAdapterHook adapterHook, GPUDeviceReturnOverride args)

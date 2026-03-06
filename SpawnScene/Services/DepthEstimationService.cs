@@ -34,13 +34,19 @@ public class DepthEstimationService : IAsyncDisposable
     private Action<Index1D,
         ArrayView1D<float, Stride1D.Dense>,  // srcDepth
         ArrayView1D<float, Stride1D.Dense>,  // dstDepth
-        int, int, int, int>?                 // srcW, srcH, dstW, dstH
+        int, int, int, int, int>?            // offset, srcW, srcH, dstW, dstH
         _resizeKernel;
 
     private Action<Index1D,
         ArrayView1D<float, Stride1D.Dense>,  // depth values
-        ArrayView1D<int, Stride1D.Dense>>?   // minMaxOut [0]=min bits, [1]=max bits
+        ArrayView1D<int, Stride1D.Dense>,    // minMaxOut [0]=min bits, [1]=max bits
+        int>?                                // offset
         _minMaxKernel;
+
+    // WebGPU hard limit: maxComputeWorkgroupsPerDimension = 65535.
+    // ILGPU WebGPU 1D auto-grouped kernels use group size 64.
+    // Batch large dispatches to stay within (65535 * 64 = 4,194,240) elements per call.
+    private const int MaxDispatchElements = 65535 * 64;
 
     public event Action? OnStateChanged;
     public string Status { get; private set; } = "";
@@ -151,15 +157,16 @@ public class DepthEstimationService : IAsyncDisposable
         Index1D idx,
         ArrayView1D<float, Stride1D.Dense> srcDepth,
         ArrayView1D<float, Stride1D.Dense> dstDepth,
-        int srcW, int srcH, int dstW, int dstH)
+        int offset, int srcW, int srcH, int dstW, int dstH)
     {
-        int y = idx / dstW;
-        int x = idx % dstW;
+        int absIdx = idx + offset;
+        int y = absIdx / dstW;
+        int x = absIdx % dstW;
         int sx = x * srcW / dstW;
         int sy = y * srcH / dstH;
         sx = sx < 0 ? 0 : (sx >= srcW ? srcW - 1 : sx);
         sy = sy < 0 ? 0 : (sy >= srcH ? srcH - 1 : sy);
-        dstDepth[idx] = srcDepth[sy * srcW + sx];
+        dstDepth[absIdx] = srcDepth[sy * srcW + sx];
     }
 
     /// <summary>
@@ -171,9 +178,10 @@ public class DepthEstimationService : IAsyncDisposable
     private static void MinMaxKernel(
         Index1D idx,
         ArrayView1D<float, Stride1D.Dense> depth,
-        ArrayView1D<int, Stride1D.Dense> minMaxOut)
+        ArrayView1D<int, Stride1D.Dense> minMaxOut,
+        int offset)
     {
-        float v = depth[idx];
+        float v = depth[idx + offset];
         if (v > 0f)
         {
             // Interop.FloatAsInt returns uint; IEEE 754 positive float ordering is preserved
@@ -220,12 +228,13 @@ public class DepthEstimationService : IAsyncDisposable
             Index1D,
             ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>,
-            int, int, int, int>(ResizeDepthKernel);
+            int, int, int, int, int>(ResizeDepthKernel);
 
         _minMaxKernel ??= accelerator.LoadAutoGroupedStreamKernel<
             Index1D,
             ArrayView1D<float, Stride1D.Dense>,
-            ArrayView1D<int, Stride1D.Dense>>(MinMaxKernel);
+            ArrayView1D<int, Stride1D.Dense>,
+            int>(MinMaxKernel);
 
         int origW = image.Width;
         int origH = image.Height;
@@ -339,11 +348,20 @@ public class DepthEstimationService : IAsyncDisposable
         int srcW, int srcH, int dstW, int dstH)
     {
         var resizedBuf = accelerator.Allocate1D<float>(dstW * dstH);
-        _resizeKernel!(dstW * dstH, rawView, resizedBuf.View, srcW, srcH, dstW, dstH);
+        int totalPixels = dstW * dstH;
+        for (int offset = 0; offset < totalPixels; offset += MaxDispatchElements)
+        {
+            int count = Math.Min(MaxDispatchElements, totalPixels - offset);
+            _resizeKernel!(count, rawView, resizedBuf.View, offset, srcW, srcH, dstW, dstH);
+        }
 
         using var minMaxBuf = accelerator.Allocate1D<int>(2);
         minMaxBuf.CopyFromCPU(new int[] { BitConverter.SingleToInt32Bits(float.MaxValue), 0 });
-        _minMaxKernel!(dstW * dstH, resizedBuf.View, minMaxBuf.View);
+        for (int offset = 0; offset < totalPixels; offset += MaxDispatchElements)
+        {
+            int count = Math.Min(MaxDispatchElements, totalPixels - offset);
+            _minMaxKernel!(count, resizedBuf.View, minMaxBuf.View, offset);
+        }
 
         await accelerator.SynchronizeAsync();
 

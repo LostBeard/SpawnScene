@@ -274,6 +274,27 @@ body {
     background: var(--text-muted);
 }
 
+.github-link {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    margin-top: var(--space-sm);
+    font-size: var(--font-size-xs);
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.15s;
+}
+
+.github-link:hover {
+    color: var(--text-primary);
+}
+
+.github-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
+}
+
 /* --- Main Content --- */
 .main-content {
     flex: 1;

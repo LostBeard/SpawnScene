@@ -1,4 +1,5 @@
 using ILGPU;
+using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnScene.Models;
@@ -7,21 +8,24 @@ using System.Runtime.InteropServices;
 namespace SpawnScene.Services;
 
 /// <summary>
-/// ILGPU kernel for GPU-only depth-to-Gaussian conversion.
-/// Reads GPU-resident depth (from DepthEstimationService) and GPU-uploaded RGBA,
-/// writes 10 floats per splat directly into a packed output buffer.
-/// No CPU readback — the packed buffer is passed straight to GpuSplatSorter.
+/// ILGPU kernel for GPU-only depth-to-Gaussian conversion with atomic compaction.
+///
+/// Pipeline:
+///   1. Unproject depth + RGBA → 10-float splat for each valid pixel.
+///   2. Invalid pixels (bad depth range) are skipped entirely via Atomic.Add compaction.
+///   3. 4-byte counter readback → actual valid splat count (no wasted slots in output buffer).
+///   4. Optional edge-sharpening: depth gradient magnitude shrinks splat scale at edges.
 /// </summary>
 public class DepthToGaussianKernel
 {
     private readonly GpuService _gpu;
 
     private Action<Index1D,
-        ArrayView1D<float, Stride1D.Dense>,  // depthValues (GPU-resident raw depth)
-        ArrayView1D<int, Stride1D.Dense>,    // packedRGBA (1 int per pixel)
-        ArrayView1D<float, Stride1D.Dense>,  // outPacked (10 floats per splat)
-        ArrayView1D<float, Stride1D.Dense>,  // params
-        int>?                                // totalPoints
+        ArrayView1D<float, Stride1D.Dense>,  // depthValues
+        ArrayView1D<int, Stride1D.Dense>,    // packedRGBA
+        ArrayView1D<float, Stride1D.Dense>,  // outPacked (compacted)
+        ArrayView1D<int, Stride1D.Dense>,    // counter [0] = valid splat count
+        ArrayView1D<float, Stride1D.Dense>>? // params
         _unprojectAndPackKernel;
 
     public DepthToGaussianKernel(GpuService gpu) => _gpu = gpu;
@@ -31,25 +35,27 @@ public class DepthToGaussianKernel
     // ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// GPU kernel: unproject depth + RGBA → packed 10-float splat (pos3, color3, scale3, opacity).
-    /// Invalid pixels get opacity=0, pos=(0,0,0) — discarded by the fragment shader (alpha<0.002).
+    /// GPU kernel: unproject depth + RGBA → compacted packed splat buffer.
+    /// Only valid pixels write output (Atomic.Add compaction — no zero-opacity dummy splats).
     /// Params: [0]=width [1]=height [2]=fx [3]=fy [4]=cx [5]=cy [6]=subsample
-    ///         [7]=minDepth [8]=maxDepth (for on-GPU normalization of relative depth)
+    ///         [7]=minDepth [8]=maxDepth [9]=edgeSharpness (0=disabled, 0.3=default)
     /// </summary>
     private static void UnprojectAndPackKernel(
         Index1D index,
         ArrayView1D<float, Stride1D.Dense> depthValues,
         ArrayView1D<int, Stride1D.Dense> packedRGBA,
         ArrayView1D<float, Stride1D.Dense> outPacked,
-        ArrayView1D<float, Stride1D.Dense> p,
-        int totalPoints)
+        ArrayView1D<int, Stride1D.Dense> counter,
+        ArrayView1D<float, Stride1D.Dense> p)
     {
         int width = (int)p[0];
+        int height = (int)p[1];
         float fx = p[2]; float fy = p[3];
         float cx = p[4]; float cy = p[5];
         int subsample = (int)p[6];
         float minDepth = p[7];
         float maxDepth = p[8];
+        float edgeSharpness = p[9];
 
         int sampledW = width / subsample;
         int sx = index % sampledW;
@@ -60,56 +66,60 @@ public class DepthToGaussianKernel
 
         float rawDepth = depthValues[imgIdx];
 
-        // Normalize raw disparity → [0,1] using min/max computed on GPU
+        // Normalize raw disparity → [0,1]
         float range = maxDepth - minDepth;
         float normalizedD = (range > 1e-6f) ? (rawDepth - minDepth) / range : 0f;
-        // Disparity → depth (larger disparity = closer)
+        // Disparity → metric-like depth (larger disparity = closer)
         float invD = 1.0f / (normalizedD + 0.01f);
         float d = invD;
-        int valid = (normalizedD >= 0.01f && d > 0.01f && d < 100f) ? 1 : 0;
 
-        int outOff = index * 10;
+        // Validity check: skip extreme depths and background
+        if (normalizedD < 0.01f || d <= 0.01f || d >= 100f) return;
 
-        if (valid == 1)
+        // Per-splat scale: world size of one pixel at this depth
+        float pixelScale = d * subsample / fx;
+        float splatScale = pixelScale > 0.001f ? pixelScale : 0.001f;
+
+        // Phase 4b: Edge-adaptive scale — shrink splats at depth discontinuities.
+        // Central difference gradient on raw depth (normalized by range for unit independence).
+        if (edgeSharpness > 0f && range > 1e-6f)
         {
-            float posX = -((imgX - cx) * d / fx);
-            float posY = -((imgY - cy) * d / fy);
-            float posZ = d;
+            int x0 = (imgX > 0) ? imgX - subsample : imgX;
+            int x1 = (imgX + subsample < width) ? imgX + subsample : imgX;
+            int y0 = (imgY > 0) ? imgY - subsample : imgY;
+            int y1 = (imgY + subsample < height) ? imgY + subsample : imgY;
 
-            // Per-splat scale: world size of one pixel at this depth
-            float pixelScale = d * subsample / fx;
-            float splatScale = pixelScale > 0.001f ? pixelScale : 0.001f;
-
-            int packed = packedRGBA[imgIdx];
-            float r = (packed & 0xFF) / 255f;
-            float g = ((packed >> 8) & 0xFF) / 255f;
-            float b = ((packed >> 16) & 0xFF) / 255f;
-
-            outPacked[outOff + 0] = posX;
-            outPacked[outOff + 1] = posY;
-            outPacked[outOff + 2] = posZ;
-            outPacked[outOff + 3] = r;
-            outPacked[outOff + 4] = g;
-            outPacked[outOff + 5] = b;
-            outPacked[outOff + 6] = splatScale;
-            outPacked[outOff + 7] = splatScale;
-            outPacked[outOff + 8] = splatScale * 0.5f;
-            outPacked[outOff + 9] = 0.9f;
+            float gx = (depthValues[imgY * width + x1] - depthValues[imgY * width + x0]) / range;
+            float gy = (depthValues[y1 * width + imgX] - depthValues[y0 * width + imgX]) / range;
+            float gradMag = MathF.Sqrt(gx * gx + gy * gy);
+            // Reduce scale at edges: high gradient → smaller splats → sharper edges
+            splatScale /= (1f + gradMag * edgeSharpness);
         }
-        else
-        {
-            // Invisible splat: opacity=0 → discarded in fs_main (alpha < 0.002)
-            outPacked[outOff + 0] = 0f;
-            outPacked[outOff + 1] = 0f;
-            outPacked[outOff + 2] = 0f;
-            outPacked[outOff + 3] = 0f;
-            outPacked[outOff + 4] = 0f;
-            outPacked[outOff + 5] = 0f;
-            outPacked[outOff + 6] = 0.001f;
-            outPacked[outOff + 7] = 0.001f;
-            outPacked[outOff + 8] = 0.0005f;
-            outPacked[outOff + 9] = 0f;
-        }
+
+        int packed = packedRGBA[imgIdx];
+        float r = (packed & 0xFF) / 255f;
+        float g = ((packed >> 8) & 0xFF) / 255f;
+        float b = ((packed >> 16) & 0xFF) / 255f;
+
+        float posX = -((imgX - cx) * d / fx);
+        float posY = -((imgY - cy) * d / fy);
+        float posZ = d;
+
+        // Atomic compaction: each valid splat gets a unique dense output slot.
+        // Zero-opacity dummy splats no longer exist — the output buffer has no gaps.
+        int slot = Atomic.Add(ref counter[0], 1);
+        int outOff = slot * 10;
+
+        outPacked[outOff + 0] = posX;
+        outPacked[outOff + 1] = posY;
+        outPacked[outOff + 2] = posZ;
+        outPacked[outOff + 3] = r;
+        outPacked[outOff + 4] = g;
+        outPacked[outOff + 5] = b;
+        outPacked[outOff + 6] = splatScale;
+        outPacked[outOff + 7] = splatScale;
+        outPacked[outOff + 8] = splatScale * 0.5f;
+        outPacked[outOff + 9] = 0.9f;
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -117,13 +127,13 @@ public class DepthToGaussianKernel
     // ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Generate a GPU-packed splat buffer from GPU-resident depth + CPU RGBA.
-    /// Returns (packedBuf, totalSplatCount) — ownership of packedBuf transfers to caller.
-    /// No CPU readback of splat data at any point.
-    /// RGBA is uploaded once from image source data (acceptable: image loaded from disk).
+    /// Generate a compacted GPU-packed splat buffer from GPU-resident depth + CPU RGBA.
+    /// Returns (packedBuf, validSplatCount) — ownership of packedBuf transfers to caller.
+    /// No CPU readback of splat data. Buffer contains only valid splats (no zero-opacity gaps).
     /// </summary>
     public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)>
-        GeneratePackedGpuBufferAsync(DepthResult depth, ImportedImage image, int subsample = 2)
+        GeneratePackedGpuBufferAsync(DepthResult depth, ImportedImage image, int subsample = 2,
+            float edgeSharpness = 0.3f)
     {
         if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
         var accelerator = _gpu.WebGPUAccelerator;
@@ -133,8 +143,8 @@ public class DepthToGaussianKernel
             ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>,
-            ArrayView1D<float, Stride1D.Dense>,
-            int>(UnprojectAndPackKernel);
+            ArrayView1D<int, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>>(UnprojectAndPackKernel);
 
         int w = depth.Width;
         int h = depth.Height;
@@ -157,10 +167,15 @@ public class DepthToGaussianKernel
             subsample,
             depth.MinDepth,
             depth.MaxDepth,
+            edgeSharpness,
         };
         using var paramBuf = accelerator.Allocate1D(paramArr);
 
-        // Output buffer: 10 floats per splat (pos3, color3, scale3, opacity).
+        // Atomic compaction counter
+        using var counterBuf = accelerator.Allocate1D<int>(1);
+        counterBuf.CopyFromCPU(new int[] { 0 });
+
+        // Output buffer: worst case all pixels are valid (over-allocated, compacted on GPU).
         // Ownership transfers to caller → GpuSplatSorter.
         var outPackedBuf = accelerator.Allocate1D<float>(numPoints * 10);
 
@@ -171,12 +186,16 @@ public class DepthToGaussianKernel
             depth.RawDepthGpu.View,
             rgbaBuf.View,
             outPackedBuf.View,
-            paramBuf.View,
-            numPoints);
+            counterBuf.View,
+            paramBuf.View);
 
-        await accelerator.SynchronizeAsync();
+        // Readback valid splat count (flushes ILGPU stream internally)
+        int[] counterResult = await counterBuf.CopyToHostAsync<int>(0, 1);
+        int validCount = Math.Clamp(counterResult[0], 0, numPoints);
 
-        Console.WriteLine($"[DepthGPU] Generated {numPoints:N0} splat slots (subsample={subsample}) — no CPU readback");
-        return (outPackedBuf, numPoints);
+        Console.WriteLine($"[DepthGPU] Compacted: {validCount:N0} valid / {numPoints:N0} candidate splats " +
+            $"(subsample={subsample}, edgeSharpness={edgeSharpness:F2})");
+
+        return (outPackedBuf, validCount);
     }
 }

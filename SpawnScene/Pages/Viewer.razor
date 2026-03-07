@@ -114,10 +114,10 @@
     // Continuous render loop via requestAnimationFrame
     private bool _renderLoopRunning;
     private ActionCallback<double>? _rafCallback;
+    private Window? _window;  // cached — avoids a new JSObject wrapper every frame
     private double _lastFrameTime;
 
     // Resize handling
-    private ActionCallback? _resizeCallback;
     private int _lastResizeWidth;
     private int _lastResizeHeight;
 
@@ -145,13 +145,11 @@
             {
                 _cameraController?.FitToScene();
             }
-            await DoRenderAsync();
+            if (_sceneManager.HasScene) DoRender();
             StartRenderLoop();
 
             // Listen for window resize events
-            _resizeCallback = new ActionCallback(OnWindowResize);
-            using var window = BlazorJSRuntime.JS.Get<Window>("window");
-            window.AddEventListener("resize", _resizeCallback);
+            _window!.OnResize += OnWindowResize;
         }
     }
 
@@ -185,7 +183,7 @@
         Console.WriteLine($"[Viewer] Canvas: {cssWidth}×{cssHeight} CSS → {_canvasWidth}×{_canvasHeight} pixels (DPR={dpr:F2})");
     }
 
-    private async void OnWindowResize()
+    private async void OnWindowResize(UIEvent e)
     {
         try
         {
@@ -228,6 +226,7 @@
         if (_renderLoopRunning) return;
         _renderLoopRunning = true;
         _lastFrameTime = 0;
+        _window ??= BlazorJSRuntime.JS.Get<Window>("window");
         _rafCallback ??= new ActionCallback<double>(OnAnimationFrame);
         RequestFrame();
     }
@@ -239,12 +238,11 @@
 
     private void RequestFrame()
     {
-        if (!_renderLoopRunning || _rafCallback == null) return;
-        using var window = BlazorJSRuntime.JS.Get<Window>("window");
-        window.RequestAnimationFrame(_rafCallback);
+        if (!_renderLoopRunning || _rafCallback == null || _window == null) return;
+        _window.RequestAnimationFrame(_rafCallback);
     }
 
-    private async void OnAnimationFrame(double timestamp)
+    private void OnAnimationFrame(double timestamp)
     {
         if (!_renderLoopRunning) return;
 
@@ -253,12 +251,12 @@
         dt = Math.Min(dt, 0.1f);
 
         // Process WASD movement
-        bool moved = _cameraController?.Tick(dt) ?? false;
+        _cameraController?.Tick(dt);
 
-        // Always render if scene is loaded (for smooth interaction)
+        // Render is fully synchronous — no await needed
         if (_sceneManager.HasScene)
         {
-            await DoRenderAsync();
+            DoRender();
         }
 
         RequestFrame();
@@ -349,12 +347,12 @@
         await InvokeAsync(StateHasChanged);
     }
 
-    private async Task DoRenderAsync()
+    private void DoRender()
     {
         try
         {
             var sw = System.Diagnostics.Stopwatch.StartNew();
-            await _renderService.RenderFrameAsync();
+            _renderService.RenderFrame();
             sw.Stop();
             _renderTime = sw.Elapsed.TotalMilliseconds;
         }
@@ -408,8 +406,12 @@
         _sceneManager.OnSceneChanged -= OnSceneChanged;
         _rafCallback?.Dispose();
         _rafCallback = null;
-        _resizeCallback?.Dispose();
-        _resizeCallback = null;
+        if (_window != null)
+        {
+            _window.OnResize -= OnWindowResize;
+            _window.Dispose();
+            _window = null;
+        }
         _cameraController?.Dispose();
     }
 }

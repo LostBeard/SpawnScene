@@ -39,12 +39,16 @@ public class GpuGaussianRenderer : IDisposable
     // Pack compute pipeline: converts Float32 sort output → packed vertex format
     private GPUComputePipeline? _packPipeline;
     private GPUBindGroup? _packBindGroup;
-    private GPUBuffer? _srcGpuBufferCached; // cached ILGPU source buffer for bind group
+    private GPUBuffer? _srcDataCached; // cached ILGPU data buffer handle for bind group invalidation
+    private GPUBuffer? _srcIdxCached;  // cached ILGPU index buffer handle for bind group invalidation
+    private GPUBuffer? _packCountBuf;  // uniform: visible count for pack dispatch guard
+    private Uint32Array? _packCountJsArray; // cached JS array for WriteBuffer (no per-frame alloc)
 
     // Uniform buffer: MVP matrix (64 bytes) + viewport (8 bytes) + focal (8 bytes) = 80 bytes
     private GPUBuffer? _uniformBuffer;
     private GPUBindGroup? _uniformBindGroup;
     private readonly float[] _uniformData = new float[20]; // 16 (mat4) + 2 (viewport) + 2 (focal)
+    private Float32Array? _uniformJsArray; // cached — reused every frame, no per-frame alloc
 
     // CAS sharpening pass
     private GPUTexture? _offscreenTexture;
@@ -53,6 +57,8 @@ public class GpuGaussianRenderer : IDisposable
     private GPUBuffer? _casUniformBuffer;
     private GPUSampler? _casSampler;
     private float _sharpeningStrength = 0.5f;
+    private readonly float[] _casData = new float[4];
+    private Float32Array? _casJsArray; // cached — reused every frame, no per-frame alloc
 
     // Depth texture
     private GPUTexture? _depthTexture;
@@ -196,7 +202,7 @@ public class GpuGaussianRenderer : IDisposable
         // Depth texture
         CreateDepthTexture();
 
-        // Uniform buffer (80 bytes)
+        // Uniform buffer (80 bytes: 16 mat4 floats + viewport + focal)
         _uniformBuffer = _device.CreateBuffer(new GPUBufferDescriptor
         {
             Size = 80,
@@ -214,6 +220,18 @@ public class GpuGaussianRenderer : IDisposable
                     Resource = new GPUBufferBinding { Buffer = _uniformBuffer }
                 }
             }
+        });
+
+        // Pre-allocate reusable JS typed arrays — avoids per-frame JS object allocations
+        _uniformJsArray = new Float32Array(_uniformData.Length);
+        _casJsArray = new Float32Array(4);
+        _packCountJsArray = new Uint32Array(1);
+
+        // Pack count uniform (4 bytes): holds visibleCount for pack shader guard
+        _packCountBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 4,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
 
         // CAS uniform (16 bytes aligned: sharpening strength + texel size)
@@ -308,7 +326,8 @@ public class GpuGaussianRenderer : IDisposable
         // Invalidate pack bind group whenever the vertex buffer is recreated
         _packBindGroup?.Dispose();
         _packBindGroup = null;
-        _srcGpuBufferCached = null;
+        _srcDataCached = null;
+        _srcIdxCached = null;
     }
 
     /// <summary>
@@ -370,10 +389,12 @@ public class GpuGaussianRenderer : IDisposable
     }
 
     /// <summary>
-    /// Render one frame. GPU sort → GPU copy → splat render → CAS sharpen.
+    /// Render one frame. GPU sort → GPU pack → splat render → CAS sharpen.
+    /// Fully synchronous — no GPU drain. WebGPU's getCurrentTexture() provides
+    /// natural frame pacing (~1 frame ahead of GPU) without any explicit await.
     /// </summary>
     private bool _renderLogged;
-    public async Task RenderAsync(GaussianScene scene, CameraParams camera)
+    public void Render(GaussianScene scene, CameraParams camera)
     {
         if (_device == null || _context == null || _splatPipeline == null ||
             _splatBuffer == null || _splatCount == 0)
@@ -398,22 +419,20 @@ public class GpuGaussianRenderer : IDisposable
             camera.FocalY = camera.FocalX;
         }
 
-        // ── Step 1: GPU Sort ──
-        var sortedBuf = await _sorter.SortAsync(camera);
-        if (sortedBuf != null)
-        {
-            // GPU-side pack: ILGPU Float32 → packed Float16/Unorm8 vertex buffer
-            PackIlgpuToVertex(sortedBuf);
-        }
-
-        // ── Step 2: Build MVP ──
+        // ── Step 1: Build MVP (needed by both sort and render) ──
         var view = camera.ViewMatrix;
         float fovY = 2f * MathF.Atan(camera.Height / (2f * camera.FocalY));
         float aspect = (float)camera.Width / camera.Height;
         var proj = CreateWebGPUPerspective(fovY, aspect, camera.Near, camera.Far);
         var mvp = view * proj;
 
-        // Upload uniforms
+        // ── Step 2: GPU Frustum Cull + Sort ──
+        // Returns sortRan=true when indices changed → vertex buffer must be repacked.
+        // On non-sort frames the cached vertex buffer is still valid (same sort order).
+        // visibleCount: deferred readback from previous frame; conservative on first frame.
+        var (dataBuf, idxBuf, sortRan, visibleCount) = _sorter.Sort(camera, mvp);
+
+        // ── Step 3: Upload MVP + viewport uniforms ──
         _uniformData[0] = mvp.M11; _uniformData[1] = mvp.M12; _uniformData[2] = mvp.M13; _uniformData[3] = mvp.M14;
         _uniformData[4] = mvp.M21; _uniformData[5] = mvp.M22; _uniformData[6] = mvp.M23; _uniformData[7] = mvp.M24;
         _uniformData[8] = mvp.M31; _uniformData[9] = mvp.M32; _uniformData[10] = mvp.M33; _uniformData[11] = mvp.M34;
@@ -423,27 +442,30 @@ public class GpuGaussianRenderer : IDisposable
         _uniformData[18] = camera.FocalX;
         _uniformData[19] = camera.FocalY;
 
-        using var uniformJsArray = new Float32Array(_uniformData);
-        _queue!.WriteBuffer(_uniformBuffer!, 0, uniformJsArray);
+        _uniformJsArray!.Set(_uniformData);
+        _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformJsArray);
 
-        // CAS uniform
-        var casData = new float[] { _sharpeningStrength, 1f / _canvasWidth, 1f / _canvasHeight, 0f };
-        using var casJsArray = new Float32Array(casData);
-        _queue.WriteBuffer(_casUniformBuffer!, 0, casJsArray);
-
-        // ── Step 3: Render splats → offscreen → CAS → canvas ──
+        // ── Step 4: Pack (only when sort ran) + Render — single encoder/submit ──
+        // Merging pack compute + render pass into one command buffer halves GPU submit overhead.
         using var colorTexture = _context.GetCurrentTexture();
         using var colorView = colorTexture.CreateView();
         using var encoder = _device.CreateCommandEncoder();
 
-        // Pass 1: Splats → offscreen texture
+        // Pack: ILGPU Float32 → packed vertex buffer (only if sort produced new indices)
+        if (sortRan && dataBuf != null && idxBuf != null)
+            AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount);
+
+        // Render splats → render target (offscreen for CAS, canvas otherwise)
+        bool useCas = _sharpeningStrength > 0f;
+        var renderTarget = useCas ? _offscreenView! : colorView;
+
         using var splatPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
         {
             ColorAttachments = new[]
             {
                 new GPURenderPassColorAttachment
                 {
-                    View = _offscreenView!,
+                    View = renderTarget,
                     LoadOp = GPULoadOp.Clear,
                     StoreOp = GPUStoreOp.Store,
                     ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
@@ -461,66 +483,82 @@ public class GpuGaussianRenderer : IDisposable
         splatPass.SetPipeline(_splatPipeline);
         splatPass.SetBindGroup(0, _uniformBindGroup!);
         splatPass.SetVertexBuffer(0, _splatBuffer);
-        splatPass.Draw(6, (uint)_splatCount, 0, 0);
+        // Draw only visible splats (deferred count from previous frame's GPU readback).
+        // Sorted splats are [0..visibleCount-1] visible + [visibleCount..N-1] sentinels (-1).
+        // Drawing visibleCount skips the sentinel range entirely → no fragment shader overhead.
+        splatPass.Draw(6, (uint)visibleCount, 0, 0);
         splatPass.End();
 
-        // Pass 2: CAS sharpening → canvas
-        using var casPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+        if (useCas)
         {
-            ColorAttachments = new[]
-            {
-                new GPURenderPassColorAttachment
-                {
-                    View = colorView,
-                    LoadOp = GPULoadOp.Clear,
-                    StoreOp = GPUStoreOp.Store,
-                    ClearValue = new GPUColorDict { R = 0.0, G = 0.0, B = 0.0, A = 1.0 },
-                }
-            }
-        });
+            _casData[0] = _sharpeningStrength;
+            _casData[1] = 1f / _canvasWidth;
+            _casData[2] = 1f / _canvasHeight;
+            _casData[3] = 0f;
+            _casJsArray!.Set(_casData);
+            _queue.WriteBuffer(_casUniformBuffer!, 0, _casJsArray);
 
-        casPass.SetPipeline(_casPipeline!);
-        casPass.SetBindGroup(0, _casBindGroup!);
-        casPass.Draw(3, 1, 0, 0); // Fullscreen triangle
-        casPass.End();
+            using var casPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+            {
+                ColorAttachments = new[]
+                {
+                    new GPURenderPassColorAttachment
+                    {
+                        View = colorView,
+                        LoadOp = GPULoadOp.Clear,
+                        StoreOp = GPUStoreOp.Store,
+                        ClearValue = new GPUColorDict { R = 0.0, G = 0.0, B = 0.0, A = 1.0 },
+                    }
+                }
+            });
+            casPass.SetPipeline(_casPipeline!);
+            casPass.SetBindGroup(0, _casBindGroup!);
+            casPass.Draw(3, 1, 0, 0);
+            casPass.End();
+        }
 
         using var commandBuffer = encoder.Finish();
         _queue!.Submit(new[] { commandBuffer });
+        // No explicit GPU sync needed. WebGPU's getCurrentTexture() (called at the
+        // top of the next frame) will not return until the swapchain texture is free,
+        // naturally throttling CPU to ~1 frame ahead without a full GPU drain.
     }
 
     /// <summary>
-    /// GPU-side pack: Float32 sort output → packed Float16/Unorm8 vertex buffer.
-    /// Uses a WebGPU compute shader for the conversion.
-    /// No CPU involvement — data stays on GPU.
+    /// Appends a pack compute pass to the supplied encoder.
+    /// Converts ILGPU Float32 splat data → packed vertex buffer using the sorted index buffer.
+    /// Only packs visibleCount splats — culled sentinels at [visibleCount..N-1] are skipped.
+    /// Caller is responsible for submitting the encoder.
+    /// Called only on frames where the sort ran (indices changed).
     /// </summary>
-    private void PackIlgpuToVertex(MemoryBuffer1D<float, Stride1D.Dense> sortedBuf)
+    private void AppendPackComputePass(
+        GPUCommandEncoder encoder,
+        MemoryBuffer1D<float, Stride1D.Dense> dataBuf,
+        MemoryBuffer1D<int, Stride1D.Dense> idxBuf,
+        int visibleCount)
     {
-        if (_splatBuffer == null || _device == null || _queue == null || _packPipeline == null)
-        {
-            Console.WriteLine($"[Pack] Early return: splatBuffer={_splatBuffer != null} device={_device != null} queue={_queue != null} packPipeline={_packPipeline != null}");
-            return;
-        }
+        if (_splatBuffer == null || _device == null || _packPipeline == null || _packCountBuf == null) return;
 
-        // Access ILGPU's inner WebGPU buffer via IArrayView.Buffer pattern
-        var iView = (IArrayView)(MemoryBuffer)sortedBuf;
-        if (iView.Buffer is not WebGPUMemoryBuffer webGpuMem)
-        {
-            Console.WriteLine($"[Pack] Buffer is not WebGPUMemoryBuffer: {iView.Buffer?.GetType().Name ?? "null"}");
-            return;
-        }
+        var dataView = (IArrayView)(MemoryBuffer)dataBuf;
+        if (dataView.Buffer is not WebGPUMemoryBuffer dataMem) return;
+        var srcDataBuffer = dataMem.NativeBuffer?.NativeBuffer;
+        if (srcDataBuffer == null) return;
 
-        var srcGpuBuffer = webGpuMem.NativeBuffer?.NativeBuffer;
-        if (srcGpuBuffer == null)
-        {
-            Console.WriteLine($"[Pack] srcGpuBuffer null: NativeBuffer={webGpuMem.NativeBuffer != null}");
-            return;
-        }
+        var idxView = (IArrayView)(MemoryBuffer)idxBuf;
+        if (idxView.Buffer is not WebGPUMemoryBuffer idxMem) return;
+        var srcIdxBuffer = idxMem.NativeBuffer?.NativeBuffer;
+        if (srcIdxBuffer == null) return;
 
-        // Create or reuse pack bind group (source buffer is stable across frames)
-        if (_packBindGroup == null || _srcGpuBufferCached != srcGpuBuffer)
+        // Write visible count to uniform buffer (before encoder submit, queue.writeBuffer runs first).
+        _packCountJsArray![0] = (uint)visibleCount;
+        _queue!.WriteBuffer(_packCountBuf, 0, _packCountJsArray);
+
+        // Create or reuse pack bind group (invalidate only when GPU buffer refs change)
+        if (_packBindGroup == null || _srcDataCached != srcDataBuffer || _srcIdxCached != srcIdxBuffer)
         {
             _packBindGroup?.Dispose();
-            _srcGpuBufferCached = srcGpuBuffer;
+            _srcDataCached = srcDataBuffer;
+            _srcIdxCached = srcIdxBuffer;
 
             using var layout = _packPipeline.GetBindGroupLayout(0);
             _packBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
@@ -528,23 +566,21 @@ public class GpuGaussianRenderer : IDisposable
                 Layout = layout,
                 Entries = new GPUBindGroupEntry[]
                 {
-                    new() { Binding = 0, Resource = new GPUBufferBinding { Buffer = srcGpuBuffer } },
-                    new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = _splatBuffer } },
+                    new() { Binding = 0, Resource = new GPUBufferBinding { Buffer = srcDataBuffer } },
+                    new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = srcIdxBuffer } },
+                    new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = _splatBuffer } },
+                    new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = _packCountBuf } },
                 }
             });
         }
 
-        // Dispatch pack compute: 1 thread per splat, workgroup size 64
-        uint workgroups = (uint)((_splatCount + 63) / 64);
-        using var encoder = _device.CreateCommandEncoder();
+        // Dispatch only over visible splats (culled sentinels at tail are skipped).
+        uint workgroups = (uint)((visibleCount + 63) / 64);
         using var pass = encoder.BeginComputePass();
         pass.SetPipeline(_packPipeline);
         pass.SetBindGroup(0, _packBindGroup);
         pass.DispatchWorkgroups(workgroups, 1, 1);
         pass.End();
-        using var cmd = encoder.Finish();
-        _queue.Submit(new[] { cmd });
-        Console.WriteLine($"[Pack] OK — {workgroups} workgroups dispatched for {_splatCount} splats");
     }
 
     public void Dispose()
@@ -569,6 +605,11 @@ public class GpuGaussianRenderer : IDisposable
         _casSampler?.Dispose();
         _splatPipeline?.Dispose();
         _casPipeline?.Dispose();
+        _uniformJsArray?.Dispose();
+        _casJsArray?.Dispose();
+        _packCountBuf?.Destroy();
+        _packCountBuf?.Dispose();
+        _packCountJsArray?.Dispose();
     }
 
     /// <summary>
@@ -785,17 +826,33 @@ fn fs_cas(input : VSOutput) -> @location(0) vec4<f32> {
     //  = 24 bytes per splat (was 40 bytes)
     // ════════════════════════════════════════════════════════════
     private const string PackComputeSource = @"
-@group(0) @binding(0) var<storage, read> src : array<f32>;
-@group(0) @binding(1) var<storage, read_write> dst : array<u32>;
+@group(0) @binding(0) var<storage, read>       src     : array<f32>;  // original packed splat data (10 floats/splat)
+@group(0) @binding(1) var<storage, read>       idx     : array<i32>;  // sorted indices; -1 = culled sentinel
+@group(0) @binding(2) var<storage, read_write> dst     : array<u32>;  // packed vertex output (6 u32s/splat)
+@group(0) @binding(3) var<uniform>             u_count : u32;         // visible splat count (deferred readback)
 
 @compute @workgroup_size(64)
 fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let splatCount = arrayLength(&src) / 10u;
     let i = gid.x;
-    if (i >= splatCount) { return; }
+    if (i >= u_count) { return; }
 
-    let srcOff = i * 10u;
-    let dstOff = i * 6u;  // 24 bytes = 6 u32s
+    let dstOff = i * 6u;
+
+    // Culled splats have idx=-1 sentinel (sorted last by DescendingInt32).
+    // Write a fully-transparent vertex so the fragment shader discards it cheaply.
+    let origIdx = idx[i];
+    if (origIdx < 0) {
+        dst[dstOff + 0u] = 0u;
+        dst[dstOff + 1u] = 0u;
+        dst[dstOff + 2u] = 0u;
+        dst[dstOff + 3u] = 0u;  // opacity = 0 → fragment discard
+        dst[dstOff + 4u] = 0u;
+        dst[dstOff + 5u] = 0u;
+        return;
+    }
+
+    // Index lookup: maps sorted position i to original splat data — eliminates CPU reorder pass
+    let srcOff = u32(origIdx) * 10u;
 
     // Position: 3 floats bitcast to 3 u32s (preserve full precision)
     dst[dstOff + 0u] = bitcast<u32>(src[srcOff + 0u]);  // pos.x

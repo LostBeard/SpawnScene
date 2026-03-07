@@ -127,12 +127,29 @@
             <h3>④ Generate Gaussians</h3>
             <div class="controls-row">
                 <label>
+                    Quality:
+                    <select @bind="_qualityPreset" @bind:after="OnQualityPresetChanged">
+                        <option value="fast">Fast (subsample 4)</option>
+                        <option value="standard">Standard (subsample 2)</option>
+                        <option value="high">High (subsample 1)</option>
+                    </select>
+                </label>
+                <label>
                     Subsample:
                     <select @bind="_subsample">
-                        <option value="1">1 (full quality)</option>
-                        <option value="2">2 (high quality)</option>
-                        <option value="4">4 (balanced)</option>
-                        <option value="8">8 (fast)</option>
+                        <option value="1">1 (full resolution)</option>
+                        <option value="2">2 (half resolution)</option>
+                        <option value="4">4 (quarter resolution)</option>
+                        <option value="8">8 (eighth resolution)</option>
+                    </select>
+                </label>
+                <label>
+                    Edge Sharpness:
+                    <select @bind="_edgeSharpness">
+                        <option value="0">Off</option>
+                        <option value="0.15">Low</option>
+                        <option value="0.3">Medium</option>
+                        <option value="0.6">High</option>
                     </select>
                 </label>
                 <button class="btn btn-primary" @onclick="GenerateGaussiansAsync" disabled="@_isProcessing">
@@ -185,6 +202,7 @@
     [Inject] private GpuDepthColorizer _depthColorizer { get; set; } = default!;
     [Inject] private RenderService _renderService { get; set; } = default!;
     [Inject] private SceneManager _sceneManager { get; set; } = default!;
+    [Inject] private GpuSplatSorter _gpuSorter { get; set; } = default!;
     [Inject] private NavigationManager _nav { get; set; } = default!;
     [Inject] private HttpClient _http { get; set; } = default!;
 
@@ -196,7 +214,8 @@
     private ElementReference _previewDepth;
     private int _selectedImageIdx = 0;
     private int _subsample = 2;
-    private int _trainIterations = 100;
+    private float _edgeSharpness = 0.3f;
+    private string _qualityPreset = "standard";
     private bool _isProcessing;
     private int _previewW = 400;
     private int _previewH = 300;
@@ -204,6 +223,18 @@
     protected override void OnInitialized()
     {
         _depth.OnStateChanged += async () => await InvokeAsync(StateHasChanged);
+    }
+
+    private void OnQualityPresetChanged()
+    {
+        (_subsample, _edgeSharpness) = _qualityPreset switch
+        {
+            "fast" => (4, 0f),
+            "high" => (1, 0.3f),
+            _ => (2, 0.3f), // standard
+        };
+        // High = 32-bit sort (8 passes, full precision); Standard/Fast = 16-bit (4 passes, 2x faster)
+        _gpuSorter.Use16BitSort = _qualityPreset != "high";
     }
 
     private async Task LoadModel()
@@ -441,7 +472,7 @@
                 // GPU fast path: GeneratePackedGpuBufferAsync returns a MemoryBuffer owned
                 // here until we transfer it to the renderer (UploadSceneFromGpuBuffer).
                 var (packedBuf, splatCount) = await _gpuKernel.GeneratePackedGpuBufferAsync(
-                    dr, _images[i], _subsample);
+                    dr, _images[i], _subsample, _edgeSharpness);
 
                 if (splatCount == 0)
                 {

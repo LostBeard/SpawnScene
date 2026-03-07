@@ -28,6 +28,7 @@ public class GpuService : IBackgroundService, IAsyncDisposable
 
     private async Task GpuShare_OnDeviceRequested(GPUAdapterHook adapterHook, GPUDeviceReturnOverride args)
     {
+        // When ORT requests a GPUDevice, add required limits to the options so that ILGPU can adopt the device later.
         var limits = adapterHook.Adapter.Limits;
         args.Options ??= _js.New<JSObject>("Object");
         var requiredLimits = args.Options.JSRef!.Get<JSObject?>("requiredLimits");

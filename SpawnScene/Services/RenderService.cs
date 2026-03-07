@@ -89,30 +89,21 @@ public class RenderService : IDisposable
     public void Invalidate() { }
 
     /// <summary>
-    /// Render a single frame of the current scene using the GPU-only renderer.
+    /// Render a single frame synchronously. Called every RAF — hot path.
+    /// Scene upload is handled separately by OnSceneChanged / SetActiveSceneGpuLoaded.
     /// </summary>
-    public async Task RenderFrameAsync()
+    public void RenderFrame()
     {
         if (_canvas == null || !_rendererAttached) return;
 
         var scene = _sceneManager.ActiveScene;
         var camera = _sceneManager.Camera;
 
-        // For GPU fast-path scenes (GpuSplatCount > 0, empty Gaussians array),
-        // data is already in the renderer — use HasGpuData to confirm readiness.
         var hasGpuData = _gpuRenderer.HasGpuData;
         if (scene == null || (scene.Count == 0 && !hasGpuData)) return;
 
-        // Ensure scene is uploaded (skipped for GPU fast-path via SetActiveSceneGpuLoaded)
-        if (_uploadedScene != scene)
-        {
-            if (scene.Gaussians?.Length > 0)
-                await _gpuRenderer.UploadScene(scene);
-            _uploadedScene = scene;
-        }
-
-        // Render using native WebGPU (single Draw() call — no async needed)
-        await _gpuRenderer.RenderAsync(scene, camera);
+        // Render using native WebGPU — fully synchronous, no GPU drain.
+        _gpuRenderer.Render(scene, camera);
 
         // Track FPS
         _frameCount++;
@@ -127,6 +118,27 @@ public class RenderService : IDisposable
         }
 
         OnRenderComplete?.Invoke();
+    }
+
+    /// <summary>
+    /// Render a single frame, uploading the scene first if it has changed.
+    /// Use this when scene upload-on-demand is needed (e.g. from async contexts).
+    /// </summary>
+    public async Task RenderFrameAsync()
+    {
+        if (_canvas == null || !_rendererAttached) return;
+
+        var scene = _sceneManager.ActiveScene;
+
+        // Ensure scene is uploaded (skipped for GPU fast-path via SetActiveSceneGpuLoaded)
+        if (_uploadedScene != scene && scene != null)
+        {
+            if (scene.Gaussians?.Length > 0)
+                await _gpuRenderer.UploadScene(scene);
+            _uploadedScene = scene;
+        }
+
+        RenderFrame();
     }
 
     /// <summary>Handle canvas resize: update viewport and renderer textures.</summary>

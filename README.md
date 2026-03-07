@@ -20,7 +20,7 @@
 
 
 ### Screenshots
-[![Generate Splat](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/splat-generate-1.jpg)](https://lostbeard.github.io/SpawnScene/)  
+[![Generate Splat](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/splat-generate-2.jpg)](https://lostbeard.github.io/SpawnScene/)  
 [![Garden Original](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/samples/garden_hd.png)](https://lostbeard.github.io/SpawnScene/)  
 [![Garden Splat 1](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-1.jpg)](https://lostbeard.github.io/SpawnScene/)  
 [![Garden Splat 2](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-2.jpg)](https://lostbeard.github.io/SpawnScene/)  

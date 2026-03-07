@@ -18,6 +18,14 @@
 - **📦 PLY / SPLAT Loading** — Load pre-built scenes from `.ply` or `.splat` files
 - **🔒 Fully Client-Side** — No server, no uploads. All GPU compute runs in your browser.
 
+
+### Screenshots
+[![Garden Original](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/samples/garden_hd.png)](https://lostbeard.github.io/SpawnScene/)  
+[![Garden Splat 1](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-1.jpg)](https://lostbeard.github.io/SpawnScene/)  
+[![Garden Splat 2](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-2.jpg)](https://lostbeard.github.io/SpawnScene/)  
+
+
+
 ## 🚀 Pipeline
 
 ```

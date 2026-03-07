@@ -25,6 +25,27 @@ public class RenderService : IDisposable
     /// <summary>Current frames per second.</summary>
     public float Fps => _fps;
 
+    /// <summary>Sort precision: true = 4-pass 16-bit (faster), false = 8-pass 32-bit.</summary>
+    public bool Use16BitSort
+    {
+        get => _gpuRenderer.Use16BitSort;
+        set => _gpuRenderer.Use16BitSort = value;
+    }
+
+    /// <summary>CAS sharpening intensity (0 = off, 1 = maximum).</summary>
+    public float SharpeningStrength
+    {
+        get => _gpuRenderer.SharpeningStrength;
+        set => _gpuRenderer.SharpeningStrength = value;
+    }
+
+    /// <summary>Adaptive resolution mode.</summary>
+    public AdaptiveResMode AdaptiveResMode
+    {
+        get => _gpuRenderer.AdaptiveResMode;
+        set => _gpuRenderer.AdaptiveResMode = value;
+    }
+
     /// <summary>Fired when FPS is updated (approximately once per second).</summary>
     public event Action<float>? OnFpsUpdated;
 
@@ -81,7 +102,7 @@ public class RenderService : IDisposable
         if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
 
         // Attach canvas to GPU renderer for direct WebGPU blitting
-        _gpuRenderer.AttachCanvas(_canvas);
+        _gpuRenderer.AttachCanvas(_canvas, canvasRef);
         _rendererAttached = true;
     }
 

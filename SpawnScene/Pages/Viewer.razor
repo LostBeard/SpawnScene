@@ -63,6 +63,52 @@
         WASD: move • QE: up/down • Mouse drag: look • Shift: fast • Scroll: zoom • Dbl-click: reset
     </div>
 
+    <button class="viewer-settings-btn" @onclick="ToggleSettings" title="Render Settings">⚙</button>
+
+    @if (_showSettings)
+    {
+        <div class="viewer-settings-panel">
+            <div class="vsp-title">Render Settings</div>
+
+            <div class="vsp-row">
+                <span class="vsp-label">Sort</span>
+                <div class="vsp-toggle">
+                    <button class="vsp-opt @(_renderService.Use16BitSort ? "vsp-opt-active" : "")"
+                            @onclick="() => _renderService.Use16BitSort = true">16-bit</button>
+                    <button class="vsp-opt @(!_renderService.Use16BitSort ? "vsp-opt-active" : "")"
+                            @onclick="() => _renderService.Use16BitSort = false">32-bit</button>
+                </div>
+            </div>
+
+            <div class="vsp-row">
+                <span class="vsp-label">Sharpen</span>
+                <input class="vsp-slider" type="range" min="0" max="1" step="0.05"
+                       value="@_renderService.SharpeningStrength.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)"
+                       @oninput="OnSharpenInput" />
+                <span class="vsp-value">@_renderService.SharpeningStrength.ToString("F2")</span>
+            </div>
+
+            <div class="vsp-row">
+                <span class="vsp-label">Res Mode</span>
+                <select class="vsp-select" value="@_renderService.AdaptiveResMode.ToString()" @onchange="OnAdaptiveResModeChanged">
+                    <option value="Auto">Auto</option>
+                    <option value="ForceFull">Full</option>
+                    <option value="ForceHalf">Half</option>
+                </select>
+            </div>
+
+            <div class="vsp-row">
+                <span class="vsp-label">DPR Cap</span>
+                <select class="vsp-select" value="@_dprCap.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)" @onchange="OnDprCapChanged">
+                    <option value="1.0">1×</option>
+                    <option value="1.5">1.5×</option>
+                    <option value="2.0">2×</option>
+                    <option value="3.0">Full</option>
+                </select>
+            </div>
+        </div>
+    }
+
     @if (!_sceneManager.HasScene && !_isLoading)
     {
         <div style="position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none;">
@@ -121,6 +167,11 @@
     private int _lastResizeWidth;
     private int _lastResizeHeight;
 
+    // Settings panel
+    private bool _showSettings;
+    private float _dprCap = 2.0f;
+    private readonly System.Diagnostics.Stopwatch _renderStopwatch = new();
+
     protected override void OnInitialized()
     {
         _cameraController = new CameraController(_sceneManager);
@@ -172,7 +223,7 @@
         // Get device pixel ratio for 1:1 mapping
         float dpr = BlazorJSRuntime.JS.Get<float>("devicePixelRatio");
         if (dpr < 1f) dpr = 1f;
-        if (dpr > 3f) dpr = 3f; // Cap at 3x to avoid excessive GPU load
+        if (dpr > _dprCap) dpr = _dprCap;
 
         _canvasWidth = (int)(cssWidth * dpr);
         _canvasHeight = (int)(cssHeight * dpr);
@@ -198,7 +249,7 @@
 
             float dpr = BlazorJSRuntime.JS.Get<float>("devicePixelRatio");
             if (dpr < 1f) dpr = 1f;
-            if (dpr > 3f) dpr = 3f;
+            if (dpr > _dprCap) dpr = _dprCap;
 
             int newWidth = (int)(cssWidth * dpr);
             int newHeight = (int)(cssHeight * dpr);
@@ -351,14 +402,46 @@
     {
         try
         {
-            var sw = System.Diagnostics.Stopwatch.StartNew();
+            _renderStopwatch.Restart();
             _renderService.RenderFrame();
-            sw.Stop();
-            _renderTime = sw.Elapsed.TotalMilliseconds;
+            _renderStopwatch.Stop();
+            _renderTime = _renderStopwatch.Elapsed.TotalMilliseconds;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"Render error: {ex.Message}");
+        }
+    }
+
+    // --- Settings Panel ---
+    private void ToggleSettings() => _showSettings = !_showSettings;
+
+    private void OnSharpenInput(ChangeEventArgs e)
+    {
+        if (float.TryParse(e.Value?.ToString(), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out float v))
+            _renderService.SharpeningStrength = v;
+    }
+
+    private void OnAdaptiveResModeChanged(ChangeEventArgs e)
+    {
+        _renderService.AdaptiveResMode = e.Value?.ToString() switch
+        {
+            "ForceFull" => AdaptiveResMode.ForceFull,
+            "ForceHalf" => AdaptiveResMode.ForceHalf,
+            _           => AdaptiveResMode.Auto,
+        };
+    }
+
+    private void OnDprCapChanged(ChangeEventArgs e)
+    {
+        if (float.TryParse(e.Value?.ToString(), System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out float cap))
+        {
+            _dprCap = cap;
+            UpdateCanvasSize();
+            if (_canvasWidth > 0 && _canvasHeight > 0)
+                _renderService.HandleResize(_canvasWidth, _canvasHeight);
         }
     }
 

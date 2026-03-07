@@ -4,6 +4,7 @@ using ILGPU.Algorithms.RadixSortOperations;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU;
 using SpawnScene.Models;
+using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 
@@ -73,15 +74,18 @@ public class GpuSplatSorter : IDisposable
     /// Precision is sufficient for Gaussian splatting alpha blending.
     /// Set true for Standard/Fast presets, false for High.
     /// </summary>
-    public bool Use16BitSort { get; set; } = false;
+    public bool Use16BitSort { get; set; } = true;
 
-    // Camera tracking for dirty detection
-    private Vector3 _lastCameraPos;
-    private Vector3 _lastCameraFwd;
-    private const float DirtyThreshold = 0.01f;
+    // Camera tracking
+    // _prevFrameCameraPos/Fwd: updated every Sort() call → accurate per-frame velocity for _smoothedVelocity
+    private Vector3 _prevFrameCameraPos;
+    private Vector3 _prevFrameCameraFwd;
 
-    // Adaptive sort interval: scales with camera velocity
-    private int _framesSinceSort;
+    // Async sort tracking — prevents GPU queue backpressure
+    // _syncTask: non-null while GPU sort is in flight; polled via IsCompleted (non-blocking)
+    // _lastSortTicks: Stopwatch timestamp of last sort submission (50ms min between sorts)
+    private Task? _syncTask;
+    private long _lastSortTicks;
     private bool _sortPending;
     private float _smoothedVelocity;
     private const float VelocitySmoothing = 0.3f;
@@ -310,9 +314,10 @@ public class GpuSplatSorter : IDisposable
 
     private void ResetSortState()
     {
-        _lastCameraPos = new Vector3(float.NaN);
-        _lastCameraFwd = new Vector3(float.NaN);
-        _framesSinceSort = 10; // Force immediate sort on first frame
+        _prevFrameCameraPos = new Vector3(float.NaN);
+        _prevFrameCameraFwd = new Vector3(float.NaN);
+        _syncTask = null;    // Abandon any in-flight sort (buffers being disposed)
+        _lastSortTicks = 0;  // Allow immediate first sort (now - 0 >> 50ms)
         _sortPending = true;
         _smoothedVelocity = 0f;
     }
@@ -337,36 +342,54 @@ public class GpuSplatSorter : IDisposable
 
         var camPos = camera.Position;
         var camFwd = camera.Forward;
-        float currentVelocity = 0f;
 
-        if (!float.IsNaN(_lastCameraPos.X))
+        // Per-frame velocity: measured against previous frame for accurate _smoothedVelocity.
+        float currentVelocity = 0f;
+        if (!float.IsNaN(_prevFrameCameraPos.X))
         {
-            float posDelta = Vector3.DistanceSquared(camPos, _lastCameraPos);
-            float fwdDelta = Vector3.DistanceSquared(camFwd, _lastCameraFwd);
+            float posDelta = Vector3.DistanceSquared(camPos, _prevFrameCameraPos);
+            float fwdDelta = Vector3.DistanceSquared(camFwd, _prevFrameCameraFwd);
             currentVelocity = posDelta + fwdDelta;
-            if (currentVelocity >= DirtyThreshold)
-                _sortPending = true;
         }
-        else
+        _prevFrameCameraPos = camPos;
+        _prevFrameCameraFwd = camFwd;
+
+        // ── In-flight GPU sort check ──
+        // Only one sort is submitted at a time. While the GPU is sorting, we render with
+        // the stale vertex buffer — no queue backpressure, no blocking CPU wait.
+        bool sortJustDone = false;
+        if (_syncTask != null)
         {
-            _sortPending = true;
+            if (!_syncTask.IsCompleted)
+            {
+                // Sort still running — update velocity for adaptive-res, return stale results.
+                _smoothedVelocity = _smoothedVelocity * (1f - VelocitySmoothing) + currentVelocity * VelocitySmoothing;
+                return (_packedDataBuf, _indicesBuf, false, _lastSortVisibleCount);
+            }
+            // Sort completed this frame — signal caller to repack with new indices.
+            // Do NOT start a new sort this same frame: the pack pass (submitted after Sort()
+            // returns) and a new sort (which would write _indicesBuf) would conflict in the queue.
+            _syncTask = null;
+            sortJustDone = true;
         }
 
         _smoothedVelocity = _smoothedVelocity * (1f - VelocitySmoothing) + currentVelocity * VelocitySmoothing;
 
-        int sortInterval;
-        if (_smoothedVelocity > 0.1f) sortInterval = 1;
-        else if (_smoothedVelocity > 0.01f) sortInterval = 2;
-        else sortInterval = 5;
+        if (currentVelocity > 1e-8f)
+            _sortPending = true;
 
-        _framesSinceSort++;
-        if (!_sortPending || _framesSinceSort < sortInterval)
+        // On the frame sort just completed: return sortRan=true so pack runs, skip new sort.
+        if (sortJustDone)
+            return (_packedDataBuf, _indicesBuf, true, _lastSortVisibleCount);
+
+        // ── Rate gate: 50ms minimum between sort submissions ──
+        // Prevents thrashing on fast GPUs. On slow GPUs, _syncTask completion is the natural limiter.
+        long now = Stopwatch.GetTimestamp();
+        if (!_sortPending || (now - _lastSortTicks) < Stopwatch.Frequency / 20)
             return (_packedDataBuf, _indicesBuf, false, _lastSortVisibleCount);
 
-        _framesSinceSort = 0;
         _sortPending = false;
-        _lastCameraPos = camPos;
-        _lastCameraFwd = camFwd;
+        _lastSortTicks = now;
 
         var accelerator = _gpu.WebGPUAccelerator;
 
@@ -397,11 +420,12 @@ public class GpuSplatSorter : IDisposable
         else
             _radixSortPairs32!(accelerator.DefaultStream, _distanceBuf.View, _indicesBuf.View, _tempBuf!.View);
 
-        // Flush cull + sort to GPU queue — no CPU wait.
-        accelerator.DefaultStream.Synchronize();
+        // Non-blocking async wait — RAF loop continues at full rate while GPU sorts.
+        // _syncTask.IsCompleted is polled each frame; sortRan=true fires on completion frame.
+        _syncTask = accelerator.DefaultStream.SynchronizeAsync();
 
         _lastSortVisibleCount = _splatCount;
-        return (_packedDataBuf, _indicesBuf, true, _splatCount);
+        return (_packedDataBuf, _indicesBuf, false, _splatCount);
     }
 
     private void DisposeBuffers()

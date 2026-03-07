@@ -131,7 +131,7 @@
                     <select @bind="_qualityPreset" @bind:after="OnQualityPresetChanged">
                         <option value="fast">Fast (subsample 4)</option>
                         <option value="standard">Standard (subsample 2)</option>
-                        <option value="high">High (subsample 1)</option>
+                        <option value="high">High (subsample 1 + 2× SR)</option>
                     </select>
                 </label>
                 <label>
@@ -156,6 +156,37 @@
                     🎯 Generate from Depth
                 </button>
             </div>
+
+            @* ── SR model loader — shown only when High preset is selected ── *@
+            @if (_useSuperResolution)
+            {
+                <div class="sr-section">
+                    @if (_sr.IsReady && _sr.LoadedScale == _srScale)
+                    {
+                        <div class="model-badge">✅ SR ×@_srScale model ready</div>
+                    }
+                    else
+                    {
+                        <button class="btn btn-secondary" @onclick="LoadSrModel" disabled="@(_sr.IsLoading || _isProcessing)">
+                            @if (_sr.IsLoading)
+                            {
+                                <span class="spinner-inline"></span>
+                            }
+                            Load SR ×@_srScale Model (~3-5 MB)
+                        </button>
+                        <span class="text-muted-color" style="font-size:0.85em">
+                            Requires <code>wwwroot/models/sr_x@(_srScale).onnx</code>
+                        </span>
+                    }
+                    @if (!string.IsNullOrEmpty(_sr.Status))
+                    {
+                        <div class="status-bar @(_sr.IsLoading ? "running" : "done")" style="margin-top:0.4rem">
+                            @if (_sr.IsLoading) { <div class="spinner-inline"></div> }
+                            <span>@_sr.Status</span>
+                        </div>
+                    }
+                </div>
+            }
         </div>
     }
 
@@ -197,6 +228,7 @@
 
 @code {
     [Inject] private DepthEstimationService _depth { get; set; } = default!;
+    [Inject] private SuperResolutionService _sr { get; set; } = default!;
     [Inject] private DepthToGaussianKernel _gpuKernel { get; set; } = default!;
     [Inject] private GpuGaussianRenderer _gpuRenderer { get; set; } = default!;
     [Inject] private GpuDepthColorizer _depthColorizer { get; set; } = default!;
@@ -220,21 +252,31 @@
     private int _previewW = 400;
     private int _previewH = 300;
 
+    // Super-resolution options
+    private bool _useSuperResolution;
+    private int _srScale = 2;
+
     protected override void OnInitialized()
     {
         _depth.OnStateChanged += async () => await InvokeAsync(StateHasChanged);
+        _sr.OnStateChanged += async () => await InvokeAsync(StateHasChanged);
     }
 
     private void OnQualityPresetChanged()
     {
-        (_subsample, _edgeSharpness) = _qualityPreset switch
+        (_subsample, _edgeSharpness, _useSuperResolution, _srScale) = _qualityPreset switch
         {
-            "fast" => (4, 0f),
-            "high" => (1, 0.3f),
-            _ => (2, 0.3f), // standard
+            "fast" => (4, 0f, false, 2),
+            "high" => (1, 0.3f, true, 2),
+            _ => (2, 0.3f, false, 2), // standard
         };
         // High = 32-bit sort (8 passes, full precision); Standard/Fast = 16-bit (4 passes, 2x faster)
         _gpuSorter.Use16BitSort = _qualityPreset != "high";
+    }
+
+    private async Task LoadSrModel()
+    {
+        await _sr.LoadModelAsync(_srScale);
     }
 
     private async Task LoadModel()
@@ -396,7 +438,8 @@
 
         // Dispose previous GPU depth result before replacing
         _depthResults[_selectedImageIdx]?.Dispose();
-        var result = await _depth.EstimateDepthAsync(_images[_selectedImageIdx]);
+        var srcImage = await GetSrImageAsync(_images[_selectedImageIdx]);
+        var result = await _depth.EstimateDepthAsync(srcImage);
         _depthResults[_selectedImageIdx] = result;
 
         _isProcessing = false;
@@ -415,13 +458,29 @@
             if (_depthResults[i] != null) continue;
             _selectedImageIdx = i;
             StateHasChanged();
-            _depthResults[i] = await _depth.EstimateDepthAsync(_images[i]);
+            var srcImage = await GetSrImageAsync(_images[i]);
+            _depthResults[i] = await _depth.EstimateDepthAsync(srcImage);
         }
 
         _isProcessing = false;
         StateHasChanged();
         await Task.Yield();
         await DrawPreviews();
+    }
+
+    /// <summary>
+    /// Returns an SR-upscaled version of the image if High preset + SR model is loaded.
+    /// Returns the original image unchanged otherwise.
+    /// The returned image is the ORIGINAL (not a new allocation) when SR is not active,
+    /// so callers must not dispose it.
+    /// </summary>
+    private async Task<ImportedImage> GetSrImageAsync(ImportedImage image)
+    {
+        if (!_useSuperResolution || !_sr.IsReady || _sr.LoadedScale != _srScale)
+            return image;
+
+        var upscaled = await _sr.UpscaleAsync(image);
+        return upscaled ?? image; // fall back to original on SR failure
     }
 
     private async Task DrawPreviews()

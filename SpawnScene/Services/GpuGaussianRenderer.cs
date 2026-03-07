@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using Microsoft.AspNetCore.Components;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
 using SpawnDev.ILGPU.WebGPU;
@@ -9,6 +10,14 @@ using System.Numerics;
 
 namespace SpawnScene.Services;
 
+/// <summary>Controls whether adaptive half-resolution mode is applied.</summary>
+public enum AdaptiveResMode
+{
+    Auto,       // velocity-gated: enters half-res above LowResEnterVelocity
+    ForceFull,  // always render at full physical resolution
+    ForceHalf,  // always render at half physical resolution
+}
+
 /// <summary>
 /// Native WebGPU Gaussian splat renderer with GPU-sorted splats.
 /// Architecture:
@@ -17,6 +26,7 @@ namespace SpawnScene.Services;
 ///   - GPU-side buffer copy (no CPU round-trips)
 ///   - EWA anti-alias filter for distant splats
 ///   - CAS post-processing sharpening
+///   - Adaptive resolution: halves canvas pixel dims during fast movement, restores when still
 /// </summary>
 public class GpuGaussianRenderer : IDisposable
 {
@@ -48,7 +58,7 @@ public class GpuGaussianRenderer : IDisposable
     private GPUBuffer? _uniformBuffer;
     private GPUBindGroup? _uniformBindGroup;
     private readonly float[] _uniformData = new float[20]; // 16 (mat4) + 2 (viewport) + 2 (focal)
-    private Float32Array? _uniformJsArray; // cached — reused every frame, no per-frame alloc
+    private byte[]? _uniformByteData; // pre-allocated byte mirror of _uniformData for direct WriteBuffer
 
     // CAS sharpening pass
     private GPUTexture? _offscreenTexture;
@@ -58,7 +68,7 @@ public class GpuGaussianRenderer : IDisposable
     private GPUSampler? _casSampler;
     private float _sharpeningStrength = 0.5f;
     private readonly float[] _casData = new float[4];
-    private Float32Array? _casJsArray; // cached — reused every frame, no per-frame alloc
+    private byte[]? _casByteData; // pre-allocated byte mirror of _casData for direct WriteBuffer
 
     // Depth texture
     private GPUTexture? _depthTexture;
@@ -66,13 +76,48 @@ public class GpuGaussianRenderer : IDisposable
 
     private int _canvasWidth;
     private int _canvasHeight;
+
+    // Adaptive resolution — physical dims track the true canvas pixel size.
+    // _canvasWidth/_canvasHeight may be half of physical during fast movement.
+    private ElementReference _canvasRef;
+    private int _physicalWidth;
+    private int _physicalHeight;
+    private bool _lowResActive;
+    // Thresholds calibrated for per-frame DistanceSquared (see GpuSplatSorter for scale reference).
+    // Fast movement (aggressive mouse or Shift+WASD) pushes _smoothedVelocity above 0.0001.
+    private const float LowResEnterVelocity = 0.0002f; // enter half-res when velocity exceeds this
+    private const float LowResExitVelocity  = 0.00005f; // exit half-res once velocity drops below this (hysteresis)
+
     private bool _disposed;
+
+    // Reused 1-element array for Submit (avoids per-frame allocation)
+    private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
+
+    // Cached render pass descriptors — rebuilt on resize, reused every frame.
+    // GPURenderPassColorAttachment.View is { get; set; } so we update it per frame for swapchain targets.
+    // GPURenderPassDepthStencilAttachment.View is { get; init; } so we recreate on resize.
+    private GPURenderPassColorAttachment? _splatColorAttachCas;    // View = _offscreenView (stable)
+    private GPURenderPassColorAttachment? _splatColorAttachDirect; // View updated per frame
+    private GPURenderPassColorAttachment? _casColorAttach;          // View updated per frame
+    private GPURenderPassDescriptor? _splatPassDescCas;            // fully stable (CAS path)
+    private GPURenderPassDescriptor? _splatPassDescDirect;          // color View updated per frame
+    private GPURenderPassDescriptor? _casPassDesc;                  // color View updated per frame
 
     /// <summary>Sharpening intensity (0 = off, 1 = maximum).</summary>
     public float SharpeningStrength
     {
         get => _sharpeningStrength;
         set => _sharpeningStrength = Math.Clamp(value, 0f, 1f);
+    }
+
+    /// <summary>Controls adaptive resolution behavior.</summary>
+    public AdaptiveResMode AdaptiveResMode { get; set; } = AdaptiveResMode.Auto;
+
+    /// <summary>Sort precision passthrough: true = 4-pass 16-bit (faster), false = 8-pass 32-bit.</summary>
+    public bool Use16BitSort
+    {
+        get => _sorter.Use16BitSort;
+        set => _sorter.Use16BitSort = value;
     }
 
     public GpuGaussianRenderer(GpuService gpuService, GpuSplatSorter sorter)
@@ -86,9 +131,12 @@ public class GpuGaussianRenderer : IDisposable
 
     /// <summary>
     /// Initialize the WebGPU render pipeline. Called once when canvas is attached.
+    /// <paramref name="canvasRef"/> is stored for adaptive-resolution canvas pixel resizing.
     /// </summary>
-    public void AttachCanvas(HTMLCanvasElement canvas)
+    public void AttachCanvas(HTMLCanvasElement canvas, ElementReference canvasRef)
     {
+        _canvasRef = canvasRef;
+
         var webGpuAccel = _gpu.WebGPUAccelerator;
         var nativeAccel = webGpuAccel.NativeAccelerator;
         _device = nativeAccel.NativeDevice
@@ -109,8 +157,10 @@ public class GpuGaussianRenderer : IDisposable
             Format = _canvasFormat,
         });
 
-        _canvasWidth = canvas.Width;
-        _canvasHeight = canvas.Height;
+        _physicalWidth = canvas.Width;
+        _physicalHeight = canvas.Height;
+        _canvasWidth = _physicalWidth;
+        _canvasHeight = _physicalHeight;
 
         // ── Pack Compute Pipeline (Float32 → Float16/Unorm8 packing) ──
         using var packShader = _device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = PackComputeSource });
@@ -222,9 +272,9 @@ public class GpuGaussianRenderer : IDisposable
             }
         });
 
-        // Pre-allocate reusable JS typed arrays — avoids per-frame JS object allocations
-        _uniformJsArray = new Float32Array(_uniformData.Length);
-        _casJsArray = new Float32Array(4);
+        // Pre-allocate reusable byte buffers for direct WriteBuffer — avoids HeapView/PrimeHeap on every frame
+        _uniformByteData = new byte[_uniformData.Length * sizeof(float)];
+        _casByteData = new byte[_casData.Length * sizeof(float)];
         _packCountJsArray = new Uint32Array(1);
 
         // Pack count uniform (4 bytes): holds visibleCount for pack shader guard
@@ -270,6 +320,7 @@ public class GpuGaussianRenderer : IDisposable
             Usage = GPUTextureUsage.RenderAttachment,
         });
         _depthView = _depthTexture.CreateView();
+        RebuildCachedDescriptors();
     }
 
     private void CreateOffscreenTexture()
@@ -285,6 +336,7 @@ public class GpuGaussianRenderer : IDisposable
             Usage = GPUTextureUsage.RenderAttachment | GPUTextureUsage.TextureBinding,
         });
         _offscreenView = _offscreenTexture.CreateView();
+        RebuildCachedDescriptors();
 
         // Rebuild CAS bind group when texture changes
         if (_casPipeline != null && _casSampler != null && _casUniformBuffer != null)
@@ -305,6 +357,72 @@ public class GpuGaussianRenderer : IDisposable
                 }
             });
         }
+    }
+
+    /// <summary>
+    /// Rebuilds the cached render pass descriptor objects.
+    /// Called after depth or offscreen texture recreation (canvas resize).
+    /// On cache hit frames, these objects are reused directly — only the swapchain View field
+    /// is updated per frame in Render() for the direct and CAS pass targets.
+    /// </summary>
+    private void RebuildCachedDescriptors()
+    {
+        // Direct splat pass (no CAS) — depth stencil is stable; color View updated per frame
+        if (_depthView != null)
+        {
+            _splatColorAttachDirect = new GPURenderPassColorAttachment
+            {
+                LoadOp = GPULoadOp.Clear,
+                StoreOp = GPUStoreOp.Store,
+                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+            };
+            _splatPassDescDirect = new GPURenderPassDescriptor
+            {
+                ColorAttachments = new[] { _splatColorAttachDirect },
+                DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
+                {
+                    View = _depthView,
+                    DepthLoadOp = "clear",
+                    DepthStoreOp = "store",
+                    DepthClearValue = 1.0f,
+                },
+            };
+        }
+
+        // CAS splat pass — renders to offscreen texture (fully stable, no per-frame update needed)
+        if (_offscreenView != null && _depthView != null)
+        {
+            _splatColorAttachCas = new GPURenderPassColorAttachment
+            {
+                View = _offscreenView,
+                LoadOp = GPULoadOp.Clear,
+                StoreOp = GPUStoreOp.Store,
+                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+            };
+            _splatPassDescCas = new GPURenderPassDescriptor
+            {
+                ColorAttachments = new[] { _splatColorAttachCas },
+                DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
+                {
+                    View = _depthView,
+                    DepthLoadOp = "clear",
+                    DepthStoreOp = "store",
+                    DepthClearValue = 1.0f,
+                },
+            };
+        }
+
+        // CAS post-process pass — renders to swapchain; color View updated per frame
+        _casColorAttach = new GPURenderPassColorAttachment
+        {
+            LoadOp = GPULoadOp.Clear,
+            StoreOp = GPUStoreOp.Store,
+            ClearValue = new GPUColorDict { R = 0.0, G = 0.0, B = 0.0, A = 1.0 },
+        };
+        _casPassDesc = new GPURenderPassDescriptor
+        {
+            ColorAttachments = new[] { _casColorAttach },
+        };
     }
 
     /// <summary>
@@ -372,20 +490,27 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>
     /// Resize canvas and recreate GPU textures for new dimensions.
     /// Called when the browser window is resized.
+    /// Preserves the current adaptive resolution mode (low-res active = render at half the new physical size).
     /// </summary>
     public void ResizeCanvas(int newWidth, int newHeight)
     {
         if (_device == null || newWidth <= 0 || newHeight <= 0) return;
-        if (newWidth == _canvasWidth && newHeight == _canvasHeight) return;
 
-        _canvasWidth = newWidth;
-        _canvasHeight = newHeight;
+        _physicalWidth = newWidth;
+        _physicalHeight = newHeight;
 
-        // Recreate depth and offscreen textures for new size
+        int renderW = _lowResActive ? Math.Max(1, newWidth / 2) : newWidth;
+        int renderH = _lowResActive ? Math.Max(1, newHeight / 2) : newHeight;
+
+        if (renderW == _canvasWidth && renderH == _canvasHeight) return;
+
+        _canvasWidth = renderW;
+        _canvasHeight = renderH;
+
         CreateDepthTexture();
         CreateOffscreenTexture();
 
-        Console.WriteLine($"[GpuRenderer] Resized GPU textures: {newWidth}×{newHeight}");
+        Console.WriteLine($"[GpuRenderer] Resized GPU textures: {renderW}×{renderH} (physical: {newWidth}×{newHeight})");
     }
 
     /// <summary>
@@ -407,6 +532,38 @@ public class GpuGaussianRenderer : IDisposable
             return;
         }
         if (!_renderLogged) { _renderLogged = true; Console.WriteLine($"[Render] First frame: {_splatCount} splats, cam={camera.Position} fwd={camera.Forward}"); }
+
+        // ── Adaptive Resolution: enter/exit half-res based on mode and camera velocity ──
+        // Auto: velocity-gated with hysteresis. ForceFull/ForceHalf: unconditional.
+        {
+            float velocity = _sorter.SmoothedVelocity;
+            bool wantLowRes = AdaptiveResMode switch
+            {
+                AdaptiveResMode.ForceFull => false,
+                AdaptiveResMode.ForceHalf => true,
+                _                         => _lowResActive ? velocity > LowResExitVelocity : velocity > LowResEnterVelocity,
+            };
+            if (wantLowRes != _lowResActive && _physicalWidth > 0)
+            {
+                _lowResActive = wantLowRes;
+                int rw = _lowResActive ? Math.Max(1, _physicalWidth / 2) : _physicalWidth;
+                int rh = _lowResActive ? Math.Max(1, _physicalHeight / 2) : _physicalHeight;
+
+                // Set canvas element pixel dimensions so WebGPU's getCurrentTexture() returns the right size.
+                // The Blazor viewer reads clientWidth (CSS layout), not canvas.Width, for resize detection,
+                // so this won't interfere with the external resize logic.
+                using var canvasEl = new HTMLCanvasElement(_canvasRef);
+                canvasEl.Width = rw;
+                canvasEl.Height = rh;
+
+                _canvasWidth = rw;
+                _canvasHeight = rh;
+                CreateDepthTexture();
+                CreateOffscreenTexture();
+
+                Console.WriteLine($"[GpuRenderer] Adaptive res: {(wantLowRes ? "LOW" : "FULL")} {rw}×{rh} (velocity={velocity:F4})");
+            }
+        }
 
         // Ensure camera dimensions match canvas
         if (camera.Width == 0 || camera.Height == 0)
@@ -437,13 +594,18 @@ public class GpuGaussianRenderer : IDisposable
         _uniformData[4] = mvp.M21; _uniformData[5] = mvp.M22; _uniformData[6] = mvp.M23; _uniformData[7] = mvp.M24;
         _uniformData[8] = mvp.M31; _uniformData[9] = mvp.M32; _uniformData[10] = mvp.M33; _uniformData[11] = mvp.M34;
         _uniformData[12] = mvp.M41; _uniformData[13] = mvp.M42; _uniformData[14] = mvp.M43; _uniformData[15] = mvp.M44;
-        _uniformData[16] = camera.Width;
-        _uniformData[17] = camera.Height;
-        _uniformData[18] = camera.FocalX;
-        _uniformData[19] = camera.FocalY;
+        // Viewport = render dims (may be half physical in low-res mode).
+        // Focal must be scaled proportionally so screen-space splat radii stay visually consistent:
+        //   NDC_radius = world_scale * focal / depth * 2 / viewport — focal/viewport ratio must be preserved.
+        float focalScaleX = camera.Width > 0 ? (float)_canvasWidth / camera.Width : 1f;
+        float focalScaleY = camera.Height > 0 ? (float)_canvasHeight / camera.Height : 1f;
+        _uniformData[16] = _canvasWidth;
+        _uniformData[17] = _canvasHeight;
+        _uniformData[18] = camera.FocalX * focalScaleX;
+        _uniformData[19] = camera.FocalY * focalScaleY;
 
-        _uniformJsArray!.Set(_uniformData);
-        _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformJsArray);
+        Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
+        _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
 
         // ── Step 4: Pack (only when sort ran) + Render — single encoder/submit ──
         // Merging pack compute + render pass into one command buffer halves GPU submit overhead.
@@ -456,29 +618,20 @@ public class GpuGaussianRenderer : IDisposable
             AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount);
 
         // Render splats → render target (offscreen for CAS, canvas otherwise)
-        bool useCas = _sharpeningStrength > 0f;
-        var renderTarget = useCas ? _offscreenView! : colorView;
+        bool useCas = _sharpeningStrength > 0f && !_lowResActive;
 
-        using var splatPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+        GPURenderPassDescriptor splatPassDesc;
+        if (useCas)
         {
-            ColorAttachments = new[]
-            {
-                new GPURenderPassColorAttachment
-                {
-                    View = renderTarget,
-                    LoadOp = GPULoadOp.Clear,
-                    StoreOp = GPUStoreOp.Store,
-                    ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
-                }
-            },
-            DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
-            {
-                View = _depthView!,
-                DepthLoadOp = "clear",
-                DepthStoreOp = "store",
-                DepthClearValue = 1.0f,
-            }
-        });
+            splatPassDesc = _splatPassDescCas!; // stable: uses _offscreenView, no per-frame update
+        }
+        else
+        {
+            _splatColorAttachDirect!.View = colorView; // update swapchain view
+            splatPassDesc = _splatPassDescDirect!;
+        }
+
+        using var splatPass = encoder.BeginRenderPass(splatPassDesc);
 
         splatPass.SetPipeline(_splatPipeline);
         splatPass.SetBindGroup(0, _uniformBindGroup!);
@@ -495,22 +648,11 @@ public class GpuGaussianRenderer : IDisposable
             _casData[1] = 1f / _canvasWidth;
             _casData[2] = 1f / _canvasHeight;
             _casData[3] = 0f;
-            _casJsArray!.Set(_casData);
-            _queue.WriteBuffer(_casUniformBuffer!, 0, _casJsArray);
+            Buffer.BlockCopy(_casData, 0, _casByteData!, 0, _casByteData!.Length);
+            _queue.WriteBuffer(_casUniformBuffer!, 0, _casByteData);
 
-            using var casPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
-            {
-                ColorAttachments = new[]
-                {
-                    new GPURenderPassColorAttachment
-                    {
-                        View = colorView,
-                        LoadOp = GPULoadOp.Clear,
-                        StoreOp = GPUStoreOp.Store,
-                        ClearValue = new GPUColorDict { R = 0.0, G = 0.0, B = 0.0, A = 1.0 },
-                    }
-                }
-            });
+            _casColorAttach!.View = colorView; // update swapchain view
+            using var casPass = encoder.BeginRenderPass(_casPassDesc!);
             casPass.SetPipeline(_casPipeline!);
             casPass.SetBindGroup(0, _casBindGroup!);
             casPass.Draw(3, 1, 0, 0);
@@ -518,7 +660,8 @@ public class GpuGaussianRenderer : IDisposable
         }
 
         using var commandBuffer = encoder.Finish();
-        _queue!.Submit(new[] { commandBuffer });
+        _submitArray[0] = commandBuffer;
+        _queue!.Submit(_submitArray);
         // No explicit GPU sync needed. WebGPU's getCurrentTexture() (called at the
         // top of the next frame) will not return until the swapchain texture is free,
         // naturally throttling CPU to ~1 frame ahead without a full GPU drain.
@@ -605,8 +748,7 @@ public class GpuGaussianRenderer : IDisposable
         _casSampler?.Dispose();
         _splatPipeline?.Dispose();
         _casPipeline?.Dispose();
-        _uniformJsArray?.Dispose();
-        _casJsArray?.Dispose();
+        // _uniformByteData and _casByteData are plain byte[] — no disposal needed
         _packCountBuf?.Destroy();
         _packCountBuf?.Dispose();
         _packCountJsArray?.Dispose();

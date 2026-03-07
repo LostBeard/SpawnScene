@@ -35,7 +35,11 @@ public class PointCloudRenderer : IDisposable
     // Camera uniform buffer (MVP matrix = 64 bytes)
     private GPUBuffer? _uniformBuffer;
     private GPUBindGroup? _uniformBindGroup;
+    private Uint8Array? _uniformJsArray; // cached — reused every frame, no per-frame alloc
+    private readonly float[] _mvpFloats = new float[16];
+    private readonly float[] _pointSizeFloat = new float[1];
 
+    private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
     private bool _running;
     private bool _disposed;
     private double _lastTimestamp;
@@ -60,10 +64,11 @@ public class PointCloudRenderer : IDisposable
 
     public bool IsInitialized { get; private set; }
     public int PointCount => _pointCount;
-
+    Window? _window;
     public PointCloudRenderer(BlazorJSRuntime js)
     {
         _js = js;
+        _window = _js.Get<Window>("window");
     }
 
     /// <summary>
@@ -172,6 +177,8 @@ public class PointCloudRenderer : IDisposable
                 }
             }
         });
+
+        _uniformJsArray = new Uint8Array(80);
 
         IsInitialized = true;
         Console.WriteLine($"[PointCloudRenderer] Initialized. Canvas: {_canvasWidth}x{_canvasHeight}");
@@ -321,9 +328,8 @@ public class PointCloudRenderer : IDisposable
 
     private void RequestFrame()
     {
-        if (!_running || _disposed || _rafCallback == null) return;
-        using var window = _js.Get<Window>("window");
-        window.RequestAnimationFrame(_rafCallback);
+        if (!_running || _disposed || _rafCallback == null || _window == null) return;
+        _window.RequestAnimationFrame(_rafCallback);
     }
 
     private void OnAnimationFrame(double timestamp)
@@ -365,14 +371,12 @@ public class PointCloudRenderer : IDisposable
 
 
 
-        // Upload MVP + pointSize to uniform buffer
-        var mvpFloats = new float[16];
-        CopyMatrixToArray(mvp, mvpFloats);
-        var uniformData = new byte[80];
-        Buffer.BlockCopy(mvpFloats, 0, uniformData, 0, 64);
-        var pointSizeBytes = BitConverter.GetBytes(_pointSize);
-        Buffer.BlockCopy(pointSizeBytes, 0, uniformData, 64, 4);
-        _queue!.WriteBuffer(_uniformBuffer!, 0, uniformData);
+        // Upload MVP + pointSize to uniform buffer (cached arrays, no per-frame alloc)
+        CopyMatrixToArray(mvp, _mvpFloats);
+        _pointSizeFloat[0] = _pointSize;
+        _uniformJsArray!.Write(_mvpFloats, 0);
+        _uniformJsArray!.Write(_pointSizeFloat, 64); // byte offset 64 (after 16 floats)
+        _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformJsArray);
 
         // Render
         using var colorTexture = _context.GetCurrentTexture();
@@ -407,7 +411,8 @@ public class PointCloudRenderer : IDisposable
         pass.End();
 
         using var commandBuffer = encoder.Finish();
-        _queue!.Submit(new[] { commandBuffer });
+        _submitArray[0] = commandBuffer;
+        _queue!.Submit(_submitArray);
     }
 
     private Matrix4x4 BuildOrbitMvp(float aspect)
@@ -497,6 +502,8 @@ public class PointCloudRenderer : IDisposable
 
         _uniformBindGroup?.Dispose();
         _uniformBindGroup = null;
+        _uniformJsArray?.Dispose();
+        _uniformJsArray = null;
         _uniformBuffer?.Destroy();
         _uniformBuffer?.Dispose();
         _uniformBuffer = null;

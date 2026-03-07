@@ -232,6 +232,7 @@ namespace SpawnScene.Services
             }
             return args.Device;
         }
+        /// <inheritdoc/>
         public void Dispose()
         {
             if (Disposed) return;

@@ -17,8 +17,7 @@
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.3" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.3" PrivateAssets="all" />
 		<PackageReference Include="SpawnDev.BlazorJS.OnnxRuntimeWeb" Version="1.2.0" />
-		<PackageReference Include="SpawnDev.BlazorJS" Version="3.3.0" />
-		<PackageReference Include="SpawnDev.ILGPU" Version="3.6.0" />
+		<PackageReference Include="SpawnDev.ILGPU" Version="4.0.0" />
 	</ItemGroup>
 
 	<!-- Prevent the IL trimmer from removing types accessed via reflection in ILGPU's static constructors -->

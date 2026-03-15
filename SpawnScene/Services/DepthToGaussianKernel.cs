@@ -56,10 +56,11 @@ public class DepthToGaussianKernel
         float minDepth = p[7];
         float maxDepth = p[8];
         float edgeSharpness = p[9];
+        int globalIndex = index;
 
         int sampledW = width / subsample;
-        int sx = index % sampledW;
-        int sy = index / sampledW;
+        int sx = globalIndex % sampledW;
+        int sy = globalIndex / sampledW;
         int imgX = sx * subsample;
         int imgY = sy * subsample;
         int imgIdx = imgY * width + imgX;
@@ -182,6 +183,7 @@ public class DepthToGaussianKernel
         if (depth.RawDepthGpu == null)
             throw new InvalidOperationException("DepthResult.RawDepthGpu is null — GPU path requires GPU-resident depth.");
 
+        // Single dispatch — ILGPU handles 2D dispatch fallback transparently for large workgroup counts.
         _unprojectAndPackKernel(numPoints,
             depth.RawDepthGpu.View,
             rgbaBuf.View,

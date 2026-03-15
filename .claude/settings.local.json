@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls -la)",
+      "Bash(xargs grep -l \"MaxNumGroupsExtent\\\\|MaxNumGroups\")",
+      "Bash(done)",
+      "Bash(powershell -Command \"[Reflection.Assembly]::LoadFrom\\(''SpawnDev.BlazorJS.dll''\\) | Out-Null; [Type]::GetType\\(''SpawnDev.BlazorJS.JSObjects.GPUSupportedLimits''\\).GetProperties\\(\\) | ForEach-Object { Write-Host $_Name }\")",
+      "Bash(powershell -NoProfile -Command \"[Reflection.Assembly]::LoadFrom\\(''C:\\\\Users\\\\TJ\\\\.nuget\\\\packages\\\\spawndev.blazorjs\\\\3.3.0\\\\lib\\\\net6.0\\\\SpawnDev.BlazorJS.dll''\\) | ForEach-Object { $_.GetType\\(''SpawnDev.BlazorJS.JSObjects.GPUSupportedLimits''\\).GetProperties\\(\\) | Select-Object Name }\")",
+      "WebFetch(domain:github.com)",
+      "Bash(dotnet build SpawnDev.ILGPU/SpawnDev.ILGPU.csproj --no-restore)",
+      "Bash(dotnet build SpawnScene/SpawnScene.csproj --no-restore)",
+      "Bash(dotnet build SpawnScene/SpawnScene.csproj)",
+      "Bash(xargs grep -l \"ComputeGridStrideLoopExtent\")",
+      "Bash(while read f)",
+      "Bash(do grep -l \"ComputeGridStrideLoopExtent\" \"$f\")",
+      "Bash(echo \"Found in: $f\")",
+      "Bash(ls *Radix*)",
+      "Bash(grep -l \"ExclusiveScan\" \"d:\\\\users\\\\tj\\\\projects\\\\SpawnDev.ILGPU\\\\SpawnDev.ILGPU\\\\ILGPU.Algorithms\"/*.cs)",
+      "Bash(dotnet build SpawnDev.ILGPU/SpawnDev.ILGPU.csproj)",
+      "Bash(dotnet build SpawnDev.ILGPU.Demo.Shared/SpawnDev.ILGPU.Demo.Shared.csproj)",
+      "Bash(dotnet build SpawnDev.ILGPU.Demo/SpawnDev.ILGPU.Demo.csproj)",
+      "Bash(dotnet build SpawnDev.ILGPU.ConsoleDemo/SpawnDev.ILGPU.ConsoleDemo.csproj)"
+    ]
+  }
+}

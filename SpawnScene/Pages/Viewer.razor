@@ -73,10 +73,12 @@
             <div class="vsp-row">
                 <span class="vsp-label">Sort</span>
                 <div class="vsp-toggle">
-                    <button class="vsp-opt @(_renderService.Use16BitSort ? "vsp-opt-active" : "")"
-                            @onclick="() => _renderService.Use16BitSort = true">16-bit</button>
-                    <button class="vsp-opt @(!_renderService.Use16BitSort ? "vsp-opt-active" : "")"
-                            @onclick="() => _renderService.Use16BitSort = false">32-bit</button>
+                    <button class="vsp-opt @(_renderService.SkipSort ? "vsp-opt-active" : "")"
+                            @onclick="() => _renderService.SkipSort = true">Off</button>
+                    <button class="vsp-opt @(!_renderService.SkipSort && _renderService.Use16BitSort ? "vsp-opt-active" : "")"
+                            @onclick="() => { _renderService.SkipSort = false; _renderService.Use16BitSort = true; }">16-bit</button>
+                    <button class="vsp-opt @(!_renderService.SkipSort && !_renderService.Use16BitSort ? "vsp-opt-active" : "")"
+                            @onclick="() => { _renderService.SkipSort = false; _renderService.Use16BitSort = false; }">32-bit</button>
                 </div>
             </div>
 

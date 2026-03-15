@@ -3,6 +3,7 @@ using ILGPU.Algorithms;
 using ILGPU.Algorithms.RadixSortOperations;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU;
+using SpawnDev.ILGPU.WebGPU;
 using SpawnScene.Models;
 using System.Diagnostics;
 using System.Numerics;
@@ -75,6 +76,19 @@ public class GpuSplatSorter : IDisposable
     /// Set true for Standard/Fast presets, false for High.
     /// </summary>
     public bool Use16BitSort { get; set; } = true;
+
+    /// <summary>
+    /// Diagnostic: skip the radix sort entirely and render in cull-kernel output order.
+    /// If holes disappear with this enabled, the sort is the problem.
+    /// </summary>
+    private bool _skipSort;
+    public bool SkipSort
+    {
+        get => _skipSort;
+        set { _skipSort = value; if (!value) _skipSortLogged = false; }
+    }
+    private bool _skipSortLogged;
+    private bool _sortValidated;
 
     // Camera tracking
     // _prevFrameCameraPos/Fwd: updated every Sort() call → accurate per-frame velocity for _smoothedVelocity
@@ -415,10 +429,27 @@ public class GpuSplatSorter : IDisposable
         // High: DescendingInt32 (8 passes) — full 32-bit depth precision.
         // Standard/Fast: DescendingInt16As32 (4 passes) — 16-bit precision, 2x faster.
         // Visible depths (≥ 0) sort before int.MinValue sentinels → back-to-front, culled last.
-        if (Use16BitSort)
+        if (SkipSort)
+        {
+            // Diagnostic: skip sort, render in cull-kernel output order (unsorted).
+            // If holes disappear, the sort is the problem. If holes persist, it's elsewhere.
+            if (!_skipSortLogged)
+            {
+                Console.WriteLine($"[GpuSorter] DIAGNOSTIC: Sort SKIPPED — rendering {_splatCount:N0} splats unsorted");
+                _skipSortLogged = true;
+            }
+        }
+        else if (Use16BitSort)
             _radixSortPairs16!(accelerator.DefaultStream, _distanceBuf.View, _indicesBuf.View, _tempBuf!.View);
         else
             _radixSortPairs32!(accelerator.DefaultStream, _distanceBuf.View, _indicesBuf.View, _tempBuf!.View);
+
+        // ── Diagnostic: one-time async readback to validate sort output ──
+        if (!_sortValidated && !SkipSort)
+        {
+            _sortValidated = true;
+            _ = ValidateSortOutputAsync();
+        }
 
         // Non-blocking async wait — RAF loop continues at full rate while GPU sorts.
         // _syncTask.IsCompleted is polled each frame; sortRan=true fires on completion frame.
@@ -426,6 +457,55 @@ public class GpuSplatSorter : IDisposable
 
         _lastSortVisibleCount = _splatCount;
         return (_packedDataBuf, _indicesBuf, false, _splatCount);
+    }
+
+    /// <summary>
+    /// One-time async readback diagnostic: copies sort output from GPU and checks for
+    /// duplicate indices, missing indices, out-of-range values, and sort-order violations.
+    /// Fire-and-forget from Sort() — results printed to console.
+    /// </summary>
+    private async Task ValidateSortOutputAsync()
+    {
+        try
+        {
+            var accelerator = _gpu.WebGPUAccelerator;
+            await accelerator.SynchronizeAsync();
+
+            var indices = await _indicesBuf!.CopyToHostAsync<int>(0, _splatCount);
+            var distances = await _distanceBuf!.CopyToHostAsync<int>(0, _splatCount);
+
+            // Check 1: count unique vs duplicate indices
+            var seen = new HashSet<int>(indices.Length);
+            int dupes = 0, outOfRange = 0, negatives = 0;
+            foreach (var idx in indices)
+            {
+                if (idx < -1 || idx >= _splatCount) outOfRange++;
+                else if (idx == -1) negatives++;
+                else if (!seen.Add(idx)) dupes++;
+            }
+            int missing = _splatCount - negatives - seen.Count;
+            Console.WriteLine($"[SortValidation] N={_splatCount:N0}, unique={seen.Count:N0}, " +
+                $"dupes={dupes:N0}, missing={missing:N0}, outOfRange={outOfRange:N0}, culled(idx=-1)={negatives:N0}");
+
+            // Check 2: first 20 and last 20 distances — should be descending
+            var sb = new System.Text.StringBuilder("[SortValidation] First 20 distances: ");
+            for (int i = 0; i < Math.Min(20, _splatCount); i++) sb.Append($"{distances[i]} ");
+            Console.WriteLine(sb.ToString());
+            sb.Clear();
+            sb.Append("[SortValidation] Last 20 distances: ");
+            for (int i = Math.Max(0, _splatCount - 20); i < _splatCount; i++) sb.Append($"{distances[i]} ");
+            Console.WriteLine(sb.ToString());
+
+            // Check 3: count sort-order violations
+            int violations = 0;
+            for (int i = 1; i < _splatCount && violations < 100; i++)
+                if (distances[i] > distances[i - 1]) violations++;
+            Console.WriteLine($"[SortValidation] Sort-order violations (desc): {violations}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[SortValidation] Error: {ex.Message}");
+        }
     }
 
     private void DisposeBuffers()

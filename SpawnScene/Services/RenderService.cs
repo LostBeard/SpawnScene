@@ -32,6 +32,13 @@ public class RenderService : IDisposable
         set => _gpuRenderer.Use16BitSort = value;
     }
 
+    /// <summary>Diagnostic: skip radix sort entirely (render unsorted).</summary>
+    public bool SkipSort
+    {
+        get => _gpuRenderer.SkipSort;
+        set => _gpuRenderer.SkipSort = value;
+    }
+
     /// <summary>CAS sharpening intensity (0 = off, 1 = maximum).</summary>
     public float SharpeningStrength
     {

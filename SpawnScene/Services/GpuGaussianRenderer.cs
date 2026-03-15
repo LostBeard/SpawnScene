@@ -120,6 +120,13 @@ public class GpuGaussianRenderer : IDisposable
         set => _sorter.Use16BitSort = value;
     }
 
+    /// <summary>Diagnostic: skip radix sort entirely (render unsorted).</summary>
+    public bool SkipSort
+    {
+        get => _sorter.SkipSort;
+        set => _sorter.SkipSort = value;
+    }
+
     public GpuGaussianRenderer(GpuService gpuService, GpuSplatSorter sorter)
     {
         _gpu = gpuService;
@@ -717,12 +724,18 @@ public class GpuGaussianRenderer : IDisposable
             });
         }
 
-        // Dispatch only over visible splats (culled sentinels at tail are skipped).
-        uint workgroups = (uint)((visibleCount + 63) / 64);
+        // 2D dispatch to stay within WebGPU's maxComputeWorkgroupsPerDimension (65535).
+        // For scenes ≤ 4.2M splats: wgY=1 (identical to old 1D path).
+        // For larger scenes (e.g. 5K full-res = 14.7M splats): wgY=4.
+        // Out-of-bounds threads hit the i >= u_count guard in the shader and return early.
+        const uint maxWG = 65535u;
+        uint totalWG = (uint)((visibleCount + 63) / 64);
+        uint wgX = Math.Min(totalWG, maxWG);
+        uint wgY = (totalWG + maxWG - 1) / maxWG;
         using var pass = encoder.BeginComputePass();
         pass.SetPipeline(_packPipeline);
         pass.SetBindGroup(0, _packBindGroup);
-        pass.DispatchWorkgroups(workgroups, 1, 1);
+        pass.DispatchWorkgroups(wgX, wgY, 1);
         pass.End();
     }
 
@@ -974,8 +987,11 @@ fn fs_cas(input : VSOutput) -> @location(0) vec4<f32> {
 @group(0) @binding(3) var<uniform>             u_count : u32;         // visible splat count (deferred readback)
 
 @compute @workgroup_size(64)
-fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
+               @builtin(num_workgroups) nwg : vec3<u32>) {
+    // 2D dispatch: recompute linear index from row (gid.y) and column (gid.x).
+    // nwg.x = wgX (workgroups in X), so nwg.x * 64 = total threads per row.
+    let i = gid.y * nwg.x * 64u + gid.x;
     if (i >= u_count) { return; }
 
     let dstOff = i * 6u;

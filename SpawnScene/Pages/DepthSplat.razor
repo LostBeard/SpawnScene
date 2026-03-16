@@ -252,6 +252,7 @@
 
     private List<ImportedImage> _images = new();
     private List<DepthResult?> _depthResults = new();
+    private List<GpuImage?> _gpuImages = new();
     private List<ElementReference> _thumbCanvases = new();
     private ElementReference _previewOriginal;
     private ElementReference _previewDepth;
@@ -332,6 +333,7 @@
                 RgbaPixels = pixels,
             });
             _depthResults.Add(null);
+            _gpuImages.Add(null);
             _thumbCanvases.Add(new ElementReference());
             _selectedImageIdx = _images.Count - 1;
         }
@@ -352,6 +354,8 @@
     {
         _images.Clear();
         _depthResults.Clear();
+        foreach (var gi in _gpuImages) gi?.Dispose();
+        _gpuImages.Clear();
         _thumbCanvases.Clear();
 
         foreach (var file in e.GetMultipleFiles(20))
@@ -388,6 +392,7 @@
                     RgbaPixels = pixels,
                 });
                 _depthResults.Add(null);
+                _gpuImages.Add(null);
                 _thumbCanvases.Add(new ElementReference());
             }
             catch (Exception ex)
@@ -451,10 +456,20 @@
         _isProcessing = true;
         StateHasChanged();
 
-        // Dispose previous GPU depth result before replacing
+        // Dispose previous results before replacing
         _depthResults[_selectedImageIdx]?.Dispose();
-        var srcImage = await GetSrImageAsync(_images[_selectedImageIdx]);
-        var result = await _depth.EstimateDepthAsync(srcImage);
+        _gpuImages[_selectedImageIdx]?.Dispose();
+        _gpuImages[_selectedImageIdx] = null;
+
+        var gpuImage = await GetSrGpuImageAsync(_images[_selectedImageIdx]);
+        _gpuImages[_selectedImageIdx] = gpuImage;
+
+        DepthResult? result;
+        if (gpuImage != null)
+            result = await _depth.EstimateDepthAsync(gpuImage);
+        else
+            result = await _depth.EstimateDepthAsync(_images[_selectedImageIdx]);
+
         _depthResults[_selectedImageIdx] = result;
 
         _isProcessing = false;
@@ -473,8 +488,15 @@
             if (_depthResults[i] != null) continue;
             _selectedImageIdx = i;
             StateHasChanged();
-            var srcImage = await GetSrImageAsync(_images[i]);
-            _depthResults[i] = await _depth.EstimateDepthAsync(srcImage);
+
+            _gpuImages[i]?.Dispose();
+            var gpuImage = await GetSrGpuImageAsync(_images[i]);
+            _gpuImages[i] = gpuImage;
+
+            if (gpuImage != null)
+                _depthResults[i] = await _depth.EstimateDepthAsync(gpuImage);
+            else
+                _depthResults[i] = await _depth.EstimateDepthAsync(_images[i]);
         }
 
         _isProcessing = false;
@@ -484,18 +506,15 @@
     }
 
     /// <summary>
-    /// Returns an SR-upscaled version of the image if High preset + SR model is loaded.
-    /// Returns the original image unchanged otherwise.
-    /// The returned image is the ORIGINAL (not a new allocation) when SR is not active,
-    /// so callers must not dispose it.
+    /// Returns a GPU-resident upscaled image if SR is active, null otherwise.
+    /// When null, callers use the original ImportedImage (CPU path).
     /// </summary>
-    private async Task<ImportedImage> GetSrImageAsync(ImportedImage image)
+    private async Task<GpuImage?> GetSrGpuImageAsync(ImportedImage image)
     {
         if (!_useSuperResolution || !_sr.IsReady || _sr.LoadedScale != _srScale)
-            return image;
+            return null;
 
-        var upscaled = await _sr.UpscaleAsync(image);
-        return upscaled ?? image; // fall back to original on SR failure
+        return await _sr.UpscaleAsync(image);
     }
 
     private async Task DrawPreviews()
@@ -545,8 +564,10 @@
 
                 // GPU fast path: GeneratePackedGpuBufferAsync returns a MemoryBuffer owned
                 // here until we transfer it to the renderer (UploadSceneFromGpuBuffer).
-                var (packedBuf, splatCount) = await _gpuKernel.GeneratePackedGpuBufferAsync(
-                    dr, _images[i], _subsample, _edgeSharpness);
+                var gpuImage = _gpuImages[i];
+                var (packedBuf, splatCount) = gpuImage != null
+                    ? await _gpuKernel.GeneratePackedGpuBufferAsync(dr, gpuImage, _subsample, _edgeSharpness)
+                    : await _gpuKernel.GeneratePackedGpuBufferAsync(dr, _images[i], _subsample, _edgeSharpness);
 
                 if (splatCount == 0)
                 {
@@ -597,8 +618,9 @@
 
     public async ValueTask DisposeAsync()
     {
-        // Dispose all GPU depth results when this page is torn down
         foreach (var dr in _depthResults)
             dr?.Dispose();
+        foreach (var gi in _gpuImages)
+            gi?.Dispose();
     }
 }

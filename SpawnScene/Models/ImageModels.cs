@@ -1,4 +1,29 @@
+using ILGPU;
+using ILGPU.Runtime;
+
 namespace SpawnScene.Models;
+
+/// <summary>
+/// GPU-resident image: packed RGBA int buffer + dimensions.
+/// Used to keep SR output on GPU through depth estimation and Gaussian generation.
+/// Caller must Dispose() to release the GPU buffer (unless ownership is transferred).
+/// </summary>
+public class GpuImage : IDisposable
+{
+    /// <summary>Packed RGBA as int[W*H] on GPU. Owned by this instance.</summary>
+    public MemoryBuffer1D<int, Stride1D.Dense> PackedRgba { get; set; } = default!;
+
+    public int Width { get; set; }
+    public int Height { get; set; }
+    public string FileName { get; set; } = "";
+
+    public void Dispose()
+    {
+        PackedRgba?.Dispose();
+        PackedRgba = null!;
+        GC.SuppressFinalize(this);
+    }
+}
 
 /// <summary>
 /// A detected feature (keypoint) in an image.

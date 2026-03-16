@@ -170,7 +170,7 @@ public class SuperResolutionService : IAsyncDisposable
     ///   5. CPU readback of RGBA bytes (one CPU boundary per image)
     /// Returns a new ImportedImage at upscaled dimensions, or null on failure.
     /// </summary>
-    public async Task<ImportedImage?> UpscaleAsync(ImportedImage image)
+    public async Task<GpuImage?> UpscaleAsync(ImportedImage image)
     {
         if (_session == null || _ort == null)
         {
@@ -249,8 +249,8 @@ public class SuperResolutionService : IAsyncDisposable
 
             Console.WriteLine($"[SR] Output dims: [{string.Join(", ", dims)}], location: {outputTensor.Location}");
 
-            // ── Step 4: NCHW float → packed RGBA ──────────────────────────
-            using var dstRgbaBuf = accelerator.Allocate1D<int>(outPixCount);
+            // ── Step 4: NCHW float → packed RGBA (GPU-resident, ownership transfers out) ──
+            var dstRgbaBuf = accelerator.Allocate1D<int>(outPixCount);
 
             if (outputTensor.Location == "gpu-buffer")
             {
@@ -282,21 +282,16 @@ public class SuperResolutionService : IAsyncDisposable
 
             await accelerator.SynchronizeAsync();
 
-            // ── Step 5: Readback to CPU ────────────────────────────────────
-            // One CPU boundary per image — unavoidable for the ImportedImage contract.
-            // Future optimization: pass NCHW GPU buffer directly to depth estimator.
-            int[] packedResult = await dstRgbaBuf.CopyToHostAsync<int>(0, outPixCount);
-            byte[] rgbaBytes = MemoryMarshal.Cast<int, byte>(packedResult.AsSpan()).ToArray();
-
+            // GPU-resident output — no CPU readback. Ownership transfers to caller.
             Status = $"✅ SR ×{LoadedScale}: {origW}×{origH} → {outW}×{outH}";
             OnStateChanged?.Invoke();
 
-            return new ImportedImage
+            return new GpuImage
             {
-                FileName = $"{image.FileName} ×{LoadedScale}SR",
+                PackedRgba = dstRgbaBuf,
                 Width = outW,
                 Height = outH,
-                RgbaPixels = rgbaBytes,
+                FileName = $"{image.FileName} ×{LoadedScale}SR",
             };
         }
         catch (Exception ex)

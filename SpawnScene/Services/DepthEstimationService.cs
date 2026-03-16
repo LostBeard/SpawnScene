@@ -46,9 +46,10 @@ public class DepthEstimationService : IAsyncDisposable
 
     private Action<Index1D,
         ArrayView1D<float, Stride1D.Dense>,  // srcDepth
+        ArrayView1D<int, Stride1D.Dense>,    // guideRgba (high-res color for edge guidance)
         ArrayView1D<float, Stride1D.Dense>,  // dstDepth
         int, int, int, int, int>?            // offset, srcW, srcH, dstW, dstH
-        _resizeKernel;
+        _guidedUpsampleKernel;
 
     private Action<Index1D,
         ArrayView1D<float, Stride1D.Dense>,  // depth values
@@ -148,9 +149,9 @@ public class DepthEstimationService : IAsyncDisposable
     // ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// GPU kernel: nearest-neighbor resize + NCHW layout + ImageNet normalize.
+    /// GPU kernel: bicubic (Catmull-Rom) resize + NCHW layout + ImageNet normalize.
     /// Input:  packed RGBA ints [origW*origH]
-    /// Output: NCHW float32 [3*inputSize*inputSize] ready for DepthAnythingV2
+    /// Output: NCHW float32 [3*inputSize*inputSize] ready for depth model
     /// Params: [0]=inputSize [1]=origW [2]=origH [3-5]=mean [6-8]=std
     /// </summary>
     private static void PreprocessRgbaKernel(
@@ -166,40 +167,130 @@ public class DepthEstimationService : IAsyncDisposable
         int totalPix = inputSize * inputSize;
         int c = idx / totalPix;
         int rem = idx % totalPix;
-        int y = rem / inputSize;
-        int x = rem % inputSize;
-
-        int sx = x * origW / inputSize;
-        int sy = y * origH / inputSize;
-        sx = sx < 0 ? 0 : (sx >= origW ? origW - 1 : sx);
-        sy = sy < 0 ? 0 : (sy >= origH ? origH - 1 : sy);
-
-        int packed = srcRgba[sy * origW + sx];
+        int dstY = rem / inputSize;
+        int dstX = rem % inputSize;
         int shift = c * 8; // R=0, G=8, B=16
-        float pixVal = (float)((packed >> shift) & 0xFF) / 255f;
 
-        dstNchw[idx] = (pixVal - p[3 + c]) / p[6 + c];
+        // Map destination pixel to source coordinates (center-aligned)
+        float srcXf = (dstX + 0.5f) * origW / inputSize - 0.5f;
+        float srcYf = (dstY + 0.5f) * origH / inputSize - 0.5f;
+        int x0 = (int)srcXf - (srcXf < (int)srcXf ? 1 : 0); // floor
+        int y0 = (int)srcYf - (srcYf < (int)srcYf ? 1 : 0);
+        float fx = srcXf - x0;
+        float fy = srcYf - y0;
+
+        // Catmull-Rom weights for 4 sample points at positions -1, 0, 1, 2
+        float fx2 = fx * fx, fx3 = fx2 * fx;
+        float fy2 = fy * fy, fy3 = fy2 * fy;
+
+        float wx0 = -0.5f * fx3 + fx2 - 0.5f * fx;
+        float wx1 = 1.5f * fx3 - 2.5f * fx2 + 1f;
+        float wx2 = -1.5f * fx3 + 2f * fx2 + 0.5f * fx;
+        float wx3 = 0.5f * fx3 - 0.5f * fx2;
+
+        float wy0 = -0.5f * fy3 + fy2 - 0.5f * fy;
+        float wy1 = 1.5f * fy3 - 2.5f * fy2 + 1f;
+        float wy2 = -1.5f * fy3 + 2f * fy2 + 0.5f * fy;
+        float wy3 = 0.5f * fy3 - 0.5f * fy2;
+
+        // Sample 4×4 neighborhood with bicubic weights
+        float val = 0f;
+        for (int j = -1; j <= 2; j++)
+        {
+            float wy = j == -1 ? wy0 : j == 0 ? wy1 : j == 1 ? wy2 : wy3;
+            int sy = y0 + j;
+            sy = sy < 0 ? 0 : (sy >= origH ? origH - 1 : sy);
+
+            for (int i = -1; i <= 2; i++)
+            {
+                float wx = i == -1 ? wx0 : i == 0 ? wx1 : i == 1 ? wx2 : wx3;
+                int sx = x0 + i;
+                sx = sx < 0 ? 0 : (sx >= origW ? origW - 1 : sx);
+
+                int packed = srcRgba[sy * origW + sx];
+                float pixVal = ((packed >> shift) & 0xFF) / 255f;
+                val += pixVal * wx * wy;
+            }
+        }
+
+        // Clamp to [0,1] before normalization (bicubic can overshoot)
+        val = val < 0f ? 0f : (val > 1f ? 1f : val);
+
+        dstNchw[idx] = (val - p[3 + c]) / p[6 + c];
     }
 
     /// <summary>
-    /// GPU kernel: nearest-neighbor depth resize.
-    /// Input:  depth [srcW*srcH]
-    /// Output: depth [dstW*dstH]
+    /// GPU kernel: joint bilateral upsampling — uses the high-res color image as an
+    /// edge guide so depth boundaries align with color edges.
+    /// Samples a 5×5 window in low-res depth, weighted by spatial distance and
+    /// color similarity (Cauchy kernel, no exp needed).
     /// </summary>
-    private static void ResizeDepthKernel(
+    private static void GuidedDepthUpsampleKernel(
         Index1D idx,
         ArrayView1D<float, Stride1D.Dense> srcDepth,
+        ArrayView1D<int, Stride1D.Dense> guideRgba,
         ArrayView1D<float, Stride1D.Dense> dstDepth,
         int offset, int srcW, int srcH, int dstW, int dstH)
     {
         int absIdx = idx + offset;
-        int y = absIdx / dstW;
-        int x = absIdx % dstW;
-        int sx = x * srcW / dstW;
-        int sy = y * srcH / dstH;
-        sx = sx < 0 ? 0 : (sx >= srcW ? srcW - 1 : sx);
-        sy = sy < 0 ? 0 : (sy >= srcH ? srcH - 1 : sy);
-        dstDepth[absIdx] = srcDepth[sy * srcW + sx];
+        int dstY = absIdx / dstW;
+        int dstX = absIdx % dstW;
+
+        // Map destination pixel to source coordinates
+        float srcXf = (dstX + 0.5f) * srcW / dstW - 0.5f;
+        float srcYf = (dstY + 0.5f) * srcH / dstH - 0.5f;
+        int cx = (int)(srcXf + 0.5f);
+        int cy = (int)(srcYf + 0.5f);
+        cx = cx < 0 ? 0 : (cx >= srcW ? srcW - 1 : cx);
+        cy = cy < 0 ? 0 : (cy >= srcH ? srcH - 1 : cy);
+
+        // Guide color at this output pixel
+        int centerPacked = guideRgba[dstY * dstW + dstX];
+        float cR = (centerPacked & 0xFF) / 255f;
+        float cG = ((centerPacked >> 8) & 0xFF) / 255f;
+        float cB = ((centerPacked >> 16) & 0xFF) / 255f;
+
+        // Joint bilateral: spatial × color similarity weights (Cauchy kernel)
+        const float invSigmaSpace2 = 1f / (1.5f * 1.5f);  // spatial sigma = 1.5 low-res pixels
+        const float invSigmaColor2 = 1f / (0.05f * 0.05f); // color sigma = 0.05 in [0,1]
+        const int radius = 2; // 5×5 window
+
+        float weightSum = 0f;
+        float depthSum = 0f;
+
+        for (int dy = -radius; dy <= radius; dy++)
+        {
+            for (int dx = -radius; dx <= radius; dx++)
+            {
+                int sx = cx + dx;
+                int sy = cy + dy;
+                sx = sx < 0 ? 0 : (sx >= srcW ? srcW - 1 : sx);
+                sy = sy < 0 ? 0 : (sy >= srcH ? srcH - 1 : sy);
+
+                // Spatial weight: Cauchy kernel 1/(1 + d²/σ²)
+                float dist2 = (float)(dx * dx + dy * dy);
+                float ws = 1f / (1f + dist2 * invSigmaSpace2);
+
+                // Color similarity: compare guide at output pixel vs guide at sample's position
+                int gx = sx * dstW / srcW;
+                int gy = sy * dstH / srcH;
+                gx = gx >= dstW ? dstW - 1 : gx;
+                gy = gy >= dstH ? dstH - 1 : gy;
+                int samplePacked = guideRgba[gy * dstW + gx];
+                float sR = (samplePacked & 0xFF) / 255f;
+                float sG = ((samplePacked >> 8) & 0xFF) / 255f;
+                float sB = ((samplePacked >> 16) & 0xFF) / 255f;
+
+                float colorDiff2 = (cR - sR) * (cR - sR) + (cG - sG) * (cG - sG) + (cB - sB) * (cB - sB);
+                float wc = 1f / (1f + colorDiff2 * invSigmaColor2);
+
+                float w = ws * wc;
+                weightSum += w;
+                depthSum += srcDepth[sy * srcW + sx] * w;
+            }
+        }
+
+        dstDepth[absIdx] = weightSum > 0f ? depthSum / weightSum : srcDepth[cy * srcW + cx];
     }
 
     /// <summary>
@@ -230,14 +321,8 @@ public class DepthEstimationService : IAsyncDisposable
     // ─────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Run depth estimation on an image. Returns a GPU-resident DepthResult.
-    /// Full GPU pipeline:
-    ///   1. Upload RGBA bytes to GPU (one-time — image loaded from disk)
-    ///   2. GPU preprocess: RGBA → NCHW float32 normalized (kernel)
-    ///   3. ONNX inference on shared GPUDevice (zero-copy tensor input)
-    ///   4. Output stays GPU-resident via ExternalWebGPUMemoryBuffer
-    ///   5. GPU resize: 518×518 → origW×origH (kernel)
-    ///   6. GPU min/max reduce → 8 bytes CPU readback for scalar metadata only
+    /// Run depth estimation on a CPU-resident image. Returns a GPU-resident DepthResult.
+    /// Uploads RGBA to GPU, then runs the shared depth pipeline.
     /// </summary>
     public async Task<DepthResult?> EstimateDepthAsync(ImportedImage image)
     {
@@ -249,42 +334,72 @@ public class DepthEstimationService : IAsyncDisposable
 
         if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
         var accelerator = _gpu.WebGPUAccelerator;
+        EnsureKernelsLoaded(accelerator);
 
-        // Load kernels on first call (cached for reuse)
+        // Upload RGBA to GPU — justified: image data from disk/file picker (CPU source boundary).
+        var packedRgba = System.Runtime.InteropServices.MemoryMarshal
+            .Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
+        using var rgbaBuf = accelerator.Allocate1D(packedRgba);
+
+        return await RunDepthPipelineAsync(accelerator, rgbaBuf.View, image.Width, image.Height);
+    }
+
+    /// <summary>
+    /// Run depth estimation on a GPU-resident image (SR fast path).
+    /// Skips CPU→GPU upload — packed RGBA is already on GPU.
+    /// </summary>
+    public async Task<DepthResult?> EstimateDepthAsync(GpuImage gpuImage)
+    {
+        if (_session == null || _ort == null)
+        {
+            Status = "Model not loaded. Load a model first.";
+            return null;
+        }
+
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+        EnsureKernelsLoaded(accelerator);
+
+        return await RunDepthPipelineAsync(accelerator, gpuImage.PackedRgba.View, gpuImage.Width, gpuImage.Height);
+    }
+
+    private void EnsureKernelsLoaded(WebGPUAccelerator accelerator)
+    {
         _preprocessKernel ??= accelerator.LoadAutoGroupedStreamKernel<
             Index1D,
             ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>>(PreprocessRgbaKernel);
 
-        _resizeKernel ??= accelerator.LoadAutoGroupedStreamKernel<
+        _guidedUpsampleKernel ??= accelerator.LoadAutoGroupedStreamKernel<
             Index1D,
             ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>,
-            int, int, int, int, int>(ResizeDepthKernel);
+            int, int, int, int, int>(GuidedDepthUpsampleKernel);
 
         _minMaxKernel ??= accelerator.LoadAutoGroupedStreamKernel<
             Index1D,
             ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<int, Stride1D.Dense>,
             int>(MinMaxKernel);
+    }
 
-        int origW = image.Width;
-        int origH = image.Height;
+    /// <summary>
+    /// Shared depth pipeline: preprocess GPU-resident packed RGBA → ORT inference → resize + min/max.
+    /// </summary>
+    private async Task<DepthResult?> RunDepthPipelineAsync(
+        WebGPUAccelerator accelerator,
+        ArrayView1D<int, Stride1D.Dense> rgbaView,
+        int origW, int origH)
+    {
         const int inputSize = 518; // ViT patch size × 37
 
         Status = "Preprocessing image on GPU...";
         OnStateChanged?.Invoke();
         await Task.Yield();
 
-        // ── Step 1: Upload RGBA to GPU ──────────────────────────────────────
-        // Justified: image data loaded from disk/file picker — unavoidable source boundary.
-        // Reinterpret byte[W*H*4] as int[W*H] (packed RGBA, zero-copy in managed memory).
-        var packedRgba = System.Runtime.InteropServices.MemoryMarshal
-            .Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
-        using var rgbaBuf = accelerator.Allocate1D(packedRgba);
-
-        // ── Step 2: GPU preprocess — RGBA → NCHW float32 (normalized) ──────
+        // GPU preprocess — RGBA → NCHW float32 (resize + ImageNet normalize)
         var paramArr = new float[]
         {
             inputSize, origW, origH,
@@ -294,12 +409,10 @@ public class DepthEstimationService : IAsyncDisposable
         using var paramBuf = accelerator.Allocate1D(paramArr);
         using var preprocessBuf = accelerator.Allocate1D<float>(3 * inputSize * inputSize);
 
-        _preprocessKernel(3 * inputSize * inputSize, rgbaBuf.View, preprocessBuf.View, paramBuf.View);
+        _preprocessKernel!(3 * inputSize * inputSize, rgbaView, preprocessBuf.View, paramBuf.View);
 
         await accelerator.SynchronizeAsync();
 
-        // Get the underlying GPUBuffer to create a zero-copy ORT input tensor.
-        // Both preprocessBuf and the session use the same GPUDevice (set in LoadModelAsync).
         var gpuInputBuffer = GetNativeBuffer(preprocessBuf);
         if (gpuInputBuffer == null)
         {
@@ -347,7 +460,7 @@ public class DepthEstimationService : IAsyncDisposable
                 // externalBuf + outputTensor remain alive while kernels execute and sync inside
                 return await RunResizeMinMaxAsync(accelerator,
                     externalBuf.AsArrayView<float>(0, outElements),
-                    outW, outH, origW, origH);
+                    rgbaView, outW, outH, origW, origH);
             }
             else
             {
@@ -360,7 +473,7 @@ public class DepthEstimationService : IAsyncDisposable
 
                 using var rawUploadBuf = accelerator.Allocate1D(cpuDepth);
                 return await RunResizeMinMaxAsync(accelerator, rawUploadBuf.View,
-                    outW, outH, origW, origH);
+                    rgbaView, outW, outH, origW, origH);
             }
         }
         catch (Exception ex)
@@ -378,6 +491,7 @@ public class DepthEstimationService : IAsyncDisposable
     private async Task<DepthResult?> RunResizeMinMaxAsync(
         WebGPUAccelerator accelerator,
         ArrayView1D<float, Stride1D.Dense> rawView,
+        ArrayView1D<int, Stride1D.Dense> guideRgba,
         int srcW, int srcH, int dstW, int dstH)
     {
         var resizedBuf = accelerator.Allocate1D<float>(dstW * dstH);
@@ -385,7 +499,7 @@ public class DepthEstimationService : IAsyncDisposable
         for (int offset = 0; offset < totalPixels; offset += MaxDispatchElements)
         {
             int count = Math.Min(MaxDispatchElements, totalPixels - offset);
-            _resizeKernel!(count, rawView, resizedBuf.View, offset, srcW, srcH, dstW, dstH);
+            _guidedUpsampleKernel!(count, rawView, guideRgba, resizedBuf.View, offset, srcW, srcH, dstW, dstH);
         }
 
         using var minMaxBuf = accelerator.Allocate1D<int>(2);

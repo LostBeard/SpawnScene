@@ -130,7 +130,6 @@ public class DepthToGaussianKernel
     /// <summary>
     /// Generate a compacted GPU-packed splat buffer from GPU-resident depth + CPU RGBA.
     /// Returns (packedBuf, validSplatCount) — ownership of packedBuf transfers to caller.
-    /// No CPU readback of splat data. Buffer contains only valid splats (no zero-opacity gaps).
     /// </summary>
     public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)>
         GeneratePackedGpuBufferAsync(DepthResult depth, ImportedImage image, int subsample = 2,
@@ -138,7 +137,32 @@ public class DepthToGaussianKernel
     {
         if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
         var accelerator = _gpu.WebGPUAccelerator;
+        EnsureKernelLoaded(accelerator);
 
+        // Upload RGBA to GPU — justified: image data from file/picker (CPU source boundary).
+        var packedRgba = MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
+        using var rgbaBuf = accelerator.Allocate1D(packedRgba);
+
+        return await RunUnprojectAsync(accelerator, depth, rgbaBuf.View, subsample, edgeSharpness);
+    }
+
+    /// <summary>
+    /// Generate a compacted GPU-packed splat buffer from GPU-resident depth + GPU-resident RGBA.
+    /// SR fast path — skips CPU→GPU upload.
+    /// </summary>
+    public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)>
+        GeneratePackedGpuBufferAsync(DepthResult depth, GpuImage gpuImage, int subsample = 2,
+            float edgeSharpness = 0.3f)
+    {
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+        EnsureKernelLoaded(accelerator);
+
+        return await RunUnprojectAsync(accelerator, depth, gpuImage.PackedRgba.View, subsample, edgeSharpness);
+    }
+
+    private void EnsureKernelLoaded(WebGPUAccelerator accelerator)
+    {
         _unprojectAndPackKernel ??= accelerator.LoadAutoGroupedStreamKernel<
             Index1D,
             ArrayView1D<float, Stride1D.Dense>,
@@ -146,7 +170,15 @@ public class DepthToGaussianKernel
             ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>>(UnprojectAndPackKernel);
+    }
 
+    /// <summary>
+    /// Shared unprojection pipeline: GPU-resident depth + GPU-resident packed RGBA → compacted splat buffer.
+    /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)>
+        RunUnprojectAsync(WebGPUAccelerator accelerator, DepthResult depth,
+            ArrayView1D<int, Stride1D.Dense> rgbaView, int subsample, float edgeSharpness)
+    {
         int w = depth.Width;
         int h = depth.Height;
         int sampledW = w / subsample;
@@ -157,10 +189,6 @@ public class DepthToGaussianKernel
         float fy = fx;
         float cx = w / 2f;
         float cy = h / 2f;
-
-        // Upload RGBA to GPU — justified: image data from file/picker (CPU source boundary).
-        var packedRgba = MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
-        using var rgbaBuf = accelerator.Allocate1D(packedRgba);
 
         var paramArr = new float[]
         {
@@ -183,15 +211,14 @@ public class DepthToGaussianKernel
         if (depth.RawDepthGpu == null)
             throw new InvalidOperationException("DepthResult.RawDepthGpu is null — GPU path requires GPU-resident depth.");
 
-        // Single dispatch — ILGPU handles 2D dispatch fallback transparently for large workgroup counts.
-        _unprojectAndPackKernel(numPoints,
+        _unprojectAndPackKernel!(numPoints,
             depth.RawDepthGpu.View,
-            rgbaBuf.View,
+            rgbaView,
             outPackedBuf.View,
             counterBuf.View,
             paramBuf.View);
 
-        // Readback valid splat count (flushes ILGPU stream internally)
+        // Readback valid splat count only (4 bytes)
         int[] counterResult = await counterBuf.CopyToHostAsync<int>(0, 1);
         int validCount = Math.Clamp(counterResult[0], 0, numPoints);
 

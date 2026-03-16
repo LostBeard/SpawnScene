@@ -17,7 +17,7 @@ public class CameraController : IDisposable
     private float _yaw;   // Horizontal rotation (radians)
     private float _pitch; // Vertical rotation (radians, clamped ±89°)
     private Vector3 _position = new(0, 0, 3);
-    private float _moveSpeed = 2.0f;
+    private float _moveSpeed = 1.0f;
 
     // Drag state
     private bool _isDragging;
@@ -33,7 +33,7 @@ public class CameraController : IDisposable
     private const float ZoomSensitivity = 0.02f;
     private const float MinPitch = -MathF.PI / 2f + 0.01f;
     private const float MaxPitch = MathF.PI / 2f - 0.01f;
-    private const float FastMultiplier = 3.0f;
+    private const float FastMultiplier = 4.0f;
 
     /// <summary>Whether any movement keys are currently held.</summary>
     public bool IsMoving => _heldKeys.Count > 0;
@@ -62,7 +62,7 @@ public class CameraController : IDisposable
             // Depth scenes place all splats at Z > 0 (posZ = depth).
             // Yaw = π gives Forward = (0,0,+1), looking in +Z direction toward the splats.
             _position = Vector3.Zero;
-            _moveSpeed = 0.1f;
+            _moveSpeed = 1.0f;
             _yaw = MathF.PI;
             _pitch = 0f;
         }
@@ -85,7 +85,7 @@ public class CameraController : IDisposable
             float D = radius / MathF.Sin(fovY * 0.5f);
             D = MathF.Max(D, 0.5f);
             _position = center - Vector3.UnitZ * D;
-            _moveSpeed = MathF.Max(radius * 0.05f, 0.1f);
+            _moveSpeed = MathF.Max(radius * 0.5f, 1.0f);
 
             var dir = Vector3.Normalize(center - _position);
             _yaw = MathF.Atan2(dir.X, -dir.Z);
@@ -95,7 +95,7 @@ public class CameraController : IDisposable
         {
             // GPU-only scene, unknown source — safe default
             _position = new Vector3(0f, 0f, -3f);
-            _moveSpeed = 0.1f;
+            _moveSpeed = 1.0f;
             _yaw = 0f;
             _pitch = 0f;
         }

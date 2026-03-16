@@ -169,7 +169,7 @@
             NormalColor = System.Drawing.Color.FromArgb(255, 50, 50, 65),
             HoverColor = System.Drawing.Color.FromArgb(255, 70, 70, 85),
             PressedColor = System.Drawing.Color.FromArgb(255, 40, 40, 55),
-            OnClick = () => _nav.NavigateTo("/"),
+            OnClick = () => _nav.NavigateTo(""),
         });
 
         // Header row
@@ -1207,9 +1207,10 @@
                     SplatCount = splatCount,
                     QualityPreset = _activeProject.Settings.QualityPreset,
                 };
-                // Convert float[] to byte[] for OPFS storage
+                // Convert float[] to byte[] for OPFS storage — free floats immediately
                 var sceneBytes = new byte[packedFloats.Length * sizeof(float)];
                 Buffer.BlockCopy(packedFloats, 0, sceneBytes, 0, sceneBytes.Length);
+                packedFloats = null; // free GPU readback array
 
                 await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, sceneBytes);
                 Console.WriteLine($"[Studio] Scene saved to OPFS: {sceneBytes.Length / (1024 * 1024):F1} MB");
@@ -1269,16 +1270,18 @@
                 return;
             }
 
-            // Convert byte[] back to float[]
-            var packedFloats = new float[sceneBytes.Length / sizeof(float)];
-            Buffer.BlockCopy(sceneBytes, 0, packedFloats, 0, sceneBytes.Length);
-
             _statusMessage = $"Uploading {scene.SplatCount:N0} splats to GPU...";
             BuildProjectDetailUI();
 
-            // Upload to GPU
+            // Reinterpret byte[] as float[] — null out sceneBytes immediately to reduce peak memory.
+            // For 14M splats: byte[560MB] → float[560MB], freeing bytes before GPU allocation.
+            var packedFloats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(sceneBytes.AsSpan()).ToArray();
+            sceneBytes = null!; // free ~560MB before GPU allocation
+
+            // Upload to GPU (releases old scene buffers internally via DisposeBuffers)
             var accelerator = _gpuService.WebGPUAccelerator;
-            var packedBuf = accelerator.Allocate1D(packedFloats); // ownership transfers to renderer
+            var packedBuf = accelerator.Allocate1D(packedFloats);
+            packedFloats = null!; // free ~560MB before vertex buffer allocation
             await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, scene.SplatCount);
 
             var gaussianScene = new GaussianScene

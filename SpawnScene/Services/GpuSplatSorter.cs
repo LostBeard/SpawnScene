@@ -107,6 +107,14 @@ public class GpuSplatSorter : IDisposable
     public int SplatCount => _splatCount;
     public float SmoothedVelocity => _smoothedVelocity;
 
+    /// <summary>Expose packed data buffer for stochastic pack-at-upload.</summary>
+    public MemoryBuffer1D<float, Stride1D.Dense>? PackedDataBuf => _packedDataBuf;
+    /// <summary>Expose index buffer for stochastic pack-at-upload (filled with identity 0..N-1).</summary>
+    public MemoryBuffer1D<int, Stride1D.Dense>? IndicesBuf => _indicesBuf;
+
+    // Identity fill kernel (for stochastic mode: fill index buffer with 0..N-1)
+    private Action<Index1D, ArrayView1D<int, Stride1D.Dense>>? _identityFillKernel;
+
     public GpuSplatSorter(GpuService gpu) => _gpu = gpu;
 
     // ═══════════════════════════════════════════════════════════
@@ -130,6 +138,9 @@ public class GpuSplatSorter : IDisposable
         // Depth quantization: 10000f / int.MaxValue for 32-bit, 500f / 65534 for 16-bit
         public float DistScale;
         public int DistMax;
+        // Screen-space LOD culling: reject splats whose projected pixel size < MinScreenSize
+        public float FocalLength;   // max(focalX, focalY) in pixels
+        public float MinScreenSize; // minimum projected pixel radius (e.g. 0.3)
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -143,7 +154,7 @@ public class GpuSplatSorter : IDisposable
     ///   Culled:  outDistances[i] = int.MinValue (-1 sentinel), outIndices[i] = -1
     /// After DescendingInt32 sort: visible splats (depth ≥ 0) come first, culled (int.MinValue) last.
     /// The pack shader checks outIndices[i] &lt; 0 to skip culled slots.
-    /// No Atomic.Add, no counter readback, no CPU→GPU sync mid-frame.
+    /// Includes screen-space LOD culling: sub-pixel splats are treated as culled.
     /// </summary>
     private static void CullAndDistanceKernel(
         Index1D index,
@@ -162,7 +173,8 @@ public class GpuSplatSorter : IDisposable
         float opacity = packedData[o + 9];
 
         // Frustum cull with per-splat radius margin + zero-opacity rejection.
-        float margin = packedData[o + 6] * 3f;
+        float splatScale = packedData[o + 6];
+        float margin = splatScale * 3f;
         bool visible = opacity > 0f
             && x * p.P0x + y * p.P0y + z * p.P0z + p.P0d >= -margin  // Left
             && x * p.P1x + y * p.P1y + z * p.P1z + p.P1d >= -margin  // Right
@@ -177,18 +189,22 @@ public class GpuSplatSorter : IDisposable
             float dy = y - p.CamPosY;
             float dz = z - p.CamPosZ;
             float dist = dx * p.CamFwdX + dy * p.CamFwdY + dz * p.CamFwdZ;
-            // Quantize depth; clamp to DistMax so 16-bit sort wraps are avoided.
-            int qDist = dist > 0f ? (int)(dist * p.DistScale) : 0;
-            outDistances[i] = qDist > p.DistMax ? p.DistMax : qDist;
-            outIndices[i] = i;
+
+            // Screen-space LOD cull: reject sub-pixel splats.
+            // Projected size ≈ splatScale * focalLength / distance.
+            if (dist > 0f && splatScale * p.FocalLength / dist >= p.MinScreenSize)
+            {
+                int qDist = (int)(dist * p.DistScale);
+                outDistances[i] = qDist > p.DistMax ? p.DistMax : qDist;
+                outIndices[i] = i;
+                return;
+            }
         }
-        else
-        {
-            // Sentinel: int.MinValue sorts LAST in DescendingInt32.
-            // Pack shader skips idx < 0 → no wasted vertex/fragment work.
-            outDistances[i] = int.MinValue;
-            outIndices[i] = -1;
-        }
+
+        // Sentinel: int.MinValue sorts LAST in DescendingInt32.
+        // Pack shader skips idx < 0 → no wasted vertex/fragment work.
+        outDistances[i] = int.MinValue;
+        outIndices[i] = -1;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -202,7 +218,8 @@ public class GpuSplatSorter : IDisposable
     /// WebGPU clip-space Z=[0,1]: near=row3, far=row4-row3, others use row4±rowN.
     /// </summary>
     internal static CullParams BuildCullParams(Matrix4x4 mvp, Vector3 camPos, Vector3 camFwd, int splatCount,
-        float distScale = 10000f, int distMax = int.MaxValue)
+        float distScale = 10000f, int distMax = int.MaxValue,
+        float focalLength = 1000f, float minScreenSize = 0.3f)
     {
         // GpuMatrix4x4.FromMatrix4x4 transposes .NET's row-major (v*M) to GPU column-major (M*v).
         // GPU row i = .NET column i, giving clip = gm * worldPos (column-vector convention).
@@ -223,6 +240,8 @@ public class GpuSplatSorter : IDisposable
             SplatCount = splatCount,
             DistScale = distScale,
             DistMax = distMax,
+            FocalLength = focalLength,
+            MinScreenSize = minScreenSize,
         };
 
         static void SetPlane(ref float px, ref float py, ref float pz, ref float pd,
@@ -336,6 +355,42 @@ public class GpuSplatSorter : IDisposable
         _smoothedVelocity = 0f;
     }
 
+    /// <summary>
+    /// Update camera velocity tracking without running cull/sort.
+    /// Used in stochastic render mode where sort is not needed.
+    /// </summary>
+    public void UpdateVelocity(Vector3 camPos, Vector3 camFwd)
+    {
+        float currentVelocity = 0f;
+        if (!float.IsNaN(_prevFrameCameraPos.X))
+        {
+            currentVelocity = Vector3.DistanceSquared(camPos, _prevFrameCameraPos)
+                            + Vector3.DistanceSquared(camFwd, _prevFrameCameraFwd);
+        }
+        _prevFrameCameraPos = camPos;
+        _prevFrameCameraFwd = camFwd;
+        _smoothedVelocity = _smoothedVelocity * (1f - VelocitySmoothing) + currentVelocity * VelocitySmoothing;
+    }
+
+    /// <summary>GPU kernel: fill index buffer with identity [0, 1, 2, ..., N-1].</summary>
+    private static void IdentityFillKernel(
+        Index1D index,
+        ArrayView1D<int, Stride1D.Dense> output)
+    {
+        output[index] = index;
+    }
+
+    /// <summary>Fill _indicesBuf with identity indices for stochastic pack-at-upload.</summary>
+    public async Task FillIdentityIndicesAsync()
+    {
+        if (_indicesBuf == null || _splatCount == 0) return;
+        var accelerator = _gpu.WebGPUAccelerator;
+        _identityFillKernel ??= accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView1D<int, Stride1D.Dense>>(IdentityFillKernel);
+        _identityFillKernel(_splatCount, _indicesBuf.View);
+        await accelerator.SynchronizeAsync();
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  Sort
     // ═══════════════════════════════════════════════════════════
@@ -417,7 +472,8 @@ public class GpuSplatSorter : IDisposable
         // ── Step 1: Frustum cull + depth quantize (all N slots, sentinels for culled splats) ──
         float distScale = Use16BitSort ? 500f : 10000f;
         int distMax = Use16BitSort ? 65534 : int.MaxValue;
-        var cullParams = BuildCullParams(mvp, camPos, camFwd, _splatCount, distScale, distMax);
+        float focalLength = MathF.Max(camera.FocalX, camera.FocalY);
+        var cullParams = BuildCullParams(mvp, camPos, camFwd, _splatCount, distScale, distMax, focalLength);
         _cullDistanceKernel(
             _splatCount,
             _packedDataBuf.View,

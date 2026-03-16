@@ -21,7 +21,7 @@ There are no tests or linting tools configured.
 
 SpawnScene is a fully client-side Blazor WebAssembly Gaussian Splatting application. It generates 3D scenes from a single photo using monocular depth estimation (DepthAnything V2), with the entire pipeline running on the GPU via WebGPU and SpawnDev.ILGPU. No server backend.
 
-**Stack:** .NET 10 / C# 13, Blazor WASM, SpawnDev.ILGPU 4.0.0 (WebGPU compute), ONNX Runtime Web 1.25 (WebGPU EP), native WebGPU (WGSL shaders), SpawnDev.BlazorJS (JS interop).
+**Stack:** .NET 10 / C# 13, Blazor WASM, SpawnDev.ILGPU 4.0.0 (WebGPU compute), ONNX Runtime Web 1.25 (WebGPU EP, DistillAnyDepth + DepthAnything V2), native WebGPU (WGSL shaders), SpawnDev.BlazorJS (JS interop).
 
 **Browser requirement:** WebGPU-capable (Chrome 113+, Edge 113+, Safari 18+). No fallbacks exist.
 
@@ -42,29 +42,50 @@ Anti-patterns to avoid:
 
 ## Architecture
 
+### Render Modes (`SplatRenderMode`)
+
+The renderer supports two modes, switchable via `GpuGaussianRenderer.RenderMode`:
+
+- **Stochastic** (default) — Sort-free stochastic rasterization with temporal accumulation. No per-frame radix sort. ~45-60 FPS.
+- **Sorted** — Traditional sorted alpha blending (cull → radix sort → pack → render). Legacy mode for A/B comparison.
+
 ### GPU Pipeline (data flow)
 
 ```
 Photo (CPU read, unavoidable)
   → Upload RGBA once → GPU
   → ILGPU PreprocessKernel (RGBA → NCHW 518x518)
-  → ONNX WebGPU inference (DepthAnything V2 Small)
+  → ONNX WebGPU inference (DistillAnyDepth Small, default)
   → ILGPU ResizeKernel (518x518 → original res)
   → ILGPU MinMaxReduce (2 floats → CPU, UI metadata only)
   → ILGPU UnprojectAndPackKernel (depth + RGBA → 10 floats/splat)
-  → ILGPU RadixSort (back-to-front ordering)
-  → WebGPU pack compute (Float32 → Float16/UNorm8 vertex format)
-  → WebGPU splat render (billboard quads + EWA filter + CAS sharpening)
+  → ILGPU IdentityFill + WebGPU pack compute (one-time at upload)
+  → Per frame (stochastic mode):
+      → WebGPU stochastic splat render (billboard quads + stochastic discard + depth test)
+      → WebGPU accumulation blend (temporal EMA into persistent texture)
+      → WebGPU CAS display (sharpening → canvas)
   → Canvas
 ```
 
-### Render Loop
+### Stochastic Render Loop
 
-RAF → `RenderService.RenderFrame()` → `GpuGaussianRenderer.Render()` (hot path, synchronous).
+RAF → `RenderService.RenderFrame()` → `GpuGaussianRenderer.Render()` → `RenderStochastic()`.
 
-- **Sort frame:** `GpuSplatSorter.Sort()` polls `_syncTask.IsCompleted` (non-blocking). If sort completed, pack compute shader runs, then render with new vertex buffer.
-- **Non-sort frame:** render with stale vertex buffer from last pack (no GPU submission for sort).
-- Sort is self-throttling: natural rate = GPU sort duration, 50ms minimum floor between submissions.
+Per frame, SPP × (stochastic render + accumulate) + 1 display pass:
+1. **Stochastic splat render** → `_stochasticTexture`: billboard quads with EWA, fragment does stochastic discard (`u >= effective_alpha`), opaque writes with depth test.
+2. **Accumulate blend** → `_accumTexture`: fullscreen EMA blend with weight `1/frameCount`.
+3. **CAS display** → canvas: contrast-adaptive sharpening on accumulated result.
+
+Key behaviors:
+- **Moving camera:** `_accumFrameCount` resets to 0 each frame → no inter-frame ghosting. SPP sub-samples averaged within the frame only.
+- **Still camera:** `_accumFrameCount` grows to 1024 → deep progressive convergence.
+- **Velocity-adaptive SPP:** movement=2, convergence burst=3, converged=1.
+- **Min alpha floor:** during movement, low-alpha edge fragments boosted to 0.15 survival → fills holes.
+- **Velocity-adaptive dilation:** subtle splat fattening via uniform (max +5%) bridges sub-pixel gaps.
+
+### Sorted Render Loop (legacy)
+
+Same as before: `Sort()` polls `_syncTask.IsCompleted` (non-blocking). If sort completed, pack compute runs, then render with new vertex buffer. Sort is self-throttling: 50ms minimum floor.
 
 ### Adaptive Resolution
 
@@ -79,8 +100,8 @@ Canvas pixel dimensions halve during fast camera movement, restore when slow. Th
 | `GpuService` | ILGPU WebGPU accelerator lifecycle; device sharing with ORT via `GpuShareService` |
 | `DepthEstimationService` | ONNX depth inference + GPU pre/post-processing kernels |
 | `DepthToGaussianKernel` | ILGPU kernel: depth + RGBA → packed Gaussian buffer |
-| `GpuSplatSorter` | Async non-blocking ILGPU radix sort with frustum culling |
-| `GpuGaussianRenderer` | WebGPU splat renderer: pack compute + render pass + CAS post-processing |
+| `GpuSplatSorter` | ILGPU radix sort (sorted mode) + velocity tracking + identity fill (stochastic mode) |
+| `GpuGaussianRenderer` | WebGPU renderer: stochastic + sorted pipelines, accumulation, CAS post-processing |
 | `RenderService` | RAF render loop orchestration + scene upload coordination |
 | `SceneManager` | Active scene + camera state, fires `OnSceneChanged`/`OnCameraChanged` events |
 | `CameraController` | FPS-style camera (WASD + mouse look + scroll zoom) |

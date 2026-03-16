@@ -26,8 +26,8 @@
 ```
 User selects model
     │
-    ├─▶ DistillAnyDepth Small (default)     ~99 MB ONNX
-    └─▶ DepthAnythingV2 Small               ~99 MB ONNX
+    ├─▶ DistillAnyDepth Small (default)      ~99 MB ONNX
+    └─▶ DepthAnything V2 Small              ~99 MB ONNX
 
 OnnxRuntime.Init()
     └─▶ CreateInferenceSession (WebGPU EP, shared GPUDevice with ILGPU)
@@ -136,7 +136,12 @@ GpuGaussianRenderer.UploadSceneFromGpuBuffer()
     └─▶ Transfers buffer ownership to renderer pipeline
 ```
 
-### ⑤ Viewer (60 FPS render loop)
+### ⑤ Viewer (45-60 FPS render loop)
+
+Two render modes available via `GpuGaussianRenderer.RenderMode`:
+
+#### Stochastic Mode (default) — Sort-Free
+
 ```
 requestAnimationFrame
     │
@@ -148,42 +153,59 @@ CameraController.Tick(dt)                    [CPU, per-frame]
 RenderService.RenderFrame()
     │
     ▼
-GpuSplatSorter.Sort()                       [GPU, async]
+GpuGaussianRenderer.RenderStochastic()       [GPU]
     ┌────────────────────────────────────────────────────────────┐
-    │  Polls _syncTask.IsCompleted (non-blocking)                │
+    │  Velocity tracking (no sort, no cull kernel)               │
     │                                                            │
-    │  If previous sort still in-flight:                         │
-    │    → skip, render with stale vertex buffer                 │
+    │  Velocity-adaptive parameters:                             │
+    │    • Dilation: scale *= 1 + sqrt(velocity)*5 (max +5%)    │
+    │    • Min alpha floor: 0.15 when moving, 0 when still      │
+    │    • SPP: 2 moving, 3 convergence burst, 1 converged      │
+    │    • Accumulation: reset each frame when moving            │
     │                                                            │
-    │  If sort completed (or first frame):                       │
-    │    → FrustumCull + DistanceKernel (depth quantization)     │
-    │    → ILGPU RadixSort (16-bit: 4 passes, 32-bit: 8 passes) │
-    │    → Back-to-front ordering for alpha blending             │
-    │    → Submit new sort, capture _syncTask                    │
-    │    → sortRan = true                                        │
+    │  For each sub-sample (1–3 per frame):                      │
+    │    ┌──────────────────────────────────────────────────┐    │
+    │    │  Pass 1: Stochastic splat render                 │    │
+    │    │    → _stochasticTexture (clear each sub-sample)  │    │
+    │    │    Billboard quads + EWA anti-alias               │    │
+    │    │    Fragment: stochastic discard (u >= alpha)      │    │
+    │    │    DepthWriteEnabled=true, no alpha blending      │    │
+    │    │    Depth test selects closest surviving sample    │    │
+    │    │                                                   │    │
+    │    │  Pass 2: Accumulate blend                         │    │
+    │    │    → _accumTexture (LoadOp=load, EMA blend)      │    │
+    │    │    weight = 1/frameCount (running average)        │    │
+    │    └──────────────────────────────────────────────────┘    │
     │                                                            │
-    │  Rate gated: 50ms minimum between submissions              │
-    └────────────────────────────────────────────────────────────┘
-    │
-    ▼
-GpuGaussianRenderer.Render()                 [GPU]
-    ┌────────────────────────────────────────────────────────────┐
-    │  If sortRan:                                               │
-    │    WebGPU PackComputeShader                                │
-    │      float32 → float16/uint8 vertex packing                │
-    │                                                            │
-    │  WebGPU SplatPipeline (render pass)                        │
-    │    Billboard quads + EWA anti-alias filter                 │
-    │    Packed vertex: pos(f32) + color_alpha(u8x4) + scale(f16)│
-    │                                                            │
-    │  If CAS enabled:                                           │
-    │    WebGPU CAS post-process pass (sharpening 0.0–1.0)       │
+    │  Pass 3: CAS display                                       │
+    │    → Canvas (sharpening + present)                         │
     │                                                            │
     │  Adaptive resolution:                                      │
     │    Fast camera movement → half-res canvas                  │
     │    Slow/still → full-res canvas                            │
-    │                                                            │
-    │  → Canvas (GPU direct present)                             │
+    └────────────────────────────────────────────────────────────┘
+```
+
+#### Sorted Mode (legacy) — Traditional Alpha Blending
+
+```
+requestAnimationFrame → CameraController.Tick(dt) → RenderService.RenderFrame()
+    │
+    ▼
+GpuSplatSorter.Sort()                       [GPU, async]
+    ┌────────────────────────────────────────────────────────────┐
+    │  Polls _syncTask.IsCompleted (non-blocking)                │
+    │  CullAndDistanceKernel → RadixSort (16-bit or 32-bit)     │
+    │  Rate gated: 50ms minimum between submissions              │
+    └────────────────────────────────────────────────────────────┘
+    │
+    ▼
+GpuGaussianRenderer.RenderSorted()           [GPU]
+    ┌────────────────────────────────────────────────────────────┐
+    │  If sortRan: PackComputeShader (float32 → packed vertex)   │
+    │  SplatPipeline: billboard quads + EWA + alpha blending     │
+    │  Optional CAS post-process                                 │
+    │  → Canvas                                                  │
     └────────────────────────────────────────────────────────────┘
 ```
 

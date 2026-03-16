@@ -6,25 +6,36 @@
 <div class="depth-splat-container">
     <div class="depth-header">
         <h2>🔮 Depth Splat</h2>
-        <p class="text-muted-color">Create Gaussian Splats from images using AI depth estimation (DepthAnythingV2).</p>
+        <p class="text-muted-color">Create Gaussian Splats from images using AI depth estimation.</p>
     </div>
 
     @* ── Step 1: Load Model ── *@
     <div class="depth-section">
         <h3>① Load Depth Model</h3>
-        @if (_depth.IsReady)
+        @if (_depth.IsReady && _depth.LoadedModelId == _selectedModelId)
         {
-            <div class="model-badge">✅ DepthAnythingV2 Small loaded</div>
+            <div class="model-badge">✅ @_depth.LoadedModelName loaded</div>
         }
         else
         {
-            <button class="btn btn-primary" @onclick="LoadModel" disabled="@_depth.IsLoading">
-                @if (_depth.IsLoading)
-                {
-                    <span class="spinner-inline"></span>
-                }
-                Load DepthAnythingV2 Small (~99 MB)
-            </button>
+            <div class="controls-row">
+                <label>
+                    Model:
+                    <select @bind="_selectedModelId">
+                        @foreach (var model in DepthEstimationService.AvailableModels)
+                        {
+                            <option value="@model.Id">@model.Name</option>
+                        }
+                    </select>
+                </label>
+                <button class="btn btn-primary" @onclick="LoadModel" disabled="@_depth.IsLoading">
+                    @if (_depth.IsLoading)
+                    {
+                        <span class="spinner-inline"></span>
+                    }
+                    Load @(_selectedModel?.Name ?? "Model") (@(_selectedModel?.SizeLabel ?? ""))
+                </button>
+            </div>
         }
     </div>
 
@@ -252,6 +263,10 @@
     private int _previewW = 400;
     private int _previewH = 300;
 
+    // Model selection
+    private string _selectedModelId = DepthEstimationService.DefaultModelId;
+    private DepthModelInfo? _selectedModel => DepthEstimationService.AvailableModels.FirstOrDefault(m => m.Id == _selectedModelId);
+
     // Super-resolution options
     private bool _useSuperResolution;
     private int _srScale = 2;
@@ -281,7 +296,7 @@
 
     private async Task LoadModel()
     {
-        await _depth.LoadModelAsync();
+        await _depth.LoadModelAsync(_selectedModelId);
     }
 
     private async Task LoadSampleImage(string url, string name)

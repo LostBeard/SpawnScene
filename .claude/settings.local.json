@@ -19,7 +19,13 @@
       "Bash(dotnet build SpawnDev.ILGPU/SpawnDev.ILGPU.csproj)",
       "Bash(dotnet build SpawnDev.ILGPU.Demo.Shared/SpawnDev.ILGPU.Demo.Shared.csproj)",
       "Bash(dotnet build SpawnDev.ILGPU.Demo/SpawnDev.ILGPU.Demo.csproj)",
-      "Bash(dotnet build SpawnDev.ILGPU.ConsoleDemo/SpawnDev.ILGPU.ConsoleDemo.csproj)"
+      "Bash(dotnet build SpawnDev.ILGPU.ConsoleDemo/SpawnDev.ILGPU.ConsoleDemo.csproj)",
+      "WebSearch",
+      "WebFetch(domain:distill-any-depth-official.github.io)",
+      "WebFetch(domain:arxiv.org)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(powershell -Command \"Invoke-WebRequest -Uri 'https://huggingface.co/FuryTMP/Distill-Any-Depth-Small-onnx/resolve/main/Distill%20Any%20Depth%20Small/model.onnx?download=true' -OutFile 'D:\\\\users\\\\tj\\\\Projects\\\\SpawnScene\\\\SpawnScene\\\\SpawnScene\\\\wwwroot\\\\models\\\\distill_any_depth_small.onnx'\" 2>&1)"
     ]
   }
 }

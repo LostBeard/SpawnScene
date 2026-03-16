@@ -9,7 +9,13 @@ using SpawnScene.Models;
 namespace SpawnScene.Services;
 
 /// <summary>
-/// Monocular depth estimation using DepthAnythingV2 ONNX models.
+/// Available depth estimation model definition.
+/// All models use the same 518×518 ViT input and ImageNet normalization.
+/// </summary>
+public record DepthModelInfo(string Id, string Name, string Path, string SizeLabel);
+
+/// <summary>
+/// Monocular depth estimation using ONNX models (DepthAnythingV2, DistillAnyDepth).
 /// Full GPU pipeline: RGBA→NCHW preprocessing on GPU, ONNX inference on the shared
 /// GPUDevice (zero-copy input via TensorFromGpuBuffer), output kept GPU-resident via
 /// ExternalWebGPUMemoryBuffer, depth resized + min/max computed on GPU.
@@ -17,12 +23,19 @@ namespace SpawnScene.Services;
 /// </summary>
 public class DepthEstimationService : IAsyncDisposable
 {
-    private const string ModelPath = "models/depth_anything_v2_small.onnx";
-    private const string ModelName = "DepthAnythingV2 Small";
+    public static readonly DepthModelInfo[] AvailableModels = new[]
+    {
+        new DepthModelInfo("distill-any-depth-small", "DistillAnyDepth Small", "models/distill_any_depth_small.onnx", "~99 MB"),
+        new DepthModelInfo("depth-anything-v2-small", "DepthAnythingV2 Small", "models/depth_anything_v2_small.onnx", "~99 MB"),
+    };
+
+    public static readonly string DefaultModelId = AvailableModels[0].Id;
 
     private readonly GpuService _gpu;
     private OnnxRuntime? _ort;
     private OrtInferenceSession? _session;
+    public string? LoadedModelId { get; private set; }
+    public string? LoadedModelName { get; private set; }
 
     // GPU kernel delegates — loaded lazily, cached across calls
     private Action<Index1D,
@@ -59,13 +72,31 @@ public class DepthEstimationService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Initialize ONNX Runtime and load the DepthAnythingV2 Small model.
+    /// Initialize ONNX Runtime and load the specified depth model.
     /// Injects the ILGPU GPUDevice into ort.env.webgpu so ORT and ILGPU share one
     /// device, enabling zero-copy buffer exchange.
     /// </summary>
-    public async Task LoadModelAsync()
+    public async Task LoadModelAsync(string modelId)
     {
-        if (_session != null) return;
+        var model = AvailableModels.FirstOrDefault(m => m.Id == modelId);
+        if (model == null)
+        {
+            Status = $"❌ Unknown model: {modelId}";
+            OnStateChanged?.Invoke();
+            return;
+        }
+
+        // Already loaded this exact model
+        if (_session != null && LoadedModelId == modelId) return;
+
+        // Switching models: dispose old session
+        if (_session != null)
+        {
+            _session.Dispose();
+            _session = null;
+            LoadedModelId = null;
+            LoadedModelName = null;
+        }
 
         IsLoading = true;
         OnStateChanged?.Invoke();
@@ -84,18 +115,20 @@ public class DepthEstimationService : IAsyncDisposable
             using var env = _ort.Env;
             env.SetPreferredOutputLocation("gpu-buffer");
 
-            Status = $"Loading {ModelName}...";
+            Status = $"Loading {model.Name}...";
             OnStateChanged?.Invoke();
             await Task.Yield();
 
-            _session = await _ort.CreateInferenceSessionAsync(ModelPath, new SessionCreateOptions
+            _session = await _ort.CreateInferenceSessionAsync(model.Path, new SessionCreateOptions
             {
                 ExecutionProviders = new[] { "webgpu", "wasm" },
                 GraphOptimizationLevel = "all",
                 LogSeverityLevel = 3,
             });
 
-            Status = $"✅ {ModelName} loaded — inputs: [{string.Join(", ", _session.InputNames)}], outputs: [{string.Join(", ", _session.OutputNames)}]";
+            LoadedModelId = modelId;
+            LoadedModelName = model.Name;
+            Status = $"✅ {model.Name} loaded — inputs: [{string.Join(", ", _session.InputNames)}], outputs: [{string.Join(", ", _session.OutputNames)}]";
             Console.WriteLine($"[Depth] {Status}");
         }
         catch (Exception ex)

@@ -17,7 +17,7 @@ public class CameraController : IDisposable
     private float _yaw;   // Horizontal rotation (radians)
     private float _pitch; // Vertical rotation (radians, clamped ±89°)
     private Vector3 _position = new(0, 0, 3);
-    private float _moveSpeed = 0.2f;
+    private float _moveSpeed = 0.5f;
 
     // Drag state
     private bool _isDragging;
@@ -28,7 +28,7 @@ public class CameraController : IDisposable
     private readonly HashSet<string> _heldKeys = new(StringComparer.OrdinalIgnoreCase);
 
     // Sensitivity
-    private const float LookSensitivity = 0.001f;
+    private const float LookSensitivity = 0.002f;
     private const float PanSensitivity = 0.001f;
     private const float ZoomSensitivity = 0.02f;
     private const float MinPitch = -MathF.PI / 2f + 0.01f;
@@ -137,27 +137,42 @@ public class CameraController : IDisposable
         _isPanning = false;
     }
 
-    public void OnMouseMove(double clientX, double clientY)
+    /// <summary>
+    /// Handle mouse movement. When isPointerLocked=true, dx/dy are raw movement deltas.
+    /// When false, dx/dy are absolute client coordinates (legacy drag mode).
+    /// </summary>
+    public void OnMouseMove(double dx, double dy, bool isPointerLocked = false)
     {
+        if (isPointerLocked)
+        {
+            // Pointer lock: dx/dy are movement deltas — always apply look
+            _yaw += (float)dx * LookSensitivity;
+            _pitch -= (float)dy * LookSensitivity;
+            _pitch = Math.Clamp(_pitch, MinPitch, MaxPitch);
+            UpdateCamera();
+            return;
+        }
+
+        // Legacy drag mode: dx/dy are absolute client coordinates
         if (!_isDragging) return;
 
-        double dx = clientX - _lastMouseX;
-        double dy = clientY - _lastMouseY;
-        _lastMouseX = clientX;
-        _lastMouseY = clientY;
+        double deltaX = dx - _lastMouseX;
+        double deltaY = dy - _lastMouseY;
+        _lastMouseX = dx;
+        _lastMouseY = dy;
 
         if (_isPanning)
         {
             // Pan: move position in camera's XY plane
             float panScale = _moveSpeed * PanSensitivity;
-            _position -= Right * (float)dx * panScale;
-            _position += Up * (float)dy * panScale;
+            _position -= Right * (float)deltaX * panScale;
+            _position += Up * (float)deltaY * panScale;
         }
         else
         {
             // Look: yaw/pitch
-            _yaw += (float)dx * LookSensitivity;
-            _pitch -= (float)dy * LookSensitivity; // Mouse up = look up (positive pitch)
+            _yaw += (float)deltaX * LookSensitivity;
+            _pitch -= (float)deltaY * LookSensitivity;
             _pitch = Math.Clamp(_pitch, MinPitch, MaxPitch);
         }
 

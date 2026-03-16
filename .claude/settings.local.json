@@ -25,7 +25,10 @@
       "WebFetch(domain:arxiv.org)",
       "Bash(curl:*)",
       "Bash(wget:*)",
-      "Bash(powershell -Command \"Invoke-WebRequest -Uri 'https://huggingface.co/FuryTMP/Distill-Any-Depth-Small-onnx/resolve/main/Distill%20Any%20Depth%20Small/model.onnx?download=true' -OutFile 'D:\\\\users\\\\tj\\\\Projects\\\\SpawnScene\\\\SpawnScene\\\\SpawnScene\\\\wwwroot\\\\models\\\\distill_any_depth_small.onnx'\" 2>&1)"
+      "Bash(powershell -Command \"Invoke-WebRequest -Uri 'https://huggingface.co/FuryTMP/Distill-Any-Depth-Small-onnx/resolve/main/Distill%20Any%20Depth%20Small/model.onnx?download=true' -OutFile 'D:\\\\users\\\\tj\\\\Projects\\\\SpawnScene\\\\SpawnScene\\\\SpawnScene\\\\wwwroot\\\\models\\\\distill_any_depth_small.onnx'\" 2>&1)",
+      "Bash(grep:*)",
+      "Bash(find:*)",
+      "Bash(cd:*)"
     ]
   }
 }

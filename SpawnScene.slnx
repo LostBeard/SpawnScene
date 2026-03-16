@@ -3,5 +3,6 @@
     <File Path="Notes.md" />
     <File Path="README.md" />
   </Folder>
+  <Project Path="../../SpawnDev.BlazorJS/SpawnDev.BlazorJS/SpawnDev.BlazorJS/SpawnDev.BlazorJS.csproj" />
   <Project Path="SpawnScene/SpawnScene.csproj" />
 </Solution>

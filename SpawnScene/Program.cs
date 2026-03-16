@@ -29,6 +29,7 @@ builder.Services.AddScoped<GpuDepthColorizer>();
 builder.Services.AddScoped<GpuSplatSorter>();
 builder.Services.AddScoped<GpuGaussianRenderer>();
 builder.Services.AddScoped<ProjectService>();
+builder.Services.AddScoped<XRService>();
 
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");

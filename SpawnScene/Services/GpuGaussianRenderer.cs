@@ -129,6 +129,19 @@ public class GpuGaussianRenderer : IDisposable
 
     private bool _disposed;
 
+    // XR bridge: WebGPU OffscreenCanvas used to pass rendered frames to WebGL XR
+    private OffscreenCanvas? _xrBridgeCanvas;
+    private GPUCanvasContext? _xrBridgeContext;
+    private GPUTexture? _xrBridgeDepth;
+    private GPUTexture? _xrBridgeStochasticTex; // intermediate texture when CAS is enabled
+    private GPUTextureView? _xrBridgeStochasticView;
+    private GPUBindGroup? _xrCasBindGroup;
+    private int _xrBridgeWidth;
+    private int _xrBridgeHeight;
+
+    /// <summary>The OffscreenCanvas that WebGL reads from via texImage2D for XR blit.</summary>
+    public OffscreenCanvas? XRBridgeCanvas => _xrBridgeCanvas;
+
     // Reused 1-element array for Submit (avoids per-frame allocation)
     private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
 
@@ -1106,6 +1119,299 @@ public class GpuGaussianRenderer : IDisposable
     }
 
     /// <summary>
+    /// Render a single XR eye view to the given color texture.
+    /// Called twice per XR frame (left + right eye) with different view/proj matrices.
+    /// Uses stochastic rendering without accumulation (single-sample per eye, no temporal blending).
+    /// </summary>
+    public void RenderXRView(Matrix4x4 viewMatrix, Matrix4x4 projMatrix,
+        GPUTexture colorTexture, GPUTexture? depthTexture,
+        int viewportX, int viewportY, int viewportWidth, int viewportHeight)
+    {
+        if (_device == null || _splatBuffer == null || _splatCount == 0 || _stochasticSplatPipeline == null) return;
+
+        var mvp = viewMatrix * projMatrix;
+
+        // Upload uniforms for this eye
+        _uniformData[0] = mvp.M11; _uniformData[1] = mvp.M12; _uniformData[2] = mvp.M13; _uniformData[3] = mvp.M14;
+        _uniformData[4] = mvp.M21; _uniformData[5] = mvp.M22; _uniformData[6] = mvp.M23; _uniformData[7] = mvp.M24;
+        _uniformData[8] = mvp.M31; _uniformData[9] = mvp.M32; _uniformData[10] = mvp.M33; _uniformData[11] = mvp.M34;
+        _uniformData[12] = mvp.M41; _uniformData[13] = mvp.M42; _uniformData[14] = mvp.M43; _uniformData[15] = mvp.M44;
+        _uniformData[16] = viewportWidth;
+        _uniformData[17] = viewportHeight;
+        // Use reasonable focal length for XR (based on projection matrix)
+        _uniformData[18] = MathF.Abs(projMatrix.M11) * viewportWidth * 0.5f;
+        _uniformData[19] = MathF.Abs(projMatrix.M22) * viewportHeight * 0.5f;
+        _globalFrameCount++;
+        _uniformData[20] = BitConverter.Int32BitsToSingle(_globalFrameCount);
+        _uniformData[21] = 1f; // no dilation in XR
+        _uniformData[22] = 0.1f; // slight min_alpha floor for XR (reduce holes)
+
+        Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
+        _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
+
+        // Create a depth texture for this view if the XR layer doesn't provide one
+        // For now, use a temporary depth texture
+        using var colorView = colorTexture.CreateView();
+        using var tempDepth = depthTexture == null ? _device.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { viewportWidth, viewportHeight },
+            Format = "depth24plus",
+            Usage = GPUTextureUsage.RenderAttachment,
+        }) : null;
+        using var depthView = (depthTexture ?? tempDepth!).CreateView();
+
+        using var encoder = _device.CreateCommandEncoder();
+
+        // Single stochastic render pass (no accumulation — each XR frame is independent)
+        var colorAttach = new GPURenderPassColorAttachment
+        {
+            View = colorView,
+            LoadOp = GPULoadOp.Clear,
+            StoreOp = GPUStoreOp.Store,
+            ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+        };
+        var passDesc = new GPURenderPassDescriptor
+        {
+            ColorAttachments = new[] { colorAttach },
+            DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
+            {
+                View = depthView,
+                DepthLoadOp = "clear",
+                DepthStoreOp = "store",
+                DepthClearValue = 1.0f,
+            },
+        };
+
+        using var pass = encoder.BeginRenderPass(passDesc);
+        pass.SetPipeline(_stochasticSplatPipeline);
+        pass.SetBindGroup(0, _uniformBindGroup!);
+        pass.SetVertexBuffer(0, _splatBuffer);
+        pass.SetViewport(viewportX, viewportY, viewportWidth, viewportHeight, 0, 1);
+        pass.Draw(6, (uint)_splatCount, 0, 0);
+        pass.End();
+
+        using var cmdBuf = encoder.Finish();
+        _submitArray[0] = cmdBuf;
+        _queue.Submit(_submitArray);
+    }
+
+    /// <summary>
+    /// Render a single XR eye to the internal bridge OffscreenCanvas (for WebGL XR fallback).
+    /// WebGPU renders stochastic splats → OffscreenCanvas, then WebGLXRBlit reads it via texImage2D.
+    /// No accumulation (each eye is independent). Optional CAS sharpening pass.
+    /// </summary>
+    public void RenderXRViewToCanvas(Matrix4x4 viewMatrix, Matrix4x4 projMatrix,
+        int width, int height, bool applyCAS = false)
+    {
+        if (_device == null || _splatBuffer == null || _splatCount == 0 || _stochasticSplatPipeline == null) return;
+
+        EnsureXRBridge(width, height, applyCAS);
+
+        var mvp = viewMatrix * projMatrix;
+
+        // Upload uniforms for this eye
+        _uniformData[0] = mvp.M11; _uniformData[1] = mvp.M12; _uniformData[2] = mvp.M13; _uniformData[3] = mvp.M14;
+        _uniformData[4] = mvp.M21; _uniformData[5] = mvp.M22; _uniformData[6] = mvp.M23; _uniformData[7] = mvp.M24;
+        _uniformData[8] = mvp.M31; _uniformData[9] = mvp.M32; _uniformData[10] = mvp.M33; _uniformData[11] = mvp.M34;
+        _uniformData[12] = mvp.M41; _uniformData[13] = mvp.M42; _uniformData[14] = mvp.M43; _uniformData[15] = mvp.M44;
+        _uniformData[16] = width;
+        _uniformData[17] = height;
+        _uniformData[18] = MathF.Abs(projMatrix.M11) * width * 0.5f;
+        _uniformData[19] = MathF.Abs(projMatrix.M22) * height * 0.5f;
+        _globalFrameCount++;
+        _uniformData[20] = BitConverter.Int32BitsToSingle(_globalFrameCount);
+        _uniformData[21] = 1f; // no dilation in XR
+        _uniformData[22] = 0.1f; // slight min_alpha floor for XR (reduce holes)
+
+        Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
+        _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
+
+        using var encoder = _device.CreateCommandEncoder();
+
+        // Determine color target: directly to canvas if no CAS, otherwise to intermediate texture
+        using var canvasTexture = _xrBridgeContext!.GetCurrentTexture();
+
+        if (applyCAS && _xrBridgeStochasticView != null && _xrCasBindGroup != null)
+        {
+            // Pass 1: stochastic render → intermediate texture
+            using var depthView = _xrBridgeDepth!.CreateView();
+            var colorAttach = new GPURenderPassColorAttachment
+            {
+                View = _xrBridgeStochasticView,
+                LoadOp = GPULoadOp.Clear,
+                StoreOp = GPUStoreOp.Store,
+                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+            };
+            var passDesc = new GPURenderPassDescriptor
+            {
+                ColorAttachments = new[] { colorAttach },
+                DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
+                {
+                    View = depthView,
+                    DepthLoadOp = "clear",
+                    DepthStoreOp = "store",
+                    DepthClearValue = 1.0f,
+                },
+            };
+            using var splatPass = encoder.BeginRenderPass(passDesc);
+            splatPass.SetPipeline(_stochasticSplatPipeline);
+            splatPass.SetBindGroup(0, _uniformBindGroup!);
+            splatPass.SetVertexBuffer(0, _splatBuffer);
+            splatPass.Draw(6, (uint)_splatCount, 0, 0);
+            splatPass.End();
+
+            // Pass 2: CAS → canvas texture
+            _casData[0] = _sharpeningStrength;
+            _casData[1] = 1f / width;
+            _casData[2] = 1f / height;
+            _casData[3] = 0f;
+            Buffer.BlockCopy(_casData, 0, _casByteData!, 0, _casByteData!.Length);
+            _queue.WriteBuffer(_casUniformBuffer!, 0, _casByteData);
+
+            using var canvasView = canvasTexture.CreateView();
+            var casAttach = new GPURenderPassColorAttachment
+            {
+                View = canvasView,
+                LoadOp = GPULoadOp.Clear,
+                StoreOp = GPUStoreOp.Store,
+                ClearValue = new GPUColorDict { R = 0, G = 0, B = 0, A = 1.0 },
+            };
+            var casDesc = new GPURenderPassDescriptor { ColorAttachments = new[] { casAttach } };
+            using var casPass = encoder.BeginRenderPass(casDesc);
+            casPass.SetPipeline(_casPipeline!);
+            casPass.SetBindGroup(0, _xrCasBindGroup);
+            casPass.Draw(3, 1, 0, 0);
+            casPass.End();
+        }
+        else
+        {
+            // Single pass: stochastic render directly → canvas texture
+            using var canvasView = canvasTexture.CreateView();
+            using var depthView = _xrBridgeDepth!.CreateView();
+            var colorAttach = new GPURenderPassColorAttachment
+            {
+                View = canvasView,
+                LoadOp = GPULoadOp.Clear,
+                StoreOp = GPUStoreOp.Store,
+                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+            };
+            var passDesc = new GPURenderPassDescriptor
+            {
+                ColorAttachments = new[] { colorAttach },
+                DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
+                {
+                    View = depthView,
+                    DepthLoadOp = "clear",
+                    DepthStoreOp = "store",
+                    DepthClearValue = 1.0f,
+                },
+            };
+            using var splatPass = encoder.BeginRenderPass(passDesc);
+            splatPass.SetPipeline(_stochasticSplatPipeline);
+            splatPass.SetBindGroup(0, _uniformBindGroup!);
+            splatPass.SetVertexBuffer(0, _splatBuffer);
+            splatPass.Draw(6, (uint)_splatCount, 0, 0);
+            splatPass.End();
+        }
+
+        using var xrCmdBuf = encoder.Finish();
+        _submitArray[0] = xrCmdBuf;
+        _queue.Submit(_submitArray);
+    }
+
+    /// <summary>Lazily create or resize the XR bridge OffscreenCanvas + associated resources.</summary>
+    private void EnsureXRBridge(int width, int height, bool needsCAS)
+    {
+        if (_xrBridgeCanvas != null && _xrBridgeWidth == width && _xrBridgeHeight == height)
+        {
+            // Size matches — only create CAS resources if newly requested
+            if (needsCAS && _xrBridgeStochasticTex == null)
+                CreateXRBridgeCASResources(width, height);
+            return;
+        }
+
+        // Dispose old resources
+        DisposeXRBridge();
+
+        _xrBridgeCanvas = new OffscreenCanvas(width, height);
+        _xrBridgeContext = _xrBridgeCanvas.GetWebGPUContext();
+        _xrBridgeContext.Configure(new GPUCanvasConfiguration
+        {
+            Device = _device!,
+            Format = _canvasFormat,
+        });
+
+        _xrBridgeDepth = _device!.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { width, height },
+            Format = "depth24plus",
+            Usage = GPUTextureUsage.RenderAttachment,
+        });
+
+        _xrBridgeWidth = width;
+        _xrBridgeHeight = height;
+
+        if (needsCAS)
+            CreateXRBridgeCASResources(width, height);
+    }
+
+    private void CreateXRBridgeCASResources(int width, int height)
+    {
+        _xrBridgeStochasticTex?.Destroy();
+        _xrBridgeStochasticTex?.Dispose();
+        _xrBridgeStochasticView?.Dispose();
+        _xrCasBindGroup?.Dispose();
+
+        _xrBridgeStochasticTex = _device!.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { width, height },
+            Format = _canvasFormat,
+            Usage = GPUTextureUsage.RenderAttachment | GPUTextureUsage.TextureBinding,
+        });
+        _xrBridgeStochasticView = _xrBridgeStochasticTex.CreateView();
+
+        // CAS bind group reads from the XR stochastic texture
+        if (_casPipeline != null && _casSampler != null && _casUniformBuffer != null)
+        {
+            _xrCasBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
+            {
+                Layout = _casPipeline.GetBindGroupLayout(0),
+                Entries = new[]
+                {
+                    new GPUBindGroupEntry { Binding = 0, Resource = _xrBridgeStochasticView },
+                    new GPUBindGroupEntry { Binding = 1, Resource = _casSampler },
+                    new GPUBindGroupEntry
+                    {
+                        Binding = 2,
+                        Resource = new GPUBufferBinding { Buffer = _casUniformBuffer }
+                    }
+                }
+            });
+        }
+    }
+
+    /// <summary>Release XR bridge resources. Called on session end and in Dispose.</summary>
+    public void DisposeXRBridge()
+    {
+        _xrCasBindGroup?.Dispose();
+        _xrCasBindGroup = null;
+        _xrBridgeStochasticView?.Dispose();
+        _xrBridgeStochasticView = null;
+        _xrBridgeStochasticTex?.Destroy();
+        _xrBridgeStochasticTex?.Dispose();
+        _xrBridgeStochasticTex = null;
+        _xrBridgeDepth?.Destroy();
+        _xrBridgeDepth?.Dispose();
+        _xrBridgeDepth = null;
+        _xrBridgeContext?.Dispose();
+        _xrBridgeContext = null;
+        _xrBridgeCanvas?.Dispose();
+        _xrBridgeCanvas = null;
+        _xrBridgeWidth = 0;
+        _xrBridgeHeight = 0;
+    }
+
+    /// <summary>
     /// Appends a pack compute pass to the supplied encoder.
     /// Converts ILGPU Float32 splat data → packed vertex buffer using the sorted index buffer.
     /// Only packs visibleCount splats — culled sentinels at [visibleCount..N-1] are skipped.
@@ -1197,6 +1503,9 @@ public class GpuGaussianRenderer : IDisposable
         _packCountBuf?.Destroy();
         _packCountBuf?.Dispose();
         _packCountJsArray?.Dispose();
+
+        // XR bridge resources
+        DisposeXRBridge();
 
         // Stochastic rasterization resources
         _stochasticSplatPipeline?.Dispose();

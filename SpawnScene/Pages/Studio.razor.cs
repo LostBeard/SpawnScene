@@ -24,6 +24,7 @@ public partial class Studio : IAsyncDisposable
     [Inject] private HttpClient _http { get; set; } = default!;
     [Inject] private NavigationManager _nav { get; set; } = default!;
     [Inject] private XRService _xrService { get; set; } = default!;
+    [Inject] private BlazorJSRuntime _js { get; set; } = default!;
 
     private ElementReference _canvasRef;
     private ElementReference _containerRef;
@@ -108,7 +109,7 @@ public partial class Studio : IAsyncDisposable
         using var canvas = new HTMLCanvasElement(_canvasRef);
         _context = canvas.GetContext<GPUCanvasContext>("webgpu");
 
-        using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+        using var navigator = _js.Get<Navigator>("navigator");
         using var gpu = navigator.Gpu;
         if (gpu is not null)
             _canvasFormat = gpu.GetPreferredCanvasFormat();
@@ -136,10 +137,10 @@ public partial class Studio : IAsyncDisposable
         }
 
         // Start render loop
-        _window = BlazorJSRuntime.JS.Get<Window>("window");
+        _window = _js.Get<Window>("window");
         _window.OnResize += OnWindowResize;
 
-        _document = BlazorJSRuntime.JS.Get<Document>("document");
+        _document = _js.Get<Document>("document");
         _document.OnPointerLockChange += OnPointerLockChange;
         _document.OnMouseMove += OnNativeMouseMove;
 

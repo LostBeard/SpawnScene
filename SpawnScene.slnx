@@ -2,6 +2,7 @@
   <Folder Name="/Solution Items/">
     <File Path="Notes.md" />
     <File Path="README.md" />
+    <File Path="REFERENCES.md" />
   </Folder>
   <Project Path="../../SpawnDev.BlazorJS/SpawnDev.BlazorJS/SpawnDev.BlazorJS/SpawnDev.BlazorJS.csproj" />
   <Project Path="SpawnScene/SpawnScene.csproj" />

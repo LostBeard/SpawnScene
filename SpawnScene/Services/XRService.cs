@@ -11,19 +11,20 @@ namespace SpawnScene.Services;
 /// </summary>
 public class XRService : IDisposable
 {
+    private readonly BlazorJSRuntime _js;
     private readonly GpuService _gpu;
 
     // XR state
     private XRSession? _session;
     private XRReferenceSpace? _refSpace;
-    private ActionCallback<double, XRFrame>? _xrRafCallback;
+    private ActionCallback<double, XRFrame?>? _xrRafCallback;
 
     // WebGPU XR path
     private XRGPUBinding? _gpuBinding;
     private XRProjectionLayer? _projectionLayer;
 
     // WebGL XR fallback path
-    private OffscreenCanvas? _glCanvas;
+    private HTMLCanvasElement? _glCanvas;
     private WebGL2RenderingContext? _glContext;
     private XRWebGLLayer? _webglLayer;
 
@@ -50,7 +51,11 @@ public class XRService : IDisposable
     /// <summary>Fired when the XR session ends.</summary>
     public event Action? OnSessionEnded;
 
-    public XRService(GpuService gpu) => _gpu = gpu;
+    public XRService(BlazorJSRuntime js, GpuService gpu)
+    {
+        _js = js;
+        _gpu = gpu;
+    }
 
     /// <summary>Check if immersive-vr is supported.</summary>
     public async Task<bool> IsVRSupportedAsync()
@@ -58,7 +63,7 @@ public class XRService : IDisposable
         if (_vrSupported.HasValue) return _vrSupported.Value;
         try
         {
-            using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+            using var navigator = _js.Get<Navigator>("navigator");
             using var xr = navigator.XR;
             if (xr == null) { _vrSupported = false; return false; }
             _vrSupported = await xr.IsSessionSupported("immersive-vr");
@@ -73,7 +78,7 @@ public class XRService : IDisposable
         if (_arSupported.HasValue) return _arSupported.Value;
         try
         {
-            using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+            using var navigator = _js.Get<Navigator>("navigator");
             using var xr = navigator.XR;
             if (xr == null) { _arSupported = false; return false; }
             _arSupported = await xr.IsSessionSupported("immersive-ar");
@@ -87,7 +92,7 @@ public class XRService : IDisposable
     {
         if (_session != null) return;
 
-        using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+        using var navigator = _js.Get<Navigator>("navigator");
         using var xr = navigator.XR;
         if (xr == null) throw new InvalidOperationException("WebXR not available");
 
@@ -130,9 +135,12 @@ public class XRService : IDisposable
             _gpuBinding?.Dispose();
             _gpuBinding = null;
 
-            // WebGL XR fallback
-            _glCanvas = new OffscreenCanvas(1, 1);
-            _glContext = _glCanvas.GetWebGL2Context(new WebGLContextAttributes { XrCompatible = true });
+            // WebGL XR fallback — use HTMLCanvasElement (XRWebGLLayer requires it in most browsers)
+            using var doc = _js.Get<Document>("document");
+            _glCanvas = doc.CreateElement<HTMLCanvasElement>("canvas");
+            _glContext = _glCanvas.GetContext<WebGL2RenderingContext>("webgl2", new WebGLContextAttributes { XrCompatible = true });
+            if (_glContext == null)
+                throw new InvalidOperationException("Failed to create WebGL2 xr-compatible context");
             _webglLayer = new XRWebGLLayer(_session, _glContext);
 
             _session.UpdateRenderState(new XRRenderStateInit
@@ -145,8 +153,9 @@ public class XRService : IDisposable
         }
 
         // Start XR render loop
-        _xrRafCallback = new ActionCallback<double, XRFrame>(OnXRAnimationFrame);
+        _xrRafCallback = new ActionCallback<double, XRFrame?>(OnXRAnimationFrame);
         _session.RequestAnimationFrame(_xrRafCallback);
+        Console.WriteLine("[XRService] XR render loop started");
     }
 
     /// <summary>Exit the current XR session.</summary>
@@ -195,14 +204,21 @@ public class XRService : IDisposable
         }
         SessionMode = null;
         IsWebGLFallback = false;
+        _xrFrameCount = 0;
     }
 
-    private void OnXRAnimationFrame(double time, XRFrame frame)
+    private int _xrFrameCount;
+
+    private void OnXRAnimationFrame(double time, XRFrame? frame)
     {
-        if (_session == null || _refSpace == null) return;
+        if (_session == null || _refSpace == null || frame == null) return;
 
         // Request next frame first (ensures continuous loop)
         _session.RequestAnimationFrame(_xrRafCallback!);
+
+        _xrFrameCount++;
+        if (_xrFrameCount <= 3)
+            Console.WriteLine($"[XRService] XR frame #{_xrFrameCount} (t={time:F1}, fallback={IsWebGLFallback})");
 
         try
         {

@@ -139,7 +139,7 @@ public partial class Studio
         int cssHeight = container.ClientHeight;
         if (cssWidth <= 0 || cssHeight <= 0) { cssWidth = 960; cssHeight = 640; }
 
-        float dpr = BlazorJSRuntime.JS.Get<float>("devicePixelRatio");
+        float dpr = _js.Get<float>("devicePixelRatio");
         if (dpr < 1f) dpr = 1f;
         if (dpr > 2f) dpr = 2f;
 
@@ -160,7 +160,7 @@ public partial class Studio
             _lastResizeWidth = cssWidth;
             _lastResizeHeight = cssHeight;
 
-            float dpr = BlazorJSRuntime.JS.Get<float>("devicePixelRatio");
+            float dpr = _js.Get<float>("devicePixelRatio");
             if (dpr < 1f) dpr = 1f;
             if (dpr > 2f) dpr = 2f;
 

@@ -133,7 +133,7 @@ public partial class Studio
             BuildProjectDetailUI();
 
             using var blob = new Blob(new byte[][] { imageBytes }, new BlobOptions { Type = "image/jpeg" });
-            using var bitmap = await BlazorJSRuntime.JS.CallAsync<ImageBitmap>("createImageBitmap", blob);
+            using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
             int w = (int)bitmap.Width;
             int h = (int)bitmap.Height;
 
@@ -338,7 +338,7 @@ public partial class Studio
                 try
                 {
                     using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = file.ContentType });
-                    using var bitmap = await BlazorJSRuntime.JS.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                    using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
                     width = (int)bitmap.Width;
                     height = (int)bitmap.Height;
                     Console.WriteLine($"[Studio] Image decoded: {name} ({width}x{height})");
@@ -379,7 +379,7 @@ public partial class Studio
             try
             {
                 using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
-                using var bitmap = await BlazorJSRuntime.JS.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
                 width = (int)bitmap.Width;
                 height = (int)bitmap.Height;
             }
@@ -409,7 +409,7 @@ public partial class Studio
             const int thumbW = 320, thumbH = 200;
             using var canvas = new HTMLCanvasElement(_canvasRef);
 
-            using var bitmap = await BlazorJSRuntime.JS.CallAsync<ImageBitmap>("createImageBitmap", canvas);
+            using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", canvas);
 
             using var osc = new OffscreenCanvas(thumbW, thumbH);
             using var ctx = osc.Get2DContext();
@@ -490,7 +490,7 @@ public partial class Studio
             if (bytes == null) return;
 
             using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/jpeg" });
-            using var bitmap = await BlazorJSRuntime.JS.CallAsync<ImageBitmap>("createImageBitmap", blob);
+            using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
 
             const int thumbW = 240, thumbH = 160;
             using var osc = new OffscreenCanvas(thumbW, thumbH);

@@ -29,7 +29,9 @@
       "Bash(grep:*)",
       "Bash(find:*)",
       "Bash(cd:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "WebFetch(domain:blog.playcanvas.com)",
+      "WebFetch(domain:www.reddit.com)"
     ]
   }
 }

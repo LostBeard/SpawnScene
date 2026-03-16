@@ -48,4 +48,57 @@ This project is a Blazor WebAssembly application that demonstrates the use of Ga
 - Integration with machine learning models to enhance the Gaussian Splatting process, allowing for improved scene generation and more accurate representations of the original images, pushing the boundaries of what can be achieved with this technique in a web-based application.
 - Support for collaborative editing of 3D scenes, allowing multiple users to work on the same scene simultaneously, fostering a sense of community and shared creativity within the application, and enabling users to learn from each other and create more complex and interesting scenes together.
 - Generate 3D scenes from video input, allowing users to create dynamic and evolving scenes that change over time, providing a new way to visualize and interact with video content in a 3D space.
-- 
+
+
+# SuperSplat Reference Features
+
+Features from [PlayCanvas SuperSplat](https://github.com/playcanvas/supersplat) relevant to SpawnScene.
+
+## Walk Mode
+- Click-to-walk: click a destination, camera glides there
+- FPS controls: WASD on desktop
+- Pinch-to-move: mobile touchscreen
+- Voxel-based collision system for ground/wall detection
+- **Status:** SpawnScene has FPS camera. Missing click-to-walk and collision.
+
+## Streamed LOD (Level of Detail)
+- Based on SOG (Spatially Ordered Gaussians) format
+- Scenes sliced into small streamable chunks loaded on demand
+- Dynamic quality based on viewpoint distance and device capability
+- Phones get fewer splats, desktops get full quality
+- **Status:** Not implemented. Currently loads entire scene at once. Critical for large scenes on mobile.
+
+## Annotations / Hotspots (SuperSplat Studio)
+- Up to 25 hotspots per scene with title, description, saved camera viewpoint
+- Smooth camera transitions between hotspots
+- Reorderable, sequential browsing via nav bar
+- Turns splat viewer into interactive presentation tool
+- **Status:** Not implemented. Would integrate with WebGPU UI framework.
+
+## Post-Processing Stack
+- Bloom (soft glow on bright areas)
+- Sharpening (detail enhancement) — SpawnScene has CAS
+- Vignette (edge darkening)
+- Color grading (brightness, contrast, saturation, tint)
+- Chromatic fringing (lens effect)
+- Multiple tonemapping operators (Linear, Filmic, ACES, Hejl, Neutral)
+- Custom background color
+- High Precision Rendering mode for HDR effects
+- **Status:** Only CAS sharpening implemented.
+
+## Publishing / Sharing
+- Drag-and-drop PLY/SOG/LCC upload
+- Instant public URL sharing
+- Metadata fields (license, capture hardware, geolocation)
+- **Status:** OPFS local persistence only. No cloud upload or URL sharing.
+
+## Format Support
+- PLY, SOG (Spatially Ordered Gaussians), Streamed SOG, LCC
+- **Status:** PLY and SPLAT import. No SOG/LCC support.
+
+## Priority
+1. Streamed LOD — essential for mobile and large scenes
+2. Annotations/hotspots — key differentiator for presentations
+3. Post-processing stack — bloom, vignette, color grading (extend existing CAS pipeline)
+4. Walk mode with collision — exploration beyond orbital camera
+5. Publishing/sharing — cloud upload + URL sharing

@@ -1,20 +1,22 @@
 @page "/"
 
-<PageTitle>SpawnScene</PageTitle>
+<PageTitle>SpawnScene — Step Into Your Photos</PageTitle>
 
 <div class="page-wrapper">
     <div class="hero animate-in">
         <h1 class="hero-title">SpawnScene</h1>
-        <p class="hero-subtitle">
-            Create stunning 3D Gaussian Splat scenes from ordinary photos — entirely in your browser.
-            No server, no uploads, just GPU power.
+        <p class="hero-subtitle" style="font-size: var(--font-size-lg); max-width: 700px;">
+            Transform any photograph into an immersive 3D world you can walk through.
+            Your browser becomes a portal — no servers, no uploads, no limits.
         </p>
-        <div style="margin-top: var(--space-lg); display: flex; gap: var(--space-md); flex-wrap: wrap;">
-            <a href="depth-splat" class="btn btn-primary">
-                🔮 Create Scene
-            </a>
-            <a href="viewer" class="btn btn-secondary">
-                👁 Open Viewer
+        <p style="color: var(--text-muted); max-width: 600px; margin-top: var(--space-sm); line-height: 1.6;">
+            SpawnScene uses AI depth estimation and Gaussian Splatting to reconstruct photorealistic 3D environments
+            from a single image. Explore your memories in full 3D, with VR support coming soon.
+            Every computation runs on your GPU, entirely in your browser.
+        </p>
+        <div style="margin-top: var(--space-xl); display: flex; gap: var(--space-md); flex-wrap: wrap; align-items: center;">
+            <a href="studio" class="btn btn-primary" style="font-size: var(--font-size-lg); padding: var(--space-md) var(--space-xl);">
+                Enter Studio
             </a>
             <a href="https://github.com/LostBeard/SpawnScene" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
                 <svg style="width:1em;height:1em;vertical-align:middle;margin-right:0.4em" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -34,38 +36,38 @@
 
     <div class="feature-grid" style="margin: 0 auto;">
         <div class="card feature-card animate-in animate-in-delay-1">
-            <div class="feature-icon">🧊</div>
-            <div class="feature-title">3D Gaussian Splatting</div>
+            <div class="feature-icon">🌌</div>
+            <div class="feature-title">Step Inside Your Photos</div>
             <div class="feature-desc">
-                State-of-the-art neural 3D representation. Turn a single photo into
-                a photorealistic, interactive 3D scene.
+                A single photograph becomes a 3D environment you can explore freely.
+                Walk through rooms, orbit around objects, see the world from any angle.
             </div>
         </div>
 
         <div class="card feature-card animate-in animate-in-delay-2">
             <div class="feature-icon">⚡</div>
-            <div class="feature-title">GPU Accelerated</div>
+            <div class="feature-title">Real-Time, GPU-First</div>
             <div class="feature-desc">
-                Powered by SpawnDev.ILGPU — depth estimation, Gaussian generation,
-                radix sorting, and rendering all run on the GPU via WebGPU.
+                Stochastic rasterization renders 14 million+ Gaussian splats at 60 FPS.
+                AI depth estimation, scene generation, and rendering — all on your GPU via WebGPU.
             </div>
         </div>
 
         <div class="card feature-card animate-in animate-in-delay-3">
             <div class="feature-icon">🔒</div>
-            <div class="feature-title">Fully Client-Side</div>
+            <div class="feature-title">Entirely In Your Browser</div>
             <div class="feature-desc">
-                All processing happens in your browser using WebGPU compute.
-                Your images never leave your device. Zero backend required.
+                No server. No cloud. No uploads. Your photos never leave your device.
+                Projects save locally and persist across sessions.
             </div>
         </div>
 
         <div class="card feature-card animate-in animate-in-delay-4">
-            <div class="feature-icon">🎯</div>
-            <div class="feature-title">Zero-Copy Pipeline</div>
+            <div class="feature-icon">🥽</div>
+            <div class="feature-title">Built for Immersion</div>
             <div class="feature-desc">
-                Depth estimation → Gaussian generation → radix sort → render.
-                Data stays on the GPU from start to finish — no CPU round-trips.
+                The interface is rendered entirely via WebGPU — ready for VR headsets.
+                Explore your 3D scenes on desktop today, in virtual reality tomorrow.
             </div>
         </div>
     </div>
@@ -73,41 +75,51 @@
     <div class="pipeline-section animate-in animate-in-delay-5">
         <h3 class="pipeline-title">How It Works</h3>
         <div class="pipeline-steps">
-            <a href="/depth-splat" class="pipeline-step step-ready">
+            <a href="/studio" class="pipeline-step step-ready">
                 <div class="step-number">1</div>
                 <div class="step-content">
-                    <div class="step-name">Load Image</div>
-                    <div class="step-desc">Upload any photo</div>
+                    <div class="step-name">Add a Photo</div>
+                    <div class="step-desc">Any image from your camera roll</div>
                 </div>
                 <div class="step-arrow">→</div>
             </a>
 
-            <a href="/depth-splat" class="pipeline-step step-ready">
+            <a href="/studio" class="pipeline-step step-ready">
                 <div class="step-number">2</div>
                 <div class="step-content">
-                    <div class="step-name">Estimate Depth</div>
-                    <div class="step-desc">DepthAnything V2 via ONNX on GPU</div>
+                    <div class="step-name">AI Depth Estimation</div>
+                    <div class="step-desc">DistillAnyDepth via ONNX on your GPU</div>
                 </div>
                 <div class="step-arrow">→</div>
             </a>
 
-            <a href="/depth-splat" class="pipeline-step step-ready">
+            <a href="/studio" class="pipeline-step step-ready">
                 <div class="step-number">3</div>
                 <div class="step-content">
-                    <div class="step-name">Generate Splats</div>
-                    <div class="step-desc">ILGPU kernel → 100K+ Gaussians</div>
+                    <div class="step-name">Generate 3D Scene</div>
+                    <div class="step-desc">Millions of Gaussian splats in seconds</div>
                 </div>
                 <div class="step-arrow">→</div>
             </a>
 
-            <a href="/viewer" class="pipeline-step step-ready">
+            <a href="/studio" class="pipeline-step step-ready">
                 <div class="step-number">4</div>
                 <div class="step-content">
-                    <div class="step-name">View in 3D</div>
-                    <div class="step-desc">Real-time splat renderer at 60 FPS</div>
+                    <div class="step-name">Explore in 3D</div>
+                    <div class="step-desc">Walk through your scene at 60 FPS</div>
                 </div>
             </a>
         </div>
+    </div>
+
+    <div style="text-align: center; margin: var(--space-2xl) 0 var(--space-xl);" class="animate-in animate-in-delay-5">
+        <h3 style="color: var(--text-primary); margin-bottom: var(--space-sm);">The Vision</h3>
+        <p style="color: var(--text-muted); max-width: 650px; margin: 0 auto; line-height: 1.7;">
+            Imagine pointing your phone at a room and instantly creating a 3D space you can revisit anytime —
+            from any device, in any browser, even in VR. SpawnScene is building toward that future:
+            multi-image reconstruction, collaborative scanning, and fully immersive spatial computing,
+            all running client-side with zero infrastructure.
+        </p>
     </div>
 
     <div class="tech-section animate-in animate-in-delay-6">
@@ -119,7 +131,7 @@
             <span class="tech-badge">ONNX Runtime Web</span>
             <span class="tech-badge">WebGPU</span>
             <span class="tech-badge">.NET 10</span>
-            <span class="tech-badge">C#</span>
+            <span class="tech-badge">C# 13</span>
         </div>
     </div>
 </div>

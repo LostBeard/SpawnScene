@@ -71,22 +71,36 @@ SpawnScene/
 │   ├── Gaussian3D.cs              # 3D Gaussian splat struct
 │   ├── GaussianScene.cs           # Scene container (CPU or GPU-resident)
 │   ├── CameraParams.cs            # Camera intrinsics/extrinsics + view matrix
-│   └── DepthResult.cs             # GPU-resident depth map + metadata
+│   ├── DepthResult.cs             # GPU-resident depth map + metadata
+│   └── Project.cs                 # Project, ProjectSettings, ProjectSource, ProjectScene
 ├── Services/
 │   ├── GpuShareService.cs         # WebGPU device sharing (monkey-patches navigator.gpu)
 │   ├── GpuService.cs              # ILGPU WebGPU accelerator lifecycle
 │   ├── DepthEstimationService.cs  # ONNX depth inference + GPU pre/post-processing
 │   ├── DepthToGaussianKernel.cs   # ILGPU kernel: depth → packed Gaussian buffer
-│   ├── GpuSplatSorter.cs          # ILGPU radix sort for back-to-front ordering
-│   ├── GpuGaussianRenderer.cs     # WebGPU splat renderer (pack compute + render passes)
+│   ├── GpuSplatSorter.cs          # ILGPU radix sort + velocity tracking
+│   ├── GpuGaussianRenderer.cs     # WebGPU renderer (stochastic + sorted + CAS)
 │   ├── GpuDepthColorizer.cs       # GPU Turbo colormap for depth preview
 │   ├── RenderService.cs           # Render loop + scene upload coordination
 │   ├── SceneManager.cs            # Active scene + camera state
-│   └── CameraController.cs       # FPS-style camera (WASD + mouse look)
+│   ├── CameraController.cs        # FPS-style camera (WASD + mouse look)
+│   └── ProjectService.cs          # OPFS-backed project CRUD + storage
+├── UI/                            # WebGPU UI framework (VR-ready, no HTML elements)
+│   ├── FontAtlas.cs               # Runtime bitmap font atlas generation
+│   ├── UIRenderer.cs              # Batched quad renderer (single draw call overlay)
+│   ├── UIShaders.cs               # WGSL vertex/fragment for UI quads
+│   ├── InputManager.cs            # Unified input (mouse, keyboard, gamepad)
+│   ├── UIElement.cs               # Base element with hit testing
+│   └── Elements/
+│       ├── UILabel.cs             # Text rendering
+│       ├── UIButton.cs            # Clickable button with states
+│       ├── UIPanel.cs             # Container with background
+│       └── UISlider.cs            # Horizontal drag slider
 ├── Pages/
-│   ├── Home.razor                 # Landing page
-│   ├── DepthSplat.razor           # Depth estimation + scene generation UI
-│   └── Viewer.razor               # Interactive 3D splat viewer
+│   ├── Home.razor                 # Landing page (Blazor HTML)
+│   ├── Studio.razor               # Unified tool: projects + generation + viewer (WebGPU UI)
+│   ├── DepthSplat.razor           # Legacy: standalone depth estimation UI
+│   └── Viewer.razor               # Legacy: standalone 3D viewer
 └── Formats/
     ├── PlyParser.cs               # PLY file parser
     └── SplatParser.cs             # SPLAT file parser

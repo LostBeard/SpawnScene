@@ -65,14 +65,16 @@ public class GpuGaussianRenderer : IDisposable
 
     // Uniform buffer: MVP matrix (64 bytes) + viewport (8 bytes) + focal (8 bytes) + frame_index (4 bytes) + pad (12 bytes) = 96 bytes
     private GPUBuffer? _uniformBuffer;
-    private GPUBindGroup? _uniformBindGroup;
+    private GPUBindGroup? _uniformBindGroup;        // for stochastic pipeline
+    private GPUBindGroup? _uniformBindGroupSorted;  // for sorted pipeline (separate auto-layout)
     private readonly float[] _uniformData = new float[24]; // 16 (mat4) + 2 (viewport) + 2 (focal) + 1 (frame_index) + 3 (pad)
     private byte[]? _uniformByteData; // pre-allocated byte mirror of _uniformData for direct WriteBuffer
 
     // CAS sharpening pass
     private GPUTexture? _offscreenTexture;
     private GPUTextureView? _offscreenView;
-    private GPUBindGroup? _casBindGroup;
+    private GPUBindGroup? _casBindGroup;           // for sorted mode (reads _offscreenTexture)
+    private GPUBindGroup? _casBindGroupStochastic; // for stochastic mode (reads _accumTexture)
     private GPUBuffer? _casUniformBuffer;
     private GPUSampler? _casSampler;
     private float _sharpeningStrength = 0.5f;
@@ -151,7 +153,17 @@ public class GpuGaussianRenderer : IDisposable
     public AdaptiveResMode AdaptiveResMode { get; set; } = AdaptiveResMode.Auto;
 
     /// <summary>Controls whether to use sorted alpha blending or stochastic rasterization.</summary>
-    public SplatRenderMode RenderMode { get; set; } = SplatRenderMode.Stochastic;
+    private SplatRenderMode _renderMode = SplatRenderMode.Stochastic;
+    public SplatRenderMode RenderMode
+    {
+        get => _renderMode;
+        set
+        {
+            if (_renderMode == value) return;
+            _renderMode = value;
+            _accumFrameCount = 0; // reset accumulation on mode switch
+        }
+    }
 
     /// <summary>Sort precision passthrough: true = 4-pass 16-bit (faster), false = 8-pass 32-bit.</summary>
     public bool Use16BitSort
@@ -385,10 +397,22 @@ public class GpuGaussianRenderer : IDisposable
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
 
-        // Both sorted and stochastic pipelines share the same uniform layout
+        // Each pipeline has its own auto-generated bind group layout (even if structurally identical)
         _uniformBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
         {
             Layout = _stochasticSplatPipeline.GetBindGroupLayout(0),
+            Entries = new[]
+            {
+                new GPUBindGroupEntry
+                {
+                    Binding = 0,
+                    Resource = new GPUBufferBinding { Buffer = _uniformBuffer }
+                }
+            }
+        });
+        _uniformBindGroupSorted = _device.CreateBindGroup(new GPUBindGroupDescriptor
+        {
+            Layout = _splatPipeline.GetBindGroupLayout(0),
             Entries = new[]
             {
                 new GPUBindGroupEntry
@@ -587,16 +611,14 @@ public class GpuGaussianRenderer : IDisposable
         RebuildCasBindGroupForAccum();
     }
 
-    /// <summary>Rebuild CAS bind group to sample _accumTexture (for stochastic display path).</summary>
+    /// <summary>Rebuild CAS bind group for stochastic mode (samples _accumTexture).</summary>
     private void RebuildCasBindGroupForAccum()
     {
         if (_casPipeline == null || _casSampler == null || _casUniformBuffer == null || _accumView == null) return;
 
-        // In stochastic mode, CAS reads from accumulation texture instead of offscreen.
-        // We rebuild _casBindGroup to point to _accumView. When switching back to sorted mode,
-        // CreateOffscreenTexture() will rebuild it to point to _offscreenView again.
-        _casBindGroup?.Dispose();
-        _casBindGroup = _device!.CreateBindGroup(new GPUBindGroupDescriptor
+        // Stochastic CAS reads from accumulation texture (separate from sorted CAS which reads _offscreenView)
+        _casBindGroupStochastic?.Dispose();
+        _casBindGroupStochastic = _device!.CreateBindGroup(new GPUBindGroupDescriptor
         {
             Layout = _casPipeline.GetBindGroupLayout(0),
             Entries = new[]
@@ -718,6 +740,9 @@ public class GpuGaussianRenderer : IDisposable
         await _sorter.FillIdentityIndicesAsync();
         PackAtUpload();
 
+        // Reset accumulation so the new scene renders immediately (not blended with old scene)
+        _accumFrameCount = 0;
+
         Console.WriteLine($"[GpuRenderer] Packed vertex buffer: {_splatCount:N0} splats ({_splatCount * PackedBytesPerSplat / 1024}KB, was {_splatCount * 40 / 1024}KB)");
     }
 
@@ -740,8 +765,32 @@ public class GpuGaussianRenderer : IDisposable
         await _sorter.FillIdentityIndicesAsync();
         PackAtUpload();
 
+        // Reset accumulation so the new scene renders immediately (not blended with old scene)
+        _accumFrameCount = 0;
+
         Console.WriteLine($"[GpuRenderer] GPU fast-path upload: {_splatCount:N0} splats" +
             (_splatBuffer != null ? $", {_splatCount * PackedBytesPerSplat / 1024}KB vertex buffer" : " (vertex buffer deferred)"));
+    }
+
+    /// <summary>
+    /// Read packed splat data back from GPU to CPU. // CPU transfer: file I/O (saving to OPFS)
+    /// Returns float[splatCount * 10] or null if buffer unavailable.
+    /// </summary>
+    public async Task<float[]?> ReadPackedDataAsync(int splatCount)
+    {
+        var buf = _sorter.PackedDataBuf;
+        if (buf == null) return null;
+        try
+        {
+            var accelerator = _gpu.WebGPUAccelerator;
+            await accelerator.SynchronizeAsync();
+            return await buf.CopyToHostAsync<float>(0, splatCount * 10);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[GpuRenderer] ReadPackedData failed: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>
@@ -912,7 +961,7 @@ public class GpuGaussianRenderer : IDisposable
 
         using var splatPass = encoder.BeginRenderPass(splatPassDesc);
         splatPass.SetPipeline(_splatPipeline!);
-        splatPass.SetBindGroup(0, _uniformBindGroup!);
+        splatPass.SetBindGroup(0, _uniformBindGroupSorted!);
         splatPass.SetVertexBuffer(0, _splatBuffer!);
         splatPass.Draw(6, (uint)visibleCount, 0, 0);
         splatPass.End();
@@ -1046,7 +1095,7 @@ public class GpuGaussianRenderer : IDisposable
             _casColorAttach!.View = colorView;
             using var pass = displayEncoder.BeginRenderPass(_casPassDesc!);
             pass.SetPipeline(_casPipeline!);
-            pass.SetBindGroup(0, _casBindGroup!);
+            pass.SetBindGroup(0, _casBindGroupStochastic!);
             pass.Draw(3, 1, 0, 0);
             pass.End();
 
@@ -1131,6 +1180,7 @@ public class GpuGaussianRenderer : IDisposable
         _uniformBuffer?.Destroy();
         _uniformBuffer?.Dispose();
         _uniformBindGroup?.Dispose();
+        _uniformBindGroupSorted?.Dispose();
         _depthTexture?.Destroy();
         _depthTexture?.Dispose();
         _depthView?.Dispose();
@@ -1138,6 +1188,7 @@ public class GpuGaussianRenderer : IDisposable
         _offscreenTexture?.Dispose();
         _offscreenView?.Dispose();
         _casBindGroup?.Dispose();
+        _casBindGroupStochastic?.Dispose();
         _casUniformBuffer?.Destroy();
         _casUniformBuffer?.Dispose();
         _casSampler?.Dispose();

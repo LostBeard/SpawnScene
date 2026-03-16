@@ -28,6 +28,7 @@ builder.Services.AddScoped<DepthToGaussianKernel>();
 builder.Services.AddScoped<GpuDepthColorizer>();
 builder.Services.AddScoped<GpuSplatSorter>();
 builder.Services.AddScoped<GpuGaussianRenderer>();
+builder.Services.AddScoped<ProjectService>();
 
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");

@@ -18,7 +18,7 @@
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.5" PrivateAssets="all" />
 		<PackageReference Include="SpawnDev.BlazorJS" Version="3.3.1" />
 		<PackageReference Include="SpawnDev.BlazorJS.OnnxRuntimeWeb" Version="1.2.0" />
-		<PackageReference Include="SpawnDev.ILGPU" Version="4.0.0" />
+		<PackageReference Include="SpawnDev.ILGPU" Version="4.0.2" />
 	</ItemGroup>
 
 

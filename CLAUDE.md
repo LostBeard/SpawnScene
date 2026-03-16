@@ -108,9 +108,25 @@ Canvas pixel dimensions halve during fast camera movement, restore when slow. Th
 
 ### Pages
 
-- **Home** (`/`) — Landing page
-- **DepthSplat** (`/depth-splat`) — Load model → upload photo → estimate depth → generate Gaussians
-- **Viewer** (`/viewer`) — Interactive 3D splat viewer, also loads `.ply`/`.splat` files
+- **Home** (`/`) — Landing page (standard Blazor HTML)
+- **Studio** (`/studio`) — Unified tool page: project management + scene generation + 3D viewer. Entire UI rendered via WebGPU (no HTML elements). Uses `StudioLayout` (full-viewport, no sidebar).
+- **DepthSplat** (`/depth-splat`) — Legacy: standalone depth estimation + generation UI
+- **Viewer** (`/viewer`) — Legacy: standalone 3D splat viewer, loads `.ply`/`.splat` files
+
+### WebGPU UI Framework (`UI/`)
+
+Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility:
+- `FontAtlas` — runtime bitmap font atlas (OffscreenCanvas → GPUTexture, 4 sizes)
+- `UIRenderer` — batched quad renderer (up to 4096 quads, single draw call overlay)
+- `InputManager` — polling-based input (mouse/keyboard/gamepad, pending buffer pattern)
+- `UIElement` — retained-mode tree with hit testing
+- Components: `UILabel`, `UIButton`, `UIPanel`, `UISlider`
+
+### Project System
+
+- `ProjectService` — OPFS-backed CRUD for projects (source images, generated scenes, settings)
+- `Project` / `ProjectSettings` / `ProjectSource` / `ProjectScene` — data models
+- OPFS structure: `/spawnscene/projects.json` (index) + `/spawnscene/projects/{id}/` (files)
 
 ### Build Constraints (csproj)
 

@@ -17,7 +17,7 @@ public class CameraController : IDisposable
     private float _yaw;   // Horizontal rotation (radians)
     private float _pitch; // Vertical rotation (radians, clamped ±89°)
     private Vector3 _position = new(0, 0, 3);
-    private float _moveSpeed = 0.5f;
+    private float _moveSpeed = 2.0f;
 
     // Drag state
     private bool _isDragging;

@@ -27,6 +27,7 @@ public class DepthEstimationService : IAsyncDisposable
     {
         new DepthModelInfo("distill-any-depth-small", "DistillAnyDepth Small", "models/distill_any_depth_small.onnx", "~99 MB"),
         new DepthModelInfo("depth-anything-v2-small", "DepthAnythingV2 Small", "models/depth_anything_v2_small.onnx", "~99 MB"),
+        new DepthModelInfo("depth-anything-v3-small", "DepthAnythingV3 Small", "models/depth_anything_v3_small_fp16.onnx", "~50 MB"),
     };
 
     public static readonly string DefaultModelId = AvailableModels[0].Id;
@@ -428,11 +429,18 @@ public class DepthEstimationService : IAsyncDisposable
         {
             // ── Step 3: Zero-copy ORT inference ────────────────────────────
             // TensorFromGpuBuffer wraps our ILGPU buffer — no CPU copy of input data.
+            // DAv3 expects [batch, num_images, 3, H, W] (5D); DAv2/DistillAnyDepth expect [1, 3, H, W] (4D).
+            // Same physical buffer — only the logical shape changes.
+            bool isDav3 = LoadedModelId?.StartsWith("depth-anything-v3") == true;
+            var inputDims = isDav3
+                ? new long[] { 1, 1, 3, inputSize, inputSize }
+                : new long[] { 1, 3, inputSize, inputSize };
+
             using var inputTensor = _ort.TensorFromGpuBuffer(gpuInputBuffer,
                 new TensorFromGpuBufferOptions
                 {
                     DataType = "float32",
-                    Dims = new long[] { 1, 3, inputSize, inputSize },
+                    Dims = inputDims,
                 });
 
             using var feeds = new OrtFeeds();

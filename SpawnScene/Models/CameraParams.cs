@@ -99,4 +99,45 @@ public class CameraParams
             Up = Vector3.UnitY,
         };
     }
+
+    /// <summary>
+    /// Create camera parameters from EXIF focal length data.
+    /// Priority: FocalLength35mm (exact) → phone camera estimate → default heuristic.
+    /// </summary>
+    public static CameraParams CreateFromExif(int width, int height, ExifReader.ExifFocalLength? exif)
+    {
+        float focalLength;
+
+        if (exif?.FocalLength35mm is > 0)
+        {
+            // Best path: 35mm equivalent → pixel focal length
+            focalLength = ExifReader.FocalLength35mmToPixels(exif.FocalLength35mm.Value, width, height);
+        }
+        else if (exif?.FocalLengthMm is > 0 and < 10f)
+        {
+            // Phone camera: focal length < 10mm is almost certainly a smartphone sensor.
+            // Typical phone sensors are 4-6mm wide → crop factor ~6-9x, median ~7x.
+            // Estimate 35mm equiv: f_mm * 7, then convert to pixels.
+            float estimated35mm = exif.FocalLengthMm.Value * 7f;
+            focalLength = ExifReader.FocalLength35mmToPixels(estimated35mm, width, height);
+        }
+        else
+        {
+            // No useful EXIF: fall back to default heuristic (~43mm equiv)
+            focalLength = MathF.Max(width, height) * 1.2f;
+        }
+
+        return new CameraParams
+        {
+            Width = width,
+            Height = height,
+            FocalX = focalLength,
+            FocalY = focalLength,
+            CenterX = width / 2.0f,
+            CenterY = height / 2.0f,
+            Position = new Vector3(0, 0, 3),
+            Forward = -Vector3.UnitZ,
+            Up = Vector3.UnitY,
+        };
+    }
 }

@@ -136,6 +136,9 @@ public partial class Studio
             var imageBytes = await _projectService.GetSourceAsync(_activeProject.Id, source.FileName);
             if (imageBytes == null) { _statusMessage = "Error: could not read source image"; BuildProjectDetailUI(); return; }
 
+            // Extract EXIF focal length before decoding (JPEG headers only)
+            var exifFocal = ExifReader.ExtractFocalLength(imageBytes);
+
             // Decode image
             _statusMessage = "Decoding image...";
             BuildProjectDetailUI();
@@ -153,12 +156,20 @@ public partial class Studio
             using var dataArray = imageData.Data;
             var rgbaPixels = dataArray.ReadBytes();
 
+            // Build camera params from EXIF (or fall back to heuristic)
+            var camera = CameraParams.CreateFromExif(w, h, exifFocal);
+            var focalSource = exifFocal?.FocalLength35mm is > 0 ? "EXIF 35mm"
+                : exifFocal?.FocalLengthMm is > 0 and < 10f ? $"phone estimate ({exifFocal.FocalLengthMm:F1}mm * 7x)"
+                : "heuristic 1.2x";
+            Console.WriteLine($"[EXIF] {source.FileName}: fx={camera.FocalX:F1}px ({focalSource})");
+
             var importedImage = new ImportedImage
             {
                 FileName = source.FileName,
                 Width = w,
                 Height = h,
                 RgbaPixels = rgbaPixels,
+                EstimatedCamera = camera,
             };
 
             // Estimate depth
@@ -175,7 +186,7 @@ public partial class Studio
             int subsample = _activeProject.Settings.Subsample;
             float edgeSharpness = _activeProject.Settings.EdgeSharpness;
             var (packedBuf, splatCount) = await _gaussianKernel.GeneratePackedGpuBufferAsync(
-                depthResult, importedImage, subsample, edgeSharpness);
+                depthResult, importedImage, subsample, edgeSharpness, camera);
 
             // Upload to renderer
             _statusMessage = $"Uploading {splatCount:N0} splats...";
@@ -371,6 +382,9 @@ public partial class Studio
                 var imageBytes = await _projectService.GetSourceAsync(_activeProject.Id, source.FileName);
                 if (imageBytes == null) continue;
 
+                // Extract EXIF focal length before decoding
+                var exifFocal = ExifReader.ExtractFocalLength(imageBytes);
+
                 // Decode image
                 using var blob = new Blob(new byte[][] { imageBytes }, new BlobOptions { Type = "image/jpeg" });
                 using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
@@ -384,12 +398,15 @@ public partial class Studio
                 using var dataArray = imageData.Data;
                 var rgbaPixels = dataArray.ReadBytes();
 
+                var camera = CameraParams.CreateFromExif(w, h, exifFocal);
+
                 images.Add(new ImportedImage
                 {
                     FileName = source.FileName,
                     Width = w,
                     Height = h,
                     RgbaPixels = rgbaPixels,
+                    EstimatedCamera = camera,
                 });
             }
 

@@ -45,7 +45,11 @@
       "Bash(for d:*)",
       "Bash(do echo:*)",
       "Read(//d/users/tj/Projects/SpawnScene/SpawnScene/SpawnScene/wwwroot/datasets/**)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(python3 -c \":*)",
+      "Bash(python -c \":*)",
+      "Bash(python:*)",
+      "Bash(pip install:*)"
     ]
   }
 }

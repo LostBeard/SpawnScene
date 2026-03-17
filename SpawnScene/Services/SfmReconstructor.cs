@@ -274,6 +274,13 @@ public class SfmReconstructor
                 fx = 3310.4f; cx = 316.73f; cy = 200.55f;
                 Log($"[SfM] Using DinoSparseRing calibration: fx={fx}, cx={cx}, cy={cy}");
             }
+            else if (images[0].EstimatedCamera is { } cam)
+            {
+                fx = cam.FocalX;
+                cx = cam.CenterX;
+                cy = cam.CenterY;
+                Log($"[SfM] Using EXIF-derived calibration: fx={fx}, cx={cx}, cy={cy}");
+            }
             else
             {
                 fx = Math.Max(images[0].Width, images[0].Height) * 1.2f;

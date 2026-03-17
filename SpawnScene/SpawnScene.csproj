@@ -19,7 +19,11 @@
 
 		<PackageReference Include="SpawnDev.BlazorJS" Version="3.4.0" />
 		<PackageReference Include="SpawnDev.BlazorJS.OnnxRuntimeWeb" Version="1.3.0" />
-		<PackageReference Include="SpawnDev.ILGPU" Version="4.2.0" />
+		<PackageReference Include="SpawnDev.ILGPU" Version="4.2.1" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <ProjectReference Include="..\..\..\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML.csproj" />
 	</ItemGroup>
 
 

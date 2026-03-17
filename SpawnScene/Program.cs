@@ -34,6 +34,7 @@ builder.Services.AddScoped<GpuFeatureMatcher>();
 builder.Services.AddScoped<ImageImportService>();
 builder.Services.AddScoped<SfmReconstructor>();
 builder.Services.AddScoped<MultiViewGenerationService>();
+// SpawnDev.ILGPU.ML kernels are created on-demand (GPU must be initialized first)
 
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");

@@ -1,0 +1,3190 @@
+{
+  "/backbone/Constant_1_output_0": {
+    "offset": 0,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_3_output_0": {
+    "offset": 2,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_4_output_0": {
+    "offset": 4,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_5_output_0": {
+    "offset": 6,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "onnx::Unsqueeze_465": {
+    "offset": 8,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_17_output_0": {
+    "offset": 10,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_11_output_0": {
+    "offset": 12,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/Constant_32_output_0": {
+    "offset": 14,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_60_output_0": {
+    "offset": 16,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_61_output_0": {
+    "offset": 18,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Unsqueeze_1_output_0": {
+    "offset": 20,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Mul_2_output_0": {
+    "offset": 22,
+    "shape": [
+      3
+    ],
+    "elements": 3,
+    "bytes": 6,
+    "dtype": "fp16"
+  },
+  "/backbone/Slice_output_0": {
+    "offset": 28,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "/head/Constant_9_output_0": {
+    "offset": 32,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/ConstantOfShape_output_0": {
+    "offset": 34,
+    "shape": [
+      3
+    ],
+    "elements": 3,
+    "bytes": 6,
+    "dtype": "fp16"
+  },
+  "/backbone/Transpose_output_0": {
+    "offset": 40,
+    "shape": [
+      1,
+      384,
+      37,
+      37
+    ],
+    "elements": 525696,
+    "bytes": 1051392,
+    "dtype": "fp16"
+  },
+  "/head/Constant_10_output_0": {
+    "offset": 1051432,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.patch_embed.proj.weight": {
+    "offset": 1051434,
+    "shape": [
+      384,
+      3,
+      14,
+      14
+    ],
+    "elements": 225792,
+    "bytes": 451584,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.patch_embed.proj.bias": {
+    "offset": 1503018,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.cls_token": {
+    "offset": 1503786,
+    "shape": [
+      1,
+      1,
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::Expand_6385": {
+    "offset": 1504554,
+    "shape": [
+      1,
+      1,
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "/backbone/Concat_2_output_0_": {
+    "offset": 1505322,
+    "shape": [
+      3
+    ],
+    "elements": 3,
+    "bytes": 6,
+    "dtype": "fp16"
+  },
+  "onnx::Expand_6392": {
+    "offset": 1505328,
+    "shape": [
+      1,
+      1,
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "/backbone/Concat_7_output_0": {
+    "offset": 1506096,
+    "shape": [
+      3
+    ],
+    "elements": 3,
+    "bytes": 6,
+    "dtype": "fp16"
+  },
+  "/backbone/Constant_64_output_0": {
+    "offset": 1506102,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/Mul_4_output_0": {
+    "offset": 1506104,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "/backbone/ConstantOfShape_1_output_0": {
+    "offset": 1506108,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "/backbone/Unsqueeze_16_output_0": {
+    "offset": 1506112,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.norm1.weight": {
+    "offset": 1506114,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.norm1.bias": {
+    "offset": 1506882,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6357": {
+    "offset": 1507650,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.attn.qkv.bias": {
+    "offset": 2392386,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "/backbone/blocks.0/attn/Constant_3_output_0": {
+    "offset": 2394690,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/blocks.0/attn/Constant_5_output_0": {
+    "offset": 2394692,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/blocks.4/attn/rope/Constant_10_output_0": {
+    "offset": 2394694,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/blocks.0/attn/Constant_7_output_0": {
+    "offset": 2394696,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/backbone/blocks.0/attn/Constant_8_output_0": {
+    "offset": 2394698,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6360": {
+    "offset": 2394700,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.attn.proj.bias": {
+    "offset": 2689612,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.ls1.gamma": {
+    "offset": 2690380,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.norm2.weight": {
+    "offset": 2691148,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.norm2.bias": {
+    "offset": 2691916,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6361": {
+    "offset": 2692684,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.mlp.fc1.bias": {
+    "offset": 3872332,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "/backbone/blocks.0/mlp/act/Constant_output_0": {
+    "offset": 3875404,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6362": {
+    "offset": 3875406,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.mlp.fc2.bias": {
+    "offset": 5055054,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.0.ls2.gamma": {
+    "offset": 5055822,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.norm1.weight": {
+    "offset": 5056590,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.norm1.bias": {
+    "offset": 5057358,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6363": {
+    "offset": 5058126,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.attn.qkv.bias": {
+    "offset": 5942862,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6366": {
+    "offset": 5945166,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.attn.proj.bias": {
+    "offset": 6240078,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.ls1.gamma": {
+    "offset": 6240846,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.norm2.weight": {
+    "offset": 6241614,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.norm2.bias": {
+    "offset": 6242382,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6367": {
+    "offset": 6243150,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.mlp.fc1.bias": {
+    "offset": 7422798,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6368": {
+    "offset": 7425870,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.mlp.fc2.bias": {
+    "offset": 8605518,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.1.ls2.gamma": {
+    "offset": 8606286,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.norm1.weight": {
+    "offset": 8607054,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.norm1.bias": {
+    "offset": 8607822,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6369": {
+    "offset": 8608590,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.attn.qkv.bias": {
+    "offset": 9493326,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6372": {
+    "offset": 9495630,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.attn.proj.bias": {
+    "offset": 9790542,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.ls1.gamma": {
+    "offset": 9791310,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.norm2.weight": {
+    "offset": 9792078,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.norm2.bias": {
+    "offset": 9792846,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6373": {
+    "offset": 9793614,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.mlp.fc1.bias": {
+    "offset": 10973262,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6374": {
+    "offset": 10976334,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.mlp.fc2.bias": {
+    "offset": 12155982,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.2.ls2.gamma": {
+    "offset": 12156750,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.norm1.weight": {
+    "offset": 12157518,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.norm1.bias": {
+    "offset": 12158286,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6375": {
+    "offset": 12159054,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.attn.qkv.bias": {
+    "offset": 13043790,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6378": {
+    "offset": 13046094,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.attn.proj.bias": {
+    "offset": 13341006,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.ls1.gamma": {
+    "offset": 13341774,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.norm2.weight": {
+    "offset": 13342542,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.norm2.bias": {
+    "offset": 13343310,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6379": {
+    "offset": 13344078,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.mlp.fc1.bias": {
+    "offset": 14523726,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6380": {
+    "offset": 14526798,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.mlp.fc2.bias": {
+    "offset": 15706446,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.3.ls2.gamma": {
+    "offset": 15707214,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::Reshape_1289": {
+    "offset": 15707982,
+    "shape": [
+      3
+    ],
+    "elements": 3,
+    "bytes": 6,
+    "dtype": "fp16"
+  },
+  "onnx::Reshape_1291": {
+    "offset": 15707988,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.norm1.weight": {
+    "offset": 15707992,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.norm1.bias": {
+    "offset": 15708760,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6394": {
+    "offset": 15709528,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.attn.qkv.bias": {
+    "offset": 16594264,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.attn.q_norm.weight": {
+    "offset": 16596568,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.attn.q_norm.bias": {
+    "offset": 16596696,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.attn.k_norm.weight": {
+    "offset": 16596824,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.attn.k_norm.bias": {
+    "offset": 16596952,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "/backbone/blocks.4/attn/rope/Constant_8_output_0": {
+    "offset": 16597080,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6425": {
+    "offset": 16597082,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.attn.proj.bias": {
+    "offset": 16891994,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.ls1.gamma": {
+    "offset": 16892762,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.norm2.weight": {
+    "offset": 16893530,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.norm2.bias": {
+    "offset": 16894298,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6426": {
+    "offset": 16895066,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.mlp.fc1.bias": {
+    "offset": 18074714,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6427": {
+    "offset": 18077786,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.mlp.fc2.bias": {
+    "offset": 19257434,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.4.ls2.gamma": {
+    "offset": 19258202,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.norm1.weight": {
+    "offset": 19258970,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.norm1.bias": {
+    "offset": 19259738,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6428": {
+    "offset": 19260506,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.attn.qkv.bias": {
+    "offset": 20145242,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.attn.q_norm.weight": {
+    "offset": 20147546,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.attn.q_norm.bias": {
+    "offset": 20147674,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.attn.k_norm.weight": {
+    "offset": 20147802,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.attn.k_norm.bias": {
+    "offset": 20147930,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6459": {
+    "offset": 20148058,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.attn.proj.bias": {
+    "offset": 20442970,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.ls1.gamma": {
+    "offset": 20443738,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.norm2.weight": {
+    "offset": 20444506,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.norm2.bias": {
+    "offset": 20445274,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6460": {
+    "offset": 20446042,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.mlp.fc1.bias": {
+    "offset": 21625690,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6461": {
+    "offset": 21628762,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.mlp.fc2.bias": {
+    "offset": 22808410,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.5.ls2.gamma": {
+    "offset": 22809178,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.norm.weight": {
+    "offset": 22809946,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.norm.bias": {
+    "offset": 22810714,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.norm1.weight": {
+    "offset": 22811482,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.norm1.bias": {
+    "offset": 22812250,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6462": {
+    "offset": 22813018,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.attn.qkv.bias": {
+    "offset": 23697754,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "head.norm.weight": {
+    "offset": 23700058,
+    "shape": [
+      768
+    ],
+    "elements": 768,
+    "bytes": 1536,
+    "dtype": "fp16"
+  },
+  "head.norm.bias": {
+    "offset": 23701594,
+    "shape": [
+      768
+    ],
+    "elements": 768,
+    "bytes": 1536,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.attn.q_norm.weight": {
+    "offset": 23703130,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.attn.q_norm.bias": {
+    "offset": 23703258,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.attn.k_norm.weight": {
+    "offset": 23703386,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.attn.k_norm.bias": {
+    "offset": 23703514,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.projects.0.weight": {
+    "offset": 23703642,
+    "shape": [
+      48,
+      768,
+      1,
+      1
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.projects.0.bias": {
+    "offset": 23777370,
+    "shape": [
+      48
+    ],
+    "elements": 48,
+    "bytes": 96,
+    "dtype": "fp16"
+  },
+  "/head/Mul_11_output_0": {
+    "offset": 23777466,
+    "shape": [
+      4
+    ],
+    "elements": 4,
+    "bytes": 8,
+    "dtype": "fp16"
+  },
+  "/head/ConstantOfShape_output_0": {
+    "offset": 23777474,
+    "shape": [
+      4
+    ],
+    "elements": 4,
+    "bytes": 8,
+    "dtype": "fp16"
+  },
+  "/head/Concat_12_output_0": {
+    "offset": 23777482,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "/head/Mul_8_output_0": {
+    "offset": 23777486,
+    "shape": [
+      12
+    ],
+    "elements": 12,
+    "bytes": 24,
+    "dtype": "fp16"
+  },
+  "/head/Unsqueeze_33_output_0": {
+    "offset": 23777510,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/head/Constant_44_output_0": {
+    "offset": 23777512,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "head.resize_layers.0.weight": {
+    "offset": 23777514,
+    "shape": [
+      48,
+      48,
+      4,
+      4
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.resize_layers.0.bias": {
+    "offset": 23851242,
+    "shape": [
+      48
+    ],
+    "elements": 48,
+    "bytes": 96,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6493": {
+    "offset": 23851338,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "head.scratch.layer1_rn.weight": {
+    "offset": 24146250,
+    "shape": [
+      64,
+      48,
+      3,
+      3
+    ],
+    "elements": 27648,
+    "bytes": 55296,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.attn.proj.bias": {
+    "offset": 24201546,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.ls1.gamma": {
+    "offset": 24202314,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit1.conv1.weight": {
+    "offset": 24203082,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit1.conv1.bias": {
+    "offset": 24276810,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.norm2.weight": {
+    "offset": 24276938,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.norm2.bias": {
+    "offset": 24277706,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit1.conv2.weight": {
+    "offset": 24278474,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit1.conv2.bias": {
+    "offset": 24352202,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6494": {
+    "offset": 24352330,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.mlp.fc1.bias": {
+    "offset": 25531978,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6495": {
+    "offset": 25535050,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.mlp.fc2.bias": {
+    "offset": 26714698,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.6.ls2.gamma": {
+    "offset": 26715466,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.norm1.weight": {
+    "offset": 26716234,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.norm1.bias": {
+    "offset": 26717002,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6496": {
+    "offset": 26717770,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.attn.qkv.bias": {
+    "offset": 27602506,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.attn.q_norm.weight": {
+    "offset": 27604810,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.attn.q_norm.bias": {
+    "offset": 27604938,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.attn.k_norm.weight": {
+    "offset": 27605066,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.attn.k_norm.bias": {
+    "offset": 27605194,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6527": {
+    "offset": 27605322,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.attn.proj.bias": {
+    "offset": 27900234,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.ls1.gamma": {
+    "offset": 27901002,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.norm2.weight": {
+    "offset": 27901770,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.norm2.bias": {
+    "offset": 27902538,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6528": {
+    "offset": 27903306,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.mlp.fc1.bias": {
+    "offset": 29082954,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6529": {
+    "offset": 29086026,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.mlp.fc2.bias": {
+    "offset": 30265674,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.7.ls2.gamma": {
+    "offset": 30266442,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.norm1.weight": {
+    "offset": 30267210,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.norm1.bias": {
+    "offset": 30267978,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6530": {
+    "offset": 30268746,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.attn.qkv.bias": {
+    "offset": 31153482,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "head.projects.1.weight": {
+    "offset": 31155786,
+    "shape": [
+      96,
+      768,
+      1,
+      1
+    ],
+    "elements": 73728,
+    "bytes": 147456,
+    "dtype": "fp16"
+  },
+  "head.projects.1.bias": {
+    "offset": 31303242,
+    "shape": [
+      96
+    ],
+    "elements": 96,
+    "bytes": 192,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.attn.q_norm.weight": {
+    "offset": 31303434,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.attn.q_norm.bias": {
+    "offset": 31303562,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.attn.k_norm.weight": {
+    "offset": 31303690,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.attn.k_norm.bias": {
+    "offset": 31303818,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "/head/Mul_18_output_0": {
+    "offset": 31303946,
+    "shape": [
+      24
+    ],
+    "elements": 24,
+    "bytes": 48,
+    "dtype": "fp16"
+  },
+  "/head/Unsqueeze_41_output_0": {
+    "offset": 31303994,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "head.resize_layers.1.weight": {
+    "offset": 31303996,
+    "shape": [
+      96,
+      96,
+      2,
+      2
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.resize_layers.1.bias": {
+    "offset": 31377724,
+    "shape": [
+      96
+    ],
+    "elements": 96,
+    "bytes": 192,
+    "dtype": "fp16"
+  },
+  "head.scratch.layer2_rn.weight": {
+    "offset": 31377916,
+    "shape": [
+      64,
+      96,
+      3,
+      3
+    ],
+    "elements": 55296,
+    "bytes": 110592,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit1.conv1.weight": {
+    "offset": 31488508,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit1.conv1.bias": {
+    "offset": 31562236,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit1.conv2.weight": {
+    "offset": 31562364,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit1.conv2.bias": {
+    "offset": 31636092,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6561": {
+    "offset": 31636220,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.attn.proj.bias": {
+    "offset": 31931132,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.ls1.gamma": {
+    "offset": 31931900,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.norm2.weight": {
+    "offset": 31932668,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.norm2.bias": {
+    "offset": 31933436,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6562": {
+    "offset": 31934204,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.mlp.fc1.bias": {
+    "offset": 33113852,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6563": {
+    "offset": 33116924,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.mlp.fc2.bias": {
+    "offset": 34296572,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.8.ls2.gamma": {
+    "offset": 34297340,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.norm1.weight": {
+    "offset": 34298108,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.norm1.bias": {
+    "offset": 34298876,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6564": {
+    "offset": 34299644,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.attn.qkv.bias": {
+    "offset": 35184380,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.attn.q_norm.weight": {
+    "offset": 35186684,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.attn.q_norm.bias": {
+    "offset": 35186812,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.attn.k_norm.weight": {
+    "offset": 35186940,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.attn.k_norm.bias": {
+    "offset": 35187068,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6595": {
+    "offset": 35187196,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.attn.proj.bias": {
+    "offset": 35482108,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.ls1.gamma": {
+    "offset": 35482876,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.norm2.weight": {
+    "offset": 35483644,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.norm2.bias": {
+    "offset": 35484412,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6596": {
+    "offset": 35485180,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.mlp.fc1.bias": {
+    "offset": 36664828,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6597": {
+    "offset": 36667900,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.mlp.fc2.bias": {
+    "offset": 37847548,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.9.ls2.gamma": {
+    "offset": 37848316,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.norm1.weight": {
+    "offset": 37849084,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.norm1.bias": {
+    "offset": 37849852,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6598": {
+    "offset": 37850620,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.attn.qkv.bias": {
+    "offset": 38735356,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "head.projects.2.weight": {
+    "offset": 38737660,
+    "shape": [
+      192,
+      768,
+      1,
+      1
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "head.projects.2.bias": {
+    "offset": 39032572,
+    "shape": [
+      192
+    ],
+    "elements": 192,
+    "bytes": 384,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.attn.q_norm.weight": {
+    "offset": 39032956,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.attn.q_norm.bias": {
+    "offset": 39033084,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.attn.k_norm.weight": {
+    "offset": 39033212,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.attn.k_norm.bias": {
+    "offset": 39033340,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "/head/Mul_28_output_0": {
+    "offset": 39033468,
+    "shape": [
+      48
+    ],
+    "elements": 48,
+    "bytes": 96,
+    "dtype": "fp16"
+  },
+  "/head/Unsqueeze_49_output_0": {
+    "offset": 39033564,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "head.scratch.layer3_rn.weight": {
+    "offset": 39033566,
+    "shape": [
+      64,
+      192,
+      3,
+      3
+    ],
+    "elements": 110592,
+    "bytes": 221184,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit1.conv1.weight": {
+    "offset": 39254750,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit1.conv1.bias": {
+    "offset": 39328478,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit1.conv2.weight": {
+    "offset": 39328606,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit1.conv2.bias": {
+    "offset": 39402334,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6629": {
+    "offset": 39402462,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.attn.proj.bias": {
+    "offset": 39697374,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.ls1.gamma": {
+    "offset": 39698142,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.norm2.weight": {
+    "offset": 39698910,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.norm2.bias": {
+    "offset": 39699678,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6630": {
+    "offset": 39700446,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.mlp.fc1.bias": {
+    "offset": 40880094,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6631": {
+    "offset": 40883166,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.mlp.fc2.bias": {
+    "offset": 42062814,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.10.ls2.gamma": {
+    "offset": 42063582,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.norm1.weight": {
+    "offset": 42064350,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.norm1.bias": {
+    "offset": 42065118,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6632": {
+    "offset": 42065886,
+    "shape": [
+      384,
+      1152
+    ],
+    "elements": 442368,
+    "bytes": 884736,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.attn.qkv.bias": {
+    "offset": 42950622,
+    "shape": [
+      1152
+    ],
+    "elements": 1152,
+    "bytes": 2304,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.attn.q_norm.weight": {
+    "offset": 42952926,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.attn.q_norm.bias": {
+    "offset": 42953054,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.attn.k_norm.weight": {
+    "offset": 42953182,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.attn.k_norm.bias": {
+    "offset": 42953310,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6663": {
+    "offset": 42953438,
+    "shape": [
+      384,
+      384
+    ],
+    "elements": 147456,
+    "bytes": 294912,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.attn.proj.bias": {
+    "offset": 43248350,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.ls1.gamma": {
+    "offset": 43249118,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.norm2.weight": {
+    "offset": 43249886,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.norm2.bias": {
+    "offset": 43250654,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6664": {
+    "offset": 43251422,
+    "shape": [
+      384,
+      1536
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.mlp.fc1.bias": {
+    "offset": 44431070,
+    "shape": [
+      1536
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "onnx::MatMul_6665": {
+    "offset": 44434142,
+    "shape": [
+      1536,
+      384
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.mlp.fc2.bias": {
+    "offset": 45613790,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "backbone.pretrained.blocks.11.ls2.gamma": {
+    "offset": 45614558,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "/cam_dec/Constant_4_output_0": {
+    "offset": 45615326,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "cam_dec.backbone.0.weight": {
+    "offset": 45615328,
+    "shape": [
+      768,
+      768
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "cam_dec.backbone.0.bias": {
+    "offset": 46794976,
+    "shape": [
+      768
+    ],
+    "elements": 768,
+    "bytes": 1536,
+    "dtype": "fp16"
+  },
+  "head.projects.3.weight": {
+    "offset": 46796512,
+    "shape": [
+      384,
+      768,
+      1,
+      1
+    ],
+    "elements": 294912,
+    "bytes": 589824,
+    "dtype": "fp16"
+  },
+  "head.projects.3.bias": {
+    "offset": 47386336,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "cam_dec.backbone.2.weight": {
+    "offset": 47387104,
+    "shape": [
+      768,
+      768
+    ],
+    "elements": 589824,
+    "bytes": 1179648,
+    "dtype": "fp16"
+  },
+  "cam_dec.backbone.2.bias": {
+    "offset": 48566752,
+    "shape": [
+      768
+    ],
+    "elements": 768,
+    "bytes": 1536,
+    "dtype": "fp16"
+  },
+  "cam_dec.fc_t.weight": {
+    "offset": 48568288,
+    "shape": [
+      3,
+      768
+    ],
+    "elements": 2304,
+    "bytes": 4608,
+    "dtype": "fp16"
+  },
+  "cam_dec.fc_t.bias": {
+    "offset": 48572896,
+    "shape": [
+      3
+    ],
+    "elements": 3,
+    "bytes": 6,
+    "dtype": "fp16"
+  },
+  "cam_dec.fc_qvec.weight": {
+    "offset": 48572902,
+    "shape": [
+      4,
+      768
+    ],
+    "elements": 3072,
+    "bytes": 6144,
+    "dtype": "fp16"
+  },
+  "cam_dec.fc_qvec.bias": {
+    "offset": 48579046,
+    "shape": [
+      4
+    ],
+    "elements": 4,
+    "bytes": 8,
+    "dtype": "fp16"
+  },
+  "cam_dec.fc_fov.0.weight": {
+    "offset": 48579054,
+    "shape": [
+      2,
+      768
+    ],
+    "elements": 1536,
+    "bytes": 3072,
+    "dtype": "fp16"
+  },
+  "cam_dec.fc_fov.0.bias": {
+    "offset": 48582126,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "/Constant_7_output_0": {
+    "offset": 48582130,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/Constant_4_output_0": {
+    "offset": 48582132,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/Constant_9_output_0": {
+    "offset": 48582134,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/Constant_34_output_0": {
+    "offset": 48582136,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "onnx::Reshape_5917": {
+    "offset": 48582138,
+    "shape": [
+      4
+    ],
+    "elements": 4,
+    "bytes": 8,
+    "dtype": "fp16"
+  },
+  "/Constant_28_output_0": {
+    "offset": 48582146,
+    "shape": [
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "/head/Mul_38_output_0": {
+    "offset": 48582148,
+    "shape": [
+      96
+    ],
+    "elements": 96,
+    "bytes": 192,
+    "dtype": "fp16"
+  },
+  "onnx::Slice_6301_starts": {
+    "offset": 48582340,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "onnx::Slice_6764_ends": {
+    "offset": 48582344,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "onnx::Slice_6763_axes": {
+    "offset": 48582348,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "onnx::Slice_6767_starts": {
+    "offset": 48582352,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "onnx::Slice_6311_ends": {
+    "offset": 48582356,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "onnx::Slice_6325_starts": {
+    "offset": 48582360,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "onnx::Slice_6326_ends": {
+    "offset": 48582364,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "onnx::Expand_5921": {
+    "offset": 48582368,
+    "shape": [
+      1,
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "head.resize_layers.3.weight": {
+    "offset": 48582370,
+    "shape": [
+      384,
+      384,
+      3,
+      3
+    ],
+    "elements": 1327104,
+    "bytes": 2654208,
+    "dtype": "fp16"
+  },
+  "head.resize_layers.3.bias": {
+    "offset": 51236578,
+    "shape": [
+      384
+    ],
+    "elements": 384,
+    "bytes": 768,
+    "dtype": "fp16"
+  },
+  "/Constant_55_output_0": {
+    "offset": 51237346,
+    "shape": [
+      1,
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "head.scratch.layer4_rn.weight": {
+    "offset": 51237348,
+    "shape": [
+      64,
+      384,
+      3,
+      3
+    ],
+    "elements": 221184,
+    "bytes": 442368,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet4.resConfUnit2.conv1.weight": {
+    "offset": 51679716,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet4.resConfUnit2.conv1.bias": {
+    "offset": 51753444,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet4.resConfUnit2.conv2.weight": {
+    "offset": 51753572,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet4.resConfUnit2.conv2.bias": {
+    "offset": 51827300,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet4.out_conv.weight": {
+    "offset": 51827428,
+    "shape": [
+      64,
+      64,
+      1,
+      1
+    ],
+    "elements": 4096,
+    "bytes": 8192,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet4.out_conv.bias": {
+    "offset": 51835620,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit2.conv1.weight": {
+    "offset": 51835748,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit2.conv1.bias": {
+    "offset": 51909476,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit2.conv2.weight": {
+    "offset": 51909604,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.resConfUnit2.conv2.bias": {
+    "offset": 51983332,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.out_conv.weight": {
+    "offset": 51983460,
+    "shape": [
+      64,
+      64,
+      1,
+      1
+    ],
+    "elements": 4096,
+    "bytes": 8192,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet3.out_conv.bias": {
+    "offset": 51991652,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit2.conv1.weight": {
+    "offset": 51991780,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit2.conv1.bias": {
+    "offset": 52065508,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit2.conv2.weight": {
+    "offset": 52065636,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.resConfUnit2.conv2.bias": {
+    "offset": 52139364,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.out_conv.weight": {
+    "offset": 52139492,
+    "shape": [
+      64,
+      64,
+      1,
+      1
+    ],
+    "elements": 4096,
+    "bytes": 8192,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet2.out_conv.bias": {
+    "offset": 52147684,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit2.conv1.weight": {
+    "offset": 52147812,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit2.conv1.bias": {
+    "offset": 52221540,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit2.conv2.weight": {
+    "offset": 52221668,
+    "shape": [
+      64,
+      64,
+      3,
+      3
+    ],
+    "elements": 36864,
+    "bytes": 73728,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.resConfUnit2.conv2.bias": {
+    "offset": 52295396,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "/Constant_96_output_0": {
+    "offset": 52295524,
+    "shape": [
+      1,
+      1
+    ],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.out_conv.weight": {
+    "offset": 52295526,
+    "shape": [
+      64,
+      64,
+      1,
+      1
+    ],
+    "elements": 4096,
+    "bytes": 8192,
+    "dtype": "fp16"
+  },
+  "head.scratch.refinenet1.out_conv.bias": {
+    "offset": 52303718,
+    "shape": [
+      64
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.output_conv1.weight": {
+    "offset": 52303846,
+    "shape": [
+      32,
+      64,
+      3,
+      3
+    ],
+    "elements": 18432,
+    "bytes": 36864,
+    "dtype": "fp16"
+  },
+  "head.scratch.output_conv1.bias": {
+    "offset": 52340710,
+    "shape": [
+      32
+    ],
+    "elements": 32,
+    "bytes": 64,
+    "dtype": "fp16"
+  },
+  "head.scratch.output_conv2.0.weight": {
+    "offset": 52340774,
+    "shape": [
+      32,
+      32,
+      3,
+      3
+    ],
+    "elements": 9216,
+    "bytes": 18432,
+    "dtype": "fp16"
+  },
+  "head.scratch.output_conv2.0.bias": {
+    "offset": 52359206,
+    "shape": [
+      32
+    ],
+    "elements": 32,
+    "bytes": 64,
+    "dtype": "fp16"
+  },
+  "head.scratch.output_conv2.2.weight": {
+    "offset": 52359270,
+    "shape": [
+      2,
+      32,
+      1,
+      1
+    ],
+    "elements": 64,
+    "bytes": 128,
+    "dtype": "fp16"
+  },
+  "head.scratch.output_conv2.2.bias": {
+    "offset": 52359398,
+    "shape": [
+      2
+    ],
+    "elements": 2,
+    "bytes": 4,
+    "dtype": "fp16"
+  },
+  "/backbone/patch_embed/Constant_output_0": {
+    "offset": 52359402,
+    "shape": [],
+    "elements": 1,
+    "bytes": 2,
+    "dtype": "fp16"
+  }
+}

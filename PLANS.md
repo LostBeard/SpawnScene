@@ -180,6 +180,18 @@ Source: https://github.com/SonnyC56/blunt — Python tool doing similar single-i
 
 ---
 
+## SpawnDev.ILGPU Bugs to Fix
+
+### WGSL `_uf_group_iter` Redeclaration Bug
+- **Symptom:** When multiple kernels are loaded via `LoadStreamKernel` on the same `WebGPUAccelerator`, the generated WGSL shader has duplicate declarations of `var _uf_group_iter`, causing `CreateShaderModule` to fail silently. Kernels that reference `Grid.IdxX` don't execute (output buffers stay zeroed or unchanged).
+- **Repro:** Load 3+ stream kernels (e.g., 2 MatMul + 1 LayerNorm + 1 Softmax), all using `Grid.IdxX`. The WGSL compiler reports `redeclaration of '_uf_group_iter'` at multiple line offsets.
+- **Workaround:** Use `LoadAutoGroupedStreamKernel` with `Index1D` instead (sequential-per-row approach for reduction kernels). This avoids `Grid.IdxX` in the generated WGSL.
+- **Fix:** The WGSL code generator needs to emit unique variable names per kernel entry point when multiple kernels share a shader module, or compile each `LoadStreamKernel` into its own WGSL module.
+- **Files:** SpawnDev.ILGPU WebGPU backend WGSL code generator
+- **Priority:** Medium — workaround exists, but shared memory reductions would be faster for large C dimensions
+
+---
+
 ## Reference Projects
 - **SuperSplat** (PlayCanvas): Editor/viewer for pre-made splats, SOG format, walk mode, annotations
 - **BLUNT**: Python single-image-to-splat tool, good quality improvements (flying pixel removal, edge-aware opacity, EXIF focal length)

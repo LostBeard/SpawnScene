@@ -1,6 +1,7 @@
 {
   "permissions": {
     "allow": [
+      "Bash(*)",
       "Bash(xargs ls -la)",
       "Bash(xargs grep -l \"MaxNumGroupsExtent\\\\|MaxNumGroups\")",
       "Bash(done)",

@@ -26,6 +26,7 @@ public partial class Studio : IAsyncDisposable
     [Inject] private XRService _xrService { get; set; } = default!;
     [Inject] private MultiViewGenerationService _multiViewService { get; set; } = default!;
     [Inject] private BlazorJSRuntime _js { get; set; } = default!;
+    // SpawnDev.ILGPU.ML — created on-demand after GPU init (not injected)
 
     private ElementReference _canvasRef;
     private ElementReference _containerRef;
@@ -148,6 +149,35 @@ public partial class Studio : IAsyncDisposable
         StartRenderLoop();
 
         Console.WriteLine($"[Studio] Initialized: {_canvasWidth}×{_canvasHeight}, UI ready");
+
+        // Validate MatMul kernel (temporary — remove after confirmed working)
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                // Build marker — update on every code change to detect stale DLLs
+                Console.WriteLine("[NeuralOps] Build: 2026-03-17 head-arch-inspect");
+
+                var accelerator = _gpuService.WebGPUAccelerator;
+                var weightLoader = new SpawnDev.ILGPU.ML.WeightLoader(accelerator, _http);
+                await weightLoader.LoadAsync();
+
+                // Print all head.* weight names with shapes to understand DPT head architecture
+                var headWeights = weightLoader.Shapes
+                    .Where(kv => kv.Key.StartsWith("head."))
+                    .OrderBy(kv => kv.Key)
+                    .ToList();
+                Console.WriteLine($"[DPT] {headWeights.Count} head.* tensors:");
+                foreach (var (name, shape) in headWeights)
+                    Console.WriteLine($"  {name}: [{string.Join(",", shape)}] = {shape.Aggregate(1, (a, b) => a * b):N0}");
+
+                Console.WriteLine("[NeuralOps] All tests complete!");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[MatMul] Validation error: {ex.Message}");
+            }
+        });
     }
 
     public async ValueTask DisposeAsync()

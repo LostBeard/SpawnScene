@@ -1426,14 +1426,10 @@ public class GpuGaussianRenderer : IDisposable
     {
         if (_splatBuffer == null || _device == null || _packPipeline == null || _packCountBuf == null) return;
 
-        var dataView = (IArrayView)(MemoryBuffer)dataBuf;
-        if (dataView.Buffer is not WebGPUMemoryBuffer dataMem) return;
-        var srcDataBuffer = dataMem.NativeBuffer?.NativeBuffer;
+        var srcDataBuffer = dataBuf.GetGPUBuffer();
         if (srcDataBuffer == null) return;
 
-        var idxView = (IArrayView)(MemoryBuffer)idxBuf;
-        if (idxView.Buffer is not WebGPUMemoryBuffer idxMem) return;
-        var srcIdxBuffer = idxMem.NativeBuffer?.NativeBuffer;
+        var srcIdxBuffer = idxBuf.GetGPUBuffer();
         if (srcIdxBuffer == null) return;
 
         // Write visible count to uniform buffer (before encoder submit, queue.writeBuffer runs first).

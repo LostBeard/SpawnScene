@@ -567,6 +567,29 @@ public partial class Studio
                 if (btnX > panelW - 100) { btnX = 30; sectionY += 32; }
             }
             sectionY += 35;
+
+            // Multi-view test datasets
+            mainPanel.AddChild(new UILabel
+            {
+                X = 30, Y = sectionY,
+                Text = "Multi-view test (ground truth cameras):",
+                FontSize = FontSize.Caption,
+                Color = System.Drawing.Color.Gray,
+            });
+            sectionY += 22;
+
+            mainPanel.AddChild(new UIButton
+            {
+                X = 30, Y = sectionY,
+                Width = 140, Height = 26,
+                Text = "TempleRing (4 views)",
+                FontSize = FontSize.Caption,
+                NormalColor = System.Drawing.Color.FromArgb(255, 90, 50, 70),
+                HoverColor = System.Drawing.Color.FromArgb(255, 110, 60, 85),
+                PressedColor = System.Drawing.Color.FromArgb(255, 70, 40, 55),
+                OnClick = () => _ = GenerateFromTempleRingAsync(),
+            });
+            sectionY += 35;
         }
         else
         {

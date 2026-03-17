@@ -198,6 +198,101 @@ public class ImageImportService : IDisposable
     }
 
     /// <summary>
+    /// Import pre-loaded images (from OPFS or byte arrays). Detects features and matches pairs.
+    /// Used by the multi-view pipeline where images are already decoded.
+    /// </summary>
+    public async Task ImportFromImagesAsync(IReadOnlyList<ImportedImage> images)
+    {
+        IsProcessing = true;
+        Progress = 0;
+        TotalImages = images.Count;
+        CurrentImageIndex = 0;
+        NotifyChanged();
+
+        if (!_gpu.IsInitialized)
+        {
+            Status = "Initializing GPU...";
+            NotifyChanged();
+            await Task.Yield();
+            try { await _gpu.InitializeAsync(); }
+            catch (Exception ex) { Console.WriteLine($"[Import] GPU init failed: {ex.Message}"); }
+        }
+
+        try
+        {
+            for (int i = 0; i < images.Count; i++)
+            {
+                var img = images[i];
+                CurrentImageIndex = i + 1;
+                Progress = (float)i / images.Count;
+
+                // Ensure grayscale + features exist
+                if (img.GrayPixels == null || img.GrayPixels.Length == 0)
+                {
+                    int featureWidth = img.Width, featureHeight = img.Height;
+                    if (img.Width > 1024 || img.Height > 1024)
+                    {
+                        float ds = 1024f / Math.Max(img.Width, img.Height);
+                        featureWidth = (int)(img.Width * ds);
+                        featureHeight = (int)(img.Height * ds);
+                        img.GrayPixels = DownsampleGrayscale(img.RgbaPixels, img.Width, img.Height, featureWidth, featureHeight);
+                    }
+                    else
+                    {
+                        img.GrayPixels = RgbaToGrayscale(img.RgbaPixels, img.Width, img.Height);
+                    }
+                    img.FeatureWidth = featureWidth;
+                    img.FeatureHeight = featureHeight;
+                }
+
+                if (img.Features == null || img.Features.Count == 0)
+                {
+                    Status = $"Detecting features: {img.FileName} ({i + 1}/{images.Count})...";
+                    NotifyChanged();
+                    await Task.Yield();
+
+                    img.Features = _detector.Detect(img.GrayPixels, img.FeatureWidth, img.FeatureHeight);
+
+                    // Scale feature coordinates back to full image resolution
+                    if (img.FeatureWidth != img.Width)
+                    {
+                        float scaleBackX = (float)img.Width / img.FeatureWidth;
+                        float scaleBackY = (float)img.Height / img.FeatureHeight;
+                        foreach (var feat in img.Features)
+                        {
+                            feat.X *= scaleBackX;
+                            feat.Y *= scaleBackY;
+                        }
+                    }
+                    Console.WriteLine($"[Import] {img.FileName}: {img.Features.Count} features");
+                }
+
+                if (!_images.Contains(img))
+                    _images.Add(img);
+
+                NotifyChanged();
+                await Task.Yield();
+            }
+
+            if (_images.Count >= 2)
+                await MatchAllPairsAsync();
+
+            Progress = 1.0f;
+        }
+        catch (Exception ex)
+        {
+            Status = $"Import error: {ex.Message}";
+            Console.WriteLine($"[Import] Error: {ex}");
+        }
+        finally
+        {
+            IsProcessing = false;
+            Status = $"{_images.Count} images imported, {_pairs.Count} pairs matched";
+            NotifyChanged();
+        }
+    }
+
+    /// <summary>
     /// Decode image bytes into RGBA pixel data using a temporary canvas.
     /// Uses SpawnDev.BlazorJS's Blob and OffscreenCanvas for efficient interop.
     /// </summary>

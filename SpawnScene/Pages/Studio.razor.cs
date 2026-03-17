@@ -24,6 +24,7 @@ public partial class Studio : IAsyncDisposable
     [Inject] private HttpClient _http { get; set; } = default!;
     [Inject] private NavigationManager _nav { get; set; } = default!;
     [Inject] private XRService _xrService { get; set; } = default!;
+    [Inject] private MultiViewGenerationService _multiViewService { get; set; } = default!;
     [Inject] private BlazorJSRuntime _js { get; set; } = default!;
 
     private ElementReference _canvasRef;

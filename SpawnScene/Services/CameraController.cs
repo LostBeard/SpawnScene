@@ -66,6 +66,23 @@ public class CameraController : IDisposable
             _yaw = MathF.PI;
             _pitch = 0f;
         }
+        else if (scene.SourceName == "multi-view" && scene.TrainingCameras.Count > 0)
+        {
+            // Multi-view scene: position at centroid of SfM cameras, looking toward scene center.
+            var camCenter = Vector3.Zero;
+            foreach (var cam in scene.TrainingCameras)
+                camCenter += cam.Position;
+            camCenter /= scene.TrainingCameras.Count;
+
+            // Use first camera's forward direction as initial look direction
+            var firstCam = scene.TrainingCameras[0];
+            _position = firstCam.Position;
+            _moveSpeed = 2.0f;
+
+            var dir = firstCam.Forward;
+            _yaw = MathF.Atan2(dir.X, -dir.Z);
+            _pitch = MathF.Asin(Math.Clamp(dir.Y, -1f, 1f));
+        }
         else if (scene.Gaussians != null && scene.Gaussians.Length > 0)
         {
             // 1. Compute AABB → center + bounding sphere radius from CPU data

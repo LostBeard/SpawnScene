@@ -48,6 +48,21 @@ public class SfmReconstructor
     }
 
     /// <summary>
+    /// Set CameraParams pose from an SfM rotation matrix R (world→camera) and translation t (camera-space).
+    /// Correctly computes world-space camera center as -R^T * t.
+    /// </summary>
+    private static void SetCameraPose(CameraParams cam, double[,] R, double[] t)
+    {
+        cam.Forward = new Vector3((float)R[2, 0], (float)R[2, 1], (float)R[2, 2]);
+        cam.Up = new Vector3(-(float)R[1, 0], -(float)R[1, 1], -(float)R[1, 2]);
+        // Camera center in world space = -R^T * t
+        cam.Position = new Vector3(
+            -((float)(R[0, 0] * t[0] + R[1, 0] * t[1] + R[2, 0] * t[2])),
+            -((float)(R[0, 1] * t[0] + R[1, 1] * t[1] + R[2, 1] * t[2])),
+            -((float)(R[0, 2] * t[0] + R[1, 2] * t[1] + R[2, 2] * t[2])));
+    }
+
+    /// <summary>
     /// Run the full SfM pipeline on imported images.
     /// </summary>
     public async Task ReconstructAsync()
@@ -447,13 +462,12 @@ public class SfmReconstructor
             CameraPoses[idxA] = CameraParams.CreateDefault(images[idxA].Width, images[idxA].Height);
             CameraPoses[idxA]!.FocalX = fx;
             CameraPoses[idxA]!.FocalY = fx;
+            SetCameraPose(CameraPoses[idxA]!, identR, identT); // Camera A at origin
 
             var cam2 = CameraParams.CreateDefault(images[idxB].Width, images[idxB].Height);
             cam2.FocalX = fx;
             cam2.FocalY = fx;
-            cam2.Position = new Vector3((float)t[0], (float)t[1], (float)t[2]);
-            cam2.Forward = new Vector3((float)R[2, 0], (float)R[2, 1], (float)R[2, 2]);
-            cam2.Up = new Vector3(-(float)R[1, 0], -(float)R[1, 1], -(float)R[1, 2]);
+            SetCameraPose(cam2, R, t);
             CameraPoses[idxB] = cam2;
 
             // Store pose matrices for triangulation
@@ -630,9 +644,7 @@ public class SfmReconstructor
 
                     var camNew = CameraParams.CreateDefault(images[newIdx].Width, images[newIdx].Height);
                     camNew.FocalX = fx; camNew.FocalY = fx;
-                    camNew.Position = new Vector3((float)globalT[0], (float)globalT[1], (float)globalT[2]);
-                    camNew.Forward = new Vector3((float)globalR[2, 0], (float)globalR[2, 1], (float)globalR[2, 2]);
-                    camNew.Up = new Vector3(-(float)globalR[1, 0], -(float)globalR[1, 1], -(float)globalR[1, 2]);
+                    SetCameraPose(camNew, globalR, globalT);
                     CameraPoses[newIdx] = camNew;
 
                     reconstructedCameras.Add(newIdx);
@@ -892,9 +904,7 @@ public class SfmReconstructor
 
                     var camNew = CameraParams.CreateDefault(images[newIdx].Width, images[newIdx].Height);
                     camNew.FocalX = fx; camNew.FocalY = fx;
-                    camNew.Position = new Vector3((float)finalT[0], (float)finalT[1], (float)finalT[2]);
-                    camNew.Forward = new Vector3((float)finalR[2, 0], (float)finalR[2, 1], (float)finalR[2, 2]);
-                    camNew.Up = new Vector3(-(float)finalR[1, 0], -(float)finalR[1, 1], -(float)finalR[1, 2]);
+                    SetCameraPose(camNew, finalR, finalT);
                     CameraPoses[newIdx] = camNew;
 
                     reconstructedCameras.Add(newIdx);
@@ -1042,9 +1052,7 @@ public class SfmReconstructor
                         poseT[newIdx] = finalT;
                         var camNew = CameraParams.CreateDefault(images[newIdx].Width, images[newIdx].Height);
                         camNew.FocalX = fx; camNew.FocalY = fx;
-                        camNew.Position = new Vector3((float)finalT[0], (float)finalT[1], (float)finalT[2]);
-                        camNew.Forward = new Vector3((float)finalR[2, 0], (float)finalR[2, 1], (float)finalR[2, 2]);
-                        camNew.Up = new Vector3(-(float)finalR[1, 0], -(float)finalR[1, 1], -(float)finalR[1, 2]);
+                        SetCameraPose(camNew, finalR, finalT);
                         CameraPoses[newIdx] = camNew;
                         reconstructedCameras.Add(newIdx);
                         retried++;
@@ -1330,12 +1338,10 @@ public class SfmReconstructor
 
                     var camP = CameraParams.CreateDefault(images[i].Width, images[i].Height);
                     camP.FocalX = (float)cal.K[0, 0]; camP.FocalY = (float)cal.K[1, 1];
-                    camP.Position = new Vector3((float)cal.t[0], (float)cal.t[1], (float)cal.t[2]);
-                    camP.Forward = new Vector3((float)cal.R[2, 0], (float)cal.R[2, 1], (float)cal.R[2, 2]);
-                    camP.Up = new Vector3(-(float)cal.R[1, 0], -(float)cal.R[1, 1], -(float)cal.R[1, 2]);
+                    SetCameraPose(camP, cal.R, cal.t);
                     CameraPoses[i] = camP;
 
-                    Log($"[GT] Cam[{i}] {images[i].FileName}: fx={cal.K[0, 0]:F1} pos=({cal.t[0]:F4},{cal.t[1]:F4},{cal.t[2]:F4})");
+                    Log($"[GT] Cam[{i}] {images[i].FileName}: fx={cal.K[0, 0]:F1} worldPos=({camP.Position.X:F4},{camP.Position.Y:F4},{camP.Position.Z:F4})");
                 }
                 else
                 {
@@ -1491,12 +1497,10 @@ public class SfmReconstructor
                 poseT[ci] = cal.t;
                 var camP = CameraParams.CreateDefault(images[ci].Width, images[ci].Height);
                 camP.FocalX = fx; camP.FocalY = fx;
-                camP.Position = new Vector3((float)cal.t[0], (float)cal.t[1], (float)cal.t[2]);
-                camP.Forward = new Vector3((float)cal.R[2, 0], (float)cal.R[2, 1], (float)cal.R[2, 2]);
-                camP.Up = new Vector3(-(float)cal.R[1, 0], -(float)cal.R[1, 1], -(float)cal.R[1, 2]);
+                SetCameraPose(camP, cal.R, cal.t);
                 CameraPoses[ci] = camP;
                 reconstructedCameras.Add(ci);
-                Log($"[HYBRID] GT Cam[{ci}] {images[ci].FileName} placed at ({cal.t[0]:F4},{cal.t[1]:F4},{cal.t[2]:F4})");
+                Log($"[HYBRID] GT Cam[{ci}] {images[ci].FileName} worldPos=({camP.Position.X:F4},{camP.Position.Y:F4},{camP.Position.Z:F4})");
             }
 
             // Triangulate from GT pair
@@ -1590,9 +1594,7 @@ public class SfmReconstructor
 
                     var camNew = CameraParams.CreateDefault(images[newIdx].Width, images[newIdx].Height);
                     camNew.FocalX = fx; camNew.FocalY = fx;
-                    camNew.Position = new Vector3((float)finalT[0], (float)finalT[1], (float)finalT[2]);
-                    camNew.Forward = new Vector3((float)finalR[2, 0], (float)finalR[2, 1], (float)finalR[2, 2]);
-                    camNew.Up = new Vector3(-(float)finalR[1, 0], -(float)finalR[1, 1], -(float)finalR[1, 2]);
+                    SetCameraPose(camNew, finalR, finalT);
                     CameraPoses[newIdx] = camNew;
                     reconstructedCameras.Add(newIdx);
                     addedAny = true;
@@ -2659,12 +2661,7 @@ public class SfmReconstructor
             poseR[imgIdx] = newR;
             poseT[imgIdx] = newT;
             if (CameraPoses![imgIdx] != null)
-            {
-                var camP = CameraPoses[imgIdx]!;
-                camP.Position = new Vector3((float)newT[0], (float)newT[1], (float)newT[2]);
-                camP.Forward = new Vector3((float)newR[2, 0], (float)newR[2, 1], (float)newR[2, 2]);
-                camP.Up = new Vector3(-(float)newR[1, 0], -(float)newR[1, 1], -(float)newR[1, 2]);
-            }
+                SetCameraPose(CameraPoses[imgIdx]!, newR, newT);
         }
 
         // Write back refined 3D points

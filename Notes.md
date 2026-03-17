@@ -102,3 +102,24 @@ Features from [PlayCanvas SuperSplat](https://github.com/playcanvas/supersplat) 
 3. Post-processing stack — bloom, vignette, color grading (extend existing CAS pipeline)
 4. Walk mode with collision — exploration beyond orbital camera
 5. Publishing/sharing — cloud upload + URL sharing
+
+
+# Future: WebRTC Multi-Device Cooperative Scanning
+
+Vision: Multiple mobile devices (phones/tablets) stream their camera feeds to a PC via WebRTC. The PC handles all SfM reconstruction and scene generation. Mobile devices serve as scanning cameras only.
+
+- Each mobile device runs a lightweight SpawnScene PWA that captures camera frames + gyroscope/accelerometer data
+- Frames streamed to PC over WebRTC data channels (or media tracks)
+- PC runs the full multi-view pipeline incrementally as new frames arrive
+- Real-time visualization on PC shows the growing point cloud / splat scene
+- VR headset on PC can view the scene being built in real-time
+- Multiple cameras simultaneously = faster coverage, better overlap, more robust SfM
+
+**Architecture notes:**
+- WebRTC signaling: could use a simple signaling server, or peer-to-peer via QR code exchange
+- Frame selection: PC picks the best frames from each stream (sharpness, diversity, overlap)
+- Incremental SfM: extend SfmReconstructor to add images to an existing reconstruction
+- Real-time splat updates: as new views are fused, update the GPU scene buffer incrementally
+- SpawnDev.BlazorJS has WebRTC types (RTCPeerConnection, MediaStream, etc.)
+
+**Requires:** WebRTC signaling, incremental SfM, real-time splat scene updates. Architecture first, implement later.

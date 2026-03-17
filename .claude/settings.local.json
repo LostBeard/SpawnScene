@@ -32,7 +32,20 @@
       "Bash(ls:*)",
       "WebFetch(domain:blog.playcanvas.com)",
       "WebFetch(domain:www.reddit.com)",
-      "Bash(dotnet build:*)"
+      "Bash(dotnet build:*)",
+      "WebFetch(domain:developer.playcanvas.com)",
+      "Read(//d/users/tj/Projects/SpawnScene/SpawnScene/$APPDATA/Claude/**)",
+      "Read(//d/users/tj/Projects/SpawnScene/SpawnScene/$HOME/.claude/**)",
+      "Read(//c/Users/TJ/**)",
+      "Bash(npm install:*)",
+      "Read(//d/tmp/**)",
+      "Bash(npm init:*)",
+      "Bash(node -e \":*)",
+      "Read(//d/users/tj/Projects/SpawnScene/SpawnScene/**)",
+      "Bash(for d:*)",
+      "Bash(do echo:*)",
+      "Read(//d/users/tj/Projects/SpawnScene/SpawnScene/SpawnScene/wwwroot/datasets/**)",
+      "Bash(wc:*)"
     ]
   }
 }

@@ -216,7 +216,7 @@ public class SuperResolutionService : IAsyncDisposable
 
         await accelerator.SynchronizeAsync();
 
-        var gpuInputBuffer = GetNativeBuffer(nchwBuf);
+        var gpuInputBuffer = nchwBuf.GetGPUBuffer();
         if (gpuInputBuffer == null)
         {
             Status = "❌ Could not access GPU buffer for SR input.";
@@ -305,15 +305,6 @@ public class SuperResolutionService : IAsyncDisposable
     // ─────────────────────────────────────────────────────────────
     //  Helpers
     // ─────────────────────────────────────────────────────────────
-
-    private static GPUBuffer? GetNativeBuffer<T>(MemoryBuffer1D<T, Stride1D.Dense> buf)
-        where T : unmanaged
-    {
-        var iView = (IArrayView)(MemoryBuffer)buf;
-        if (iView.Buffer is WebGPUMemoryBuffer webGpuMem)
-            return webGpuMem.NativeBuffer?.NativeBuffer;
-        return null;
-    }
 
     public async ValueTask DisposeAsync()
     {

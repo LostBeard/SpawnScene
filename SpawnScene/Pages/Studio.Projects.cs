@@ -109,6 +109,14 @@ public partial class Studio
     {
         if (_activeProject == null || _activeProject.Sources.Count == 0) return;
 
+        // Multi-view path: 2+ images → SfM + per-view depth fusion
+        if (_activeProject.Sources.Count >= 2)
+        {
+            await GenerateMultiViewScene();
+            return;
+        }
+
+        // Single-image path (existing)
         _statusMessage = "Loading depth model...";
         BuildProjectDetailUI();
 
@@ -239,6 +247,242 @@ public partial class Studio
             _statusMessage = $"Error: {ex.Message}";
             BuildProjectDetailUI();
             Console.WriteLine($"[Studio] Generation error: {ex}");
+        }
+    }
+
+    // ─── Dataset Testing ───
+
+    private async Task GenerateFromTempleRingAsync()
+    {
+        if (_activeProject == null) return;
+
+        _statusMessage = "Loading TempleRing dataset...";
+        BuildProjectDetailUI();
+
+        try
+        {
+            // Load the parameter file
+            var parText = await _http.GetStringAsync("datasets/TempleRing/templeR_par.txt");
+
+            // Parse camera params — TempleRing images are 640x480
+            var gtCameras = MultiViewGenerationService.ParseMiddleburyParams(parText, 640, 480);
+            Console.WriteLine($"[Studio] TempleRing: {gtCameras.Count} cameras parsed");
+
+            // Load first 4 images (to keep memory reasonable)
+            int maxImages = Math.Min(4, gtCameras.Count);
+            var images = new List<ImportedImage>();
+            var cameras = new List<CameraParams>();
+
+            for (int i = 0; i < maxImages; i++)
+            {
+                var (filename, cam) = gtCameras[i];
+                _statusMessage = $"Loading {filename} ({i + 1}/{maxImages})...";
+                BuildProjectDetailUI();
+
+                var bytes = await _http.GetByteArrayAsync($"datasets/TempleRing/{filename}");
+                using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
+                using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                int w = (int)bitmap.Width;
+                int h = (int)bitmap.Height;
+
+                using var osc = new OffscreenCanvas(w, h);
+                using var ctx = osc.Get2DContext();
+                ctx.DrawImage(bitmap, 0, 0);
+                using var imageData = ctx.GetImageData(0, 0, w, h);
+                using var dataArray = imageData.Data;
+                var rgba = dataArray.ReadBytes();
+
+                // Update camera dimensions to actual image size
+                cam.Width = w;
+                cam.Height = h;
+
+                images.Add(new ImportedImage { FileName = filename, Width = w, Height = h, RgbaPixels = rgba });
+                cameras.Add(cam);
+            }
+
+            // Generate using ground truth cameras (bypass SfM)
+            int subsample = _activeProject.Settings.Subsample;
+            float edgeSharpness = _activeProject.Settings.EdgeSharpness;
+
+            void OnStatus() { _statusMessage = _multiViewService.Status; BuildProjectDetailUI(); }
+            _multiViewService.OnStatusChanged += OnStatus;
+
+            try
+            {
+                var result = await _multiViewService.GenerateWithGroundTruthAsync(
+                    images, cameras, Math.Max(subsample, 2), edgeSharpness);
+
+                if (result == null) { _statusMessage = _multiViewService.Status; BuildProjectDetailUI(); return; }
+
+                var (packedBuf, splatCount) = result.Value;
+                await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
+
+                var scene = new GaussianScene
+                {
+                    GpuSplatCount = splatCount,
+                    SourceName = "multi-view",
+                };
+                foreach (var cam in cameras)
+                    scene.TrainingCameras.Add(cam);
+
+                _renderService.SetActiveSceneGpuLoaded(scene);
+                _sceneManager.ActiveScene = scene;
+
+                _statusMessage = null;
+                _state = StudioState.SceneViewer;
+                _cameraController?.FitToScene();
+                BuildViewerHudUI();
+
+                Console.WriteLine($"[Studio] TempleRing GT scene: {splatCount:N0} splats");
+            }
+            finally
+            {
+                _multiViewService.OnStatusChanged -= OnStatus;
+            }
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Error: {ex.Message}";
+            BuildProjectDetailUI();
+            Console.WriteLine($"[Studio] TempleRing error: {ex}");
+        }
+    }
+
+    // ─── Multi-View Generation ───
+
+    private async Task GenerateMultiViewScene()
+    {
+        if (_activeProject == null) return;
+
+        _statusMessage = "Preparing multi-view pipeline...";
+        BuildProjectDetailUI();
+
+        try
+        {
+            // Load all source images as ImportedImage objects
+            var images = new List<ImportedImage>();
+            foreach (var source in _activeProject.Sources)
+            {
+                _statusMessage = $"Loading {source.FileName}...";
+                BuildProjectDetailUI();
+
+                var imageBytes = await _projectService.GetSourceAsync(_activeProject.Id, source.FileName);
+                if (imageBytes == null) continue;
+
+                // Decode image
+                using var blob = new Blob(new byte[][] { imageBytes }, new BlobOptions { Type = "image/jpeg" });
+                using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                int w = (int)bitmap.Width;
+                int h = (int)bitmap.Height;
+
+                using var osc = new OffscreenCanvas(w, h);
+                using var ctx = osc.Get2DContext();
+                ctx.DrawImage(bitmap, 0, 0);
+                using var imageData = ctx.GetImageData(0, 0, w, h);
+                using var dataArray = imageData.Data;
+                var rgbaPixels = dataArray.ReadBytes();
+
+                images.Add(new ImportedImage
+                {
+                    FileName = source.FileName,
+                    Width = w,
+                    Height = h,
+                    RgbaPixels = rgbaPixels,
+                });
+            }
+
+            if (images.Count < 2)
+            {
+                _statusMessage = "Need at least 2 images for multi-view generation.";
+                BuildProjectDetailUI();
+                return;
+            }
+
+            // Subscribe to status updates
+            void OnStatus() { _statusMessage = _multiViewService.Status; BuildProjectDetailUI(); }
+            _multiViewService.OnStatusChanged += OnStatus;
+
+            try
+            {
+                // Note: UploadSceneFromGpuBuffer → EnsureSplatBuffer destroys old buffers automatically
+
+                int subsample = _activeProject.Settings.Subsample;
+                float edgeSharpness = _activeProject.Settings.EdgeSharpness;
+
+                // Multi-view generates N× more splats — enforce minimum subsample of 2
+                int multiViewSubsample = Math.Max(subsample, 2);
+
+                var result = await _multiViewService.GenerateAsync(images, multiViewSubsample, edgeSharpness);
+                if (result == null)
+                {
+                    _statusMessage = _multiViewService.Status;
+                    BuildProjectDetailUI();
+                    return;
+                }
+
+                var (packedBuf, splatCount) = result.Value;
+
+                // Upload to renderer
+                _statusMessage = $"Uploading {splatCount:N0} splats...";
+                BuildProjectDetailUI();
+
+                await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
+
+                var scene = new GaussianScene
+                {
+                    GpuSplatCount = splatCount,
+                    SourceName = "depth-splat", // same camera model as single-image
+                };
+
+                _renderService.SetActiveSceneGpuLoaded(scene);
+                _sceneManager.ActiveScene = scene;
+
+                // Save to OPFS
+                _statusMessage = $"Saving {splatCount:N0} splats to storage...";
+                BuildProjectDetailUI();
+
+                var packedFloats = await _gpuRenderer.ReadPackedDataAsync(splatCount);
+                if (packedFloats != null)
+                {
+                    var projectScene = new ProjectScene
+                    {
+                        SplatCount = splatCount,
+                        QualityPreset = _activeProject.Settings.QualityPreset,
+                    };
+                    var sceneBytes = new byte[packedFloats.Length * sizeof(float)];
+                    Buffer.BlockCopy(packedFloats, 0, sceneBytes, 0, sceneBytes.Length);
+                    packedFloats = null;
+
+                    await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, sceneBytes);
+                    Console.WriteLine($"[Studio] Multi-view scene saved: {sceneBytes.Length / (1024 * 1024):F1} MB");
+                }
+
+                // Schedule thumbnail
+                var lastScene = _activeProject.Scenes.LastOrDefault();
+                if (lastScene != null)
+                {
+                    _pendingThumbnailProjectId = _activeProject.Id;
+                    _pendingThumbnailSceneId = lastScene.Id;
+                    _thumbnailDelayFrames = 30;
+                }
+
+                _statusMessage = null;
+                _state = StudioState.SceneViewer;
+                _cameraController?.FitToScene();
+                BuildViewerHudUI();
+
+                Console.WriteLine($"[Studio] Multi-view scene: {splatCount:N0} splats from {images.Count} images");
+            }
+            finally
+            {
+                _multiViewService.OnStatusChanged -= OnStatus;
+            }
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Error: {ex.Message}";
+            BuildProjectDetailUI();
+            Console.WriteLine($"[Studio] Multi-view generation error: {ex}");
         }
     }
 

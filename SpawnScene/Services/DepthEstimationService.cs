@@ -413,7 +413,7 @@ public class DepthEstimationService : IAsyncDisposable
 
         await accelerator.SynchronizeAsync();
 
-        var gpuInputBuffer = GetNativeBuffer(preprocessBuf);
+        var gpuInputBuffer = preprocessBuf.GetGPUBuffer();
         if (gpuInputBuffer == null)
         {
             Status = "❌ Could not access GPU buffer for ORT input.";
@@ -531,16 +531,6 @@ public class DepthEstimationService : IAsyncDisposable
         };
     }
 
-
-    /// <summary>Extract the native WebGPU GPUBuffer from an ILGPU MemoryBuffer.</summary>
-    private static GPUBuffer? GetNativeBuffer<T>(MemoryBuffer1D<T, Stride1D.Dense> buf)
-        where T : unmanaged
-    {
-        var iView = (IArrayView)(MemoryBuffer)buf;
-        if (iView.Buffer is WebGPUMemoryBuffer webGpuMem)
-            return webGpuMem.NativeBuffer?.NativeBuffer;
-        return null;
-    }
 
     public async ValueTask DisposeAsync()
     {

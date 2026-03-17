@@ -30,6 +30,10 @@ builder.Services.AddScoped<GpuSplatSorter>();
 builder.Services.AddScoped<GpuGaussianRenderer>();
 builder.Services.AddScoped<ProjectService>();
 builder.Services.AddScoped<XRService>();
+builder.Services.AddScoped<GpuFeatureMatcher>();
+builder.Services.AddScoped<ImageImportService>();
+builder.Services.AddScoped<SfmReconstructor>();
+builder.Services.AddScoped<MultiViewGenerationService>();
 
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");

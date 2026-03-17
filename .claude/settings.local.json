@@ -31,7 +31,8 @@
       "Bash(cd:*)",
       "Bash(ls:*)",
       "WebFetch(domain:blog.playcanvas.com)",
-      "WebFetch(domain:www.reddit.com)"
+      "WebFetch(domain:www.reddit.com)",
+      "Bash(dotnet build:*)"
     ]
   }
 }

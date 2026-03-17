@@ -344,12 +344,10 @@ public class DepthToGaussianKernel
         int numPoints = sampledW * sampledH;
 
         // Build rotation matrix from camera Forward/Up/Right
-        // Camera axes: Right=X, Up=Y, Forward=Z (view direction)
         var right = camera.Right;
         var up = camera.Up;
         var fwd = camera.Forward;
 
-        // R = [right | up | forward] as rows (world→camera rotation)
         var worldParams = new SplatWorldParams
         {
             Width = w, Height = h,
@@ -401,7 +399,8 @@ public class DepthToGaussianKernel
             int subsample = 2, float edgeSharpness = 0.3f,
             int refWidth = 0, int refHeight = 0,
             float depthScaleCorrection = 1.0f,
-            CameraParams? camera = null)
+            CameraParams? camera = null,
+            bool isDirectDepth = false)
     {
         if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
         var accelerator = _gpu.WebGPUAccelerator;

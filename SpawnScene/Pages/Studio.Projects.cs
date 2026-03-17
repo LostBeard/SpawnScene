@@ -122,10 +122,11 @@ public partial class Studio
 
         try
         {
-            // Ensure depth model is loaded (use model ID, not display name)
-            if (!_depthService.IsReady)
+            // Load depth model from project settings (or default)
+            var targetModel = _activeProject.Settings.DepthModel ?? DepthEstimationService.DefaultModelId;
+            if (!_depthService.IsReady || _depthService.LoadedModelId != targetModel)
             {
-                await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+                await _depthService.LoadModelAsync(targetModel);
             }
 
             // Use the first source image

@@ -40,7 +40,7 @@ public class ProjectScene
 /// <summary>Per-project generation and render settings.</summary>
 public class ProjectSettings
 {
-    public string DepthModel { get; set; } = "distill-any-depth-small";
+    public string DepthModel { get; set; } = "depth-anything-v3-small";
     public string QualityPreset { get; set; } = "Standard";
     public int Subsample { get; set; } = 2;
     public float EdgeSharpness { get; set; } = 0.3f;

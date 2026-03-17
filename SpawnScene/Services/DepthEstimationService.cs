@@ -12,7 +12,8 @@ namespace SpawnScene.Services;
 /// Available depth estimation model definition.
 /// All models use the same 518×518 ViT input and ImageNet normalization.
 /// </summary>
-public record DepthModelInfo(string Id, string Name, string Path, string SizeLabel);
+/// <param name="IsDirectDepth">True if model outputs depth (high=far), false if disparity (high=close).</param>
+public record DepthModelInfo(string Id, string Name, string Path, string SizeLabel, bool IsDirectDepth = false);
 
 /// <summary>
 /// Monocular depth estimation using ONNX models (DepthAnythingV2, DistillAnyDepth).
@@ -27,16 +28,17 @@ public class DepthEstimationService : IAsyncDisposable
     {
         new DepthModelInfo("distill-any-depth-small", "DistillAnyDepth Small", "models/distill_any_depth_small.onnx", "~99 MB"),
         new DepthModelInfo("depth-anything-v2-small", "DepthAnythingV2 Small", "models/depth_anything_v2_small.onnx", "~99 MB"),
-        new DepthModelInfo("depth-anything-v3-small", "DepthAnythingV3 Small", "models/depth_anything_v3_small_fp16.onnx", "~50 MB"),
+        new DepthModelInfo("depth-anything-v3-small", "DepthAnythingV3 Small", "models/depth_anything_v3_small_fp16.onnx", "~50 MB", IsDirectDepth: true),
     };
 
-    public static readonly string DefaultModelId = AvailableModels[0].Id;
+    public static readonly string DefaultModelId = "depth-anything-v3-small";
 
     private readonly GpuService _gpu;
     private OnnxRuntime? _ort;
     private OrtInferenceSession? _session;
     public string? LoadedModelId { get; private set; }
     public string? LoadedModelName { get; private set; }
+    public bool LoadedModelIsDirectDepth { get; private set; }
 
     // GPU kernel delegates — loaded lazily, cached across calls
     private Action<Index1D,
@@ -57,6 +59,12 @@ public class DepthEstimationService : IAsyncDisposable
         ArrayView1D<int, Stride1D.Dense>,    // minMaxOut [0]=min bits, [1]=max bits
         int>?                                // offset
         _minMaxKernel;
+
+    // Flips depth values: out[i] = (min + max) - in[i], converting direct depth → disparity-like
+    private Action<Index1D,
+        ArrayView1D<float, Stride1D.Dense>,  // depth buffer (in-place)
+        float, float, int>?                  // min, max, offset
+        _flipDepthKernel;
 
     // WebGPU hard limit: maxComputeWorkgroupsPerDimension = 65535.
     // ILGPU WebGPU 1D auto-grouped kernels use group size 64.
@@ -130,6 +138,7 @@ public class DepthEstimationService : IAsyncDisposable
 
             LoadedModelId = modelId;
             LoadedModelName = model.Name;
+            LoadedModelIsDirectDepth = model.IsDirectDepth;
             Status = $"✅ {model.Name} loaded — inputs: [{string.Join(", ", _session.InputNames)}], outputs: [{string.Join(", ", _session.OutputNames)}]";
             Console.WriteLine($"[Depth] {Status}");
         }
@@ -317,6 +326,19 @@ public class DepthEstimationService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// GPU kernel: flip depth values in-place. Converts direct depth (high=far) to disparity-like (high=close).
+    /// Formula: buf[i] = (min + max) - buf[i]
+    /// </summary>
+    private static void FlipDepthKernel(
+        Index1D idx,
+        ArrayView1D<float, Stride1D.Dense> depth,
+        float min, float max, int offset)
+    {
+        int i = idx + offset;
+        depth[i] = (min + max) - depth[i];
+    }
+
     // ─────────────────────────────────────────────────────────────
     //  Inference
     // ─────────────────────────────────────────────────────────────
@@ -384,6 +406,11 @@ public class DepthEstimationService : IAsyncDisposable
             ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<int, Stride1D.Dense>,
             int>(MinMaxKernel);
+
+        _flipDepthKernel ??= accelerator.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView1D<float, Stride1D.Dense>,
+            float, float, int>(FlipDepthKernel);
     }
 
     /// <summary>
@@ -525,6 +552,22 @@ public class DepthEstimationService : IAsyncDisposable
         float minD = BitConverter.Int32BitsToSingle(mmResult[0]);
         float maxD = mmResult[1] != 0 ? BitConverter.Int32BitsToSingle(mmResult[1]) : 1f;
         if (minD >= float.MaxValue - 1f || minD >= maxD) { minD = 0f; maxD = 1f; }
+
+        Console.WriteLine($"[Depth] Min/Max: [{minD:F6}, {maxD:F6}], range={maxD - minD:F6}");
+
+        // Direct-depth models (DAv3): flip buffer so high value = close (disparity-like).
+        // The unprojection kernel assumes disparity ordering (high=close, inverts to get depth).
+        if (LoadedModelIsDirectDepth && maxD > minD)
+        {
+            Console.WriteLine($"[Depth] Flipping direct depth → disparity (min+max-val)");
+            for (int offset = 0; offset < totalPixels; offset += MaxDispatchElements)
+            {
+                int count = Math.Min(MaxDispatchElements, totalPixels - offset);
+                _flipDepthKernel!(count, resizedBuf.View, minD, maxD, offset);
+            }
+            await accelerator.SynchronizeAsync();
+            // After flip: old min becomes new max, old max becomes new min, but numerical range is preserved
+        }
 
         Status = $"✅ Depth estimated — range: [{minD:F3}, {maxD:F3}]";
         OnStateChanged?.Invoke();

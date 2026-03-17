@@ -49,7 +49,9 @@
       "Bash(python3 -c \":*)",
       "Bash(python -c \":*)",
       "Bash(python:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(sed -i 's/, bool isDirectDepth = false//g; /IsDirectDepth/d' SpawnScene/Services/DepthToGaussianKernel.cs)",
+      "Bash(sed -i 's/, isDirectDepth//g' SpawnScene/Services/DepthToGaussianKernel.cs)"
     ]
   }
 }

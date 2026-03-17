@@ -693,6 +693,41 @@ public partial class Studio
         }
         sectionY += 35;
 
+        // Depth model selector
+        mainPanel.AddChild(new UILabel
+        {
+            X = 30, Y = sectionY,
+            Text = "Depth Model:",
+            FontSize = FontSize.Caption,
+            Color = System.Drawing.Color.FromArgb(255, 180, 180, 200),
+        });
+
+        float modelX = 140;
+        foreach (var model in DepthEstimationService.AvailableModels)
+        {
+            bool active = _activeProject.Settings.DepthModel == model.Id;
+            var modelId = model.Id;
+            float btnW = Math.Max(90, model.Name.Length * 7 + 16);
+            mainPanel.AddChild(new UIButton
+            {
+                X = modelX, Y = sectionY - 3,
+                Width = btnW, Height = 26,
+                Text = model.Name,
+                FontSize = FontSize.Caption,
+                NormalColor = active
+                    ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
+                    : System.Drawing.Color.FromArgb(255, 50, 50, 65),
+                OnClick = () =>
+                {
+                    _activeProject.Settings.DepthModel = modelId;
+                    _ = _projectService.UpdateProjectAsync(_activeProject);
+                    BuildProjectDetailUI();
+                },
+            });
+            modelX += btnW + 6;
+        }
+        sectionY += 35;
+
         bool canGenerate = _activeProject.Sources.Count > 0;
         mainPanel.AddChild(new UIButton
         {

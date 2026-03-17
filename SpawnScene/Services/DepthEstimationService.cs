@@ -368,6 +368,192 @@ public class DepthEstimationService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Multi-view depth estimation result: per-view depth maps + DAv3-predicted camera poses.
+    /// </summary>
+    public class MultiViewDepthResult : IDisposable
+    {
+        public List<DepthResult> DepthResults { get; set; } = new();
+        /// <summary>DAv3 extrinsics: [R|t] 3×4 matrix per view. null if model doesn't output them.</summary>
+        public float[,][]? Extrinsics { get; set; }
+        public void Dispose()
+        {
+            foreach (var d in DepthResults) d.Dispose();
+            DepthResults.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Run DAv3 multi-view inference: all images in one pass → consistent depth + camera poses.
+    /// Requires DAv3 model (5D input). Falls back to per-image inference for other models.
+    /// </summary>
+    public async Task<MultiViewDepthResult?> EstimateDepthMultiViewAsync(IReadOnlyList<ImportedImage> images)
+    {
+        if (_session == null || _ort == null)
+        {
+            Status = "Model not loaded.";
+            return null;
+        }
+
+        bool isDav3 = LoadedModelId?.StartsWith("depth-anything-v3") == true;
+        if (!isDav3)
+        {
+            // Fallback: run each image independently
+            var result = new MultiViewDepthResult();
+            foreach (var img in images)
+            {
+                var d = await EstimateDepthAsync(img);
+                if (d != null) result.DepthResults.Add(d);
+            }
+            return result;
+        }
+
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+        EnsureKernelsLoaded(accelerator);
+
+        const int inputSize = 518;
+        int N = images.Count;
+        int pixelsPerImage = 3 * inputSize * inputSize;
+
+        Status = $"Preprocessing {N} images on GPU...";
+        OnStateChanged?.Invoke();
+        await Task.Yield();
+
+        // Preprocess all N images into one contiguous buffer: [N * 3 * 518 * 518]
+        using var preprocessBuf = accelerator.Allocate1D<float>(N * pixelsPerImage);
+        var paramArr = new float[]
+        {
+            inputSize, 0, 0, // origW/origH filled per image
+            0.485f, 0.456f, 0.406f,
+            0.229f, 0.224f, 0.225f,
+        };
+
+        for (int i = 0; i < N; i++)
+        {
+            var img = images[i];
+            paramArr[1] = img.Width;
+            paramArr[2] = img.Height;
+
+            // Upload RGBA for this image
+            var packedRgba = System.Runtime.InteropServices.MemoryMarshal
+                .Cast<byte, int>(img.RgbaPixels.AsSpan()).ToArray();
+            using var rgbaBuf = accelerator.Allocate1D(packedRgba);
+            using var paramBuf = accelerator.Allocate1D(paramArr);
+
+            // Write into the correct slice of the combined buffer
+            var sliceView = preprocessBuf.View.SubView(i * pixelsPerImage, pixelsPerImage);
+            _preprocessKernel!(pixelsPerImage, rgbaBuf.View, sliceView, paramBuf.View);
+        }
+
+        await accelerator.SynchronizeAsync();
+
+        var gpuInputBuffer = preprocessBuf.GetGPUBuffer();
+        if (gpuInputBuffer == null)
+        {
+            Status = "Could not access GPU buffer for multi-view input.";
+            return null;
+        }
+
+        Status = $"Running DAv3 multi-view inference ({N} images)...";
+        OnStateChanged?.Invoke();
+        await Task.Yield();
+
+        try
+        {
+            using var inputTensor = _ort.TensorFromGpuBuffer(gpuInputBuffer,
+                new TensorFromGpuBufferOptions
+                {
+                    DataType = "float32",
+                    Dims = new long[] { 1, N, 3, inputSize, inputSize },
+                });
+
+            using var feeds = new OrtFeeds();
+            feeds.Set(_session.InputNames[0], inputTensor);
+
+            using var ortResult = await _session.Run(feeds);
+
+            // Parse predicted_depth: [1, N, H, W]
+            using var depthTensor = ortResult.GetTensor("predicted_depth");
+            var depthDims = depthTensor.Dims;
+            int outH = (int)depthDims[depthDims.Length - 2];
+            int outW = (int)depthDims[depthDims.Length - 1];
+            Console.WriteLine($"[Depth] Multi-view output: [{string.Join(", ", depthDims)}], location: {depthTensor.Location}");
+
+            // Read depth to CPU for per-view slicing → re-upload per view for guided upsampling.
+            // CPU transfer justified: splitting [1,N,H,W] into N separate buffers.
+            using var depthData = depthTensor.GetData<SpawnDev.BlazorJS.JSObjects.Float32Array>();
+            float[] allDepth = depthData.ToArray();
+            Console.WriteLine($"[Depth] Multi-view depth: {allDepth.Length} total floats for {N} views");
+
+            // Parse extrinsics: [1, N, 3, 4] if available
+            float[][]? extrinsicsPerView = null;
+            try
+            {
+                using var extTensor = ortResult.GetTensor("extrinsics");
+                float[] extData;
+                // CPU readback of extrinsics (12 floats per view — tiny, always OK)
+                using var ed = extTensor.GetData<SpawnDev.BlazorJS.JSObjects.Float32Array>();
+                extData = ed.ToArray();
+
+                extrinsicsPerView = new float[N][];
+                for (int i = 0; i < N; i++)
+                {
+                    extrinsicsPerView[i] = new float[12];
+                    System.Array.Copy(extData, i * 12, extrinsicsPerView[i], 0, 12);
+                    Console.WriteLine($"[Depth] View {i} extrinsics: [{string.Join(", ", extrinsicsPerView[i].Select(v => v.ToString("F4")))}]");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Depth] No extrinsics output: {ex.Message}");
+            }
+
+            // Build per-view DepthResults with guided upsampling
+            var result = new MultiViewDepthResult();
+            int depthSliceSize = outH * outW;
+
+            for (int i = 0; i < N; i++)
+            {
+                int origW = images[i].Width;
+                int origH = images[i].Height;
+
+                // Upload this view's depth slice to GPU
+                var viewDepth = new float[depthSliceSize];
+                System.Array.Copy(allDepth, i * depthSliceSize, viewDepth, 0, depthSliceSize);
+                using var rawBuf = accelerator.Allocate1D(viewDepth);
+
+                // Upload RGBA guide for this view
+                var packedRgba = System.Runtime.InteropServices.MemoryMarshal
+                    .Cast<byte, int>(images[i].RgbaPixels.AsSpan()).ToArray();
+                using var guideBuf = accelerator.Allocate1D(packedRgba);
+
+                // Guided upsample + min/max
+                var depthResult = await RunResizeMinMaxAsync(accelerator, rawBuf.View,
+                    guideBuf.View, outW, outH, origW, origH);
+
+                if (depthResult != null)
+                    result.DepthResults.Add(depthResult);
+            }
+
+            if (extrinsicsPerView != null)
+            {
+                // Store as jagged array for now; MultiViewGenerationService will parse [R|t]
+                result.Extrinsics = new float[1, N][];
+                for (int i = 0; i < N; i++)
+                    result.Extrinsics[0, i] = extrinsicsPerView[i];
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            Status = $"Multi-view inference failed: {ex.Message}";
+            Console.WriteLine($"[Depth] Multi-view error: {ex}");
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Run depth estimation on a GPU-resident image (SR fast path).
     /// Skips CPU→GPU upload — packed RGBA is already on GPU.
     /// </summary>

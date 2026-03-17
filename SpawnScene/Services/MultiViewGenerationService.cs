@@ -57,6 +57,15 @@ public class MultiViewGenerationService
         if (images.Count < 2)
             throw new ArgumentException("Multi-view generation requires at least 2 images.");
 
+        // DAv3 native multi-view: single inference → consistent depth + predicted camera poses
+        bool isDav3 = _depthService.LoadedModelId?.StartsWith("depth-anything-v3") == true;
+        if (isDav3)
+        {
+            return await GenerateWithDav3MultiViewAsync(images, subsample, edgeSharpness);
+        }
+
+        // ─── Legacy path: feature matching + 2D offset ───
+
         // ─── Step 1: Feature detection + matching ───
         SetStatus($"Detecting features in {images.Count} images...");
         _importService.Clear();
@@ -218,6 +227,133 @@ public class MultiViewGenerationService
         int actualTotal = (int)(byteOffset / (10 * sizeof(float)));
         SetStatus($"Multi-view generation complete: {actualTotal:N0} splats from {viewCounts.Count} views.");
         Console.WriteLine($"[MultiView] Total: {actualTotal:N0} splats from {viewCounts.Count} views");
+
+        return (merged, totalSplats);
+    }
+
+    /// <summary>
+    /// DAv3 native multi-view: all images in one forward pass → consistent depth + camera extrinsics.
+    /// No feature matching, no 2D offsets, no per-view depth scale mismatch.
+    /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
+        GenerateWithDav3MultiViewAsync(IReadOnlyList<ImportedImage> images, int subsample, float edgeSharpness)
+    {
+        // Ensure DAv3 model loaded
+        if (!_depthService.IsReady)
+        {
+            SetStatus("Loading DAv3 model...");
+            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+        }
+
+        // Run multi-view inference
+        SetStatus($"Running DAv3 multi-view inference ({images.Count} images)...");
+        var mvResult = await _depthService.EstimateDepthMultiViewAsync(images);
+        if (mvResult == null || mvResult.DepthResults.Count == 0)
+        {
+            SetStatus("Error: DAv3 multi-view inference failed.");
+            return null;
+        }
+
+        Console.WriteLine($"[MultiView-DAv3] Got {mvResult.DepthResults.Count} depth maps" +
+            (mvResult.Extrinsics != null ? " + extrinsics" : ""));
+
+        // Parse extrinsics into CameraParams (if available)
+        var cameras = new CameraParams?[images.Count];
+        bool hasExtrinsics = mvResult.Extrinsics != null;
+
+        if (hasExtrinsics)
+        {
+            for (int i = 0; i < images.Count && i < mvResult.DepthResults.Count; i++)
+            {
+                var ext = mvResult.Extrinsics![0, i]; // [R00,R01,R02,tx, R10,R11,R12,ty, R20,R21,R22,tz]
+                var cam = images[i].EstimatedCamera ?? CameraParams.CreateDefault(images[i].Width, images[i].Height);
+
+                // Parse 3×4 [R|t] matrix
+                cam.Forward = new Vector3(ext[8], ext[9], ext[10]); // third row of R
+                cam.Up = new Vector3(-ext[4], -ext[5], -ext[6]);    // negated second row (camera Y flipped)
+                cam.Position = new Vector3(
+                    -(ext[0] * ext[3] + ext[4] * ext[7] + ext[8] * ext[11]),   // -R^T * t
+                    -(ext[1] * ext[3] + ext[5] * ext[7] + ext[9] * ext[11]),
+                    -(ext[2] * ext[3] + ext[6] * ext[7] + ext[10] * ext[11])
+                );
+
+                cameras[i] = cam;
+                Console.WriteLine($"[MultiView-DAv3] View {i}: pos={cam.Position}, fwd={cam.Forward}");
+            }
+        }
+
+        // Generate splats per view
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+        var device = accelerator.NativeAccelerator.NativeDevice!;
+        var queue = accelerator.NativeAccelerator.Queue!;
+
+        // Pass 1: count splats per view
+        var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
+        int totalSplats = 0;
+
+        for (int i = 0; i < mvResult.DepthResults.Count && i < images.Count; i++)
+        {
+            SetStatus($"Generating splats: {images[i].FileName} ({i + 1}/{images.Count})...");
+            var depth = mvResult.DepthResults[i];
+            var cam = cameras[i] ?? images[i].EstimatedCamera;
+
+            (MemoryBuffer1D<float, Stride1D.Dense> buf, int count) result;
+
+            if (hasExtrinsics && cameras[i] != null)
+            {
+                // World-space unprojection using DAv3's predicted camera poses
+                result = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
+                    depth, images[i], cameras[i]!, subsample, edgeSharpness, depthScale: 1.0f);
+            }
+            else
+            {
+                // Fallback: camera-local unprojection with EXIF focal length
+                result = await _gaussianKernel.GeneratePackedGpuBufferAsync(
+                    depth, images[i], subsample, edgeSharpness, cam);
+            }
+
+            viewResults.Add(result);
+            totalSplats += result.count;
+            Console.WriteLine($"[MultiView-DAv3] View {i}: {result.count:N0} splats");
+        }
+
+        if (totalSplats == 0)
+        {
+            foreach (var (buf, _) in viewResults) buf.Dispose();
+            mvResult.Dispose();
+            SetStatus("Error: No splats generated.");
+            return null;
+        }
+
+        // Merge all view buffers into one
+        SetStatus($"Merging {totalSplats:N0} splats from {viewResults.Count} views...");
+        var merged = accelerator.Allocate1D<float>(totalSplats * 10);
+        var mergedGpuBuf = merged.GetGPUBuffer();
+        ulong byteOffset = 0;
+
+        foreach (var (buf, count) in viewResults)
+        {
+            var srcGpuBuf = buf.GetGPUBuffer();
+            ulong byteCount = (ulong)count * 10 * sizeof(float);
+
+            if (srcGpuBuf != null && mergedGpuBuf != null)
+            {
+                using var encoder = device.CreateCommandEncoder();
+                encoder.CopyBufferToBuffer(srcGpuBuf, 0, mergedGpuBuf, byteOffset, byteCount);
+                using var cmdBuf = encoder.Finish();
+                queue.Submit(new[] { cmdBuf });
+            }
+
+            byteOffset += byteCount;
+            buf.Dispose();
+        }
+
+        mvResult.Dispose();
+
+        int actualTotal = (int)(byteOffset / (10 * sizeof(float)));
+        SetStatus($"DAv3 multi-view complete: {actualTotal:N0} splats from {viewResults.Count} views.");
+        Console.WriteLine($"[MultiView-DAv3] Total: {actualTotal:N0} splats from {viewResults.Count} views");
 
         return (merged, totalSplats);
     }

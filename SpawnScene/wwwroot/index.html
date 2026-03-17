@@ -2,18 +2,23 @@
 <html lang="en">
 
 <head>
+    <script>
+        var path = window.location.pathname.split('/');
+        // If hostname contains github.io AND we aren't at the root, use the subfolder
+        var isGitHubPages = window.location.hostname.includes('github.io');
+        var baseHref = (isGitHubPages && path[1] === 'SpawnScene') ? '/SpawnScene/' : '/';
+        document.write('<base href="' + baseHref + '" />');
+    </script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpawnScene</title>
     <meta name="description"
-        content="Create 3D scenes from images using Gaussian Splatting — entirely in your browser. Powered by SpawnDev.BlazorJS and SpawnDev.ILGPU." />
-    <base href="/" />
+          content="Create 3D scenes from images using Gaussian Splatting — entirely in your browser. Powered by SpawnDev.BlazorJS and SpawnDev.ILGPU." />
     <link rel="preload" id="webassembly" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
-        rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+          rel="stylesheet" />
     <link rel="stylesheet" href="css/app.css" />
     <link rel="icon" type="image/png" href="favicon.png" />
     <link href="SpawnScene.styles.css" rel="stylesheet" />

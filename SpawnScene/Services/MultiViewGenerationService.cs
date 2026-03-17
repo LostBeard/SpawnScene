@@ -57,6 +57,13 @@ public class MultiViewGenerationService
         if (images.Count < 2)
             throw new ArgumentException("Multi-view generation requires at least 2 images.");
 
+        // Ensure depth model is loaded before checking model type
+        if (!_depthService.IsReady)
+        {
+            SetStatus("Loading depth model...");
+            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+        }
+
         // DAv3 native multi-view: single inference → consistent depth + predicted camera poses
         bool isDav3 = _depthService.LoadedModelId?.StartsWith("depth-anything-v3") == true;
         if (isDav3)

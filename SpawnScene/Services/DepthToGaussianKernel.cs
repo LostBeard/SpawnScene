@@ -98,8 +98,8 @@ public class DepthToGaussianKernel
         float pixelScale = d * subsample / fx;
         float splatScale = pixelScale > 0.001f ? pixelScale : 0.001f;
 
-        // Phase 4b: Edge-adaptive scale — shrink splats at depth discontinuities.
-        // Central difference gradient on raw depth (normalized by range for unit independence).
+        // Depth gradient for edge-adaptive scale + opacity + flying pixel removal
+        float gradMag = 0f;
         if (edgeSharpness > 0f && range > 1e-6f)
         {
             int x0 = (imgX > 0) ? imgX - subsample : imgX;
@@ -109,10 +109,17 @@ public class DepthToGaussianKernel
 
             float gx = (depthValues[imgY * width + x1] - depthValues[imgY * width + x0]) / range;
             float gy = (depthValues[y1 * width + imgX] - depthValues[y0 * width + imgX]) / range;
-            float gradMag = MathF.Sqrt(gx * gx + gy * gy);
-            // Reduce scale at edges: high gradient → smaller splats → sharper edges
+            gradMag = MathF.Sqrt(gx * gx + gy * gy);
+
+            // Edge-adaptive scale: shrink splats at depth discontinuities
             splatScale /= (1f + gradMag * edgeSharpness);
         }
+
+        // Edge-aware opacity: full opacity in smooth regions, slightly reduced at depth edges
+        float alpha = 0.9f;
+        if (gradMag > 0.05f)
+            alpha = 0.9f - (gradMag - 0.05f) * 0.5f;
+        if (alpha < 0.3f) alpha = 0.3f;
 
         int packed = packedRGBA[imgIdx];
         float r = (packed & 0xFF) / 255f;
@@ -123,8 +130,6 @@ public class DepthToGaussianKernel
         float posY = -((imgY - cy) * d / fy);
         float posZ = d;
 
-        // Atomic compaction: each valid splat gets a unique dense output slot.
-        // Zero-opacity dummy splats no longer exist — the output buffer has no gaps.
         int slot = Atomic.Add(ref counter[0], 1);
         int outOff = slot * 10;
 
@@ -137,7 +142,7 @@ public class DepthToGaussianKernel
         outPacked[outOff + 6] = splatScale;
         outPacked[outOff + 7] = splatScale;
         outPacked[outOff + 8] = splatScale * 0.5f;
-        outPacked[outOff + 9] = 0.9f;
+        outPacked[outOff + 9] = alpha;
     }
 
     /// <summary>
@@ -194,7 +199,7 @@ public class DepthToGaussianKernel
         float pixelScale = d * subsample / fx;
         float splatScale = pixelScale > 0.001f ? pixelScale : 0.001f;
 
-        // Edge-adaptive scale
+        float gradMag = 0f;
         if (edgeSharpness > 0f && range > 1e-6f)
         {
             int x0 = (imgX > 0) ? imgX - subsample : imgX;
@@ -204,23 +209,26 @@ public class DepthToGaussianKernel
 
             float gx = (depthValues[imgY * width + x1] - depthValues[imgY * width + x0]) / range;
             float gy = (depthValues[y1 * width + imgX] - depthValues[y0 * width + imgX]) / range;
-            float gradMag = MathF.Sqrt(gx * gx + gy * gy);
+            gradMag = MathF.Sqrt(gx * gx + gy * gy);
+
             splatScale /= (1f + gradMag * edgeSharpness);
         }
+
+        float alpha = 0.9f;
+        if (gradMag > 0.05f)
+            alpha = 0.9f - (gradMag - 0.05f) * 0.5f;
+        if (alpha < 0.3f) alpha = 0.3f;
 
         int packed = packedRGBA[imgIdx];
         float r = (packed & 0xFF) / 255f;
         float g = ((packed >> 8) & 0xFF) / 255f;
         float b = ((packed >> 16) & 0xFF) / 255f;
 
-        // Unproject to camera space (same as single-image path)
         float camX = -((imgX - cx) * d / fx);
         float camY = -((imgY - cy) * d / fy);
         float camZ = d;
 
         // Transform camera space → world space: pos_world = R^T * pos_cam + C_world
-        // R is the world→camera rotation matrix, so R^T rotates camera→world.
-        // C_world is the camera center in world coordinates (passed as tx, ty, tz).
         float worldX = r00 * camX + r10 * camY + r20 * camZ + tx;
         float worldY = r01 * camX + r11 * camY + r21 * camZ + ty;
         float worldZ = r02 * camX + r12 * camY + r22 * camZ + tz;
@@ -237,7 +245,7 @@ public class DepthToGaussianKernel
         outPacked[outOff + 6] = splatScale;
         outPacked[outOff + 7] = splatScale;
         outPacked[outOff + 8] = splatScale * 0.5f;
-        outPacked[outOff + 9] = 0.9f;
+        outPacked[outOff + 9] = alpha;
     }
 
     private Action<Index1D,

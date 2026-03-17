@@ -266,20 +266,22 @@ public partial class Studio
 
             // Parse camera params — TempleRing images are 640x480
             var gtCameras = MultiViewGenerationService.ParseMiddleburyParams(parText, 640, 480);
-            Console.WriteLine($"[Studio] TempleRing: {gtCameras.Count} cameras parsed");
+            Console.WriteLine($"[Studio] TempleRing: {gtCameras.Count} cameras in par file");
 
-            // Load first 4 images (to keep memory reasonable)
-            int maxImages = Math.Min(4, gtCameras.Count);
+            // Load first 4 available images (some par entries may not have files on disk)
+            int maxImages = 4;
             var images = new List<ImportedImage>();
             var cameras = new List<CameraParams>();
 
-            for (int i = 0; i < maxImages; i++)
+            for (int i = 0; i < gtCameras.Count && images.Count < maxImages; i++)
             {
                 var (filename, cam) = gtCameras[i];
-                _statusMessage = $"Loading {filename} ({i + 1}/{maxImages})...";
+                _statusMessage = $"Loading {filename} ({images.Count + 1}/{maxImages})...";
                 BuildProjectDetailUI();
 
-                var bytes = await _http.GetByteArrayAsync($"datasets/TempleRing/{filename}");
+                byte[] bytes;
+                try { bytes = await _http.GetByteArrayAsync($"datasets/TempleRing/{filename}"); }
+                catch { Console.WriteLine($"[Studio] Skipping {filename} (not on disk)"); continue; }
                 using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
                 using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
                 int w = (int)bitmap.Width;

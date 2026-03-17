@@ -384,15 +384,33 @@ public class MultiViewGenerationService
             await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
         }
 
-        // Log camera positions to verify they make sense
+        // Log camera positions and compute scene center + depth scale
+        var camCentroid = Vector3.Zero;
         for (int i = 0; i < cameras.Count; i++)
         {
             var c = cameras[i];
+            camCentroid += c.Position;
             Console.WriteLine($"[MultiView-GT] Cam[{i}] pos=({c.Position.X:F4},{c.Position.Y:F4},{c.Position.Z:F4}) fwd=({c.Forward.X:F3},{c.Forward.Y:F3},{c.Forward.Z:F3}) fx={c.FocalX:F1}");
         }
+        camCentroid /= cameras.Count;
 
-        // Pass 1: count splats per view
-        var viewCounts = new List<(int idx, int count)>();
+        // Estimate the scene center: the point all cameras are looking at.
+        // For a ring dataset, the scene center is roughly the centroid of cameras
+        // plus the average forward direction scaled by the inter-camera distance.
+        // Simpler: the centroid of all cameras IS roughly the scene center for ring captures.
+        // The typical depth from camera to scene center is the average distance from each camera to the centroid.
+        float avgDist = 0;
+        for (int i = 0; i < cameras.Count; i++)
+            avgDist += Vector3.Distance(cameras[i].Position, camCentroid);
+        avgDist /= cameras.Count;
+
+        // MDE inverted disparity median is roughly 2.0 (for normalized=0.5 → d=1/(0.5+0.01)≈2.0)
+        // So depthScale = avgDist / typicalMdeDepth
+        float depthScale = avgDist / 2.0f;
+        Console.WriteLine($"[MultiView-GT] Camera centroid=({camCentroid.X:F4},{camCentroid.Y:F4},{camCentroid.Z:F4}), avgDist={avgDist:F4}, depthScale={depthScale:F4}");
+
+        // Pass 1: estimate depth + compute per-view scale by projecting scene center into each view
+        var viewCounts = new List<(int idx, int count, float viewScale)>();
         int totalSplats = 0;
 
         for (int i = 0; i < images.Count; i++)
@@ -401,15 +419,49 @@ public class MultiViewGenerationService
             var depthResult = await _depthService.EstimateDepthAsync(images[i]);
             if (depthResult == null) { Console.WriteLine($"[MultiView-GT] Depth failed for {i}"); continue; }
 
+            // Compute per-view depth scale: project scene center into this camera,
+            // sample MDE depth there, and scale so MDE depth = actual depth to center.
+            float viewScale = depthScale; // fallback
+            try
+            {
+                var cam = cameras[i];
+                float[] depthData = await depthResult.RawDepthGpu!.CopyToHostAsync<float>(0, depthResult.RawDepthGpu.Length);
+                float range = depthResult.MaxDepth - depthResult.MinDepth;
+
+                // Project scene center into this camera
+                var delta = camCentroid - cam.Position;
+                float camZ = Vector3.Dot(cam.Forward, delta);
+
+                if (camZ > 0.01f && range > 1e-6f)
+                {
+                    float camX = Vector3.Dot(cam.Right, delta);
+                    float camY = Vector3.Dot(-cam.Up, delta);
+                    float px = cam.FocalX * camX / camZ + cam.CenterX;
+                    float py = cam.FocalY * camY / camZ + cam.CenterY;
+                    int ix = Math.Clamp((int)px, 0, depthResult.Width - 1);
+                    int iy = Math.Clamp((int)py, 0, depthResult.Height - 1);
+
+                    float rawMde = depthData[iy * depthResult.Width + ix];
+                    float norm = (rawMde - depthResult.MinDepth) / range;
+                    if (norm > 0.01f)
+                    {
+                        float mdeDepth = 1.0f / (norm + 0.01f);
+                        viewScale = camZ / mdeDepth;
+                        Console.WriteLine($"[MultiView-GT] View {i} depth align: center at pixel ({ix},{iy}), camZ={camZ:F4}, mdeDepth={mdeDepth:F2}, scale={viewScale:F4}");
+                    }
+                }
+            }
+            catch { }
+
             SetStatus($"Generating splats: {images[i].FileName} ({i + 1}/{images.Count})...");
             var (buf, count) = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
-                depthResult, images[i], cameras[i], subsample, edgeSharpness);
+                depthResult, images[i], cameras[i], subsample, edgeSharpness, viewScale);
 
-            viewCounts.Add((i, count));
+            viewCounts.Add((i, count, viewScale));
             totalSplats += count;
             buf.Dispose();
             depthResult.Dispose();
-            Console.WriteLine($"[MultiView-GT] View {i}: {count:N0} splats");
+            Console.WriteLine($"[MultiView-GT] View {i}: {count:N0} splats, scale={viewScale:F4}");
         }
 
         if (viewCounts.Count == 0 || totalSplats == 0)
@@ -429,14 +481,14 @@ public class MultiViewGenerationService
         var mergedGpuBuf = merged.GetGPUBuffer();
 
         ulong byteOffset = 0;
-        foreach (var (idx, expectedCount) in viewCounts)
+        foreach (var (idx, expectedCount, viewScale) in viewCounts)
         {
             SetStatus($"Fusing view {idx + 1}/{images.Count}...");
             var depthResult = await _depthService.EstimateDepthAsync(images[idx]);
             if (depthResult == null) continue;
 
             var (buf, count) = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
-                depthResult, images[idx], cameras[idx], subsample, edgeSharpness);
+                depthResult, images[idx], cameras[idx], subsample, edgeSharpness, viewScale);
             depthResult.Dispose();
 
             var srcGpuBuf = buf.GetGPUBuffer();

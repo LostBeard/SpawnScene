@@ -68,16 +68,20 @@ public class CameraController : IDisposable
         }
         else if (scene.SourceName == "multi-view" && scene.TrainingCameras.Count > 0)
         {
-            // Multi-view scene: position at centroid of SfM cameras, looking toward scene center.
+            // Multi-view scene: position at first camera, looking toward scene center.
             var camCenter = Vector3.Zero;
             foreach (var cam in scene.TrainingCameras)
                 camCenter += cam.Position;
             camCenter /= scene.TrainingCameras.Count;
 
-            // Use first camera's forward direction as initial look direction
             var firstCam = scene.TrainingCameras[0];
             _position = firstCam.Position;
-            _moveSpeed = 2.0f;
+
+            // Scale move speed to scene size
+            float maxDist = 0;
+            foreach (var cam in scene.TrainingCameras)
+                maxDist = MathF.Max(maxDist, Vector3.Distance(cam.Position, camCenter));
+            _moveSpeed = MathF.Max(maxDist * 0.5f, 0.05f);
 
             var dir = firstCam.Forward;
             _yaw = MathF.Atan2(dir.X, -dir.Z);

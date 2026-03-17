@@ -47,21 +47,29 @@ Source: https://github.com/SonnyC56/blunt — Python tool doing similar single-i
 - ILGPU kernel: 3x3 or 5x5 median filter on the depth buffer
 - **Files**: New kernel in `DepthToGaussianKernel.cs` or `DepthEstimationService.cs`
 
-### 1.6 Depth Anything V3 Upgrade
-- ONNX models available: `onnx-community/depth-anything-v3-small` (105MB, Apache 2.0)
-- Also base and large variants available
-- DAv3 provides **metric depth** (meters from camera) — eliminates depth scale alignment problem entirely
-- If metric, multi-view fusion becomes: `pos_world = R^T * (metric_pos_cam) + C_world` — no scale factor needed
-- Need to verify: does the ONNX model output metric depth directly, or does it need post-processing?
-- Also may output confidence maps / semantic segments (useful for adaptive splat scale)
-- Normal-based flying pixel check: compute surface normals from depth, cull pixels with normals nearly perpendicular to camera ray (grazing angle)
-- **Files**: `DepthEstimationService.cs` (add DAv3 model option), `DepthToGaussianKernel.cs`
+### 1.6 Depth Anything V3 ✅ (2026-03-17)
+- FP16 ONNX model converted from onnx-community/depth-anything-v3-small (50.5 MB)
+- Patched `/backbone/Resize` from cubic→linear for ORT WebGPU EP compat
+- Outputs: `predicted_depth`, `confidence`, `extrinsics`, `intrinsics` — multi-view native
+- DAv3 outputs direct depth (high=far), flipped to disparity-like in `DepthEstimationService.FlipDepthKernel`
+- Model selector added to Studio UI, DAv3 is now default
+- **Status**: Inference works, testing depth quality
 
-### 1.7 Kernel Struct Refactor
-- Replace `float[] p` parameter array with a proper struct type
-- SpawnDev.ILGPU supports struct kernel params (bypasses parameter count limit)
-- Eliminates all `p[0]`, `p[10]`, `p[14]` magic indices
-- **Files**: `DepthToGaussianKernel.cs` — define `SplatKernelParams` struct
+### 1.7 Kernel Struct Refactor ✅ (2026-03-17)
+- `SplatParams` and `SplatWorldParams` structs replace all `float[] p` magic-index arrays
+- No GPU buffer allocation for params — ILGPU decomposes to scalar bindings
+- Optional `CameraParams? camera` on all public methods for EXIF flow-through
+
+### 1.8 EXIF Focal Length ✅ (2026-03-17)
+- Pure C# EXIF parser (`ExifReader.cs`) extracts FocalLength + FocalLengthIn35mmFilm from JPEG bytes
+- `CameraParams.CreateFromExif()`: FocalLength35mm (exact) → phone estimate (7x crop) → 1.2x heuristic
+- Integrated into single-image, multi-view, and SfM paths
+
+### 1.9 Normal-Based Flying Pixel Removal
+- Compute surface normals from cross-product of neighboring 3D points (ILGPU kernel)
+- Cull or reduce opacity of splats where normal is nearly perpendicular to camera ray (grazing angle)
+- More general than depth-gradient culling — works for any scene geometry
+- **Files**: New kernel in `DepthToGaussianKernel.cs` or separate `NormalFilterKernel.cs`
 
 ---
 
@@ -83,7 +91,21 @@ Source: https://github.com/SonnyC56/blunt — Python tool doing similar single-i
 - Current: hard cut between reference and extension → visible seam
 - Better: overlap band (100-200px) where both views contribute with opacity gradient
 - Reference fades from 1.0→0.0, extension fades from 0.0→1.0 across the band
+- Use sigmoid/cosine fade based on distance from image center → smooth dissolve between views
 - **Files**: `DepthToGaussianKernel.cs` (exclusion zone → blend zone)
+
+### 2.5 Global Alignment Kernel (Relative Depth + Sparse SfM)
+- Use sparse SfM points as "metric skeleton" to anchor relative MDE depth
+- ILGPU kernel: find global scale `s` and bias `b` that best fits MDE to SfM world coords
+- Scene-agnostic: works for any scene without per-view manual tuning
+- Alternative to metric depth models (which are too large for browser)
+- **Files**: New `GlobalAlignmentKernel.cs`
+
+### 2.6 DAv3 Multi-View Native Inference
+- DAv3 accepts `[1, N, 3, H, W]` input — process multiple views in single forward pass
+- Outputs extrinsics `[1, N, 3, 4]` and intrinsics — eliminates need for separate SfM
+- Could replace SfmReconstructor entirely for supported view counts
+- **Files**: `DepthEstimationService.cs`, `MultiViewGenerationService.cs`
 
 ### 2.4 Homography Instead of Translation
 - 2D offset (median dx, dy) assumes pure translation between views
@@ -108,10 +130,14 @@ Source: https://github.com/SonnyC56/blunt — Python tool doing similar single-i
 - Build active chunk list per frame
 - **Files**: `GpuGaussianRenderer.cs`
 
-### 3.3 Distance-Based LOD
+### 3.3 Distance-Based LOD + Stochastic Morton Masking
 - Budget ~14-20M active splats for 60 FPS
 - Near chunks: full density, Medium: 1/4, Far: 1/16
-- **Files**: `GpuGaussianRenderer.cs`
+- **Stochastic Morton LOD**: Use LSBs of Morton index as density mask — further splats get masked
+  by progressively more bits, maintaining constant screen-space density regardless of scene size.
+  Pre-compute Morton index during unprojection kernel for O(1) voxel lookup later.
+- This enables 100M+ splat scenes without exceeding WASM memory or GPU frame budget
+- **Files**: `GpuGaussianRenderer.cs`, `DepthToGaussianKernel.cs` (Morton pre-computation)
 
 ### 3.4 SOG File Format
 - Header + chunk index + quantized splat data

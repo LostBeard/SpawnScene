@@ -180,6 +180,9 @@ public partial class Studio
             var depthResult = await _depthService.EstimateDepthAsync(importedImage);
             if (depthResult == null) { _statusMessage = "Error: depth estimation failed"; BuildProjectDetailUI(); return; }
 
+            // Capture depth map for visualization (before Gaussian kernel consumes the buffer)
+            await CaptureDepthMapAsync(depthResult);
+
             // Generate Gaussians
             _statusMessage = "Generating Gaussians...";
             BuildProjectDetailUI();

@@ -13,7 +13,8 @@ namespace SpawnScene.Services;
 /// All models use the same 518×518 ViT input and ImageNet normalization.
 /// </summary>
 /// <param name="IsDirectDepth">True if model outputs depth (high=far), false if disparity (high=close).</param>
-public record DepthModelInfo(string Id, string Name, string Path, string SizeLabel, bool IsDirectDepth = false);
+/// <param name="IsNative">True if this model runs via native ILGPU inference (no ORT).</param>
+public record DepthModelInfo(string Id, string Name, string Path, string SizeLabel, bool IsDirectDepth = false, bool IsNative = false);
 
 /// <summary>
 /// Monocular depth estimation using ONNX models (DepthAnythingV2, DistillAnyDepth).
@@ -29,13 +30,16 @@ public class DepthEstimationService : IAsyncDisposable
         new DepthModelInfo("distill-any-depth-small", "DistillAnyDepth Small", "models/distill_any_depth_small.onnx", "~99 MB"),
         new DepthModelInfo("depth-anything-v2-small", "DepthAnythingV2 Small", "models/depth_anything_v2_small.onnx", "~99 MB"),
         new DepthModelInfo("depth-anything-v3-small", "DepthAnythingV3 Small", "models/depth_anything_v3_small_fp16.onnx", "~50 MB", IsDirectDepth: true),
+        new DepthModelInfo("depth-anything-v3-small-native", "DAv3 Native (ILGPU)", "models/dav3_weights", "~50 MB", IsDirectDepth: true, IsNative: true),
     };
 
     public static readonly string DefaultModelId = "depth-anything-v3-small";
 
     private readonly GpuService _gpu;
+    private readonly HttpClient _http;
     private OnnxRuntime? _ort;
     private OrtInferenceSession? _session;
+    private SpawnDev.ILGPU.ML.Dav3Inference? _nativeInference;
     public string? LoadedModelId { get; private set; }
     public string? LoadedModelName { get; private set; }
     public bool LoadedModelIsDirectDepth { get; private set; }
@@ -66,6 +70,16 @@ public class DepthEstimationService : IAsyncDisposable
         float, float, int>?                  // min, max, offset
         _flipDepthKernel;
 
+    // Unguided bilinear upsample for native depth pipeline (matches the Interpolate op in ORT DAv3)
+    private Action<Index1D,
+        ArrayView1D<float, Stride1D.Dense>,  // src depth
+        ArrayView1D<float, Stride1D.Dense>,  // dst depth
+        int, int, int, int>?                 // srcW, srcH, dstW, dstH
+        _bilinearDepthKernel;
+
+    // In-place exp() for native depth: ONNX graph applies Exp to raw DPT depth channel.
+    private Action<Index1D, ArrayView1D<float, Stride1D.Dense>>? _expInPlaceKernel;
+
     // WebGPU hard limit: maxComputeWorkgroupsPerDimension = 65535.
     // ILGPU WebGPU 1D auto-grouped kernels use group size 64.
     // Batch large dispatches to stay within (65535 * 64 = 4,194,240) elements per call.
@@ -74,11 +88,12 @@ public class DepthEstimationService : IAsyncDisposable
     public event Action? OnStateChanged;
     public string Status { get; private set; } = "";
     public bool IsLoading { get; private set; }
-    public bool IsReady => _session != null;
+    public bool IsReady => _session != null || _nativeInference?.IsInitialized == true;
 
-    public DepthEstimationService(GpuService gpu)
+    public DepthEstimationService(GpuService gpu, HttpClient http)
     {
         _gpu = gpu;
+        _http = http;
     }
 
     /// <summary>
@@ -97,19 +112,61 @@ public class DepthEstimationService : IAsyncDisposable
         }
 
         // Already loaded this exact model
-        if (_session != null && LoadedModelId == modelId) return;
+        if (LoadedModelId == modelId && IsReady) return;
 
-        // Switching models: dispose old session
+        // Switching models: dispose old session / native inference
         if (_session != null)
         {
             _session.Dispose();
             _session = null;
-            LoadedModelId = null;
-            LoadedModelName = null;
         }
+        if (_nativeInference != null)
+        {
+            _nativeInference.Dispose();
+            _nativeInference = null;
+        }
+        LoadedModelId = null;
+        LoadedModelName = null;
 
         IsLoading = true;
         OnStateChanged?.Invoke();
+
+        // ── Native ILGPU path ──────────────────────────────────────────
+        if (model.IsNative)
+        {
+            try
+            {
+                if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+                var accelerator = _gpu.WebGPUAccelerator;
+
+                Status = $"Loading {model.Name} weights...";
+                OnStateChanged?.Invoke();
+                await Task.Yield();
+
+                var weightLoader = new SpawnDev.ILGPU.ML.WeightLoader(accelerator, _http);
+                await weightLoader.LoadAsync();
+
+                _nativeInference = new SpawnDev.ILGPU.ML.Dav3Inference(accelerator, weightLoader);
+                _nativeInference.Initialize();
+
+                LoadedModelId = modelId;
+                LoadedModelName = model.Name;
+                LoadedModelIsDirectDepth = model.IsDirectDepth;
+                Status = $"✅ {model.Name} ready";
+                Console.WriteLine($"[Depth] {Status}");
+            }
+            catch (Exception ex)
+            {
+                Status = $"❌ Failed to load native model: {ex.Message}";
+                Console.WriteLine($"[Depth] Native load error: {ex}");
+            }
+            finally
+            {
+                IsLoading = false;
+                OnStateChanged?.Invoke();
+            }
+            return;
+        }
 
         try
         {
@@ -157,6 +214,37 @@ public class DepthEstimationService : IAsyncDisposable
     // ─────────────────────────────────────────────────────────────
     //  GPU Kernels
     // ─────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// GPU kernel: simple bilinear depth upsample (no color guidance).
+    /// Matches the Interpolate op in the DAv3 ONNX graph that upsamples DPT output to 518×518.
+    /// Align-corners = false (same as PyTorch interpolate default).
+    /// </summary>
+    private static void BilinearDepthKernel(
+        Index1D idx,
+        ArrayView1D<float, Stride1D.Dense> src,
+        ArrayView1D<float, Stride1D.Dense> dst,
+        int srcW, int srcH, int dstW, int dstH)
+    {
+        int dstX = idx % dstW;
+        int dstY = idx / dstW;
+
+        float fy = ((dstY + 0.5f) * srcH / dstH) - 0.5f;
+        float fx = ((dstX + 0.5f) * srcW / dstW) - 0.5f;
+
+        int y0 = (int)fy; if (y0 < 0) y0 = 0;
+        int y1 = y0 + 1;  if (y1 >= srcH) y1 = srcH - 1;
+        int x0 = (int)fx; if (x0 < 0) x0 = 0;
+        int x1 = x0 + 1;  if (x1 >= srcW) x1 = srcW - 1;
+
+        float ty = fy - y0; if (ty < 0f) ty = 0f;
+        float tx = fx - x0; if (tx < 0f) tx = 0f;
+
+        dst[idx] = src[y0 * srcW + x0] * (1f - ty) * (1f - tx)
+                 + src[y0 * srcW + x1] * (1f - ty) * tx
+                 + src[y1 * srcW + x0] * ty * (1f - tx)
+                 + src[y1 * srcW + x1] * ty * tx;
+    }
 
     /// <summary>
     /// GPU kernel: bicubic (Catmull-Rom) resize + NCHW layout + ImageNet normalize.
@@ -305,9 +393,9 @@ public class DepthEstimationService : IAsyncDisposable
 
     /// <summary>
     /// GPU kernel: parallel min/max reduction using atomic operations.
-    /// For positive depth values, IEEE 754 bit patterns preserve float ordering,
-    /// so we atomically track min/max as int bit patterns.
-    /// Output: [0] = min depth bits, [1] = max depth bits
+    /// Uses sortable-int encoding so IEEE 754 float ordering is preserved for both
+    /// positive AND negative values under signed int comparison.
+    /// Output: [0] = min sortable bits, [1] = max sortable bits
     /// </summary>
     private static void MinMaxKernel(
         Index1D idx,
@@ -316,14 +404,13 @@ public class DepthEstimationService : IAsyncDisposable
         int offset)
     {
         float v = depth[idx + offset];
-        if (v > 0f)
-        {
-            // Interop.FloatAsInt returns uint; IEEE 754 positive float ordering is preserved
-            // under uint bit-pattern comparison, so atomic min/max on int works correctly.
-            int bits = (int)Interop.FloatAsInt(v);
-            Atomic.Min(ref minMaxOut[0], bits);
-            Atomic.Max(ref minMaxOut[1], bits);
-        }
+        if (v != v) return; // skip NaN
+        int bits = (int)Interop.FloatAsInt(v);
+        // Positive floats: bit pattern already sorts correctly as signed int.
+        // Negative floats: flip all except sign bit so more-negative → smaller int.
+        int sortable = bits >= 0 ? bits : (bits ^ 0x7FFFFFFF);
+        Atomic.Min(ref minMaxOut[0], sortable);
+        Atomic.Max(ref minMaxOut[1], sortable);
     }
 
     /// <summary>
@@ -339,6 +426,17 @@ public class DepthEstimationService : IAsyncDisposable
         depth[i] = (min + max) - depth[i];
     }
 
+    /// <summary>In-place exp(x) — matches the Exp op in the ONNX graph after the DPT head.
+    /// Clamps input to [-1, 1] to prevent outlier pixels from dominating the min/max range.
+    /// ORT output range is ~[0.46, 1.63] (log-space ~[-0.78, 0.49]), so [-1, 1] is generous.</summary>
+    private static void ExpInPlaceKernel(Index1D idx, ArrayView1D<float, Stride1D.Dense> data)
+    {
+        float v = data[idx];
+        if (v < -1f) v = -1f;
+        if (v > 1f) v = 1f;
+        data[idx] = MathF.Exp(v);
+    }
+
     // ─────────────────────────────────────────────────────────────
     //  Inference
     // ─────────────────────────────────────────────────────────────
@@ -349,7 +447,7 @@ public class DepthEstimationService : IAsyncDisposable
     /// </summary>
     public async Task<DepthResult?> EstimateDepthAsync(ImportedImage image)
     {
-        if (_session == null || _ort == null)
+        if (!IsReady)
         {
             Status = "Model not loaded. Load a model first.";
             return null;
@@ -388,14 +486,16 @@ public class DepthEstimationService : IAsyncDisposable
     /// </summary>
     public async Task<MultiViewDepthResult?> EstimateDepthMultiViewAsync(IReadOnlyList<ImportedImage> images)
     {
-        if (_session == null || _ort == null)
+        if (!IsReady)
         {
             Status = "Model not loaded.";
             return null;
         }
 
-        bool isDav3 = LoadedModelId?.StartsWith("depth-anything-v3") == true;
-        if (!isDav3)
+        // Native model doesn't support 5D batch — fall back to per-image.
+        // Non-DAv3 ORT models also fall back (no multi-view input shape).
+        bool isDav3Ort = LoadedModelId == "depth-anything-v3-small" && _session != null;
+        if (!isDav3Ort)
         {
             // Fallback: run each image independently
             var result = new MultiViewDepthResult();
@@ -559,7 +659,7 @@ public class DepthEstimationService : IAsyncDisposable
     /// </summary>
     public async Task<DepthResult?> EstimateDepthAsync(GpuImage gpuImage)
     {
-        if (_session == null || _ort == null)
+        if (!IsReady)
         {
             Status = "Model not loaded. Load a model first.";
             return null;
@@ -597,6 +697,63 @@ public class DepthEstimationService : IAsyncDisposable
             Index1D,
             ArrayView1D<float, Stride1D.Dense>,
             float, float, int>(FlipDepthKernel);
+
+        _bilinearDepthKernel ??= accelerator.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>,
+            int, int, int, int>(BilinearDepthKernel);
+
+        _expInPlaceKernel ??= accelerator.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView1D<float, Stride1D.Dense>>(ExpInPlaceKernel);
+    }
+
+    /// <summary>
+    /// Native ILGPU depth pipeline: preprocess → Dav3Inference.RunFull → resize + min/max.
+    /// </summary>
+    private async Task<DepthResult?> RunNativeDepthPipelineAsync(
+        WebGPUAccelerator accelerator,
+        ArrayView1D<int, Stride1D.Dense> rgbaView,
+        int origW, int origH)
+    {
+        const int inputSize = 518;
+
+        Status = "Preprocessing image (native)...";
+        OnStateChanged?.Invoke();
+        await Task.Yield();
+
+        EnsureKernelsLoaded(accelerator);
+
+        var paramArr = new float[]
+        {
+            inputSize, origW, origH,
+            0.485f, 0.456f, 0.406f,
+            0.229f, 0.224f, 0.225f,
+        };
+        using var paramBuf = accelerator.Allocate1D(paramArr);
+        using var preprocessBuf = accelerator.Allocate1D<float>(3 * inputSize * inputSize);
+        _preprocessKernel!(3 * inputSize * inputSize, rgbaView, preprocessBuf.View, paramBuf.View);
+
+        Status = "Running DAv3 native inference...";
+        OnStateChanged?.Invoke();
+        await Task.Yield();
+
+        // RunFull enqueues all GPU commands (backbone + DPT head) synchronously.
+        // preprocessBuf stays alive until after SynchronizeAsync (inside RunResizeMinMaxAsync).
+        var depthBuf = _nativeInference!.RunFull(preprocessBuf.View);
+
+        // depthBuf is [2, OutputH, OutputW] — channel 0 = depth, channel 1 = confidence.
+        int outH = SpawnDev.ILGPU.ML.DptHead.OutputH;  // 296
+        int outW = SpawnDev.ILGPU.ML.DptHead.OutputW;  // 296
+        var depthCh0 = depthBuf.View.SubView(0, outH * outW);
+
+        // ONNX graph applies Exp() to raw DPT depth channel (converts log-depth to depth).
+        _expInPlaceKernel!(outH * outW, depthCh0);
+
+        // DptHead now outputs at 518×518 (resize moved inside head to match ONNX graph).
+        // No separate bilinear upsample needed — go straight to guided bilateral upsample.
+        return await RunResizeMinMaxAsync(accelerator, depthCh0, rgbaView, outW, outH, origW, origH);
     }
 
     /// <summary>
@@ -607,6 +764,9 @@ public class DepthEstimationService : IAsyncDisposable
         ArrayView1D<int, Stride1D.Dense> rgbaView,
         int origW, int origH)
     {
+        if (_nativeInference != null)
+            return await RunNativeDepthPipelineAsync(accelerator, rgbaView, origW, origH);
+
         const int inputSize = 518; // ViT patch size × 37
 
         Status = "Preprocessing image on GPU...";
@@ -724,7 +884,9 @@ public class DepthEstimationService : IAsyncDisposable
         }
 
         using var minMaxBuf = accelerator.Allocate1D<int>(2);
-        minMaxBuf.CopyFromCPU(new int[] { BitConverter.SingleToInt32Bits(float.MaxValue), 0 });
+        // Initialize with sortable-int sentinels: int.MaxValue for min (any value is smaller),
+        // int.MinValue for max (any value is larger).
+        minMaxBuf.CopyFromCPU(new int[] { int.MaxValue, int.MinValue });
         for (int offset = 0; offset < totalPixels; offset += MaxDispatchElements)
         {
             int count = Math.Min(MaxDispatchElements, totalPixels - offset);
@@ -733,11 +895,15 @@ public class DepthEstimationService : IAsyncDisposable
 
         await accelerator.SynchronizeAsync();
 
-        // Only 8 bytes of CPU readback: scalar metadata for display and kernel params
+        // Only 8 bytes of CPU readback: scalar metadata for display and kernel params.
+        // Convert from sortable-int encoding back to float bits.
         int[] mmResult = await minMaxBuf.CopyToHostAsync<int>(0, 2);
-        float minD = BitConverter.Int32BitsToSingle(mmResult[0]);
-        float maxD = mmResult[1] != 0 ? BitConverter.Int32BitsToSingle(mmResult[1]) : 1f;
-        if (minD >= float.MaxValue - 1f || minD >= maxD) { minD = 0f; maxD = 1f; }
+        int sortMin = mmResult[0], sortMax = mmResult[1];
+        int bitsMin = sortMin >= 0 ? sortMin : (sortMin ^ 0x7FFFFFFF);
+        int bitsMax = sortMax >= 0 ? sortMax : (sortMax ^ 0x7FFFFFFF);
+        float minD = BitConverter.Int32BitsToSingle(bitsMin);
+        float maxD = BitConverter.Int32BitsToSingle(bitsMax);
+        if (float.IsNaN(minD) || float.IsNaN(maxD) || minD >= maxD) { minD = 0f; maxD = 1f; }
 
         Console.WriteLine($"[Depth] Min/Max: [{minD:F6}, {maxD:F6}], range={maxD - minD:F6}");
 
@@ -775,6 +941,8 @@ public class DepthEstimationService : IAsyncDisposable
         _session = null;
         _ort?.Dispose();
         _ort = null;
+        _nativeInference?.Dispose();
+        _nativeInference = null;
         GC.SuppressFinalize(this);
     }
 }

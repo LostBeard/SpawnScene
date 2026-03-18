@@ -182,6 +182,23 @@ public partial class Studio
     {
         _uiRoot.ClearChildren();
 
+        // Depth map overlay — rendered first so HUD/buttons appear on top
+        if (_showDepthMap && _depthMapView != null)
+        {
+            float aspect = (float)_depthMapW / Math.Max(1, _depthMapH);
+            float canvasAspect = (float)_canvasWidth / Math.Max(1, _canvasHeight);
+            float dispW, dispH;
+            if (aspect > canvasAspect) { dispW = _canvasWidth; dispH = _canvasWidth / aspect; }
+            else { dispH = _canvasHeight; dispW = _canvasHeight * aspect; }
+            float dispX = (_canvasWidth - dispW) * 0.5f;
+            float dispY = (_canvasHeight - dispH) * 0.5f;
+            _uiRoot.AddChild(new UIImage
+            {
+                X = dispX, Y = dispY, Width = dispW, Height = dispH,
+                TextureView = _depthMapView,
+            });
+        }
+
         // HUD panel (bottom-left)
         var hud = _uiRoot.AddChild(new UIPanel
         {
@@ -261,6 +278,25 @@ public partial class Studio
                 BuildSettingsPanel();
             },
         });
+
+        // Depth map toggle button (only shown when a depth map has been captured)
+        if (_depthMapView != null)
+        {
+            btnRight -= 80;
+            _uiRoot.AddChild(new UIButton
+            {
+                X = btnRight, Y = 10,
+                Width = 75, Height = 32,
+                Text = _showDepthMap ? "Scene" : "Depth",
+                FontSize = FontSize.Caption,
+                NormalColor = _showDepthMap
+                    ? System.Drawing.Color.FromArgb(255, 40, 140, 60)
+                    : System.Drawing.Color.FromArgb(200, 50, 50, 65),
+                HoverColor = System.Drawing.Color.FromArgb(220, 70, 100, 85),
+                PressedColor = System.Drawing.Color.FromArgb(200, 30, 80, 50),
+                OnClick = () => { _showDepthMap = !_showDepthMap; BuildViewerHudUI(); },
+            });
+        }
 
         // Enter VR button
         btnRight -= 80;

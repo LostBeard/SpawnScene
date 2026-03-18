@@ -146,6 +146,21 @@ public class DepthEstimationService : IAsyncDisposable
                 var weightLoader = new SpawnDev.ILGPU.ML.WeightLoader(accelerator, _http);
                 await weightLoader.LoadAsync();
 
+                // Verify weights match ONNX model (expected: [-0.071, 0.074, 0.282])
+                var biasView = weightLoader.GetView("backbone.pretrained.patch_embed.proj.bias");
+                await accelerator.SynchronizeAsync();
+                var biasCheck = await accelerator.Allocate1D<float>(1).CopyToHostAsync<float>(0, 0); // dummy
+                // Read first 3 values via a temp buffer
+                using var tmpCheck = accelerator.Allocate1D<float>(5);
+                accelerator.LoadAutoGroupedStreamKernel<ILGPU.Index1D,
+                    ILGPU.Runtime.ArrayView1D<float, ILGPU.Stride1D.Dense>,
+                    ILGPU.Runtime.ArrayView1D<float, ILGPU.Stride1D.Dense>>(
+                    (idx, src, dst) => { dst[idx] = src[idx]; })(5, biasView.SubView(0, 5), tmpCheck.View);
+                await accelerator.SynchronizeAsync();
+                var check = await tmpCheck.CopyToHostAsync<float>(0, 5);
+                Console.WriteLine($"[WeightCheck] patch_embed.proj.bias first5: [{string.Join(", ", check.Select(v => v.ToString("F4")))}]");
+                Console.WriteLine($"[WeightCheck] Expected (ONNX): [-0.0708, 0.0740, 0.2825, -0.0330, -0.0434]");
+
                 _nativeInference = new SpawnDev.ILGPU.ML.Dav3Inference(accelerator, weightLoader);
                 _nativeInference.Initialize();
 
@@ -745,6 +760,44 @@ public class DepthEstimationService : IAsyncDisposable
 
         // ONNX graph applies Exp() to raw DPT depth channel (converts log-depth to depth).
         _expInPlaceKernel!(outH * outW, depthCh0);
+
+        // Dump preprocessed input first 10 values for Python comparison
+        await accelerator.SynchronizeAsync();
+        var prepCheck = await preprocessBuf.CopyToHostAsync<float>(0, 10);
+        Console.WriteLine($"[Depth] Preprocessed first10: [{string.Join(", ", prepCheck.Select(v => v.ToString("F6")))}]");
+
+        // Block output comparison
+        var b10 = await _nativeInference!.ReadBlockOutputAsync(10, 5);
+        var b11 = await _nativeInference!.ReadBlockOutputAsync(11, 5);
+        Console.WriteLine($"[Depth] Native block10 first5: [{string.Join(", ", b10.Select(v => v.ToString("F4")))}]");
+        Console.WriteLine($"[Depth] ORT    block10 first5: [-2.3555, -2.3691, 1.6699, 0.5518, -2.4766]");
+        Console.WriteLine($"[Depth] Native block11 first5: [{string.Join(", ", b11.Select(v => v.ToString("F4")))}]");
+        Console.WriteLine($"[Depth] ORT    block11 first5: [1.6191, -2.8887, 4.0742, 2.3203, -4.4102]");
+
+        // Quick pre-upsample min/max check
+        using var preMinMax = accelerator.Allocate1D<int>(2);
+        preMinMax.CopyFromCPU(new int[] { int.MaxValue, int.MinValue });
+        _minMaxKernel!(outH * outW, depthCh0, preMinMax.View, 0);
+        await accelerator.SynchronizeAsync();
+        var preMM = await preMinMax.CopyToHostAsync<int>(0, 2);
+        int sMin = preMM[0], sMax = preMM[1];
+        float preMin = BitConverter.Int32BitsToSingle(sMin >= 0 ? sMin : (sMin ^ 0x7FFFFFFF));
+        float preMax = BitConverter.Int32BitsToSingle(sMax >= 0 ? sMax : (sMax ^ 0x7FFFFFFF));
+        Console.WriteLine($"[Depth] Pre-upsample ({outW}x{outH}): [{preMin:F6}, {preMax:F6}], range={preMax - preMin:F6}");
+
+        // Check layer4_rn stats (ORT: min=-110, max=99, std=30)
+        var l4rn = _nativeInference!.DebugGetLayerRn3();
+        if (l4rn != null)
+        {
+            preMinMax.CopyFromCPU(new int[] { int.MaxValue, int.MinValue });
+            _minMaxKernel!((int)l4rn.Value.Length, l4rn.Value, preMinMax.View, 0);
+            await accelerator.SynchronizeAsync();
+            preMM = await preMinMax.CopyToHostAsync<int>(0, 2);
+            sMin = preMM[0]; sMax = preMM[1];
+            float l4Min = BitConverter.Int32BitsToSingle(sMin >= 0 ? sMin : (sMin ^ 0x7FFFFFFF));
+            float l4Max = BitConverter.Int32BitsToSingle(sMax >= 0 ? sMax : (sMax ^ 0x7FFFFFFF));
+            Console.WriteLine($"[Depth] layer4_rn (19x19): [{l4Min:F4}, {l4Max:F4}] (ORT: [-110, 99])");
+        }
 
         // DptHead now outputs at 518×518 (resize moved inside head to match ONNX graph).
         // No separate bilinear upsample needed — go straight to guided bilateral upsample.

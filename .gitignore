@@ -362,3 +362,24 @@ MigrationBackup/
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
 /DevComms
+/temp_debug.onnx
+/ort_depth_vis.png
+/ort_depth_518.npy
+/expand_proj0.npy
+/ort_depth_5k.png
+/temp_adds.onnx
+/temp_b0.onnx
+/temp_bc.onnx
+/temp_blocks.onnx
+/temp_ch.onnx
+/temp_cmp.onnx
+/temp_cmp2.onnx
+/temp_cmp3.onnx
+/temp_const.onnx
+/temp_const_b0.onnx
+/temp_debug2.onnx
+/temp_early.onnx
+/temp_expands.onnx
+/temp_l3.onnx
+/temp_posemb.onnx
+/temp_reg.onnx

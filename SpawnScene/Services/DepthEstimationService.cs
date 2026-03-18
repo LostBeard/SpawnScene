@@ -426,15 +426,10 @@ public class DepthEstimationService : IAsyncDisposable
         depth[i] = (min + max) - depth[i];
     }
 
-    /// <summary>In-place exp(x) — matches the Exp op in the ONNX graph after the DPT head.
-    /// Clamps input to [-1, 1] to prevent outlier pixels from dominating the min/max range.
-    /// ORT output range is ~[0.46, 1.63] (log-space ~[-0.78, 0.49]), so [-1, 1] is generous.</summary>
+    /// <summary>In-place exp(x) — matches the Exp op in the ONNX graph after the DPT head.</summary>
     private static void ExpInPlaceKernel(Index1D idx, ArrayView1D<float, Stride1D.Dense> data)
     {
-        float v = data[idx];
-        if (v < -1f) v = -1f;
-        if (v > 1f) v = 1f;
-        data[idx] = MathF.Exp(v);
+        data[idx] = MathF.Exp(data[idx]);
     }
 
     // ─────────────────────────────────────────────────────────────

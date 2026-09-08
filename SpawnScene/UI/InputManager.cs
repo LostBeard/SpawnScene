@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Components;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using System.Numerics;
 
 namespace SpawnScene.UI;
@@ -74,7 +74,7 @@ public class InputManager : IDisposable
         if (_attached) return;
         _attached = true;
         // Create our own HTMLCanvasElement wrapper — we own its lifetime
-        _canvas = new HTMLCanvasElement(canvasRef);
+        _canvas = canvasRef.As<HTMLCanvasElement>();
 
         _onMouseMove = new ActionCallback<MouseEvent>(OnMouseMove);
         _onMouseDown = new ActionCallback<MouseEvent>(OnMouseDown);
@@ -89,7 +89,7 @@ public class InputManager : IDisposable
         _canvas.AddEventListener("wheel", _onWheel);
 
         // Keyboard events on window (canvas may not have focus) — we own this too
-        _window = BlazorJSRuntime.JS.Get<Window>("window");
+        _window = SpawnJSRuntime.Instance.Get<Window>("window");
         _window.AddEventListener("keydown", _onKeyDown);
         _window.AddEventListener("keyup", _onKeyUp);
     }
@@ -128,7 +128,7 @@ public class InputManager : IDisposable
         // Gamepad: poll connected gamepads
         try
         {
-            using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+            using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
             _gamepads = navigator.GetGamepads();
         }
         catch

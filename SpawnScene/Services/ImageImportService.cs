@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Components.Forms;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Models;
 
 namespace SpawnScene.Services;
@@ -294,17 +294,17 @@ public class ImageImportService : IDisposable
 
     /// <summary>
     /// Decode image bytes into RGBA pixel data using a temporary canvas.
-    /// Uses SpawnDev.BlazorJS's Blob and OffscreenCanvas for efficient interop.
+    /// Uses SpawnDev.SpawnJS's Blob and OffscreenCanvas for efficient interop.
     /// </summary>
     private async Task<(byte[] rgba, int width, int height)?> DecodeImageAsync(byte[] bytes, string mimeType)
     {
         try
         {
-            // Create a Blob from the raw bytes (SpawnDev.BlazorJS efficient interop)
+            // Create a Blob from the raw bytes (SpawnDev.SpawnJS efficient interop)
             using var blob = new Blob(new[] { bytes }, new BlobOptions { Type = mimeType });
 
             // Decode via createImageBitmap (async, off main thread in the browser)
-            using var imageBitmap = await BlazorJSRuntime.JS.CallAsync<ImageBitmap>("createImageBitmap", blob);
+            using var imageBitmap = await SpawnJSRuntime.Instance.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
 
             int width = (int)imageBitmap.Width;
             int height = (int)imageBitmap.Height;

@@ -1,7 +1,7 @@
 using ILGPU;
 using ILGPU.Runtime;
 using Microsoft.AspNetCore.Components;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Rendering;
 
 namespace SpawnScene.Services;
@@ -127,7 +127,7 @@ public class GpuDepthColorizer : IAsyncDisposable
 
         // Create renderer once (or reattach when canvas ref changes)
         _renderer ??= _gpu.CreateCanvasRenderer();
-        using var canvas = new HTMLCanvasElement(canvasRef);
+        using var canvas = canvasRef.As<HTMLCanvasElement>();
         _renderer.AttachCanvas(canvas);
 
         // Present: WebGPUCanvasRenderer blits the GPU buffer to the canvas

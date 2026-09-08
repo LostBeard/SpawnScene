@@ -1,5 +1,5 @@
 using Microsoft.AspNetCore.Components;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Models;
 
 namespace SpawnScene.Services;
@@ -102,7 +102,7 @@ public class RenderService : IDisposable
     public async Task AttachCanvasAsync(ElementReference canvasRef)
     {
         _canvas?.Dispose();
-        _canvas = new HTMLCanvasElement(canvasRef);
+        _canvas = canvasRef.As<HTMLCanvasElement>();
         _sceneManager.ResizeViewport(_canvas.Width, _canvas.Height);
 
         // Initialize GPU if needed

@@ -13,7 +13,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpawnScene</title>
     <meta name="description"
-          content="Create 3D scenes from images using Gaussian Splatting — entirely in your browser. Powered by SpawnDev.BlazorJS and SpawnDev.ILGPU." />
+          content="Create 3D scenes from images using Gaussian Splatting — entirely in your browser. Powered by SpawnDev.SpawnJS and SpawnDev.ILGPU." />
     <link rel="preload" id="webassembly" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -40,7 +40,7 @@
     </div>
     <script>
         // Helper for configuring WebGPU canvas context with custom usage flags.
-        // SpawnDev.BlazorJS's C# type serialization doesn't include subclass properties,
+        // SpawnDev.SpawnJS's C# type serialization doesn't include subclass properties,
         // so we create the config object natively in JS.
         window._configureCopyDstCanvas = function (ctx, device, usage) {
             ctx.configure({ device: device, format: 'rgba8unorm', usage: usage });

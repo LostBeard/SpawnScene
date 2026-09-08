@@ -21,7 +21,7 @@ There are no tests or linting tools configured.
 
 SpawnScene is a fully client-side Blazor WebAssembly Gaussian Splatting application. It generates 3D scenes from a single photo using monocular depth estimation (DepthAnything V2), with the entire pipeline running on the GPU via WebGPU and SpawnDev.ILGPU. No server backend.
 
-**Stack:** .NET 10 / C# 13, Blazor WASM, SpawnDev.ILGPU 4.0.0 (WebGPU compute), ONNX Runtime Web 1.25 (WebGPU EP, DistillAnyDepth + DepthAnything V2), native WebGPU (WGSL shaders), SpawnDev.BlazorJS (JS interop).
+**Stack:** .NET 10 / C# 13, Blazor WASM, SpawnDev.ILGPU 4.16.2 (WebGPU compute), SpawnDev.BlazorJS 3.5.13, SpawnDev.BlazorJS.OnnxRuntimeWeb 1.3.0 (WebGPU EP, DistillAnyDepth + DepthAnything V2/V3), SpawnDev.ILGPU.ML (project reference, native GPU inference - depth + future ML), native WebGPU (WGSL shaders).
 
 **Browser requirement:** WebGPU-capable (Chrome 113+, Edge 113+, Safari 18+). No fallbacks exist.
 

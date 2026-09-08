@@ -1,5 +1,5 @@
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Services;
 
 namespace SpawnScene.Pages;
@@ -47,7 +47,7 @@ public partial class Studio
                 var hit = _uiRoot.HitTest(_inputManager.MousePosition);
                 if (hit == null)
                 {
-                    using var canvas = new HTMLCanvasElement(_canvasRef);
+                    using var canvas = _canvasRef.As<HTMLCanvasElement>();
                     canvas.RequestPointerLock();
                 }
             }
@@ -134,7 +134,7 @@ public partial class Studio
 
     private void UpdateCanvasSize()
     {
-        using var container = new HTMLElement(_containerRef);
+        using var container = _containerRef.As<HTMLElement>();
         int cssWidth = container.ClientWidth;
         int cssHeight = container.ClientHeight;
         if (cssWidth <= 0 || cssHeight <= 0) { cssWidth = 960; cssHeight = 640; }
@@ -153,7 +153,7 @@ public partial class Studio
     {
         try
         {
-            using var container = new HTMLElement(_containerRef);
+            using var container = _containerRef.As<HTMLElement>();
             int cssWidth = container.ClientWidth;
             int cssHeight = container.ClientHeight;
             if (cssWidth == _lastResizeWidth && cssHeight == _lastResizeHeight) return;

@@ -1,8 +1,9 @@
 using ILGPU;
 using ILGPU.Runtime;
 using Microsoft.AspNetCore.Components.Forms;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.ILGPU;
 using SpawnScene.Models;
 using SpawnScene.Services;
 
@@ -145,17 +146,24 @@ public partial class Studio
             BuildProjectDetailUI();
 
             using var blob = new Blob(new byte[][] { imageBytes }, new BlobOptions { Type = "image/jpeg" });
-            using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+            using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
             int w = (int)bitmap.Width;
             int h = (int)bitmap.Height;
 
-            // Get RGBA pixels via OffscreenCanvas
+            // Rasterize to RGBA via OffscreenCanvas — the pixels stay in the JS heap.
             using var osc = new OffscreenCanvas(w, h);
             using var ctx = osc.Get2DContext();
             ctx.DrawImage(bitmap, 0, 0);
             using var imageData = ctx.GetImageData(0, 0, w, h);
-            using var dataArray = imageData.Data;
-            var rgbaPixels = dataArray.ReadBytes();
+            using var dataArray = imageData.Data; // JS Uint8ClampedArray — RGBA pixels, JS-side
+
+            // Zero-copy upload: stream the JS pixel array straight into a GPU packed-RGBA buffer via
+            // CopyFromJS, so the full-res image (a 5K photo ≈ 59 MB) NEVER enters the .NET/WASM managed
+            // heap. Depth estimation and Gaussian generation both consume this single GPU buffer.
+            // GPU-First Pipeline Rule: the image bytes are pure GPU input, never touched by .NET logic.
+            if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
+            var rgbaGpuBuf = _gpuService.WebGPUAccelerator.Allocate1D<int>(w * h);
+            ((IBrowserMemoryBuffer)rgbaGpuBuf).CopyFromJS(dataArray);
 
             // Build camera params from EXIF (or fall back to heuristic)
             var camera = CameraParams.CreateFromExif(w, h, exifFocal);
@@ -164,20 +172,20 @@ public partial class Studio
                 : "heuristic 1.2x";
             Console.WriteLine($"[EXIF] {source.FileName}: fx={camera.FocalX:F1}px ({focalSource})");
 
-            var importedImage = new ImportedImage
+            // GPU-resident image (packed RGBA) — owns rgbaGpuBuf, disposed with the using scope.
+            using var gpuImage = new GpuImage
             {
-                FileName = source.FileName,
+                PackedRgba = rgbaGpuBuf,
                 Width = w,
                 Height = h,
-                RgbaPixels = rgbaPixels,
-                EstimatedCamera = camera,
+                FileName = source.FileName,
             };
 
             // Estimate depth
             _statusMessage = "Estimating depth...";
             BuildProjectDetailUI();
 
-            var depthResult = await _depthService.EstimateDepthAsync(importedImage);
+            var depthResult = await _depthService.EstimateDepthAsync(gpuImage);
             if (depthResult == null) { _statusMessage = "Error: depth estimation failed"; BuildProjectDetailUI(); return; }
 
             // Capture depth map for visualization (before Gaussian kernel consumes the buffer)
@@ -190,7 +198,7 @@ public partial class Studio
             int subsample = _activeProject.Settings.Subsample;
             float edgeSharpness = _activeProject.Settings.EdgeSharpness;
             var (packedBuf, splatCount) = await _gaussianKernel.GeneratePackedGpuBufferAsync(
-                depthResult, importedImage, subsample, edgeSharpness, camera);
+                depthResult, gpuImage, subsample, edgeSharpness, camera);
 
             // Upload to renderer
             _statusMessage = $"Uploading {splatCount:N0} splats...";
@@ -211,21 +219,19 @@ public partial class Studio
             _statusMessage = $"Saving {splatCount:N0} splats to storage...";
             BuildProjectDetailUI();
 
-            var packedFloats = await _gpuRenderer.ReadPackedDataAsync(splatCount);
-            if (packedFloats != null)
+            // GPU → JS Uint8Array → OPFS. The packed splats stay in the JS heap and never enter
+            // the .NET/WASM managed heap (a 5K image is ~14.7M splats ≈ 588 MB — marshalling that
+            // into a byte[] OOMs the managed heap).
+            using var packedU8 = await _gpuRenderer.ReadPackedUint8ArrayAsync(splatCount);
+            if (packedU8 != null)
             {
                 var projectScene = new ProjectScene
                 {
                     SplatCount = splatCount,
                     QualityPreset = _activeProject.Settings.QualityPreset,
                 };
-                // Convert float[] to byte[] for OPFS storage — free floats immediately
-                var sceneBytes = new byte[packedFloats.Length * sizeof(float)];
-                Buffer.BlockCopy(packedFloats, 0, sceneBytes, 0, sceneBytes.Length);
-                packedFloats = null; // free GPU readback array
-
-                await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, sceneBytes);
-                Console.WriteLine($"[Studio] Scene saved to OPFS: {sceneBytes.Length / (1024 * 1024):F1} MB");
+                await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
+                Console.WriteLine($"[Studio] Scene saved to OPFS: {packedU8.Length / (1024 * 1024):F1} MB");
             }
             else
             {
@@ -298,7 +304,7 @@ public partial class Studio
                 try { bytes = await _http.GetByteArrayAsync($"datasets/TempleRing/{filename}"); }
                 catch { Console.WriteLine($"[Studio] Skipping {filename} (not on disk)"); continue; }
                 using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
-                using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
                 int w = (int)bitmap.Width;
                 int h = (int)bitmap.Height;
 
@@ -391,7 +397,7 @@ public partial class Studio
 
                 // Decode image
                 using var blob = new Blob(new byte[][] { imageBytes }, new BlobOptions { Type = "image/jpeg" });
-                using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
                 int w = (int)bitmap.Width;
                 int h = (int)bitmap.Height;
 
@@ -464,20 +470,17 @@ public partial class Studio
                 _statusMessage = $"Saving {splatCount:N0} splats to storage...";
                 BuildProjectDetailUI();
 
-                var packedFloats = await _gpuRenderer.ReadPackedDataAsync(splatCount);
-                if (packedFloats != null)
+                // GPU → JS Uint8Array → OPFS (zero .NET managed-heap copies — see single-image path).
+                using var packedU8 = await _gpuRenderer.ReadPackedUint8ArrayAsync(splatCount);
+                if (packedU8 != null)
                 {
                     var projectScene = new ProjectScene
                     {
                         SplatCount = splatCount,
                         QualityPreset = _activeProject.Settings.QualityPreset,
                     };
-                    var sceneBytes = new byte[packedFloats.Length * sizeof(float)];
-                    Buffer.BlockCopy(packedFloats, 0, sceneBytes, 0, sceneBytes.Length);
-                    packedFloats = null;
-
-                    await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, sceneBytes);
-                    Console.WriteLine($"[Studio] Multi-view scene saved: {sceneBytes.Length / (1024 * 1024):F1} MB");
+                    await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
+                    Console.WriteLine($"[Studio] Multi-view scene saved: {packedU8.Length / (1024 * 1024):F1} MB");
                 }
 
                 // Schedule thumbnail
@@ -520,26 +523,22 @@ public partial class Studio
 
         try
         {
-            var sceneBytes = await _projectService.GetSceneDataAsync(_activeProject.Id, scene.Id);
-            if (sceneBytes == null)
+            // Stream OPFS → GPU. The packed splats flow JS-side chunk-by-chunk straight into the GPU
+            // buffer and never enter the .NET managed heap (a 5K scene ≈ 560 MB — reading it into a
+            // byte[]+float[] OOMs WASM). BlobStream is an IJSReadStream, so CopyFromStreamAsync takes the
+            // JS-side streaming path automatically.
+            using var sceneStream = await _projectService.OpenSceneStreamAsync(_activeProject.Id, scene.Id);
+            if (sceneStream == null)
             {
                 _statusMessage = "Error: scene data not found in storage";
                 BuildProjectDetailUI();
                 return;
             }
 
-            _statusMessage = $"Uploading {scene.SplatCount:N0} splats to GPU...";
+            _statusMessage = $"Streaming {scene.SplatCount:N0} splats to GPU...";
             BuildProjectDetailUI();
 
-            // Reinterpret byte[] as float[] — null out sceneBytes immediately to reduce peak memory.
-            var packedFloats = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(sceneBytes.AsSpan()).ToArray();
-            sceneBytes = null!; // free ~560MB before GPU allocation
-
-            // Upload to GPU (releases old scene buffers internally via DisposeBuffers)
-            var accelerator = _gpuService.WebGPUAccelerator;
-            var packedBuf = accelerator.Allocate1D(packedFloats);
-            packedFloats = null!; // free ~560MB before vertex buffer allocation
-            await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, scene.SplatCount);
+            await _gpuRenderer.UploadSceneFromStream(sceneStream, scene.SplatCount);
 
             var gaussianScene = new GaussianScene
             {
@@ -570,7 +569,7 @@ public partial class Studio
     {
         try
         {
-            using var el = new HTMLElement(_fileInput!.Element!.Value);
+            using var el = _fileInput!.Element!.Value.As<HTMLElement>();
             el.Click();
         }
         catch (Exception ex)
@@ -605,7 +604,7 @@ public partial class Studio
                 try
                 {
                     using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = file.ContentType });
-                    using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                    using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
                     width = (int)bitmap.Width;
                     height = (int)bitmap.Height;
                     Console.WriteLine($"[Studio] Image decoded: {name} ({width}x{height})");
@@ -646,7 +645,7 @@ public partial class Studio
             try
             {
                 using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
-                using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+                using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
                 width = (int)bitmap.Width;
                 height = (int)bitmap.Height;
             }
@@ -674,9 +673,9 @@ public partial class Studio
         try
         {
             const int thumbW = 320, thumbH = 200;
-            using var canvas = new HTMLCanvasElement(_canvasRef);
+            using var canvas = _canvasRef.As<HTMLCanvasElement>();
 
-            using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", canvas);
+            using var bitmap = await _js.CallAsync<HTMLCanvasElement, ImageBitmap>("createImageBitmap", canvas);
 
             using var osc = new OffscreenCanvas(thumbW, thumbH);
             using var ctx = osc.Get2DContext();
@@ -757,7 +756,7 @@ public partial class Studio
             if (bytes == null) return;
 
             using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/jpeg" });
-            using var bitmap = await _js.CallAsync<ImageBitmap>("createImageBitmap", blob);
+            using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
 
             const int thumbW = 240, thumbH = 160;
             using var osc = new OffscreenCanvas(thumbW, thumbH);

@@ -1,5 +1,5 @@
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using System.Numerics;
 
 namespace SpawnScene.Services;
@@ -11,7 +11,7 @@ namespace SpawnScene.Services;
 /// </summary>
 public class XRService : IDisposable
 {
-    private readonly BlazorJSRuntime _js;
+    private readonly SpawnJSRuntime _js;
     private readonly GpuService _gpu;
 
     // XR state
@@ -51,7 +51,7 @@ public class XRService : IDisposable
     /// <summary>Fired when the XR session ends.</summary>
     public event Action? OnSessionEnded;
 
-    public XRService(BlazorJSRuntime js, GpuService gpu)
+    public XRService(SpawnJSRuntime js, GpuService gpu)
     {
         _js = js;
         _gpu = gpu;

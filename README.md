@@ -2,11 +2,6 @@
 
 > Create interactive 3D Gaussian Splat scenes from a single photo — entirely in your browser.
 
-![Blazor WebAssembly](https://img.shields.io/badge/Blazor-WebAssembly-512BD4?style=flat-square)
-![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?style=flat-square)
-![WebGPU](https://img.shields.io/badge/WebGPU-required-orange?style=flat-square)
-![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
-
 **SpawnScene** is a fully client-side Gaussian Splatting application built with Blazor WebAssembly. It uses monocular depth estimation (DistillAnyDepth / DepthAnything V2) to generate 3D scenes from a single photograph, with the entire pipeline running on the GPU via WebGPU and SpawnDev.ILGPU.
 
 ## ✨ What It Does
@@ -50,10 +45,10 @@ Single photo
 
 | Component | Technology |
 |---|---|
-| App framework | Blazor WebAssembly (.NET 10) |
-| JS interop | [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS) |
-| GPU compute | [SpawnDev.ILGPU](https://github.com/LostBeard/SpawnDev.ILGPU) 4.0.0 (WebGPU backend) |
-| Depth estimation | ONNX Runtime Web 1.25 (WebGPU EP) |
+| App framework | .NET WebAssembly (.NET 10) |
+| JS interop | [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) |
+| GPU compute | [SpawnDev.ILGPU](https://github.com/LostBeard/SpawnDev.ILGPU) (WebGPU backend) |
+| Depth estimation | [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML) |
 | Depth models | DistillAnyDepth Small (default), DepthAnything V2 Small |
 | Rendering | Native WebGPU (WGSL shaders) |
 | Language | C# 13 |
@@ -97,7 +92,7 @@ SpawnScene/
 │       ├── UIPanel.cs             # Container with background
 │       └── UISlider.cs            # Horizontal drag slider
 ├── Pages/
-│   ├── Home.razor                 # Landing page (Blazor HTML)
+│   ├── Home.razor                 # Landing page (Razor HTML)
 │   ├── Studio.razor               # Unified tool: projects + generation + viewer (WebGPU UI)
 │   ├── DepthSplat.razor           # Legacy: standalone depth estimation UI
 │   └── Viewer.razor               # Legacy: standalone 3D viewer

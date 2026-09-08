@@ -1,4 +1,4 @@
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnScene.Services;
 

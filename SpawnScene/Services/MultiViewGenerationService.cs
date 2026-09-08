@@ -1,7 +1,8 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnScene.Models;
 using System.Numerics;
@@ -22,7 +23,7 @@ namespace SpawnScene.Services;
 /// </summary>
 public class MultiViewGenerationService
 {
-    private readonly BlazorJSRuntime _js;
+    private readonly SpawnJSRuntime _js;
     private readonly GpuService _gpu;
     private readonly ImageImportService _importService;
     private readonly SfmReconstructor _sfm;
@@ -36,7 +37,7 @@ public class MultiViewGenerationService
     public CameraParams?[] SfmCameraPoses => _sfm.CameraPoses;
 
     public MultiViewGenerationService(
-        BlazorJSRuntime js,
+        SpawnJSRuntime js,
         GpuService gpu,
         ImageImportService importService,
         SfmReconstructor sfm,

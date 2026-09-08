@@ -1,8 +1,9 @@
 using ILGPU;
 using ILGPU.Runtime;
 using Microsoft.AspNetCore.Components;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnDev.ILGPU.WebGPU.Backend;
 using SpawnScene.Models;
@@ -218,7 +219,7 @@ public class GpuGaussianRenderer : IDisposable
 
         _context = canvas.GetContext<GPUCanvasContext>("webgpu");
 
-        using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+        using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
         using var gpu = navigator.Gpu;
         if (gpu is not null)
             _canvasFormat = gpu.GetPreferredCanvasFormat();
@@ -764,6 +765,21 @@ public class GpuGaussianRenderer : IDisposable
     /// Transfers ownership of packedBuf to the sorter — caller must NOT dispose it.
     /// Safe to call before AttachCanvas — vertex buffer is deferred until canvas is ready.
     /// </summary>
+    /// <summary>
+    /// Stream a packed splat scene straight from a <see cref="Stream"/> (OPFS <c>BlobStream</c>, WebTorrent,
+    /// etc.) into a GPU buffer, then upload it for rendering. // GPU load: file I/O
+    /// When the stream is an <c>IJSReadStream</c> (browser OPFS/torrent), <c>CopyFromStreamAsync</c> streams
+    /// the bytes JS-side chunk-by-chunk directly into the GPU buffer — they never enter the .NET/WASM managed
+    /// heap. This is the only scalable load path for large scenes (a 5K image ≈ 14.7M splats ≈ 588 MB).
+    /// </summary>
+    public async Task UploadSceneFromStream(Stream sceneStream, int splatCount)
+    {
+        var accelerator = _gpu.WebGPUAccelerator;
+        var packedBuf = accelerator.Allocate1D<float>((long)splatCount * 10);
+        await packedBuf.View.CopyFromStreamAsync(sceneStream);
+        await UploadSceneFromGpuBuffer(packedBuf, splatCount);
+    }
+
     public async Task UploadSceneFromGpuBuffer(
         MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)
     {
@@ -786,8 +802,11 @@ public class GpuGaussianRenderer : IDisposable
     }
 
     /// <summary>
-    /// Read packed splat data back from GPU to CPU. // CPU transfer: file I/O (saving to OPFS)
+    /// Read packed splat data back from GPU to CPU as a .NET float[]. // CPU transfer: file I/O
     /// Returns float[splatCount * 10] or null if buffer unavailable.
+    /// NOTE: This marshals every byte into the .NET/WASM managed heap — only use for SMALL,
+    /// genuinely CPU-bound needs (e.g. PLY export). For OPFS save, use
+    /// <see cref="ReadPackedUint8ArrayAsync"/> so the bytes stay in JS.
     /// </summary>
     public async Task<float[]?> ReadPackedDataAsync(int splatCount)
     {
@@ -802,6 +821,32 @@ public class GpuGaussianRenderer : IDisposable
         catch (Exception ex)
         {
             Console.WriteLine($"[GpuRenderer] ReadPackedData failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Read packed splat data off the GPU as a JS <see cref="Uint8Array"/>. // GPU→JS: file I/O (OPFS)
+    /// The bytes land in the browser JS heap and NEVER enter the .NET/WASM managed heap — the
+    /// whole point of the SpawnDev browser stack. Hand the returned Uint8Array straight to
+    /// OPFS (FileSystemWritableFileStream.Write) so the data flows GPU → JS → disk with zero
+    /// managed-heap copies. Caller owns the returned Uint8Array (dispose it).
+    /// Returns null if the packed buffer is unavailable.
+    /// </summary>
+    public async Task<Uint8Array?> ReadPackedUint8ArrayAsync(int splatCount)
+    {
+        var buf = _sorter.PackedDataBuf;
+        if (buf == null) return null;
+        try
+        {
+            var accelerator = _gpu.WebGPUAccelerator;
+            await accelerator.SynchronizeAsync();
+            long byteCount = (long)splatCount * 10 * sizeof(float);
+            return await buf.CopyToHostUint8ArrayAsync(0, byteCount);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[GpuRenderer] ReadPackedUint8Array failed: {ex.Message}");
             return null;
         }
     }
@@ -887,7 +932,7 @@ public class GpuGaussianRenderer : IDisposable
                 int rw = _lowResActive ? Math.Max(1, _physicalWidth / 2) : _physicalWidth;
                 int rh = _lowResActive ? Math.Max(1, _physicalHeight / 2) : _physicalHeight;
 
-                using var canvasEl = new HTMLCanvasElement(_canvasRef);
+                using var canvasEl = _canvasRef.As<HTMLCanvasElement>();
                 canvasEl.Width = rw;
                 canvasEl.Height = rh;
 

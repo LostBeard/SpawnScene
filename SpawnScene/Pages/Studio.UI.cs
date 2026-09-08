@@ -1,4 +1,4 @@
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Models;
 using SpawnScene.Services;
 using SpawnScene.UI;

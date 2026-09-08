@@ -1,5 +1,6 @@
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.SpawnJS.Toolbox;
 using SpawnScene.Models;
 using System.Text;
 using System.Text.Json;
@@ -171,6 +172,53 @@ public class ProjectService
         await SaveIndexAsync();
     }
 
+    /// <summary>
+    /// Save a scene whose packed splat data is a JS <see cref="Uint8Array"/> (straight off the GPU).
+    /// The bytes stream GPU → JS → OPFS without ever touching the .NET/WASM managed heap — the only
+    /// scalable path for large scenes (a 5K image is ~14.7M splats ≈ 588 MB, which OOMs the managed
+    /// heap if marshalled into a byte[]). Caller still owns/disposes the Uint8Array.
+    /// </summary>
+    public async Task SaveSceneAsync(string projectId, ProjectScene scene, Uint8Array packedData)
+    {
+        var project = (await ListProjectsAsync()).FirstOrDefault(p => p.Id == projectId);
+        if (project == null) return;
+
+        var root = await GetRootDirAsync();
+        var projDir = await GetProjectDirAsync(root, projectId);
+        using var scenesDir = await projDir.GetDirectoryHandle("scenes", create: true);
+
+        await WriteBinaryAsync(scenesDir, $"{scene.Id}.bin", packedData);
+
+        scene.SizeBytes = packedData.Length;
+        project.Scenes.Add(scene);
+        project.ModifiedAt = DateTime.UtcNow;
+        await SaveIndexAsync();
+    }
+
+    /// <summary>
+    /// Open a streaming <see cref="Stream"/> over a scene's packed data in OPFS, WITHOUT reading it into
+    /// memory. Returns a <see cref="BlobStream"/> (an <c>IJSReadStream</c>, <c>CanReadSync=false</c>) so the
+    /// caller can stream it straight to the GPU via <c>ArrayView.CopyFromStreamAsync</c> — the bytes flow
+    /// OPFS → JS → GPU chunk-by-chunk and never enter the .NET/WASM managed heap. The returned stream owns
+    /// the underlying File/Blob; dispose it when done. Returns null if the scene file is missing.
+    /// </summary>
+    public async Task<Stream?> OpenSceneStreamAsync(string projectId, string sceneId)
+    {
+        try
+        {
+            var root = await GetRootDirAsync();
+            var projDir = await GetProjectDirAsync(root, projectId);
+            using var scenesDir = await projDir.GetDirectoryHandle("scenes");
+            using var fileHandle = await scenesDir.GetFileHandle($"{sceneId}.bin");
+            var file = await fileHandle.GetFile(); // File : Blob — owned+disposed by the BlobStream
+            return new BlobStream(file);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>Read a scene's packed float data.</summary>
     public async Task<byte[]?> GetSceneDataAsync(string projectId, string sceneId)
     {
@@ -260,7 +308,7 @@ public class ProjectService
 
     private async Task<FileSystemDirectoryHandle> GetRootDirAsync()
     {
-        using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+        using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
         using var storage = navigator.Storage;
         using var opfsRoot = await storage.GetDirectory();
         return await opfsRoot.GetDirectoryHandle("spawnscene", create: true);
@@ -296,6 +344,19 @@ public class ProjectService
         using var writable = await fileHandle.CreateWritable();
         using var blob = new Blob(new byte[][] { data }, new BlobOptions { Type = "application/octet-stream" });
         await writable.Write(blob);
+        await writable.Close();
+    }
+
+    /// <summary>
+    /// Write a JS <see cref="Uint8Array"/> straight to OPFS. The Uint8Array is passed by reference
+    /// to <c>FileSystemWritableFileStream.write</c> — the bytes never cross into the .NET managed
+    /// heap. This is the scalable path for GPU-sized payloads.
+    /// </summary>
+    private static async Task WriteBinaryAsync(FileSystemDirectoryHandle dir, string name, Uint8Array data)
+    {
+        using var fileHandle = await dir.GetFileHandle(name, create: true);
+        using var writable = await fileHandle.CreateWritable();
+        await writable.Write(data);
         await writable.Close();
     }
 

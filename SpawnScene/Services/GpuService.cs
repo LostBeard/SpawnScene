@@ -1,8 +1,8 @@
 using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.Rendering;
 using SpawnDev.ILGPU.WebGPU;
@@ -11,15 +11,18 @@ namespace SpawnScene.Services;
 
 /// <summary>
 /// Manages the ILGPU WebGPU accelerator lifecycle.
-/// WebGPU is required — no fallbacks. All compute and data processing runs on
-/// the same GPUDevice, enabling zero-copy integration with ONNX Runtime Web.
+/// WebGPU is required — no fallbacks. All compute and data processing runs on one
+/// shared GPUDevice, captured via <see cref="GpuShareService"/>'s requestAdapter hook so the
+/// whole app uses a single device. (The share hook originally also handed the device to ONNX
+/// Runtime Web for zero-copy tensor exchange; ORT was retired 2026-07-01 in the zero-ORT
+/// migration, so the single-device capture now serves ILGPU + SpawnDev.ILGPU.ML only.)
 /// </summary>
 public class GpuService : IBackgroundService, IAsyncDisposable
 {
     private Context? _context;
     private bool _initialized;
-    BlazorJSRuntime _js;
-    public GpuService(BlazorJSRuntime js, GpuShareService gpuShare)
+    SpawnJSRuntime _js;
+    public GpuService(SpawnJSRuntime js, GpuShareService gpuShare)
     {
         _js = js;
         gpuShare.OnDeviceRequested += GpuShare_OnDeviceRequested;
@@ -30,11 +33,11 @@ public class GpuService : IBackgroundService, IAsyncDisposable
     {
         // When ORT requests a GPUDevice, add required limits to the options so that ILGPU can adopt the device later.
         var limits = adapterHook.Adapter.Limits;
-        args.Options ??= _js.New<JSObject>("Object");
-        var requiredLimits = args.Options.JSRef!.Get<JSObject?>("requiredLimits");
+        args.Options ??= _js.New<SpawnJSObject>("Object");
+        var requiredLimits = args.Options.JSRef!.Get<SpawnJSObject?>("requiredLimits");
         if (requiredLimits == null)
         {
-            requiredLimits = _js.New<JSObject>("Object");
+            requiredLimits = _js.New<SpawnJSObject>("Object");
         }
         requiredLimits.JSRef!.Set("maxStorageBufferBindingSize", limits.MaxStorageBufferBindingSize);
         requiredLimits.JSRef!.Set("maxBufferSize", limits.MaxBufferSize);
@@ -64,10 +67,9 @@ public class GpuService : IBackgroundService, IAsyncDisposable
         : AcceleratorType.CPU;
 
     /// <summary>
-    /// The native WebGPU GPUDevice.
-    /// Pass to ort.env.webgpu.device before creating ONNX sessions so that ORT and
-    /// ILGPU share one GPUDevice, enabling zero-copy buffer sharing via
-    /// ExternalWebGPUMemoryBuffer and TensorFromGpuBuffer.
+    /// The native WebGPU GPUDevice backing the ILGPU accelerator. Exposed for any consumer that
+    /// needs the raw device for zero-copy buffer sharing. (Previously passed to ort.env.webgpu.device
+    /// so ORT sessions shared ILGPU's device; ORT retired 2026-07-01.)
     /// </summary>
     public GPUDevice NativeDevice =>
         WebGPUAccelerator?.NativeAccelerator?.NativeDevice

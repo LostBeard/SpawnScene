@@ -1,7 +1,6 @@
 # Goals and Features
-- Uses SpawnDev.BlazorJS, SpawnDev.ILGPU, and SpawnDev.BlazorJS.OnnxRuntimeWeb to build a Blazor Wasm app that can use Guassian Splatting to create 3D scenes from images wit hthe help of monocular depth estimation.
-- The goals are to showcase the capabilities of the various SpawnDev libraries and Blazor WebAssembly in a practical application while demonstrating new and amazing techniques in 3D world mapping.
-
+- Uses SpawnDev.SpawnJS, SpawnDev.ILGPU, and SpawnDev.ILGPU.ML to build a .NET Wasm app that uses Guassian Splatting to create 3D scenes from images with the help of monocular depth estimation.
+- The goals are to showcase the capabilities of the various SpawnDev libraries and .NET WebAssembly in a practical application while demonstrating new and amazing techniques in 3D world mapping.
 
 
 # Export to other formats
@@ -22,13 +21,13 @@ This is a specific method designed to bind gaussians to a mesh surface during th
 It makes extracting a high-quality 3D mesh much more viable than standard 3DGS.
 
 
-# Blazor Wasm Gaussian Splatting
-This project is a Blazor WebAssembly application that demonstrates the use of Gaussian Splatting to create 3D scenes from images. It utilizes the SpawnDev.BlazorJS and SpawnDev.ILGPU libraries to achieve this functionality.
+# .NET Wasm Gaussian Splatting
+This project is a .NET WebAssembly application that demonstrates the use of Gaussian Splatting to create 3D scenes from images. It utilizes the SpawnDev.SpawnJS and SpawnDev.ILGPU libraries to achieve this functionality.
 
 ## Features
 - **Gaussian Splatting**: Create 3D scenes from 2D images using Gaussian Splatting techniques.
-- **Blazor WebAssembly**: A client-side web application framework that allows for rich interactive experiences in the browser.
-- **SpawnDev Libraries**: Leverages the capabilities of SpawnDev.BlazorJS for JavaScript interop and SpawnDev.ILGPU for GPU computing.
+- **.NET WebAssembly**: A client-side web application framework that allows for rich interactive experiences in the browser.
+- **SpawnDev Libraries**: Leverages the capabilities of SpawnDev.SpawnJS for JavaScript interop and SpawnDev.ILGPU for GPU computing.
 - **Interactive 3D Scenes**: Users can interact with the generated 3D scenes, exploring the results of the Gaussian Splatting process.
 - **Educational Purpose**: This project serves as a practical example of how to use the SpawnDev libraries in a real-world application, showcasing their potential in the field of 3D graphics and web development.
 - **Open Source**: The project is open source, allowing developers to contribute and learn from the codebase.
@@ -120,6 +119,6 @@ Vision: Multiple mobile devices (phones/tablets) stream their camera feeds to a 
 - Frame selection: PC picks the best frames from each stream (sharpness, diversity, overlap)
 - Incremental SfM: extend SfmReconstructor to add images to an existing reconstruction
 - Real-time splat updates: as new views are fused, update the GPU scene buffer incrementally
-- SpawnDev.BlazorJS has WebRTC types (RTCPeerConnection, MediaStream, etc.)
+- SpawnDev.SpawnJS has WebRTC types (RTCPeerConnection, MediaStream, etc.)
 
 **Requires:** WebRTC signaling, incremental SfM, real-time splat scene updates. Architecture first, implement later.

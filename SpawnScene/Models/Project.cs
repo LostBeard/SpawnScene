@@ -44,6 +44,7 @@ public class ProjectSettings
     public string QualityPreset { get; set; } = "Standard";
     public int Subsample { get; set; } = 2;
     public float EdgeSharpness { get; set; } = 0.3f;
+    // Parked for a future NATIVE super-resolution pass (ORT SR retired 2026-07-01). See SuperResolutionService.cs.
     public bool UseSuperResolution { get; set; }
 
     [JsonConverter(typeof(JsonStringEnumConverter))]

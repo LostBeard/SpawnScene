@@ -2,8 +2,9 @@ using ILGPU;
 using ILGPU.Runtime;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Forms;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnScene.Models;
 using SpawnScene.Services;
@@ -25,7 +26,7 @@ public partial class Studio : IAsyncDisposable
     [Inject] private NavigationManager _nav { get; set; } = default!;
     [Inject] private XRService _xrService { get; set; } = default!;
     [Inject] private MultiViewGenerationService _multiViewService { get; set; } = default!;
-    [Inject] private BlazorJSRuntime _js { get; set; } = default!;
+    [Inject] private SpawnJSRuntime _js { get; set; } = default!;
     // SpawnDev.ILGPU.ML — created on-demand after GPU init (not injected)
 
     private ElementReference _canvasRef;
@@ -114,7 +115,7 @@ public partial class Studio : IAsyncDisposable
         _device = nativeAccel.NativeDevice;
         _queue = nativeAccel.Queue;
 
-        using var canvas = new HTMLCanvasElement(_canvasRef);
+        using var canvas = _canvasRef.As<HTMLCanvasElement>();
         _context = canvas.GetContext<GPUCanvasContext>("webgpu");
 
         using var navigator = _js.Get<Navigator>("navigator");

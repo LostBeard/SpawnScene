@@ -1,6 +1,6 @@
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.WebGPU;
 using System.Numerics;
 
@@ -13,7 +13,7 @@ namespace SpawnScene.Services;
 /// </summary>
 public class PointCloudRenderer : IDisposable
 {
-    private readonly BlazorJSRuntime _js;
+    private readonly SpawnJSRuntime _js;
 
     private GPUDevice? _device;
     private GPUQueue? _queue;
@@ -65,7 +65,7 @@ public class PointCloudRenderer : IDisposable
     public bool IsInitialized { get; private set; }
     public int PointCount => _pointCount;
     Window? _window;
-    public PointCloudRenderer(BlazorJSRuntime js)
+    public PointCloudRenderer(SpawnJSRuntime js)
     {
         _js = js;
         _window = _js.Get<Window>("window");

@@ -1,6 +1,7 @@
 using ILGPU;
 using ILGPU.Algorithms;
 using ILGPU.Runtime;
+using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnScene.Models;
 using System.Runtime.InteropServices;

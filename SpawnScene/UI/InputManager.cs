@@ -140,7 +140,16 @@ public class InputManager : IDisposable
     // DOM event handlers (buffer state between polls)
     private void OnMouseMove(MouseEvent e)
     {
-        _mousePos = new Vector2((float)e.OffsetX, (float)e.OffsetY);
+        // OffsetX/Y are CSS pixels; UI layout uses canvas buffer pixels (often CSS * devicePixelRatio).
+        float sx = 1f, sy = 1f;
+        if (_canvas != null)
+        {
+            float cw = _canvas.ClientWidth;
+            float ch = _canvas.ClientHeight;
+            if (cw > 0) sx = _canvas.Width / cw;
+            if (ch > 0) sy = _canvas.Height / ch;
+        }
+        _mousePos = new Vector2((float)e.OffsetX * sx, (float)e.OffsetY * sy);
     }
 
     private void OnMouseDown(MouseEvent e)

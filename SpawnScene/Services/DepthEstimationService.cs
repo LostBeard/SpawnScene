@@ -17,26 +17,29 @@ public record DepthModelInfo(string Id, string Name, string Path, string SizeLab
 
 /// <summary>
 /// Monocular depth estimation via the SpawnDev.ILGPU.ML <see cref="DepthEstimationPipeline"/>.
-/// The pipeline owns everything: model download (WebTorrent via the hub), OPFS cache, zero-copy
-/// stream-to-GPU load, ImageNet preprocessing, DAv3 inference (bit-exact vs ONNX Runtime), and a
-/// GPU-resident depth result. SpawnScene wires two calls — no ORT, no hand-built backbone, no
-/// model bytes in the .NET/WASM managed heap.
+/// The pipeline owns everything: model download (hub HTTP + OPFS cache via <see cref="IModelSource"/>),
+/// zero-copy stream-to-GPU load, ImageNet preprocessing, DAv3 inference, and a GPU-resident depth
+/// result. SpawnScene wires two calls — no ORT, no hand-built backbone, no model bytes in the
+/// .NET/WASM managed heap.
 /// </summary>
 public class DepthEstimationService : IAsyncDisposable
 {
     /// <summary>HuggingFace repo id for the depth model the pipeline downloads + caches.</summary>
-    private const string RepoId = "onnx-community/depth-anything-v3-small";
+    // DAv3 (onnx-community/depth-anything-v3-small, 5-D) currently throws in GraphExecutor:
+    //   Tensor '/backbone/Transpose_output_0' not found (needed by Resize)
+    // with producerOp=NONE elideBlocked=True — a SpawnDev.ILGPU.ML graph issue, not SpawnScene.
+    // DAv2 Small is the Depth demo's working path (4-D [1,3,518,518]) until that is fixed.
+    private const string RepoId = "onnx-community/depth-anything-v2-small";
 
     public static readonly DepthModelInfo[] AvailableModels = new[]
     {
-        new DepthModelInfo("depth-anything-v3-small", "Depth Anything V3 Small", RepoId, "~50 MB"),
+        new DepthModelInfo("depth-anything-v2-small", "Depth Anything V2 Small", RepoId, "~100 MB"),
     };
 
-    public static readonly string DefaultModelId = "depth-anything-v3-small";
+    public static readonly string DefaultModelId = "depth-anything-v2-small";
 
     private readonly GpuService _gpu;
-    private readonly HttpClient _http;
-    private readonly SpawnDev.ILGPU.ML.Hub.HubModelStream _hubStream;
+    private readonly SpawnDev.ILGPU.ML.Hub.IModelSource _modelSource;
     private DepthEstimationPipeline? _pipe;
 
     public string? LoadedModelId { get; private set; }
@@ -47,16 +50,16 @@ public class DepthEstimationService : IAsyncDisposable
     public bool IsLoading { get; private set; }
     public bool IsReady => _pipe != null;
 
-    public DepthEstimationService(GpuService gpu, HttpClient http, SpawnDev.ILGPU.ML.Hub.HubModelStream hubStream)
+    public DepthEstimationService(GpuService gpu, SpawnDev.ILGPU.ML.Hub.IModelSource modelSource)
     {
         _gpu = gpu;
-        _http = http;
-        _hubStream = hubStream;
+        _modelSource = modelSource;
     }
 
     /// <summary>
     /// Build the depth pipeline for the given model. The pipeline downloads + OPFS-caches the model
-    /// (WebTorrent hub) and streams its weights straight to the GPU — the 211 MB never enters .NET.
+    /// via <see cref="IModelSource"/> and streams its weights straight to the GPU — the weights
+    /// never enter .NET.
     /// </summary>
     public async Task LoadModelAsync(string modelId)
     {
@@ -88,10 +91,13 @@ public class DepthEstimationService : IAsyncDisposable
 
             await Task.Yield();
 
-            // 5-D input [batch, num_images, 3, H, W]; 518 = native ViT resolution (37×37 patches).
+            // 4-D input [batch, 3, H, W] for DAv2. (DAv3 is 5-D [batch, num_images, 3, H, W].)
             _pipe = await DepthEstimationPipeline.CreateFromHubAsync(
-                accelerator, _hubStream, RepoId,
-                inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, 518, 518 } });
+                accelerator, _modelSource, RepoId,
+                inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 3, 518, 518 } },
+                externalDataFile: ""); // DAv2 is a single-file ONNX (no model.onnx_data)
+            // One-shot photo path: capture/replay warmup is for video.
+            _pipe.EnableGraphCapture = false;
 
             LoadedModelId = modelId;
             LoadedModelName = model.Name;

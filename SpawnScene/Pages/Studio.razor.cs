@@ -156,6 +156,75 @@ public partial class Studio : IAsyncDisposable
         StartRenderLoop();
 
         Console.WriteLine($"[Studio] Initialized: {_canvasWidth}×{_canvasHeight}, UI ready");
+
+        // Optional automated gate: /studio?autotest=generate-room
+        await RunAutotestIfRequestedAsync();
+    }
+
+    /// <summary>
+    /// Browser automation entry: create a project, load the Room sample, generate a scene.
+    /// Triggered by query <c>?autotest=generate-room</c>. Logs <c>[Autotest] PASS</c> / <c>FAIL</c>.
+    /// </summary>
+    private async Task RunAutotestIfRequestedAsync()
+    {
+        var uri = new Uri(_nav.Uri);
+        // Manual query parse — avoid Microsoft.AspNetCore.WebUtilities package dep in WASM.
+        var query = uri.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
+            .Select(p => p.Split('=', 2))
+            .Where(p => p.Length == 2)
+            .ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1]),
+                StringComparer.OrdinalIgnoreCase);
+        if (!query.TryGetValue("autotest", out var mode) || mode != "generate-room")
+            return;
+
+        Console.WriteLine($"[Autotest] starting mode={mode}");
+        try
+        {
+            var project = await _projectService.CreateProjectAsync($"Autotest {DateTime.UtcNow:HHmmss}");
+            _projects = await _projectService.ListProjectsAsync();
+            _activeProject = project;
+            OnOpenProject(project);
+
+            await LoadSampleImage("Room", "samples/room.png");
+            if (_activeProject.Sources.Count == 0)
+                throw new InvalidOperationException("Room sample did not load");
+
+            // Drive the same path as the Generate Scene button (single-image).
+            var generateDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnDone()
+            {
+                if (_state == StudioState.SceneViewer && _sceneManager.HasScene)
+                    generateDone.TrySetResult();
+            }
+            _sceneManager.OnSceneChanged += OnDone;
+            try
+            {
+                OnGenerateSceneClicked();
+                // Poll for success or surfaced error status (OnGenerateSceneClicked is async void).
+                var pollDeadline = DateTime.UtcNow.AddMinutes(10);
+                while (DateTime.UtcNow < pollDeadline)
+                {
+                    if (generateDone.Task.IsCompleted) break;
+                    if (_statusMessage != null
+                        && (_statusMessage.StartsWith("Error", StringComparison.OrdinalIgnoreCase)
+                            || _statusMessage.Contains('❌')))
+                        throw new InvalidOperationException(_statusMessage);
+                    await Task.Delay(250);
+                }
+                if (!generateDone.Task.IsCompleted)
+                    throw new TimeoutException("Generate did not finish within 10 minutes");
+            }
+            finally
+            {
+                _sceneManager.OnSceneChanged -= OnDone;
+            }
+
+            Console.WriteLine($"[Autotest] PASS — scene with {_sceneManager.ActiveScene?.Count ?? 0} splats");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Autotest] FAIL: {ex}");
+        }
     }
 
     public async ValueTask DisposeAsync()

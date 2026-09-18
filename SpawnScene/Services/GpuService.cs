@@ -11,42 +11,19 @@ namespace SpawnScene.Services;
 
 /// <summary>
 /// Manages the ILGPU WebGPU accelerator lifecycle.
-/// WebGPU is required — no fallbacks. All compute and data processing runs on one
-/// shared GPUDevice, captured via <see cref="GpuShareService"/>'s requestAdapter hook so the
-/// whole app uses a single device. (The share hook originally also handed the device to ONNX
-/// Runtime Web for zero-copy tensor exchange; ORT was retired 2026-07-01 in the zero-ORT
-/// migration, so the single-device capture now serves ILGPU + SpawnDev.ILGPU.ML only.)
+/// WebGPU is required — no fallbacks. ILGPU + SpawnDev.ILGPU.ML share this single accelerator.
+/// (Pre-migration: <see cref="GpuShareService"/> adopted ORT's GPUDevice for zero-copy tensors.
+/// ORT was retired 2026-07-01; adopting via that hook during our own <c>requestAdapter</c> caused
+/// a double-init that leaked the first accelerator.)
 /// </summary>
 public class GpuService : IBackgroundService, IAsyncDisposable
 {
     private Context? _context;
     private bool _initialized;
     SpawnJSRuntime _js;
-    public GpuService(SpawnJSRuntime js, GpuShareService gpuShare)
+    public GpuService(SpawnJSRuntime js)
     {
         _js = js;
-        gpuShare.OnDeviceRequested += GpuShare_OnDeviceRequested;
-        gpuShare.OnDeviceCreated += OnDeviceCreated;
-    }
-
-    private async Task GpuShare_OnDeviceRequested(GPUAdapterHook adapterHook, GPUDeviceReturnOverride args)
-    {
-        // When ORT requests a GPUDevice, add required limits to the options so that ILGPU can adopt the device later.
-        var limits = adapterHook.Adapter.Limits;
-        args.Options ??= _js.New<SpawnJSObject>("Object");
-        var requiredLimits = args.Options.JSRef!.Get<SpawnJSObject?>("requiredLimits");
-        if (requiredLimits == null)
-        {
-            requiredLimits = _js.New<SpawnJSObject>("Object");
-        }
-        requiredLimits.JSRef!.Set("maxStorageBufferBindingSize", limits.MaxStorageBufferBindingSize);
-        requiredLimits.JSRef!.Set("maxBufferSize", limits.MaxBufferSize);
-    }
-
-    private async Task OnDeviceCreated(GPUAdapterHook adapterHook, GPUDeviceReturnOverride args)
-    {
-        if (args.Device != null && !_initialized)
-            await InitializeFromExternalDeviceAsync(args.Device);
     }
 
     /// <summary>The active WebGPU accelerator.</summary>
@@ -67,37 +44,14 @@ public class GpuService : IBackgroundService, IAsyncDisposable
         : AcceleratorType.CPU;
 
     /// <summary>
-    /// The native WebGPU GPUDevice backing the ILGPU accelerator. Exposed for any consumer that
-    /// needs the raw device for zero-copy buffer sharing. (Previously passed to ort.env.webgpu.device
-    /// so ORT sessions shared ILGPU's device; ORT retired 2026-07-01.)
+    /// The native WebGPU GPUDevice backing the ILGPU accelerator.
     /// </summary>
     public GPUDevice NativeDevice =>
         WebGPUAccelerator?.NativeAccelerator?.NativeDevice
         ?? throw new InvalidOperationException("GPU not initialized. Call InitializeAsync first.");
 
     /// <summary>
-    /// Initialize ILGPU by adopting an externally-created GPUDevice (e.g. from ORT).
-    /// Both libraries share the same device — zero-copy buffer exchange is possible.
-    /// </summary>
-    public async Task InitializeFromExternalDeviceAsync(GPUDevice externalDevice)
-    {
-        if (_initialized) return;
-
-        var builder = Context.Create()
-            .EnableAlgorithms()
-            .EnableWebGPUAlgorithms();
-
-        await builder.WebGPU();
-        _context = builder.ToContext();
-
-        WebGPUAccelerator = WebGPUAccelerator.CreateFromExternalDevice(_context, externalDevice);
-        _initialized = true;
-
-        Console.WriteLine($"[GpuService] ILGPU adopted external device: {DeviceName}");
-    }
-
-    /// <summary>
-    /// Initialize the WebGPU accelerator (standalone — no device sharing).
+    /// Initialize the WebGPU accelerator.
     /// Throws NotSupportedException if WebGPU is unavailable (Chrome 113+, Edge 113+, Safari 18+).
     /// </summary>
     public async Task InitializeAsync()

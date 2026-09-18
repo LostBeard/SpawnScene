@@ -123,11 +123,19 @@ public partial class Studio
 
         try
         {
-            // Load depth model from project settings (or default)
+            // Load depth model from project settings (or default). Unknown / retired ids fall back.
             var targetModel = _activeProject.Settings.DepthModel ?? DepthEstimationService.DefaultModelId;
+            if (!DepthEstimationService.AvailableModels.Any(m => m.Id == targetModel))
+                targetModel = DepthEstimationService.DefaultModelId;
             if (!_depthService.IsReady || _depthService.LoadedModelId != targetModel)
             {
                 await _depthService.LoadModelAsync(targetModel);
+                if (!_depthService.IsReady)
+                {
+                    _statusMessage = $"Error: {_depthService.Status}";
+                    BuildProjectDetailUI();
+                    return;
+                }
             }
 
             // Use the first source image
@@ -161,9 +169,10 @@ public partial class Studio
             // CopyFromJS, so the full-res image (a 5K photo ≈ 59 MB) NEVER enters the .NET/WASM managed
             // heap. Depth estimation and Gaussian generation both consume this single GPU buffer.
             // GPU-First Pipeline Rule: the image bytes are pure GPU input, never touched by .NET logic.
+            // ⚠️ IBrowserMemoryBuffer is on the underlying MemoryBuffer (.Buffer), not MemoryBuffer1D.
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
             var rgbaGpuBuf = _gpuService.WebGPUAccelerator.Allocate1D<int>(w * h);
-            ((IBrowserMemoryBuffer)rgbaGpuBuf).CopyFromJS(dataArray);
+            SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.UploadToDevice(dataArray, rgbaGpuBuf);
 
             // Build camera params from EXIF (or fall back to heuristic)
             var camera = CameraParams.CreateFromExif(w, h, exifFocal);

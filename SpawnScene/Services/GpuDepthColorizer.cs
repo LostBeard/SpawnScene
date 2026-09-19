@@ -2,7 +2,9 @@ using ILGPU;
 using ILGPU.Runtime;
 using Microsoft.AspNetCore.Components;
 using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.Rendering;
+using SpawnDev.ILGPU.WebGPU;
 
 namespace SpawnScene.Services;
 
@@ -133,6 +135,67 @@ public class GpuDepthColorizer : IAsyncDisposable
         // Present: WebGPUCanvasRenderer blits the GPU buffer to the canvas
         // via a fullscreen-triangle render pass — no CPU readback, no drawImage copy.
         await _renderer.PresentAsync(_colorBuf);
+    }
+
+    /// <summary>
+    /// Colorize a GPU-resident depth map into a WebGPU texture for UI overlay.
+    /// Colorize stays on GPU; only a JS Uint8Array staging hop is used for writeTexture
+    /// (no .NET/WASM managed-heap pixel buffer).
+    /// </summary>
+    public async Task<(GPUTexture tex, GPUTextureView view)?> ColorizeToTextureAsync(
+        DepthResult depth, GPUDevice device, GPUQueue queue, int outW, int outH)
+    {
+        if (depth.RawDepthGpu == null) return null;
+
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+
+        _colorizeKernel ??= accelerator.LoadAutoGroupedStreamKernel<
+            Index2D,
+            ArrayView1D<float, Stride1D.Dense>,
+            ArrayView2D<uint, Stride2D.DenseX>,
+            float, float,
+            int, int,
+            int, int>(ColorizeKernel);
+
+        if (_colorBuf == null || _colorBufW != outW || _colorBufH != outH)
+        {
+            _colorBuf?.Dispose();
+            _colorBuf = accelerator.Allocate2DDenseX<uint>(new Index2D(outW, outH));
+            _colorBufW = outW;
+            _colorBufH = outH;
+        }
+
+        _colorizeKernel(
+            _colorBuf.IntExtent,
+            depth.RawDepthGpu.View,
+            _colorBuf.View,
+            depth.MinDepth, depth.MaxDepth,
+            depth.Width, depth.Height,
+            outW, outH);
+
+        await _gpu.SynchronizeAsync();
+
+        // GPU → JS Uint8Array → writeTexture (pixels never enter the .NET heap).
+        // Call on the typed MemoryBuffer2D, not .Buffer — the raw backend buffer is not IArrayView
+        // and CopyToHostUint8ArrayAsync casts to IArrayView on entry.
+        long byteCount = (long)outW * outH * 4;
+        using var u8 = await _colorBuf.CopyToHostUint8ArrayAsync(0, byteCount);
+
+        var tex = device.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { outW, outH },
+            Format = "rgba8unorm",
+            Usage = GPUTextureUsage.TextureBinding | GPUTextureUsage.CopyDst,
+        });
+        queue.WriteTexture(
+            new GPUTexelCopyTextureInfo { Texture = tex },
+            u8,
+            new GPUTexelCopyBufferLayout { Offset = 0, BytesPerRow = (uint)(outW * 4), RowsPerImage = (uint)outH },
+            new uint[] { (uint)outW, (uint)outH }
+        );
+
+        return (tex, tex.CreateView());
     }
 
     public async ValueTask DisposeAsync()

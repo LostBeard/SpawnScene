@@ -121,9 +121,26 @@ public class DepthEstimationService : IAsyncDisposable
     // ─────────────────────────────────────────────────────────────
 
     /// <summary>
+    /// Run depth estimation from packed RGBA ints already on the .NET heap.
+    /// Prefer feeding a JS TypedArray via <see cref="EstimateDepthFromJsRgbaAsync"/> when the
+    /// pixels are still JS-side — this entry exists because <c>EstimateGpuRawAsync</c> takes <c>int[]</c>.
+    /// </summary>
+    public Task<DepthResult?> EstimateDepthFromPackedRgbaAsync(int[] packedRgba, int width, int height)
+        => RunPipelineAsync(packedRgba, width, height);
+
+    /// <summary>
+    /// Run depth from a JS TypedArray (e.g. ImageData.Data). One JS→.NET <c>Read&lt;int&gt;</c> for the
+    /// pipeline's <c>int[]</c> API — does not first upload to GPU and read back.
+    /// </summary>
+    public Task<DepthResult?> EstimateDepthFromJsRgbaAsync(TypedArray rgbaBytes, int width, int height)
+    {
+        // CPU transfer: DepthEstimationPipeline.EstimateGpuRawAsync currently requires int[].
+        int[] packedRgba = rgbaBytes.Read<int>();
+        return RunPipelineAsync(packedRgba, width, height);
+    }
+
+    /// <summary>
     /// Run depth estimation on a CPU-resident image. Returns a GPU-resident <see cref="DepthResult"/>.
-    /// The pipeline preprocesses (ImageNet, 5-D), runs DAv3 inference, resizes to source resolution,
-    /// and computes min/max — all on the accelerator.
     /// </summary>
     public async Task<DepthResult?> EstimateDepthAsync(ImportedImage image)
     {
@@ -133,7 +150,7 @@ public class DepthEstimationService : IAsyncDisposable
             return null;
         }
 
-        // RGBA bytes → packed int per pixel (CPU source boundary: image from disk/file picker).
+        // CPU transfer: ImportedImage already holds managed bytes (feature/SfM path).
         var packedRgba = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
 
@@ -141,8 +158,10 @@ public class DepthEstimationService : IAsyncDisposable
     }
 
     /// <summary>
-    /// Run depth estimation on a GPU-resident image (SR fast path). The pipeline's public entry
-    /// takes a CPU int[] RGBA, so this reads the packed RGBA back once before handing it over.
+    /// Run depth estimation on a GPU-resident image.
+    /// ⚠️ Round-trips GPU→JS→.NET because the pipeline only accepts <c>int[]</c>. Prefer
+    /// <see cref="EstimateDepthFromJsRgbaAsync"/> / <see cref="EstimateDepthFromPackedRgbaAsync"/>
+    /// when the source TypedArray is still available.
     /// </summary>
     public async Task<DepthResult?> EstimateDepthAsync(GpuImage gpuImage)
     {
@@ -152,9 +171,11 @@ public class DepthEstimationService : IAsyncDisposable
             return null;
         }
 
-        // GPU→CPU readback of the packed RGBA: the pipeline uploads it internally.
         int pixelCount = gpuImage.Width * gpuImage.Height;
-        int[] packedRgba = await gpuImage.PackedRgba.CopyToHostAsync<int>(0, pixelCount);
+        // GPU → JS TypedArray (not .NET), then one Read<int> for the pipeline API.
+        // Call on the typed MemoryBuffer1D — .Buffer is the raw backend buffer and is not IArrayView.
+        using var u8 = await gpuImage.PackedRgba.CopyToHostUint8ArrayAsync(0, (long)pixelCount * 4);
+        int[] packedRgba = u8.Read<int>();
 
         return await RunPipelineAsync(packedRgba, gpuImage.Width, gpuImage.Height);
     }

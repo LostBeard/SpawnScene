@@ -235,7 +235,7 @@ public class ProjectService
         }
     }
 
-    /// <summary>Save a scene thumbnail image.</summary>
+    /// <summary>Save a scene thumbnail image (RGBA bytes already on the .NET heap — prefer the Uint8Array overload).</summary>
     public async Task SaveSceneThumbnailAsync(string projectId, string sceneId, byte[] pngData)
     {
         try
@@ -244,6 +244,29 @@ public class ProjectService
             var projDir = await GetProjectDirAsync(root, projectId);
             using var scenesDir = await projDir.GetDirectoryHandle("scenes", create: true);
             await WriteBinaryAsync(scenesDir, $"{sceneId}.thumb", pngData);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[ProjectService] Error saving scene thumbnail: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Save a scene thumbnail from a JS TypedArray (e.g. ImageData.Data) without
+    /// pulling the pixels into the .NET/WASM managed heap.
+    /// </summary>
+    public async Task SaveSceneThumbnailAsync(string projectId, string sceneId, TypedArray rgbaData)
+    {
+        try
+        {
+            var root = await GetRootDirAsync();
+            var projDir = await GetProjectDirAsync(root, projectId);
+            using var scenesDir = await projDir.GetDirectoryHandle("scenes", create: true);
+            // Writable.write accepts BufferSource; TypedArray is the JS-side path.
+            using var fileHandle = await scenesDir.GetFileHandle($"{sceneId}.thumb", create: true);
+            using var writable = await fileHandle.CreateWritable();
+            await writable.Write(rgbaData);
+            await writable.Close();
         }
         catch (Exception ex)
         {

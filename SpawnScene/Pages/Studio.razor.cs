@@ -27,6 +27,7 @@ public partial class Studio : IAsyncDisposable
     [Inject] private XRService _xrService { get; set; } = default!;
     [Inject] private MultiViewGenerationService _multiViewService { get; set; } = default!;
     [Inject] private SpawnJSRuntime _js { get; set; } = default!;
+    [Inject] private GpuDepthColorizer _depthColorizer { get; set; } = default!;
     // SpawnDev.ILGPU.ML — created on-demand after GPU init (not injected)
 
     private ElementReference _canvasRef;
@@ -273,67 +274,31 @@ public partial class Studio : IAsyncDisposable
     }
 
     /// <summary>
-    /// Reads back depth result to CPU and uploads as a colorized RGBA GPUTexture for visualization.
-    /// CPU readback is justified: display-only, not in the compute pipeline.
+    /// Colorize depth on the GPU and upload as a UI texture.
+    /// Uses MinDepth/MaxDepth already computed on GPU — no full-map .NET readback/colorize loop.
     /// </summary>
     private async Task CaptureDepthMapAsync(DepthResult depthResult)
     {
         if (_device == null || _queue == null || depthResult.RawDepthGpu == null) return;
 
-        // Dispose old depth map
         _depthMapView?.Dispose(); _depthMapView = null;
         _depthMapTex?.Destroy(); _depthMapTex?.Dispose(); _depthMapTex = null;
 
         int w = depthResult.Width;
         int h = depthResult.Height;
 
-        // CPU transfer: display only
-        var depth = await depthResult.RawDepthGpu.CopyToHostAsync<float>(0, depthResult.RawDepthGpu.Length);
+        var result = await _depthColorizer.ColorizeToTextureAsync(depthResult, _device, _queue, w, h);
+        if (result == null) return;
 
-        // Use p2/p98 percentiles for visualization range (robust against outliers).
-        // Sample every Nth pixel to keep sort fast in WASM (~150K elements max).
-        int n = depth.Length;
-        int stride = Math.Max(1, n / 150_000);
-        int sampleCount = (n + stride - 1) / stride;
-        var sample = new float[sampleCount];
-        for (int i = 0, j = 0; i < n && j < sampleCount; i += stride, j++)
-            sample[j] = depth[i];
-        System.Array.Sort(sample);
-        float vizMin = sample[(int)(sampleCount * 0.02f)];
-        float vizMax = sample[Math.Min((int)(sampleCount * 0.98f), sampleCount - 1)];
-        float range = vizMax > vizMin ? vizMax - vizMin : 1f;
-
-        var rgba = new byte[w * h * 4];
-        for (int i = 0; i < depth.Length; i++)
-        {
-            float t = Math.Clamp((depth[i] - vizMin) / range, 0f, 1f);
-            DepthColormap(t, out rgba[i * 4], out rgba[i * 4 + 1], out rgba[i * 4 + 2]);
-            rgba[i * 4 + 3] = 255;
-        }
-
-        var tex = _device.CreateTexture(new GPUTextureDescriptor
-        {
-            Size = new[] { w, h },
-            Format = "rgba8unorm",
-            Usage = GPUTextureUsage.TextureBinding | GPUTextureUsage.CopyDst,
-        });
-        _queue.WriteTexture(
-            new GPUTexelCopyTextureInfo { Texture = tex },
-            rgba,
-            new GPUTexelCopyBufferLayout { Offset = 0, BytesPerRow = (uint)(w * 4), RowsPerImage = (uint)h },
-            new uint[] { (uint)w, (uint)h }
-        );
-
-        _depthMapTex = tex;
-        _depthMapView = tex.CreateView();
+        _depthMapTex = result.Value.tex;
+        _depthMapView = result.Value.view;
         _depthMapW = w;
         _depthMapH = h;
     }
 
-    /// <summary>Plasma-like colormap: t=0 (min depth) → dark purple, t=1 (max depth) → bright yellow.</summary>
+    /// <summary>Plasma-like colormap kept for any remaining CPU viz callers.</summary>
     private static void DepthColormap(float t, out byte r, out byte g, out byte b)
     {
-        // 5-stop plasma colormap (dark purple → blue-purple → magenta → orange → yellow)
         ReadOnlySpan<float> kr = stackalloc float[] { 0.05f, 0.46f, 0.80f, 0.97f, 0.94f };
         ReadOnlySpan<float> kg = stackalloc float[] { 0.03f, 0.07f, 0.14f, 0.51f, 0.98f };
         ReadOnlySpan<float> kb = stackalloc float[] { 0.53f, 0.67f, 0.37f, 0.09f, 0.13f };

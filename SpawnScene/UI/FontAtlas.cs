@@ -120,12 +120,11 @@ public class FontAtlas : IDisposable
             _metrics[size] = charMap;
         }
 
-        // Read pixel data from canvas
+        // Upload atlas pixels JS → GPU. ImageData.Data is already a Uint8ClampedArray;
+        // do NOT ReadBytes() into the .NET/WASM heap just to hand the same bytes to writeTexture.
         using var imageData = ctx.GetImageData(0, 0, AtlasSize, AtlasSize);
         using var dataArray = imageData.Data;
-        var pixelBytes = dataArray.ReadBytes();
 
-        // Upload to WebGPU texture
         Texture = device.CreateTexture(new GPUTextureDescriptor
         {
             Size = new[] { AtlasSize, AtlasSize },
@@ -136,7 +135,7 @@ public class FontAtlas : IDisposable
 
         queue.WriteTexture(
             new GPUTexelCopyTextureInfo { Texture = Texture },
-            pixelBytes,
+            dataArray,
             new GPUTexelCopyBufferLayout
             {
                 Offset = 0,

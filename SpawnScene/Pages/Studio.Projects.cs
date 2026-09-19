@@ -165,14 +165,7 @@ public partial class Studio
             using var imageData = ctx.GetImageData(0, 0, w, h);
             using var dataArray = imageData.Data; // JS Uint8ClampedArray — RGBA pixels, JS-side
 
-            // Zero-copy upload: stream the JS pixel array straight into a GPU packed-RGBA buffer via
-            // CopyFromJS, so the full-res image (a 5K photo ≈ 59 MB) NEVER enters the .NET/WASM managed
-            // heap. Depth estimation and Gaussian generation both consume this single GPU buffer.
-            // GPU-First Pipeline Rule: the image bytes are pure GPU input, never touched by .NET logic.
-            // ⚠️ IBrowserMemoryBuffer is on the underlying MemoryBuffer (.Buffer), not MemoryBuffer1D.
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
-            var rgbaGpuBuf = _gpuService.WebGPUAccelerator.Allocate1D<int>(w * h);
-            SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.UploadToDevice(dataArray, rgbaGpuBuf);
 
             // Build camera params from EXIF (or fall back to heuristic)
             var camera = CameraParams.CreateFromExif(w, h, exifFocal);
@@ -181,7 +174,16 @@ public partial class Studio
                 : "heuristic 1.2x";
             Console.WriteLine($"[EXIF] {source.FileName}: fx={camera.FocalX:F1}px ({focalSource})");
 
-            // GPU-resident image (packed RGBA) — owns rgbaGpuBuf, disposed with the using scope.
+            // Depth: JS TypedArray → one Read<int> inside the service for EstimateGpuRawAsync(int[]).
+            // Do NOT upload to GPU then CopyToHostAsync (that was a GPU→.NET→GPU round-trip).
+            _statusMessage = "Estimating depth...";
+            BuildProjectDetailUI();
+            var depthResult = await _depthService.EstimateDepthFromJsRgbaAsync(dataArray, w, h);
+            if (depthResult == null) { _statusMessage = "Error: depth estimation failed"; BuildProjectDetailUI(); return; }
+
+            // Gaussian path: JS TypedArray → GPU directly (no .NET heap).
+            var rgbaGpuBuf = _gpuService.WebGPUAccelerator.Allocate1D<int>(w * h);
+            SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.UploadToDevice(dataArray, rgbaGpuBuf);
             using var gpuImage = new GpuImage
             {
                 PackedRgba = rgbaGpuBuf,
@@ -189,13 +191,6 @@ public partial class Studio
                 Height = h,
                 FileName = source.FileName,
             };
-
-            // Estimate depth
-            _statusMessage = "Estimating depth...";
-            BuildProjectDetailUI();
-
-            var depthResult = await _depthService.EstimateDepthAsync(gpuImage);
-            if (depthResult == null) { _statusMessage = "Error: depth estimation failed"; BuildProjectDetailUI(); return; }
 
             // Capture depth map for visualization (before Gaussian kernel consumes the buffer)
             await CaptureDepthMapAsync(depthResult);
@@ -690,11 +685,10 @@ public partial class Studio
             using var ctx = osc.Get2DContext();
             ctx.DrawImage(bitmap, 0, 0, thumbW, thumbH);
             using var imageData = ctx.GetImageData(0, 0, thumbW, thumbH);
-            using var dataArray = imageData.Data;
-            var pixels = dataArray.ReadBytes();
+            using var dataArray = imageData.Data; // Uint8ClampedArray — stay JS-side
 
-            await _projectService.SaveSceneThumbnailAsync(projectId, sceneId, pixels);
-            UploadThumbnailToCache($"scene:{sceneId}", pixels, thumbW, thumbH);
+            await _projectService.SaveSceneThumbnailAsync(projectId, sceneId, dataArray);
+            UploadThumbnailToCache($"scene:{sceneId}", dataArray, thumbW, thumbH);
 
             Console.WriteLine($"[Studio] Scene thumbnail captured for {sceneId}");
         }
@@ -713,6 +707,7 @@ public partial class Studio
             var pixels = await _projectService.GetSceneThumbnailAsync(projectId, sceneId);
             if (pixels == null || pixels.Length == 0) return;
 
+            // OPFS → byte[] is the file-I/O boundary; upload that straight to the GPU texture.
             UploadThumbnailToCache(key, pixels, 320, 200);
 
             if (_state == StudioState.ProjectBrowser)
@@ -726,10 +721,32 @@ public partial class Studio
         }
     }
 
+    private void UploadThumbnailToCache(string key, TypedArray pixels, int width, int height)
+    {
+        if (_device == null || _queue == null) return;
+        var (tex, view) = CreateThumbnailTexture(key, width, height);
+        _queue.WriteTexture(
+            new GPUTexelCopyTextureInfo { Texture = tex },
+            pixels,
+            new GPUTexelCopyBufferLayout { Offset = 0, BytesPerRow = (uint)(width * 4), RowsPerImage = (uint)height },
+            new uint[] { (uint)width, (uint)height });
+        _thumbnailCache[key] = (tex, view);
+    }
+
     private void UploadThumbnailToCache(string key, byte[] pixels, int width, int height)
     {
         if (_device == null || _queue == null) return;
+        var (tex, view) = CreateThumbnailTexture(key, width, height);
+        _queue.WriteTexture(
+            new GPUTexelCopyTextureInfo { Texture = tex },
+            pixels,
+            new GPUTexelCopyBufferLayout { Offset = 0, BytesPerRow = (uint)(width * 4), RowsPerImage = (uint)height },
+            new uint[] { (uint)width, (uint)height });
+        _thumbnailCache[key] = (tex, view);
+    }
 
+    private (GPUTexture tex, GPUTextureView view) CreateThumbnailTexture(string key, int width, int height)
+    {
         if (_thumbnailCache.TryGetValue(key, out var old))
         {
             old.view.Dispose();
@@ -737,22 +754,13 @@ public partial class Studio
             old.tex.Dispose();
         }
 
-        var tex = _device.CreateTexture(new GPUTextureDescriptor
+        var tex = _device!.CreateTexture(new GPUTextureDescriptor
         {
             Size = new[] { width, height },
             Format = "rgba8unorm",
             Usage = GPUTextureUsage.TextureBinding | GPUTextureUsage.CopyDst,
         });
-        var view = tex.CreateView();
-
-        _queue.WriteTexture(
-            new GPUTexelCopyTextureInfo { Texture = tex },
-            pixels,
-            new GPUTexelCopyBufferLayout { Offset = 0, BytesPerRow = (uint)(width * 4), RowsPerImage = (uint)height },
-            new uint[] { (uint)width, (uint)height }
-        );
-
-        _thumbnailCache[key] = (tex, view);
+        return (tex, tex.CreateView());
     }
 
     private async void LoadThumbnailAsync(string projectId, string fileName)
@@ -772,10 +780,9 @@ public partial class Studio
             using var ctx = osc.Get2DContext();
             ctx.DrawImage(bitmap, 0, 0, thumbW, thumbH);
             using var imageData = ctx.GetImageData(0, 0, thumbW, thumbH);
-            using var dataArray = imageData.Data;
-            var pixels = dataArray.ReadBytes();
+            using var dataArray = imageData.Data; // Uint8ClampedArray — writeTexture directly, no ReadBytes
 
-            UploadThumbnailToCache(key, pixels, thumbW, thumbH);
+            UploadThumbnailToCache(key, dataArray, thumbW, thumbH);
 
             if (_state == StudioState.ProjectDetail && _activeProject?.Id == projectId)
                 BuildProjectDetailUI();

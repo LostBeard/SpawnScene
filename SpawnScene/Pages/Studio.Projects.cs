@@ -174,8 +174,8 @@ public partial class Studio
                 : "heuristic 1.2x";
             Console.WriteLine($"[EXIF] {source.FileName}: fx={camera.FocalX:F1}px ({focalSource})");
 
-            // Depth: JS TypedArray → one Read<int> inside the service for EstimateGpuRawAsync(int[]).
-            // Do NOT upload to GPU then CopyToHostAsync (that was a GPU→.NET→GPU round-trip).
+            // Depth: JS TypedArray → EstimateGpuRawAsync(TypedArray) via the service (no managed Read<int>).
+            // Gaussian path below: UploadToDevice keeps RGBA on GPU for unprojection.
             _statusMessage = "Estimating depth...";
             BuildProjectDetailUI();
             var depthResult = await _depthService.EstimateDepthFromJsRgbaAsync(dataArray, w, h);

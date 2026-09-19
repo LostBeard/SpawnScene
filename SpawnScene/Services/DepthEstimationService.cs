@@ -122,22 +122,17 @@ public class DepthEstimationService : IAsyncDisposable
 
     /// <summary>
     /// Run depth estimation from packed RGBA ints already on the .NET heap.
-    /// Prefer feeding a JS TypedArray via <see cref="EstimateDepthFromJsRgbaAsync"/> when the
-    /// pixels are still JS-side — this entry exists because <c>EstimateGpuRawAsync</c> takes <c>int[]</c>.
+    /// Prefer <see cref="EstimateDepthFromJsRgbaAsync"/> when pixels are still JS-side.
     /// </summary>
     public Task<DepthResult?> EstimateDepthFromPackedRgbaAsync(int[] packedRgba, int width, int height)
-        => RunPipelineAsync(packedRgba, width, height);
+        => RunPipelineAsync(() => _pipe!.EstimateGpuRawAsync(packedRgba, width, height, width, height));
 
     /// <summary>
-    /// Run depth from a JS TypedArray (e.g. ImageData.Data). One JS→.NET <c>Read&lt;int&gt;</c> for the
-    /// pipeline's <c>int[]</c> API — does not first upload to GPU and read back.
+    /// Run depth from a JS TypedArray (e.g. ImageData.Data) — JS → GPU via CopyFromJS,
+    /// no managed <c>int[]</c> crossing.
     /// </summary>
     public Task<DepthResult?> EstimateDepthFromJsRgbaAsync(TypedArray rgbaBytes, int width, int height)
-    {
-        // CPU transfer: DepthEstimationPipeline.EstimateGpuRawAsync currently requires int[].
-        int[] packedRgba = rgbaBytes.Read<int>();
-        return RunPipelineAsync(packedRgba, width, height);
-    }
+        => RunPipelineAsync(() => _pipe!.EstimateGpuRawAsync(rgbaBytes, width, height, width, height));
 
     /// <summary>
     /// Run depth estimation on a CPU-resident image. Returns a GPU-resident <see cref="DepthResult"/>.
@@ -150,20 +145,28 @@ public class DepthEstimationService : IAsyncDisposable
             return null;
         }
 
-        // CPU transfer: ImportedImage already holds managed bytes (feature/SfM path).
+        // ImportedImage already holds managed bytes (feature/SfM path).
         var packedRgba = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
 
-        return await RunPipelineAsync(packedRgba, image.Width, image.Height);
+        return await EstimateDepthFromPackedRgbaAsync(packedRgba, image.Width, image.Height);
     }
 
     /// <summary>
-    /// Run depth estimation on a GPU-resident image.
-    /// ⚠️ Round-trips GPU→JS→.NET because the pipeline only accepts <c>int[]</c>. Prefer
-    /// <see cref="EstimateDepthFromJsRgbaAsync"/> / <see cref="EstimateDepthFromPackedRgbaAsync"/>
-    /// when the source TypedArray is still available.
+    /// Run depth estimation on a GPU-resident image — no download/readback; preprocess reads
+    /// <see cref="GpuImage.PackedRgba"/> in place.
     /// </summary>
-    public async Task<DepthResult?> EstimateDepthAsync(GpuImage gpuImage)
+    public Task<DepthResult?> EstimateDepthAsync(GpuImage gpuImage)
+        => RunPipelineAsync(() => _pipe!.EstimateGpuRawAsync(
+            gpuImage.PackedRgba.View, gpuImage.Width, gpuImage.Height, gpuImage.Width, gpuImage.Height));
+
+    /// <summary>
+    /// Shared pipeline call: RGBA → GPU-resident depth + min/max.
+    /// DAv3 <c>predicted_depth</c> is inverse/relative depth (high = close) = disparity, which is
+    /// exactly what the unprojection kernel expects — so no flip is applied.
+    /// </summary>
+    private async Task<DepthResult?> RunPipelineAsync(
+        Func<Task<(MemoryBuffer1D<float, Stride1D.Dense> RawDepth, float MinDepth, float MaxDepth, int Width, int Height)>> run)
     {
         if (_pipe == null)
         {
@@ -171,30 +174,13 @@ public class DepthEstimationService : IAsyncDisposable
             return null;
         }
 
-        int pixelCount = gpuImage.Width * gpuImage.Height;
-        // GPU → JS TypedArray (not .NET), then one Read<int> for the pipeline API.
-        // Call on the typed MemoryBuffer1D — .Buffer is the raw backend buffer and is not IArrayView.
-        using var u8 = await gpuImage.PackedRgba.CopyToHostUint8ArrayAsync(0, (long)pixelCount * 4);
-        int[] packedRgba = u8.Read<int>();
-
-        return await RunPipelineAsync(packedRgba, gpuImage.Width, gpuImage.Height);
-    }
-
-    /// <summary>
-    /// Shared pipeline call: RGBA int[] → GPU-resident depth (bit-exact DAv3) + min/max.
-    /// DAv3 <c>predicted_depth</c> is inverse/relative depth (high = close) = disparity, which is
-    /// exactly what the unprojection kernel expects — so no flip is applied.
-    /// </summary>
-    private async Task<DepthResult?> RunPipelineAsync(int[] packedRgba, int width, int height)
-    {
         Status = "Running depth inference...";
         OnStateChanged?.Invoke();
         await Task.Yield();
 
         try
         {
-            var (rawDepth, minD, maxD, outW, outH) = await _pipe!.EstimateGpuRawAsync(
-                packedRgba, width, height, width, height);
+            var (rawDepth, minD, maxD, outW, outH) = await run().ConfigureAwait(false);
 
             Console.WriteLine($"[Depth] {outW}x{outH} min/max: [{minD:F6}, {maxD:F6}], range={maxD - minD:F6}");
 

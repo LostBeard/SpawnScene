@@ -16,7 +16,8 @@
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.5" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.5" PrivateAssets="all" />
-		<PackageReference Include="SpawnDev.ILGPU.ML" Version="5.2.18" />
+		<!-- Local ML for TypedArray / GPU-view depth overloads (zero-copy). Swap back to PackageReference for release. -->
+		<ProjectReference Include="..\..\..\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML.csproj" />
 		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="2.1.18" />
 	</ItemGroup>
 

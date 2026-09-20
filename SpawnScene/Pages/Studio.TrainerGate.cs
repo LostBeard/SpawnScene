@@ -136,7 +136,62 @@ public partial class Studio
             else if (!close)
                 Console.WriteLine("[TrainerGate] FAIL: GPU and CPU disagree");
             else
-                Console.WriteLine("[TrainerGate] PASS");
+                Console.WriteLine("[TrainerGate] forward PASS");
+
+            if (!hasContent || !close) return;
+
+            // ── Training: fit colour+opacity back to a target rendered from KNOWN parameters ──
+            // The target is this same scene; the splats are then perturbed. So the optimiser
+            // has a reachable answer and we can check it walks toward it, rather than only
+            // that some number went down - which a loop that merely dims everything also does.
+            trainer.SetTarget(gpuColour);
+
+            var perturbed = (float[])packed.Clone();
+            for (int i = 0; i < n; i++)
+            {
+                int o = i * SplatFormat.Floats;
+                perturbed[o + 3] = 0.5f; perturbed[o + 4] = 0.5f; perturbed[o + 5] = 0.5f;
+                perturbed[o + 9] = 0.5f;
+            }
+            using var trainBuf = accel.Allocate1D<float>(perturbed.Length);
+            trainBuf.CopyFromCPU(perturbed);
+            await accel.SynchronizeAsync();
+
+            trainer.InitOptimizerState(trainBuf, n);
+
+            float first = 0f, last = 0f;
+            const int iterations = 300;
+            for (int it = 0; it < iterations; it++)
+            {
+                float loss = await trainer.TrainStepAsync(trainBuf, n, cam, depthNear, depthFar);
+                if (it == 0) first = loss;
+                last = loss;
+                if (it % 50 == 0) Console.WriteLine($"[TrainerGate] iter {it,4} loss {loss:F6}");
+            }
+
+            // Did the parameters move toward the truth, or just the loss downward?
+            float[] fitted = await trainBuf.CopyToHostAsync<float>(0, perturbed.Length);
+            float errBefore = 0f, errAfter = 0f;
+            for (int i = 0; i < n; i++)
+            {
+                int o = i * SplatFormat.Floats;
+                for (int c = 0; c < 3; c++)
+                {
+                    errBefore += MathF.Abs(0.5f - packed[o + 3 + c]);
+                    errAfter += MathF.Abs(fitted[o + 3 + c] - packed[o + 3 + c]);
+                }
+            }
+            errBefore /= n * 3; errAfter /= n * 3;
+
+            Console.WriteLine($"[TrainerGate] loss {first:F6} -> {last:F6}");
+            Console.WriteLine($"[TrainerGate] mean |colour - truth| {errBefore:F4} -> {errAfter:F4}");
+
+            bool lossFell = last < first * 0.5f;
+            bool recovered = errAfter < errBefore * 0.6f;
+
+            if (!lossFell) Console.WriteLine("[TrainerGate] FAIL: loss did not fall");
+            else if (!recovered) Console.WriteLine("[TrainerGate] FAIL: colours did not move toward truth");
+            else Console.WriteLine("[TrainerGate] PASS");
         }
         catch (Exception ex)
         {

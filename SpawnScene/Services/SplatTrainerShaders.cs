@@ -501,4 +501,122 @@ fn scatter_gradients(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
 }
 ";
+
+    /// <summary>
+    /// Pass 7: L1 loss and its gradient w.r.t. the rendered image, in one pass.
+    ///
+    /// The forward's colour buffer is compared against the target image and dL/d(pixel) is
+    /// written for the backward kernel. The loss itself is accumulated in fixed point because
+    /// WebGPU has no float atomics; it is only a scalar for reporting, so precision there is
+    /// not load-bearing.
+    /// </summary>
+    public const string LossL1 = @"
+@group(0) @binding(0) var<storage, read>       rendered : array<f32>;   // 3 per pixel
+// 'target' is a RESERVED KEYWORD in WGSL; the binding has to be named something else.
+@group(0) @binding(1) var<storage, read>       ref_image : array<f32>;  // 3 per pixel
+@group(0) @binding(2) var<storage, read_write> dL_dpix  : array<f32>;   // 3 per pixel
+@group(0) @binding(3) var<storage, read_write> loss_fixed : atomic<i32>;
+@group(0) @binding(4) var<uniform>             dims     : vec4<u32>;    // x = pixel count
+
+const LOSS_SCALE : f32 = 1048576.0;
+
+@compute @workgroup_size(64)
+fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let p = gid.x;
+    if (p >= dims.x) { return; }
+
+    let n = f32(dims.x * 3u);
+    var total = 0.0;
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        let i = p * 3u + c;
+        let d = rendered[i] - ref_image[i];
+        total = total + abs(d);
+        // d|x|/dx = sign(x), averaged over every channel of every pixel.
+        dL_dpix[i] = sign(d) / n;
+    }
+    atomicAdd(&loss_fixed, i32(round(total / n * LOSS_SCALE)));
+}
+";
+
+    /// <summary>
+    /// Pass 8: Adam on colour and opacity.
+    ///
+    /// Parameterisation matches the reference implementation, because the published learning
+    /// rates mean nothing otherwise: opacity is stored as a LOGIT and read through a sigmoid,
+    /// so the incoming gradient is chained by d(sigmoid)/d(logit) = a(1-a). Bias correction is
+    /// included; without it the first steps are tiny and read as a wrong learning rate.
+    ///
+    /// Gradients arrive as fixed-point integers from the scatter pass and are dequantised here.
+    /// </summary>
+    public const string AdamStep = @"
+@group(0) @binding(0) var<storage, read_write> splats     : array<f32>;       // 14 per splat
+@group(0) @binding(1) var<storage, read>       grad_fixed : array<i32>;       // 4 per splat
+@group(0) @binding(2) var<storage, read_write> opacity_logit : array<f32>;    // 1 per splat
+@group(0) @binding(3) var<storage, read_write> adam_m     : array<f32>;       // 4 per splat
+@group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 4 per splat
+@group(0) @binding(5) var<uniform>             cfg        : vec4<f32>;        // x=colourLr y=opacityLr z=step w=splatCount
+
+const FLOATS_PER_SPLAT : u32 = 14u;
+const FIXED_SCALE : f32 = 1048576.0;
+const BETA1 : f32 = 0.9;
+const BETA2 : f32 = 0.999;
+const EPS : f32 = 1e-15;
+
+fn adam(value : f32, grad : f32, lr : f32, step : f32, m : ptr<function, f32>, v : ptr<function, f32>) -> f32 {
+    *m = BETA1 * (*m) + (1.0 - BETA1) * grad;
+    *v = BETA2 * (*v) + (1.0 - BETA2) * grad * grad;
+    let m_hat = *m / (1.0 - pow(BETA1, step));
+    let v_hat = *v / (1.0 - pow(BETA2, step));
+    return value - lr * m_hat / (sqrt(v_hat) + EPS);
+}
+
+@compute @workgroup_size(64)
+fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= u32(cfg.w)) { return; }
+
+    let o = i * FLOATS_PER_SPLAT;
+    let step = cfg.z;
+
+    // Colour (SH degree 0 / DC term).
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        let g = f32(grad_fixed[i * 4u + c]) / FIXED_SCALE;
+        var m = adam_m[i * 4u + c];
+        var v = adam_v[i * 4u + c];
+        let updated = adam(splats[o + 3u + c], g, cfg.x, step, &m, &v);
+        adam_m[i * 4u + c] = m;
+        adam_v[i * 4u + c] = v;
+        splats[o + 3u + c] = clamp(updated, 0.0, 1.0);
+    }
+
+    // Opacity, optimised in logit space.
+    let a = splats[o + 9u];
+    let g_op = f32(grad_fixed[i * 4u + 3u]) / FIXED_SCALE;
+    let g_logit = g_op * a * (1.0 - a);
+    var m3 = adam_m[i * 4u + 3u];
+    var v3 = adam_v[i * 4u + 3u];
+    let new_logit = adam(opacity_logit[i], g_logit, cfg.y, step, &m3, &v3);
+    adam_m[i * 4u + 3u] = m3;
+    adam_v[i * 4u + 3u] = v3;
+    opacity_logit[i] = new_logit;
+    splats[o + 9u] = 1.0 / (1.0 + exp(-new_logit));
+}
+";
+
+    /// <summary>Seed the logit buffer from the splats' current opacity, once before training.</summary>
+    public const string InitLogits = @"
+@group(0) @binding(0) var<storage, read>       splats        : array<f32>;
+@group(0) @binding(1) var<storage, read_write> opacity_logit : array<f32>;
+@group(0) @binding(2) var<uniform>             cfg           : vec4<u32>;   // x = splat count
+
+const FLOATS_PER_SPLAT : u32 = 14u;
+
+@compute @workgroup_size(64)
+fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= cfg.x) { return; }
+    let a = clamp(splats[i * FLOATS_PER_SPLAT + 9u], 1e-6, 1.0 - 1e-6);
+    opacity_logit[i] = log(a / (1.0 - a));
+}
+";
 }

@@ -34,6 +34,11 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _emitKeys;
     GPUComputePipeline? _tileRanges;
     GPUComputePipeline? _rasterForward;
+    GPUComputePipeline? _rasterBackward;
+    GPUComputePipeline? _scatterGrad;
+    GPUComputePipeline? _lossL1;
+    GPUComputePipeline? _adamStep;
+    GPUComputePipeline? _initLogits;
 
     GPUBuffer? _uniformBuf;     // TrainUniforms
     GPUBuffer? _capsBuf;        // vec4<u32>: key capacity
@@ -50,6 +55,17 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _outFinalT;  // 1 per pixel
     MemoryBuffer1D<uint, Stride1D.Dense>? _outEnd;      // 1 per pixel
     MemoryBuffer1D<int, Stride1D.Dense>? _sortTemp;   // radix temp is int-typed
+    MemoryBuffer1D<float, Stride1D.Dense>? _target;      // 3 per pixel
+    MemoryBuffer1D<float, Stride1D.Dense>? _dLdPix;      // 3 per pixel
+    MemoryBuffer1D<float, Stride1D.Dense>? _gradPerKey;  // 4 per key
+    MemoryBuffer1D<int, Stride1D.Dense>? _gradFixed;     // 4 per splat, fixed point
+    MemoryBuffer1D<float, Stride1D.Dense>? _opacityLogit;
+    MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
+    MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
+    MemoryBuffer1D<int, Stride1D.Dense>? _lossFixed;
+    GPUBuffer? _dimsBuf;
+    GPUBuffer? _adamCfgBuf;
+    int _adamStepCount;
 
     RadixSortPairs<uint, Stride1D.Dense, uint, Stride1D.Dense>? _sortPairs;
 
@@ -75,6 +91,11 @@ public sealed class SplatTrainerGpu : IDisposable
         _emitKeys = MakePipeline(SplatTrainerShaders.EmitKeys, "emit_keys");
         _tileRanges = MakePipeline(SplatTrainerShaders.TileRanges, "tile_ranges");
         _rasterForward = MakePipeline(SplatTrainerShaders.RasterForward, "raster_forward");
+        _rasterBackward = MakePipeline(SplatTrainerShaders.RasterBackward, "raster_backward");
+        _scatterGrad = MakePipeline(SplatTrainerShaders.ScatterGradients, "scatter_gradients");
+        _lossL1 = MakePipeline(SplatTrainerShaders.LossL1, "loss_l1");
+        _adamStep = MakePipeline(SplatTrainerShaders.AdamStep, "adam_step");
+        _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
 
         _uniformBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
@@ -93,8 +114,19 @@ public sealed class SplatTrainerGpu : IDisposable
         });
         _uniformBytes = new byte[UniformFloats * sizeof(float)];
         _scratch4 = new Uint32Array(4);
+        _dimsBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        _adamCfgBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
 
-        Console.WriteLine("[Trainer] pipelines created (emit_keys, tile_ranges, raster_forward)");
+        Console.WriteLine("[Trainer] pipelines created: emit_keys, tile_ranges, raster_forward, " +
+            "raster_backward, scatter_gradients, loss_l1, adam_step, init_logits");
     }
 
     GPUComputePipeline MakePipeline(string wgsl, string entry)
@@ -139,6 +171,16 @@ public sealed class SplatTrainerGpu : IDisposable
         _outColour = accel.Allocate1D<float>((long)width * height * 3);
         _outFinalT = accel.Allocate1D<float>((long)width * height);
         _outEnd = accel.Allocate1D<uint>((long)width * height);
+
+        _target = accel.Allocate1D<float>((long)width * height * 3);
+        _dLdPix = accel.Allocate1D<float>((long)width * height * 3);
+        _gradPerKey = accel.Allocate1D<float>((long)_keyCapacity * 4);
+        _gradFixed = accel.Allocate1D<int>((long)splatCount * 4);
+        _opacityLogit = accel.Allocate1D<float>(splatCount);
+        _adamM = accel.Allocate1D<float>((long)splatCount * 4);
+        _adamV = accel.Allocate1D<float>((long)splatCount * 4);
+        _lossFixed = accel.Allocate1D<int>(1);
+        _adamStepCount = 0;
 
         int temp = accel.ComputeRadixSortPairsTempStorageSize<uint, uint, AscendingUInt32>((Index1D)_keyCapacity);
         _sortTemp = accel.Allocate1D<int>(Math.Max(1, temp));
@@ -274,6 +316,121 @@ public sealed class SplatTrainerGpu : IDisposable
         return await _outColour!.CopyToHostAsync<float>(0, _width * _height * 3);
     }
 
+    /// <summary>Upload the target image this view is being fitted to.</summary>
+    public void SetTarget(float[] rgb)
+    {
+        if (rgb.Length != _width * _height * 3)
+            throw new ArgumentException($"target is {rgb.Length}, expected {_width * _height * 3}");
+        _target!.CopyFromCPU(rgb);
+    }
+
+    /// <summary>Seed opacity logits from the splats' current opacity. Call once before training.</summary>
+    public void InitOptimizerState(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
+    {
+        var splatGpu = splatBuf.GetGPUBuffer()!;
+        WriteU32(_dimsBuf!, (uint)splatCount);
+        Dispatch(_initLogits!, (splatCount + 63) / 64, 1, new[]
+        {
+            Buf(0, splatGpu), Buf(1, _opacityLogit!.GetGPUBuffer()!), Buf(2, _dimsBuf!),
+        });
+        _adamM!.MemSetToZero();
+        _adamV!.MemSetToZero();
+        _adamStepCount = 0;
+    }
+
+    /// <summary>
+    /// One training iteration on the current target: forward, loss, backward, scatter, Adam.
+    /// Returns the L1 loss BEFORE the step, so a caller can watch it fall.
+    ///
+    /// Deliberately one iteration per call. A long-running dispatch chain can trip the driver
+    /// watchdog and lose the device, so the host yields between iterations rather than queueing
+    /// a whole training run.
+    /// </summary>
+    public async Task<float> TrainStepAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
+        CameraParams cam, float depthNear, float depthFar,
+        float colourLr = SplatOptimizer.DefaultColourLr,
+        float opacityLr = SplatOptimizer.DefaultOpacityLr)
+    {
+        var accel = _gpu.WebGPUAccelerator;
+        var splatGpu = splatBuf.GetGPUBuffer()!;
+
+        // Forward also refreshes the tile binning for this view.
+        await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar);
+        if (LastKeyCount == 0) return 0f;
+
+        int pixels = _width * _height;
+
+        // ── Loss and dL/d(pixel) ──
+        _lossFixed!.MemSetToZero();
+        await accel.SynchronizeAsync();
+        WriteU32(_dimsBuf!, (uint)pixels);
+        Dispatch(_lossL1!, (pixels + 63) / 64, 1, new[]
+        {
+            Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
+            Buf(2, _dLdPix!.GetGPUBuffer()!), Buf(3, _lossFixed!.GetGPUBuffer()!), Buf(4, _dimsBuf!),
+        });
+
+        // ── Backward: one workgroup per tile, no atomics ──
+        // grad_per_key is written for every key this frame, so stale values cannot leak in.
+        Dispatch(_rasterBackward!, _tilesX, _tilesY, new[]
+        {
+            Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _ranges!.GetGPUBuffer()!),
+            Buf(3, _values!.GetGPUBuffer()!), Buf(4, _outFinalT!.GetGPUBuffer()!),
+            Buf(5, _outEnd!.GetGPUBuffer()!), Buf(6, _dLdPix!.GetGPUBuffer()!),
+            Buf(7, _gradPerKey!.GetGPUBuffer()!),
+        });
+
+        // ── Scatter per-key gradients into per-splat totals ──
+        _gradFixed!.MemSetToZero();
+        await accel.SynchronizeAsync();
+        WriteU32(_countBuf!, (uint)LastKeyCount);
+        Dispatch(_scatterGrad!, (LastKeyCount + 63) / 64, 1, new[]
+        {
+            Buf(0, _gradPerKey!.GetGPUBuffer()!), Buf(1, _values!.GetGPUBuffer()!),
+            Buf(2, _gradFixed!.GetGPUBuffer()!), Buf(3, _countBuf!),
+        });
+
+        // ── Adam ──
+        _adamStepCount++;
+        WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
+        Dispatch(_adamStep!, (splatCount + 63) / 64, 1, new[]
+        {
+            Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),
+            Buf(2, _opacityLogit!.GetGPUBuffer()!), Buf(3, _adamM!.GetGPUBuffer()!),
+            Buf(4, _adamV!.GetGPUBuffer()!), Buf(5, _adamCfgBuf!),
+        });
+        await accel.SynchronizeAsync();
+
+        int[] lossRaw = await _lossFixed!.CopyToHostAsync<int>(0, 1);
+        return lossRaw[0] / 1048576f;
+    }
+
+    static GPUBindGroupEntry Buf(uint binding, GPUBuffer b) =>
+        new() { Binding = binding, Resource = new GPUBufferBinding { Buffer = b } };
+
+    void Dispatch(GPUComputePipeline pipeline, int wgX, int wgY, GPUBindGroupEntry[] entries)
+    {
+        using var enc = _device!.CreateCommandEncoder();
+        using var pass = enc.BeginComputePass();
+        pass.SetPipeline(pipeline);
+        using var layout = pipeline.GetBindGroupLayout(0);
+        using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor { Layout = layout, Entries = entries });
+        pass.SetBindGroup(0, bg);
+        pass.DispatchWorkgroups((uint)Math.Max(1, wgX), (uint)Math.Max(1, wgY), 1);
+        pass.End();
+        using var cmd = enc.Finish();
+        _queue!.Submit(new[] { cmd });
+    }
+
+    void WriteVec4(GPUBuffer buf, float x, float y, float z, float w)
+    {
+        var f = new[] { x, y, z, w };
+        var bytes = new byte[16];
+        Buffer.BlockCopy(f, 0, bytes, 0, 16);
+        _queue!.WriteBuffer(buf, 0, bytes);
+    }
+
     void WriteUniforms(CameraParams cam, float depthNear, float depthFar, int splatCount)
     {
         WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var right, out var up, out var fwd, out var pos);
@@ -315,6 +472,14 @@ public sealed class SplatTrainerGpu : IDisposable
         _outFinalT?.Dispose(); _outFinalT = null;
         _outEnd?.Dispose(); _outEnd = null;
         _sortTemp?.Dispose(); _sortTemp = null;
+        _target?.Dispose(); _target = null;
+        _dLdPix?.Dispose(); _dLdPix = null;
+        _gradPerKey?.Dispose(); _gradPerKey = null;
+        _gradFixed?.Dispose(); _gradFixed = null;
+        _opacityLogit?.Dispose(); _opacityLogit = null;
+        _adamM?.Dispose(); _adamM = null;
+        _adamV?.Dispose(); _adamV = null;
+        _lossFixed?.Dispose(); _lossFixed = null;
     }
 
     public void Dispose()
@@ -323,9 +488,16 @@ public sealed class SplatTrainerGpu : IDisposable
         _uniformBuf?.Destroy(); _uniformBuf?.Dispose();
         _capsBuf?.Destroy(); _capsBuf?.Dispose();
         _countBuf?.Destroy(); _countBuf?.Dispose();
+        _dimsBuf?.Destroy(); _dimsBuf?.Dispose();
+        _adamCfgBuf?.Destroy(); _adamCfgBuf?.Dispose();
         _scratch4?.Dispose();
         _emitKeys?.Dispose();
         _tileRanges?.Dispose();
         _rasterForward?.Dispose();
+        _rasterBackward?.Dispose();
+        _scatterGrad?.Dispose();
+        _lossL1?.Dispose();
+        _adamStep?.Dispose();
+        _initLogits?.Dispose();
     }
 }

@@ -178,6 +178,12 @@ public partial class Studio : IAsyncDisposable
         if (!query.TryGetValue("autotest", out var mode))
             return;
 
+        if (mode == "trainer-gate")
+        {
+            await RunTrainerGateAsync();
+            return;
+        }
+
         if (mode == "novel-view")
         {
             query.TryGetValue("view", out var viewName);

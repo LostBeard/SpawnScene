@@ -75,9 +75,20 @@ public static class SplatTileRasterizer
     /// Bin, key and sort. One ascending sort groups by tile AND orders front-to-back inside
     /// each tile, because the tile id occupies the high bits of the key.
     /// </summary>
-    public static Binned Bin(IReadOnlyList<SplatRasterizer.Splat2D> splats, int width, int height,
-        float depthScale = 1024f)
+    public static Binned Bin(IReadOnlyList<SplatRasterizer.Splat2D> splats, int width, int height)
     {
+        // Normalise depth into the full key range. A fixed scale wastes most of the 18 bits on
+        // a scene with a narrow depth span and collapses distinct splats onto the same key,
+        // where their compositing order then depends on allocation order rather than depth.
+        float near = float.MaxValue, far = float.MinValue;
+        foreach (var sp in splats)
+        {
+            if (!(sp.Opacity > 0f)) continue;
+            near = MathF.Min(near, sp.Depth);
+            far = MathF.Max(far, sp.Depth);
+        }
+        float depthSpan = MathF.Max(far - near, 1e-6f);
+
         int tilesX = (width + TileSize - 1) / TileSize;
         int tilesY = (height + TileSize - 1) / TileSize;
 
@@ -94,7 +105,7 @@ public static class SplatTileRasterizer
             var span = Span(in s, ext, tilesX, tilesY);
             if (span.Count == 0) continue;
 
-            uint dq = (uint)Math.Clamp(s.Depth * depthScale, 0f, DepthMax);
+            uint dq = (uint)(Math.Clamp((s.Depth - near) / depthSpan, 0f, 1f) * DepthMax);
             for (int ty = span.Y0; ty <= span.Y1; ty++)
             {
                 for (int tx = span.X0; tx <= span.X1; tx++)

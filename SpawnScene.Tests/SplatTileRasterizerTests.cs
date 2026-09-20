@@ -198,6 +198,38 @@ public class SplatTileRasterizerTests
     }
 
     [Test]
+    public void DepthKeysUseTheFullPrecisionOfTheirBitField()
+    {
+        // The sort key packs depth into 18 bits (262143 levels). Quantising with a FIXED scale
+        // (the original depth * 1024) spends only a few hundred of those on a scene whose depth
+        // spans 0.4 to 0.8 - so distinct splats collapse onto the same key and their
+        // compositing order is decided by allocation order instead of by depth. Normalising
+        // against the actual range is what keeps depth ordering meaningful.
+        var splats = new List<SplatRasterizer.Splat2D>();
+        for (int i = 0; i < 200; i++)
+        {
+            splats.Add(new SplatRasterizer.Splat2D
+            {
+                // All in one tile, so every key shares a tile id and only depth distinguishes them.
+                Px = 8f, Py = 8f,
+                ConicA = 0.5f, ConicB = 0f, ConicC = 0.5f,
+                R = 0.5f, G = 0.5f, B = 0.5f, Opacity = 0.05f,
+                // A realistic span. TempleRing's object is ~0.26 units across at ~0.5 depth with
+                // hundreds of thousands of splats, so neighbouring depths differ by far less
+                // than 1/1024. Spreading 200 splats over 0.05 gives 2.5e-4 steps, which a fixed
+                // depth*1024 scale cannot resolve at all - they all collapse together.
+                Depth = 0.40f + i * (0.05f / 200f),
+            });
+        }
+
+        var b = SplatTileRasterizer.Bin(splats, W, H);
+        int distinct = b.Keys.Distinct().Count();
+
+        Assert.That(distinct, Is.EqualTo(splats.Count),
+            $"every distinct depth should get its own key, got {distinct} of {splats.Count}");
+    }
+
+    [Test]
     public void SplatsOffScreenOrBehindTheCameraAreBinnedOut()
     {
         var splats = new List<SplatRasterizer.Splat2D>

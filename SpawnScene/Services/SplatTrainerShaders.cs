@@ -48,10 +48,14 @@ struct TrainUniforms {
     principal  : vec2<f32>,   // cx, cy in pixels
     viewport   : vec2<f32>,   // width, height in pixels
     tiles      : vec2<u32>,   // tile counts in x and y
+    // Depth range of the scene from this view. The sort key quantises depth into 18 bits, so
+    // it must be normalised against the ACTUAL range: a fixed scale (depth * 1024) spent only
+    // ~400 of 262143 levels on a scene 0.4-0.8 deep, collapsing many splats onto the same key.
+    // Ties then composite in whatever order the atomic allocator happened to hand out.
+    depth_near : f32,
+    depth_far  : f32,
     splat_count: u32,
     _pad0      : u32,
-    _pad1      : u32,
-    _pad2      : u32,
 };
 
 @group(0) @binding(0) var<uniform> u : TrainUniforms;
@@ -169,47 +173,27 @@ fn splat_weight(conic : vec3<f32>, centre : vec2<f32>, pixel : vec2<f32>) -> f32
 ";
 
     /// <summary>
-    /// Pass 1: count how many tiles each splat touches, so the host can prefix-sum and size the
-    /// key buffer exactly. Splitting count from emit avoids a global atomic allocator, which
-    /// WebGPU gives no ordering guarantees for.
-    /// </summary>
-    public const string CountTiles = Common + @"
-@group(0) @binding(2) var<storage, read_write> tile_counts : array<u32>;
-
-@compute @workgroup_size(64)
-fn count_tiles(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
-    if (i >= u.splat_count) { return; }
-
-    let p = project(i);
-    if (!p.valid) { tile_counts[i] = 0u; return; }
-
-    let lo = vec2<i32>(floor((p.centre - p.extent) / f32(TILE)));
-    let hi = vec2<i32>(floor((p.centre + p.extent) / f32(TILE)));
-    let x0 = max(lo.x, 0);
-    let y0 = max(lo.y, 0);
-    let x1 = min(hi.x, i32(u.tiles.x) - 1);
-    let y1 = min(hi.y, i32(u.tiles.y) - 1);
-
-    if (x1 < x0 || y1 < y0) { tile_counts[i] = 0u; return; }
-    tile_counts[i] = u32((x1 - x0 + 1) * (y1 - y0 + 1));
-}
-";
-
-    /// <summary>
-    /// Pass 2: emit one (tileId, depth) key per overlapped tile at the offset the prefix sum
-    /// assigned. Key packs tile in the high bits and quantised depth in the low bits, so a
-    /// single ascending sort groups by tile AND orders front-to-back within each tile.
+    /// Pass 1: emit one (tile, depth) key per overlapped tile.
+    ///
+    /// Slots are reserved with a single global <c>atomicAdd</c> per splat rather than a
+    /// count pass plus a prefix sum. The WebGPU caution about atomics concerns ORDERING
+    /// guarantees, and allocation needs none - the keys are sorted immediately afterwards, so
+    /// only uniqueness matters, and the previous value returned by atomicAdd gives exactly that.
+    /// This removes a kernel and a multi-level scan.
+    ///
+    /// The caller sizes <c>keys</c>/<c>values</c> for the worst case and checks the final
+    /// counter; overflow is reported rather than silently truncating the scene.
     /// </summary>
     public const string EmitKeys = Common + @"
-@group(0) @binding(2) var<storage, read>       tile_offsets : array<u32>;  // exclusive prefix sum
-@group(0) @binding(3) var<storage, read_write> keys         : array<u32>;
-@group(0) @binding(4) var<storage, read_write> values       : array<u32>;  // splat index
+@group(0) @binding(2) var<storage, read_write> keys    : array<u32>;
+@group(0) @binding(3) var<storage, read_write> values  : array<u32>;
+@group(0) @binding(4) var<storage, read_write> counter : atomic<u32>;
+@group(0) @binding(5) var<uniform>             caps    : vec4<u32>;   // x = key capacity
 
-// Depth is quantised into the low bits. DEPTH_BITS must leave room for the tile id:
-// 1920x1080 at 16px tiles is 120x68 = 8160 tiles, which needs 13 bits.
+// Depth occupies the low bits; the tile id sits above it. 18 bits of depth leaves 14 for the
+// tile, i.e. up to 16384 tiles - 2048x2048 pixels at 16px tiles.
 const DEPTH_BITS : u32 = 18u;
-const DEPTH_MAX : f32 = 262143.0;   // (1 << DEPTH_BITS) - 1
+const DEPTH_MAX : f32 = 262143.0;
 
 @compute @workgroup_size(64)
 fn emit_keys(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -227,11 +211,16 @@ fn emit_keys(@builtin(global_invocation_id) gid : vec3<u32>) {
     let y1 = min(hi.y, i32(u.tiles.y) - 1);
     if (x1 < x0 || y1 < y0) { return; }
 
-    // Normalise depth against the far plane the host supplied via focal.y scaling is not
-    // available here, so clamp against a generous range and rely on relative ordering only.
-    let dq = u32(clamp(p.depth * 1024.0, 0.0, DEPTH_MAX));
+    let n = u32((x1 - x0 + 1) * (y1 - y0 + 1));
+    let base = atomicAdd(&counter, n);
+    if (base + n > caps.x) { return; }   // overflow; host sees counter > capacity and reports
 
-    var slot = tile_offsets[i];
+    // Normalised into the full 18-bit range so distinct depths get distinct keys.
+    let span = max(u.depth_far - u.depth_near, 1e-6);
+    let dn = clamp((p.depth - u.depth_near) / span, 0.0, 1.0);
+    let dq = u32(dn * DEPTH_MAX);
+
+    var slot = base;
     for (var ty = y0; ty <= y1; ty = ty + 1) {
         for (var tx = x0; tx <= x1; tx = tx + 1) {
             let tile = u32(ty) * u.tiles.x + u32(tx);

@@ -1,0 +1,8 @@
+{
+  "name": "spawnscene-tools",
+  "private": true,
+  "description": "Browser automation and measurement gates for SpawnScene (tools/). Run `npm install` once, then e.g. `node tools/_cdp_novel_view.js <tag>`.",
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

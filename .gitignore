@@ -383,3 +383,6 @@ FodyWeavers.xsd
 /temp_l3.onnx
 /temp_posemb.onnx
 /temp_reg.onnx
+
+# Gate output: rendered captures and comparison images. Large, regenerable.
+_shots/

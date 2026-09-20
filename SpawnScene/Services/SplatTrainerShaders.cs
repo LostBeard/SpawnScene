@@ -360,4 +360,156 @@ fn raster_forward(
     }
 }
 ";
+
+    /// <summary>
+    /// Pass 5: backward for COLOUR and OPACITY, one workgroup per tile.
+    ///
+    /// The whole shape of this kernel is dictated by WebGPU having no f32 atomics, so a
+    /// pixel-major scatter (each pixel atomically adding into every splat it touched) is not
+    /// merely slow - it is unavailable. Instead:
+    ///
+    ///  - All 256 threads walk the tile's splat list BACK TO FRONT in LOCKSTEP. A thread whose
+    ///    pixel never reached splat k simply contributes zero for it. Lockstep is what makes the
+    ///    workgroup reduction below legal, and keeps every barrier in uniform control flow.
+    ///  - For each splat the workgroup reduces its 256 per-pixel contributions to one value and
+    ///    a single thread writes it to grad_per_key[k]. There is exactly one slot per
+    ///    (tile, splat) pair, which is precisely what the sorted key array already enumerates,
+    ///    so nothing is shared between workgroups and no atomics are needed here.
+    ///  - A separate, much lighter scatter pass folds per-key gradients into per-splat totals.
+    ///
+    /// Transmittance is recovered the same way as the CPU oracle: start from the pixel's final
+    /// T and divide out each splat's alpha walking backwards.
+    /// </summary>
+    public const string RasterBackward = Common + @"
+@group(0) @binding(2) var<storage, read> ranges  : array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read> values  : array<u32>;
+@group(0) @binding(4) var<storage, read> final_t : array<f32>;   // 1 per pixel, from forward
+@group(0) @binding(5) var<storage, read> end_idx : array<u32>;   // 1 per pixel, from forward
+@group(0) @binding(6) var<storage, read> dL_dpix : array<f32>;   // 3 per pixel
+// 4 per KEY: dL/dR, dL/dG, dL/dB, dL/dopacity. One slot per (tile, splat) pair.
+@group(0) @binding(7) var<storage, read_write> grad_per_key : array<f32>;
+
+var<workgroup> red : array<vec4<f32>, 256>;
+
+@compute @workgroup_size(16, 16, 1)
+fn raster_backward(
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    let tile = wg.y * u.tiles.x + wg.x;
+    let px = wg.x * TILE + (li % TILE);
+    let py = wg.y * TILE + (li / TILE);
+    let inside = px < u32(u.viewport.x) && py < u32(u.viewport.y);
+    let pixel = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
+
+    let range = ranges[tile];
+
+    var t = 1.0;
+    var my_end = range.x;
+    var dL = vec3<f32>(0.0);
+    if (inside) {
+        let o = py * u32(u.viewport.x) + px;
+        t = final_t[o];
+        my_end = end_idx[o];
+        dL = vec3<f32>(dL_dpix[o * 3u + 0u], dL_dpix[o * 3u + 1u], dL_dpix[o * 3u + 2u]);
+    }
+
+    // Colour accumulated by everything BEHIND the splat currently being processed.
+    var rec = vec3<f32>(0.0);
+
+    // Back to front, in lockstep. range.x/range.y are uniform, so every barrier below is
+    // reached by every invocation.
+    var k = range.y;
+    loop {
+        if (k <= range.x) { break; }
+        k = k - 1u;
+
+        var contrib = vec4<f32>(0.0);
+
+        // A thread only participates for splats its own pixel actually reached.
+        if (inside && k < my_end) {
+            let p = project(values[k]);
+            if (p.valid) {
+                let g = splat_weight(p.conic, p.centre, pixel);
+                if (g > 0.0) {
+                    let raw_alpha = p.opacity * g;
+                    let alpha = min(MAX_ALPHA, raw_alpha);
+                    if (alpha >= MIN_ALPHA) {
+                        // Undo this splat to recover the transmittance it rendered against.
+                        t = t / (1.0 - alpha);
+                        let w = alpha * t;
+
+                        contrib = vec4<f32>(w * dL.x, w * dL.y, w * dL.z, 0.0);
+
+                        let dL_dalpha =
+                            (p.colour.x - rec.x) * t * dL.x +
+                            (p.colour.y - rec.y) * t * dL.y +
+                            (p.colour.z - rec.z) * t * dL.z;
+
+                        // A CLAMPED alpha is constant in opacity, so its derivative is zero.
+                        // Dropping this guard produces a phantom gradient that drives opacity
+                        // up without bound.
+                        if (raw_alpha < MAX_ALPHA) {
+                            contrib.w = g * dL_dalpha;
+                        }
+
+                        rec = alpha * p.colour + (1.0 - alpha) * rec;
+                    }
+                }
+            }
+        }
+
+        // Reduce this splat's contribution across the tile's 256 pixels.
+        red[li] = contrib;
+        workgroupBarrier();
+        var stride = 128u;
+        loop {
+            if (stride == 0u) { break; }
+            if (li < stride) { red[li] = red[li] + red[li + stride]; }
+            workgroupBarrier();
+            stride = stride >> 1u;
+        }
+
+        if (li == 0u) {
+            grad_per_key[k * 4u + 0u] = red[0].x;
+            grad_per_key[k * 4u + 1u] = red[0].y;
+            grad_per_key[k * 4u + 2u] = red[0].z;
+            grad_per_key[k * 4u + 3u] = red[0].w;
+        }
+        workgroupBarrier();
+    }
+}
+";
+
+    /// <summary>
+    /// Pass 6: fold per-(tile, splat) gradients into per-splat totals.
+    ///
+    /// This is the only place atomics are needed, and the traffic is one add per KEY rather
+    /// than one per (pixel, splat) - smaller by roughly the pixel count of a tile. Floats go
+    /// through fixed point because WebGPU only offers integer atomics.
+    /// </summary>
+    public const string ScatterGradients = @"
+@group(0) @binding(0) var<storage, read>       grad_per_key : array<f32>;
+@group(0) @binding(1) var<storage, read>       values       : array<u32>;
+@group(0) @binding(2) var<storage, read_write> grad_fixed   : array<atomic<i32>>;
+@group(0) @binding(3) var<uniform>             counts       : vec4<u32>;   // x = key count
+
+// Gradients here are sums over a tile's pixels of quantities around 1e-4..1e-1. 2^20 keeps
+// ~6 decimal digits while leaving headroom before a 32-bit overflow.
+const FIXED_SCALE : f32 = 1048576.0;
+
+@compute @workgroup_size(64)
+fn scatter_gradients(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let k = gid.x;
+    if (k >= counts.x) { return; }
+
+    let splat = values[k];
+    for (var c = 0u; c < 4u; c = c + 1u) {
+        let v = grad_per_key[k * 4u + c];
+        if (v != 0.0) {
+            atomicAdd(&grad_fixed[splat * 4u + c], i32(round(v * FIXED_SCALE)));
+        }
+    }
+}
+";
 }

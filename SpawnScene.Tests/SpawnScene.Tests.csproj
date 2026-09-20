@@ -20,6 +20,7 @@
     <Compile Include="..\SpawnScene\Services\WorldSpaceGeometry.cs" Link="Linked\WorldSpaceGeometry.cs" />
     <Compile Include="..\SpawnScene\Services\SplatCovariance.cs" Link="Linked\SplatCovariance.cs" />
     <Compile Include="..\SpawnScene\Services\SplatRasterizer.cs" Link="Linked\SplatRasterizer.cs" />
+    <Compile Include="..\SpawnScene\Services\SplatOptimizer.cs" Link="Linked\SplatOptimizer.cs" />
     <Compile Include="..\SpawnScene\Services\MvsGeometricFusion.cs" Link="Linked\MvsGeometricFusion.cs" />
     <Compile Include="..\SpawnScene\Services\MvsFusionGpu.cs" Link="Linked\MvsFusionGpu.cs" />
   </ItemGroup>

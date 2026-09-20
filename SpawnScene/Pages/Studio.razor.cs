@@ -175,7 +175,20 @@ public partial class Studio : IAsyncDisposable
             .Where(p => p.Length == 2)
             .ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1]),
                 StringComparer.OrdinalIgnoreCase);
-        if (!query.TryGetValue("autotest", out var mode) || mode != "generate-room")
+        if (!query.TryGetValue("autotest", out var mode))
+            return;
+
+        if (mode == "novel-view")
+        {
+            query.TryGetValue("view", out var viewName);
+            // ?onlyview=N restricts the dense unproject to a single view (diagnostic).
+            int onlyView = query.TryGetValue("onlyview", out var ov) && int.TryParse(ov, out var ovi) ? ovi : -1;
+            bool globalScale = query.TryGetValue("globalscale", out var gs) && gs is "1" or "true";
+            await RunNovelViewAutotestAsync(viewName ?? "templeR0016", onlyView, globalScale);
+            return;
+        }
+
+        if (mode != "generate-room")
             return;
 
         Console.WriteLine($"[Autotest] starting mode={mode}");

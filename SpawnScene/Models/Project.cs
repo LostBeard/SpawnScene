@@ -35,12 +35,26 @@ public class ProjectScene
     public long SizeBytes { get; set; }
     public int SplatCount { get; set; }
     public string QualityPreset { get; set; } = "Standard";
+
+    /// <summary>
+    /// Floats per splat in this scene's .bin. Absent in records written before splats carried a
+    /// rotation, so it deserializes to 0 and <see cref="EffectiveFloatsPerSplat"/> treats it as
+    /// the old 10-float layout rather than silently reading the file at the wrong stride.
+    /// </summary>
+    public int FloatsPerSplat { get; set; }
+
+    /// <summary>Stride to read this scene's .bin at. 10 = pre-rotation layout, needs widening.</summary>
+    [JsonIgnore]
+    public int EffectiveFloatsPerSplat => FloatsPerSplat > 0 ? FloatsPerSplat : LegacyFloatsPerSplat;
+
+    /// <summary>The packed layout before a per-splat quaternion existed: pos3 color3 scale3 opacity1.</summary>
+    public const int LegacyFloatsPerSplat = 10;
 }
 
 /// <summary>Per-project generation and render settings.</summary>
 public class ProjectSettings
 {
-    public string DepthModel { get; set; } = "depth-anything-v2-small";
+    public string DepthModel { get; set; } = "depth-anything-v3-small";
     public string QualityPreset { get; set; } = "Standard";
     public int Subsample { get; set; } = 2;
     public float EdgeSharpness { get; set; } = 0.3f;

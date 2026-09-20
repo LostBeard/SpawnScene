@@ -98,6 +98,8 @@ public partial class Studio
     private void RenderUIOverlay()
     {
         if (_uiRenderer == null || _context == null || _device == null) return;
+        // Novel-view measurement captures the canvas; the HUD would be scored as scene content.
+        if (_hideUiOverlay) return;
 
         _uiRenderer.Begin(_canvasWidth, _canvasHeight);
         _uiRoot.Draw(_uiRenderer);

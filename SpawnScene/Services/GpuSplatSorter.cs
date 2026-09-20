@@ -48,7 +48,7 @@ public readonly struct DescendingInt16As32 : IRadixSortOperation<int>
 public class GpuSplatSorter : IDisposable
 {
     private readonly GpuService _gpu;
-    private const int FloatsPerSplat = 10; // pos3 + color3 + scale3 + opacity1
+    private const int FloatsPerSplat = SplatFormat.Floats; // pos3 + color3 + scale3 + opacity1 + quat4
 
     // ILGPU buffers — persistent across frames
     private MemoryBuffer1D<float, Stride1D.Dense>? _packedDataBuf;
@@ -166,14 +166,21 @@ public class GpuSplatSorter : IDisposable
         int i = index;
         if (i >= p.SplatCount) return;
 
-        int o = i * 10;
+        int o = i * FloatsPerSplat;
         float x = packedData[o];
         float y = packedData[o + 1];
         float z = packedData[o + 2];
         float opacity = packedData[o + 9];
 
         // Frustum cull with per-splat radius margin + zero-opacity rejection.
-        float splatScale = packedData[o + 6];
+        // Splats are anisotropic and oriented, so the bounding radius is the LARGEST axis --
+        // reading sx alone would cull an edge-on disk whose long axis is still on screen.
+        float s0 = packedData[o + 6];
+        float s1 = packedData[o + 7];
+        float s2 = packedData[o + 8];
+        float sMax = s0 > s1 ? s0 : s1;
+        if (s2 > sMax) sMax = s2;
+        float splatScale = sMax;
         float margin = splatScale * 3f;
         bool visible = opacity > 0f
             && x * p.P0x + y * p.P0y + z * p.P0z + p.P0d >= -margin  // Left
@@ -324,6 +331,12 @@ public class GpuSplatSorter : IDisposable
             packedData[o + 7] = scale.Y;
             packedData[o + 8] = scale.Z;
             packedData[o + 9] = g.Opacity;
+            // Gaussian3D.Rotation normalizes and orders (x, y, z, w); PLY stores rot_0 as w.
+            var q = g.Rotation;
+            packedData[o + 10] = q.X;
+            packedData[o + 11] = q.Y;
+            packedData[o + 12] = q.Z;
+            packedData[o + 13] = q.W;
         }
 
         _packedDataBuf = accelerator.Allocate1D(packedData);

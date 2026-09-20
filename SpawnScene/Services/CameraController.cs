@@ -68,7 +68,8 @@ public class CameraController : IDisposable
         }
         else if (scene.SourceName == "multi-view" && scene.TrainingCameras.Count > 0)
         {
-            // Multi-view scene: position at first camera, looking toward scene center.
+            // Multi-view: sit at first camera, look at the camera-ring / scene center (not raw Forward —
+            // Forward can disagree slightly with the intended look-at after depth scaling).
             var camCenter = Vector3.Zero;
             foreach (var cam in scene.TrainingCameras)
                 camCenter += cam.Position;
@@ -77,13 +78,26 @@ public class CameraController : IDisposable
             var firstCam = scene.TrainingCameras[0];
             _position = firstCam.Position;
 
-            // Scale move speed to scene size
             float maxDist = 0;
             foreach (var cam in scene.TrainingCameras)
                 maxDist = MathF.Max(maxDist, Vector3.Distance(cam.Position, camCenter));
             _moveSpeed = MathF.Max(maxDist * 0.5f, 0.05f);
 
-            var dir = firstCam.Forward;
+            // Always aim at a point in front of the camera — never Normalize(0).
+            // TempleRing: Middlebury bbox mid. Otherwise camera-ring centroid, else Forward.
+            var temple = new Vector3(0.028f, 0.042f, -0.054f);
+            Vector3 dir = firstCam.Forward;
+            var toTemple = temple - _position;
+            if (toTemple.LengthSquared() > 1e-6f
+                && Vector3.Dot(Vector3.Normalize(toTemple), firstCam.Forward) > 0.2f)
+                dir = toTemple;
+            else
+            {
+                var toCenter = camCenter - _position;
+                if (toCenter.LengthSquared() > 1e-6f)
+                    dir = toCenter;
+            }
+            dir = Vector3.Normalize(dir);
             _yaw = MathF.Atan2(dir.X, -dir.Z);
             _pitch = MathF.Asin(Math.Clamp(dir.Y, -1f, 1f));
         }
@@ -125,18 +139,7 @@ public class CameraController : IDisposable
     }
 
     // --- Derived axes from yaw/pitch ---
-    private Vector3 Forward
-    {
-        get
-        {
-            float cp = MathF.Cos(_pitch);
-            return new Vector3(
-                cp * MathF.Sin(_yaw),
-                MathF.Sin(_pitch),
-                -cp * MathF.Cos(_yaw)
-            );
-        }
-    }
+    private Vector3 Forward => WorldSpaceGeometry.ForwardFromYawPitch(_yaw, _pitch);
 
     private Vector3 Right => Vector3.Normalize(Vector3.Cross(Forward, Vector3.UnitY));
 
@@ -246,6 +249,47 @@ public class CameraController : IDisposable
         _position += Vector3.Normalize(move) * speed;
         UpdateCamera();
         return true;
+    }
+
+    /// <summary>
+    /// Park the camera at an EXACT pose, orientation included.
+    ///
+    /// The normal input path stores yaw/pitch and forces <c>Up = world +Y</c>, which cannot
+    /// represent roll. A dataset ground-truth pose generally IS rolled, so this writes
+    /// <paramref name="forward"/>/<paramref name="up"/> straight onto the camera and then syncs
+    /// yaw/pitch so that if the user takes over afterwards, movement continues from here rather
+    /// than snapping. Roll is lost the moment they look around - that is inherent to a yaw/pitch
+    /// controller, not a bug here.
+    ///
+    /// Used by the novel-view fidelity gate, and the same primitive saved viewpoints /
+    /// hotspots will need (NOTES.md SuperSplat parity).
+    /// </summary>
+    public void SetPose(Vector3 position, Vector3 forward, Vector3 up)
+    {
+        var f = Vector3.Normalize(forward);
+        var u = Vector3.Normalize(up);
+
+        // Re-orthogonalize up against forward (Gram-Schmidt) so the view matrix is well formed
+        // even if the dataset's stored up is only approximately perpendicular.
+        var right = Vector3.Cross(f, u);
+        if (right.LengthSquared() < 1e-12f)
+            right = Vector3.Cross(f, MathF.Abs(f.Y) > 0.9f ? Vector3.UnitX : Vector3.UnitY);
+        right = Vector3.Normalize(right);
+        u = Vector3.Normalize(Vector3.Cross(right, f));
+
+        _position = position;
+
+        // Keep the yaw/pitch model consistent with where we just pointed, so if the user takes
+        // over with WASD the view continues from here instead of snapping.
+        WorldSpaceGeometry.YawPitchFromForward(f, out float yaw, out float pitch);
+        _yaw = yaw;
+        _pitch = Math.Clamp(pitch, MinPitch, MaxPitch);
+
+        var camera = _sceneManager.Camera;
+        camera.Position = position;
+        camera.Forward = f;
+        camera.Up = u;
+        _sceneManager.Camera = camera;
     }
 
     private void UpdateCamera()

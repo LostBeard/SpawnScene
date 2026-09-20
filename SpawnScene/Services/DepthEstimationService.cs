@@ -25,18 +25,16 @@ public record DepthModelInfo(string Id, string Name, string Path, string SizeLab
 public class DepthEstimationService : IAsyncDisposable
 {
     /// <summary>HuggingFace repo id for the depth model the pipeline downloads + caches.</summary>
-    // DAv3 (onnx-community/depth-anything-v3-small, 5-D) currently throws in GraphExecutor:
-    //   Tensor '/backbone/Transpose_output_0' not found (needed by Resize)
-    // with producerOp=NONE elideBlocked=True — a SpawnDev.ILGPU.ML graph issue, not SpawnScene.
-    // DAv2 Small is the Depth demo's working path (4-D [1,3,518,518]) until that is fixed.
-    private const string RepoId = "onnx-community/depth-anything-v2-small";
+    // DAv3 Small: native 5-D [batch, num_images, 3, H, W] + external model.onnx_data.
+    // (DAv2 was a temporary SpawnScene workaround while ML dropped the pos-embed weight on the hub/stream path.)
+    private const string RepoId = "onnx-community/depth-anything-v3-small";
 
     public static readonly DepthModelInfo[] AvailableModels = new[]
     {
-        new DepthModelInfo("depth-anything-v2-small", "Depth Anything V2 Small", RepoId, "~100 MB"),
+        new DepthModelInfo("depth-anything-v3-small", "Depth Anything V3 Small", RepoId, "~100 MB", IsDirectDepth: true),
     };
 
-    public static readonly string DefaultModelId = "depth-anything-v2-small";
+    public static readonly string DefaultModelId = "depth-anything-v3-small";
 
     private readonly GpuService _gpu;
     private readonly SpawnDev.ILGPU.ML.Hub.IModelSource _modelSource;
@@ -91,11 +89,11 @@ public class DepthEstimationService : IAsyncDisposable
 
             await Task.Yield();
 
-            // 4-D input [batch, 3, H, W] for DAv2. (DAv3 is 5-D [batch, num_images, 3, H, W].)
+            // Native DAv3 shape: 5-D [batch, num_images, 3, H, W]. External weights via default
+            // onnx/model.onnx_data (do NOT pass externalDataFile: "" — that is the DAv2 single-file path).
             _pipe = await DepthEstimationPipeline.CreateFromHubAsync(
                 accelerator, _modelSource, RepoId,
-                inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 3, 518, 518 } },
-                externalDataFile: ""); // DAv2 is a single-file ONNX (no model.onnx_data)
+                inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, 518, 518 } });
             // One-shot photo path: capture/replay warmup is for video.
             _pipe.EnableGraphCapture = false;
 
@@ -162,8 +160,8 @@ public class DepthEstimationService : IAsyncDisposable
 
     /// <summary>
     /// Shared pipeline call: RGBA → GPU-resident depth + min/max.
-    /// DAv3 <c>predicted_depth</c> is inverse/relative depth (high = close) = disparity, which is
-    /// exactly what the unprojection kernel expects — so no flip is applied.
+    /// DAv3 <c>predicted_depth</c> is relative/direct depth (high = far), not DAv2 disparity.
+    /// Unprojection kernels consume it as direct depth (no invert / no FlipDepthKernel).
     /// </summary>
     private async Task<DepthResult?> RunPipelineAsync(
         Func<Task<(MemoryBuffer1D<float, Stride1D.Dense> RawDepth, float MinDepth, float MaxDepth, int Width, int Height)>> run)
@@ -210,8 +208,13 @@ public class DepthEstimationService : IAsyncDisposable
     public class MultiViewDepthResult : IDisposable
     {
         public List<DepthResult> DepthResults { get; set; } = new();
-        /// <summary>DAv3 extrinsics: [R|t] 3×4 matrix per view. null when unavailable.</summary>
-        public float[,][]? Extrinsics { get; set; }
+        /// <summary>Per-view 3×4 [R|t] as length-12 row-major arrays. Null when unavailable.</summary>
+        public float[][]? Extrinsics { get; set; }
+        /// <summary>Per-view 3×3 intrinsics as length-9 row-major arrays. Null when unavailable.</summary>
+        public float[][]? Intrinsics { get; set; }
+        /// <summary>True when every view has a GPU confidence map (same W×H as depth).</summary>
+        public bool HasConfidence =>
+            DepthResults.Count > 0 && DepthResults.All(d => d.ConfidenceGpu != null);
         public void Dispose()
         {
             foreach (var d in DepthResults) d.Dispose();
@@ -219,11 +222,12 @@ public class DepthEstimationService : IAsyncDisposable
         }
     }
 
+    /// <summary>Max views for a single joint DAv3 forward (WebGPU memory / compile cost).</summary>
+    public const int MaxMultiViewImages = 6;
+
     /// <summary>
-    /// Multi-view depth: per-image fallback. Each image is estimated independently.
-    /// NOTE: joint depth + camera extrinsics (the old ORT 5-D multi-view batch) are intentionally
-    /// dropped in the pipeline migration; <see cref="MultiViewDepthResult.Extrinsics"/> is null until
-    /// the pipeline exposes a multi-view entry point.
+    /// Joint multi-view depth via DAv3 <c>[1,N,3,H,W]</c>. Fills <see cref="MultiViewDepthResult.Extrinsics"/>
+    /// when the model emits usable poses. Caps at <see cref="MaxMultiViewImages"/>.
     /// </summary>
     public async Task<MultiViewDepthResult?> EstimateDepthMultiViewAsync(IReadOnlyList<ImportedImage> images)
     {
@@ -232,15 +236,73 @@ public class DepthEstimationService : IAsyncDisposable
             Status = "Model not loaded.";
             return null;
         }
+        if (images.Count == 0) return null;
 
-        var result = new MultiViewDepthResult();
-        foreach (var img in images)
+        int n = Math.Min(images.Count, MaxMultiViewImages);
+        if (images.Count > MaxMultiViewImages)
+            Console.WriteLine($"[Depth] Cap multi-view at {MaxMultiViewImages} (got {images.Count})");
+
+        Status = $"Running joint DAv3 multi-view ({n} images)...";
+        OnStateChanged?.Invoke();
+        await Task.Yield();
+
+        try
         {
-            var d = await EstimateDepthAsync(img);
-            if (d != null) result.DepthResults.Add(d);
+            var rgbaFrames = new int[n][];
+            var widths = new int[n];
+            var heights = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                rgbaFrames[i] = System.Runtime.InteropServices.MemoryMarshal
+                    .Cast<byte, int>(images[i].RgbaPixels.AsSpan()).ToArray();
+                widths[i] = images[i].Width;
+                heights[i] = images[i].Height;
+            }
+
+            // Output at first image resolution (splat unproject expects matching WxH).
+            int outW = widths[0], outH = heights[0];
+            using var mv = await _pipe.EstimateMultiViewGpuAsync(
+                rgbaFrames, widths, heights, outputWidth: outW, outputHeight: outH).ConfigureAwait(false);
+
+            var result = new MultiViewDepthResult
+            {
+                Extrinsics = mv.Extrinsics,
+                Intrinsics = mv.Intrinsics,
+            };
+
+            for (int i = 0; i < mv.ViewCount; i++)
+            {
+                var (raw, minD, maxD, w, h) = mv.Views[i];
+                result.DepthResults.Add(new DepthResult
+                {
+                    RawDepthGpu = raw,
+                    ConfidenceGpu = mv.ConfidenceMaps != null && i < mv.ConfidenceMaps.Count
+                        ? mv.ConfidenceMaps[i]
+                        : null,
+                    Width = w,
+                    Height = h,
+                    MinDepth = minD,
+                    MaxDepth = maxD,
+                });
+            }
+            // Caller owns depth (+ confidence) buffers now.
+            mv.DetachDepthViews();
+            mv.DetachConfidenceMaps();
+
+            Status = $"✅ Multi-view depth: {result.DepthResults.Count} views" +
+                     (result.HasConfidence ? " + confidence" : "") +
+                     (result.Extrinsics != null ? " + extrinsics" : "");
+            Console.WriteLine($"[Depth] {Status}");
+            OnStateChanged?.Invoke();
+            return result;
         }
-        result.Extrinsics = null;
-        return result;
+        catch (Exception ex)
+        {
+            Status = $"❌ Multi-view inference failed: {ex.Message}";
+            Console.WriteLine($"[Depth] Multi-view error: {ex}");
+            OnStateChanged?.Invoke();
+            return null;
+        }
     }
 
     public ValueTask DisposeAsync()
@@ -262,9 +324,15 @@ public class DepthResult : IDisposable
     /// <summary>
     /// GPU-resident raw depth values at original image resolution.
     /// Owned by this instance — disposed with it.
-    /// Relative/inverse depth (disparity-like, high = close); use MinDepth/MaxDepth to normalize on GPU.
+    /// Relative/direct depth from DAv3 (high = far). Use MinDepth/MaxDepth for range; do not invert.
     /// </summary>
     public MemoryBuffer1D<float, Stride1D.Dense>? RawDepthGpu { get; set; }
+
+    /// <summary>
+    /// Optional per-pixel confidence (same W×H as depth). Owned by this instance when set.
+    /// Joint DAv3 multi-view fills this; monocular EstimateDepthAsync leaves it null.
+    /// </summary>
+    public MemoryBuffer1D<float, Stride1D.Dense>? ConfidenceGpu { get; set; }
 
     /// <summary>Width of the depth map (matches source image).</summary>
     public int Width { get; set; }
@@ -282,6 +350,8 @@ public class DepthResult : IDisposable
     {
         RawDepthGpu?.Dispose();
         RawDepthGpu = null;
+        ConfidenceGpu?.Dispose();
+        ConfidenceGpu = null;
         GC.SuppressFinalize(this);
     }
 }

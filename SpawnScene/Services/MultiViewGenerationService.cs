@@ -10,16 +10,8 @@ using System.Numerics;
 namespace SpawnScene.Services;
 
 /// <summary>
-/// Multi-view scene generation using feature-based 2D alignment.
-///
-/// For near-parallel views (typical phone photos of a room):
-/// 1. Pick the first image as the reference frame
-/// 2. Generate depth + splats for the reference (single-image pipeline)
-/// 3. For each additional image, compute 2D pixel offset via feature matches
-/// 4. Generate splats for additional images with the offset applied (extends coverage)
-///
-/// This avoids the SfM rotation/scale alignment problems that plague near-parallel views
-/// while still leveraging multi-image coverage to extend the scene beyond a single photo.
+/// Multi-view scene generation: joint DAv3 depths + hybrid poses (SfM → DAv3 extrinsics → fallback).
+/// World-space unproject when poses are shared; soft border fade + seam/SfM scale for fusion.
 /// </summary>
 public class MultiViewGenerationService
 {
@@ -200,7 +192,7 @@ public class MultiViewGenerationService
         var device = nativeAccel.NativeDevice!;
         var queue = nativeAccel.Queue!;
 
-        var merged = accelerator.Allocate1D<float>(totalSplats * 10);
+        var merged = accelerator.Allocate1D<float>(totalSplats * SplatFormat.Floats);
         var mergedGpuBuf = merged.GetGPUBuffer();
 
         ulong byteOffset = 0;
@@ -218,7 +210,7 @@ public class MultiViewGenerationService
             depthResult.Dispose();
 
             var srcGpuBuf = buf.GetGPUBuffer();
-            ulong byteCount = (ulong)count * 10 * sizeof(float);
+            ulong byteCount = (ulong)count * SplatFormat.Floats * sizeof(float);
 
             if (srcGpuBuf != null && mergedGpuBuf != null)
             {
@@ -240,91 +232,175 @@ public class MultiViewGenerationService
     }
 
     /// <summary>
-    /// DAv3 native multi-view: all images in one forward pass → consistent depth + camera extrinsics.
-    /// No feature matching, no 2D offsets, no per-view depth scale mismatch.
+    /// Hybrid multi-view: joint DAv3 depths + pose from SfM (if reliable) else DAv3 extrinsics else camera-local fallback.
     /// </summary>
     private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
         GenerateWithDav3MultiViewAsync(IReadOnlyList<ImportedImage> images, int subsample, float edgeSharpness)
     {
-        // Ensure DAv3 model loaded
         if (!_depthService.IsReady)
         {
             SetStatus("Loading DAv3 model...");
             await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
         }
 
-        // Run multi-view inference
-        SetStatus($"Running DAv3 multi-view inference ({images.Count} images)...");
-        var mvResult = await _depthService.EstimateDepthMultiViewAsync(images);
+        int n = Math.Min(images.Count, DepthEstimationService.MaxMultiViewImages);
+        var viewImages = images.Take(n).ToList();
+
+        SetStatus($"Running joint DAv3 multi-view ({n} images)...");
+        var mvResult = await _depthService.EstimateDepthMultiViewAsync(viewImages);
         if (mvResult == null || mvResult.DepthResults.Count == 0)
         {
             SetStatus("Error: DAv3 multi-view inference failed.");
             return null;
         }
 
-        Console.WriteLine($"[MultiView-DAv3] Got {mvResult.DepthResults.Count} depth maps" +
-            (mvResult.Extrinsics != null ? " + extrinsics" : ""));
+        // ── Pose selection: SfM → DAv3 extrinsics → fallback ──
+        string poseSource = "fallback";
+        var cameras = new CameraParams?[n];
 
-        // Parse extrinsics into CameraParams (if available)
-        var cameras = new CameraParams?[images.Count];
-        bool hasExtrinsics = mvResult.Extrinsics != null;
-
-        if (hasExtrinsics)
+        // Try SfM on feature matches (often fails on near-parallel phone snaps — that is expected).
+        try
         {
-            for (int i = 0; i < images.Count && i < mvResult.DepthResults.Count; i++)
+            SetStatus("Trying SfM poses...");
+            _importService.Clear();
+            await _importService.ImportFromImagesAsync(viewImages);
+            if (_importService.MatchedPairs.Count > 0)
             {
-                var ext = mvResult.Extrinsics![0, i]; // [R00,R01,R02,tx, R10,R11,R12,ty, R20,R21,R22,tz]
-                var cam = images[i].EstimatedCamera ?? CameraParams.CreateDefault(images[i].Width, images[i].Height);
+                await _sfm.ReconstructAsync();
+                int posed = 0;
+                for (int i = 0; i < n && i < _sfm.CameraPoses.Length; i++)
+                {
+                    if (_sfm.CameraPoses[i] != null)
+                    {
+                        cameras[i] = _sfm.CameraPoses[i];
+                        posed++;
+                    }
+                }
+                if (posed >= 2 && _sfm.Points3D.Count >= 10)
+                {
+                    poseSource = "sfm";
+                    Console.WriteLine($"[MultiView] Pose source=sfm cameras={posed} pts={_sfm.Points3D.Count}");
+                }
+                else
+                {
+                    System.Array.Clear(cameras);
+                    Console.WriteLine($"[MultiView] SfM weak (cams={posed}, pts={_sfm.Points3D.Count}) — trying DAv3 extrinsics");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Array.Clear(cameras);
+            Console.WriteLine($"[MultiView] SfM failed: {ex.Message} — trying DAv3 extrinsics");
+        }
 
-                // Parse 3×4 [R|t] matrix
-                cam.Forward = new Vector3(ext[8], ext[9], ext[10]); // third row of R
-                cam.Up = new Vector3(-ext[4], -ext[5], -ext[6]);    // negated second row (camera Y flipped)
-                cam.Position = new Vector3(
-                    -(ext[0] * ext[3] + ext[4] * ext[7] + ext[8] * ext[11]),   // -R^T * t
-                    -(ext[1] * ext[3] + ext[5] * ext[7] + ext[9] * ext[11]),
-                    -(ext[2] * ext[3] + ext[6] * ext[7] + ext[10] * ext[11])
-                );
-
-                cameras[i] = cam;
-                Console.WriteLine($"[MultiView-DAv3] View {i}: pos={cam.Position}, fwd={cam.Forward}");
+        if (poseSource != "sfm" && mvResult.Extrinsics != null && mvResult.Extrinsics.Length >= n)
+        {
+            bool sane = true;
+            for (int i = 0; i < n; i++)
+            {
+                var ext = mvResult.Extrinsics[i];
+                if (ext == null || ext.Length < 12 || !IsSaneExtrinsics(ext))
+                { sane = false; break; }
+            }
+            if (sane)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    var ext = mvResult.Extrinsics[i];
+                    var cam = viewImages[i].EstimatedCamera
+                        ?? CameraParams.CreateDefault(viewImages[i].Width, viewImages[i].Height);
+                    ApplyExtrinsicsToCamera(cam, ext);
+                    if (mvResult.Intrinsics != null && i < mvResult.Intrinsics.Length
+                        && mvResult.Intrinsics[i] is { Length: >= 9 } K)
+                    {
+                        cam.FocalX = K[0];
+                        cam.FocalY = K[4];
+                        cam.CenterX = K[2];
+                        cam.CenterY = K[5];
+                    }
+                    cameras[i] = cam;
+                }
+                poseSource = "dav3";
+                Console.WriteLine("[MultiView] Pose source=dav3 extrinsics");
             }
         }
 
-        // Generate splats per view
+        if (poseSource == "fallback")
+            Console.WriteLine("[MultiView] Pose source=fallback (camera-local / no shared world)");
+
+        // Per-view depth scale: center-projection style when we have shared poses (TempleRing idea).
+        float[] depthScales = Enumerable.Repeat(1.0f, n).ToArray();
+        if (poseSource != "fallback")
+        {
+            depthScales = ComputeHybridDepthScales(cameras, mvResult.DepthResults, viewImages);
+
+            if (poseSource == "sfm" && _sfm.Points3D.Count >= 10)
+            {
+                try
+                {
+                    float sfmScale = await FitSfmSparseDepthScaleAsync(
+                        cameras, mvResult.DepthResults, _sfm.Points3D);
+                    if (sfmScale > 0.05f && sfmScale < 50f)
+                    {
+                        for (int i = 0; i < n; i++)
+                            depthScales[i] *= sfmScale;
+                        Console.WriteLine($"[MultiView] SfM sparse depth scale={sfmScale:F4} (pts={_sfm.Points3D.Count})");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[MultiView] SfM sparse scale skipped: {ex.Message}");
+                }
+            }
+            // Joint DAv3 depths already share one relative frame — do NOT apply per-view seam
+            // scales (that separates clouds into floating fragments). Global baseScale is enough.
+        }
+
         if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
         var accelerator = _gpu.WebGPUAccelerator;
         var device = accelerator.NativeAccelerator.NativeDevice!;
         var queue = accelerator.NativeAccelerator.Queue!;
 
-        // Pass 1: count splats per view
         var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
         int totalSplats = 0;
+        bool useWorld = poseSource != "fallback";
+        int nonRefIn = 0, nonRefKept = 0;
 
-        for (int i = 0; i < mvResult.DepthResults.Count && i < images.Count; i++)
+        for (int i = 0; i < mvResult.DepthResults.Count && i < n; i++)
         {
-            SetStatus($"Generating splats: {images[i].FileName} ({i + 1}/{images.Count})...");
+            SetStatus($"Generating splats: {viewImages[i].FileName} ({i + 1}/{n}, pose={poseSource})...");
             var depth = mvResult.DepthResults[i];
-            var cam = cameras[i] ?? images[i].EstimatedCamera;
+            var cam = cameras[i] ?? viewImages[i].EstimatedCamera;
 
             (MemoryBuffer1D<float, Stride1D.Dense> buf, int count) result;
-
-            if (hasExtrinsics && cameras[i] != null)
+            if (useWorld && cameras[i] != null)
             {
-                // World-space unprojection using DAv3's predicted camera poses
                 result = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
-                    depth, images[i], cameras[i]!, subsample, edgeSharpness, depthScale: 1.0f);
+                    depth, viewImages[i], cameras[i]!, subsample, edgeSharpness, depthScales[i]);
+
+                // Fuse non-ref views against view 0 (same shared-frame depths).
+                if (i > 0 && result.count > 0 && cameras[0] != null)
+                {
+                    nonRefIn += result.count;
+                    result = await _gaussianKernel.FuseConsistencyVsRefAsync(
+                        result.buf, result.count, mvResult.DepthResults[0], cameras[0]!,
+                        depthScales[0], relThresh: 0.06f);
+                    nonRefKept += result.count;
+                }
             }
             else
             {
-                // Fallback: camera-local unprojection with EXIF focal length
                 result = await _gaussianKernel.GeneratePackedGpuBufferAsync(
-                    depth, images[i], subsample, edgeSharpness, cam);
+                    depth, viewImages[i], subsample, edgeSharpness, cam);
             }
 
             viewResults.Add(result);
             totalSplats += result.count;
-            Console.WriteLine($"[MultiView-DAv3] View {i}: {result.count:N0} splats");
+            Console.WriteLine($"[MultiView] View {i}: {result.count:N0} splats scale={depthScales[i]:F3}");
         }
+        if (nonRefIn > 0)
+            Console.WriteLine($"[MultiView] Consistency: non-ref kept {nonRefKept:N0}/{nonRefIn:N0} ({(float)nonRefKept / nonRefIn:P0})");
 
         if (totalSplats == 0)
         {
@@ -334,36 +410,129 @@ public class MultiViewGenerationService
             return null;
         }
 
-        // Merge all view buffers into one
-        SetStatus($"Merging {totalSplats:N0} splats from {viewResults.Count} views...");
-        var merged = accelerator.Allocate1D<float>(totalSplats * 10);
-        var mergedGpuBuf = merged.GetGPUBuffer();
-        ulong byteOffset = 0;
-
+        SetStatus($"Merging {totalSplats:N0} splats from {viewResults.Count} views (pose={poseSource})...");
+        var merged = accelerator.Allocate1D<float>(totalSplats * SplatFormat.Floats);
+        long offsetBytes = 0;
+        int actualTotal = 0;
         foreach (var (buf, count) in viewResults)
         {
-            var srcGpuBuf = buf.GetGPUBuffer();
-            ulong byteCount = (ulong)count * 10 * sizeof(float);
-
-            if (srcGpuBuf != null && mergedGpuBuf != null)
+            if (count <= 0) { buf.Dispose(); continue; }
+            ulong byteCount = (ulong)count * SplatFormat.Floats * sizeof(float);
+            using (var encoder = device.CreateCommandEncoder())
             {
-                using var encoder = device.CreateCommandEncoder();
-                encoder.CopyBufferToBuffer(srcGpuBuf, 0, mergedGpuBuf, byteOffset, byteCount);
-                using var cmdBuf = encoder.Finish();
-                queue.Submit(new[] { cmdBuf });
+                encoder.CopyBufferToBuffer(
+                    buf.GetGPUBuffer()!, 0,
+                    merged.GetGPUBuffer()!, (ulong)offsetBytes,
+                    byteCount);
+                queue.Submit(new[] { encoder.Finish() });
             }
-
-            byteOffset += byteCount;
+            offsetBytes += (long)byteCount;
+            actualTotal += count;
             buf.Dispose();
         }
-
+        await accelerator.SynchronizeAsync();
         mvResult.Dispose();
 
-        int actualTotal = (int)(byteOffset / (10 * sizeof(float)));
-        SetStatus($"DAv3 multi-view complete: {actualTotal:N0} splats from {viewResults.Count} views.");
-        Console.WriteLine($"[MultiView-DAv3] Total: {actualTotal:N0} splats from {viewResults.Count} views");
+        SetStatus($"Multi-view complete: {actualTotal:N0} splats from {viewResults.Count} views (pose={poseSource}).");
+        Console.WriteLine($"[MultiView] Total: {actualTotal:N0} splats pose={poseSource}");
+        return (merged, actualTotal);
+    }
 
-        return (merged, totalSplats);
+    private static bool IsSaneExtrinsics(float[] ext)
+    {
+        // Reject all-zero / NaN; require a roughly unit-ish rotation row.
+        float row0 = MathF.Sqrt(ext[0] * ext[0] + ext[1] * ext[1] + ext[2] * ext[2]);
+        float row2 = MathF.Sqrt(ext[8] * ext[8] + ext[9] * ext[9] + ext[10] * ext[10]);
+        return row0 > 0.5f && row0 < 1.5f && row2 > 0.5f && row2 < 1.5f;
+    }
+
+    private static void ApplyExtrinsicsToCamera(CameraParams cam, float[] ext)
+    {
+        // ext = row-major 3×4 [R|t]
+        cam.Forward = new Vector3(ext[8], ext[9], ext[10]);
+        cam.Up = new Vector3(-ext[4], -ext[5], -ext[6]);
+        cam.Position = new Vector3(
+            -(ext[0] * ext[3] + ext[4] * ext[7] + ext[8] * ext[11]),
+            -(ext[1] * ext[3] + ext[5] * ext[7] + ext[9] * ext[11]),
+            -(ext[2] * ext[3] + ext[6] * ext[7] + ext[10] * ext[11]));
+    }
+
+    /// <summary>
+    /// TempleRing-style depth scale: place a unit depth at a typical scene distance from camera centroid.
+    /// </summary>
+    private static float[] ComputeHybridDepthScales(
+        CameraParams?[] cameras, List<DepthResult> depths, IReadOnlyList<ImportedImage> images)
+    {
+        var scales = new float[depths.Count];
+        System.Array.Fill(scales, 1.0f);
+
+        var posed = cameras.Where(c => c != null).Select(c => c!).ToList();
+        if (posed.Count < 1) return scales;
+
+        var centroid = new Vector3(
+            posed.Average(c => c.Position.X),
+            posed.Average(c => c.Position.Y),
+            posed.Average(c => c.Position.Z));
+        float avgDist = posed.Average(c => Vector3.Distance(c.Position, centroid));
+        if (avgDist < 1e-3f) avgDist = 1.0f;
+        // Relative MDE mid-depth ≈ mid of min/max — scale so that maps into avg camera distance.
+        float midRaw = depths.Average(d => (d.MinDepth + d.MaxDepth) * 0.5f);
+        if (midRaw < 1e-4f) midRaw = 1.0f;
+        float baseScale = avgDist / midRaw;
+        for (int i = 0; i < scales.Length; i++)
+            scales[i] = baseScale;
+        Console.WriteLine($"[MultiView] Hybrid depthScale base={baseScale:F4} (avgCamDist={avgDist:F4}, midRaw={midRaw:F4})");
+        return scales;
+    }
+
+    /// <summary>
+    /// Fit global MDE→metric scale from SfM sparse points: median(Z_cam / inv(normalized MDE)).
+    /// </summary>
+    private static async Task<float> FitSfmSparseDepthScaleAsync(
+        CameraParams?[] cameras, List<DepthResult> depths, List<ReconstructedPoint> points)
+    {
+        var ratios = new List<float>();
+        int maxPts = Math.Min(points.Count, 400);
+
+        for (int ci = 0; ci < cameras.Length && ci < depths.Count; ci++)
+        {
+            var cam = cameras[ci];
+            var depth = depths[ci];
+            if (cam == null || depth.RawDepthGpu == null) continue;
+
+            float[] host;
+            try { host = await depth.RawDepthGpu.CopyToHostAsync<float>(0, depth.RawDepthGpu.Length); }
+            catch { continue; }
+
+            int w = depth.Width, h = depth.Height;
+            var right = Vector3.Normalize(Vector3.Cross(cam.Forward, cam.Up));
+            var up = Vector3.Normalize(Vector3.Cross(right, cam.Forward));
+
+            for (int pi = 0; pi < maxPts; pi++)
+            {
+                var world = points[pi].Position;
+                var delta = world - cam.Position;
+                float zCam = Vector3.Dot(delta, cam.Forward);
+                if (zCam < 0.05f) continue;
+
+                float xCam = Vector3.Dot(delta, right);
+                float yCam = Vector3.Dot(delta, -up); // OpenCV Y-down
+                // Match UnprojectWorldSpaceKernel: u = cx + fx*xCam/z, v = cy + fy*yCam/z
+                float u = cam.CenterX + cam.FocalX * xCam / zCam;
+                float v = cam.CenterY + cam.FocalY * yCam / zCam;
+                int ix = (int)MathF.Round(u);
+                int iy = (int)MathF.Round(v);
+                if (ix < 0 || iy < 0 || ix >= w || iy >= h) continue;
+
+                float raw = host[iy * w + ix];
+                if (raw < 1e-4f) continue;
+                ratios.Add(zCam / raw);
+            }
+        }
+
+        if (ratios.Count < 8) return 1.0f;
+        ratios.Sort();
+        return ratios[ratios.Count / 2];
     }
 
     /// <summary>
@@ -450,11 +619,9 @@ public class MultiViewGenerationService
             {
                 if (ey < 0 || ey >= extH) continue;
 
-                // Extension depth at this pixel
+                // Extension depth at this pixel (DAv3 direct depth)
                 float extRaw = extDepthData[ey * extW + bx];
-                float extNorm = (extRaw - extDepth.MinDepth) / extRange;
-                if (extNorm < 0.01f) continue;
-                float extD = 1.0f / (extNorm + 0.01f);
+                if (extRaw < 1e-4f) continue;
 
                 // Corresponding reference pixel
                 int refX = (int)(bx + dx);
@@ -462,12 +629,9 @@ public class MultiViewGenerationService
                 if (refX < 0 || refX >= refW || refY < 0 || refY >= refH) continue;
 
                 float refRaw = refDepthData[refY * refW + refX];
-                float refNorm = (refRaw - refDepth.MinDepth) / refRange;
-                if (refNorm < 0.01f) continue;
-                float refD = 1.0f / (refNorm + 0.01f);
+                if (refRaw < 1e-4f) continue;
 
-                if (extD > 0.01f && refD > 0.01f)
-                    ratios.Add(refD / extD);
+                ratios.Add(refRaw / extRaw);
             }
         }
 
@@ -480,21 +644,16 @@ public class MultiViewGenerationService
                 if (ex < 0 || ex >= extW) continue;
 
                 float extRaw = extDepthData[by * extW + ex];
-                float extNorm = (extRaw - extDepth.MinDepth) / extRange;
-                if (extNorm < 0.01f) continue;
-                float extD = 1.0f / (extNorm + 0.01f);
+                if (extRaw < 1e-4f) continue;
 
                 int refX = (int)(ex + dx);
                 int refY = (int)(by + dy);
                 if (refX < 0 || refX >= refW || refY < 0 || refY >= refH) continue;
 
                 float refRaw = refDepthData[refY * refW + refX];
-                float refNorm = (refRaw - refDepth.MinDepth) / refRange;
-                if (refNorm < 0.01f) continue;
-                float refD = 1.0f / (refNorm + 0.01f);
+                if (refRaw < 1e-4f) continue;
 
-                if (extD > 0.01f && refD > 0.01f)
-                    ratios.Add(refD / extD);
+                ratios.Add(refRaw / extRaw);
             }
         }
 
@@ -511,13 +670,15 @@ public class MultiViewGenerationService
         return scale;
     }
 
+
     /// <summary>
-    /// Generate a multi-view scene using ground truth camera parameters (bypasses SfM).
-    /// Used for testing/validation with datasets like TempleRing that have known R/t/K.
+    /// TempleRing / GT regression:
+    /// Joint DAv3 depths + GT cameras + DN-Splatter per-view affine scale + MVSNet/COLMAP FB fuse.
+    /// DAv3 extrinsics on TempleRing are often degenerate — do not unproject with them.
     /// </summary>
     public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
         GenerateWithGroundTruthAsync(IReadOnlyList<ImportedImage> images, IReadOnlyList<CameraParams> cameras,
-            int subsample = 2, float edgeSharpness = 0.3f)
+            int subsample = 1, float edgeSharpness = 0.3f, int onlyView = -1, bool globalScale = false)
     {
         if (images.Count != cameras.Count)
             throw new ArgumentException("Image count must match camera count.");
@@ -528,194 +689,577 @@ public class MultiViewGenerationService
             await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
         }
 
-        // Log camera positions and compute scene center + depth scale
-        var camCentroid = Vector3.Zero;
-        for (int i = 0; i < cameras.Count; i++)
+        int n = images.Count;
+        bool isTemple = images.Any(im => im.FileName.StartsWith("templeR", StringComparison.OrdinalIgnoreCase));
+        var lookAt = isTemple
+            ? new Vector3(0.028f, 0.042f, -0.054f)
+            : cameras.Aggregate(Vector3.Zero, (a, c) => a + c.Position) / cameras.Count;
+
+        for (int i = 0; i < n; i++)
         {
             var c = cameras[i];
-            camCentroid += c.Position;
-            Console.WriteLine($"[MultiView-GT] Cam[{i}] pos=({c.Position.X:F4},{c.Position.Y:F4},{c.Position.Z:F4}) fwd=({c.Forward.X:F3},{c.Forward.Y:F3},{c.Forward.Z:F3}) fx={c.FocalX:F1}");
+            Console.WriteLine($"[MultiView-GT] GT Cam[{i}] {images[i].FileName} pos=({c.Position.X:F4},{c.Position.Y:F4},{c.Position.Z:F4}) fwd=({c.Forward.X:F3},{c.Forward.Y:F3},{c.Forward.Z:F3})");
         }
-        camCentroid /= cameras.Count;
+        Console.WriteLine($"[MultiView-GT] lookAt=({lookAt.X:F4},{lookAt.Y:F4},{lookAt.Z:F4}) subsample={subsample}");
 
-        // Estimate the scene center: the point all cameras are looking at.
-        // For a ring dataset, the scene center is roughly the centroid of cameras
-        // plus the average forward direction scaled by the inter-camera distance.
-        // Simpler: the centroid of all cameras IS roughly the scene center for ring captures.
-        // The typical depth from camera to scene center is the average distance from each camera to the centroid.
-        float avgDist = 0;
-        for (int i = 0; i < cameras.Count; i++)
-            avgDist += Vector3.Distance(cameras[i].Position, camCentroid);
-        avgDist /= cameras.Count;
+        SetStatus($"Joint DAv3 multi-view depth ({n} images)...");
+        var mvResult = await _depthService.EstimateDepthMultiViewAsync(images);
+        if (mvResult == null || mvResult.DepthResults.Count < n)
+        {
+            int got = mvResult?.DepthResults.Count ?? 0;
+            mvResult?.Dispose();
+            if (isTemple)
+            {
+                // Monocular fallback reintroduces ghost sheets — fail closed on TempleRing.
+                SetStatus($"Error: Joint DAv3 returned {got}/{n} views — fail-closed (no monocular).");
+                Console.WriteLine($"[MultiView-GT] FAIL joint_depth got={got}/{n}");
+                return null;
+            }
+            Console.WriteLine("[MultiView-GT] Joint depth failed — monocular fallback");
+            return await GenerateWithGroundTruthMonocularFallbackAsync(images, cameras, subsample, edgeSharpness);
+        }
 
-        // MDE inverted disparity median is roughly 2.0 (for normalized=0.5 → d=1/(0.5+0.01)≈2.0)
-        // So depthScale = avgDist / typicalMdeDepth
-        float depthScale = avgDist / 2.0f;
-        Console.WriteLine($"[MultiView-GT] Camera centroid=({camCentroid.X:F4},{camCentroid.Y:F4},{camCentroid.Z:F4}), avgDist={avgDist:F4}, depthScale={depthScale:F4}");
+        int w = mvResult.DepthResults[0].Width;
+        int h = mvResult.DepthResults[0].Height;
+        if (w <= 0 || h <= 0)
+        {
+            mvResult.Dispose();
+            SetStatus("Error: Invalid depth map size.");
+            return null;
+        }
 
-        // Pass 1: estimate depth + compute per-view scale by projecting scene center into each view
-        var viewCounts = new List<(int idx, int count, float viewScale)>();
+        // ── Depth stays on the device ──
+        // ⚠️ This used to CopyToHostAsync every view (4.9 MB at 640x480 x4), run metricization,
+        // the scale probe and the FB fuse in WASM, then upload the same maps back for the unproject.
+        // The whole middle is kernels now; see MvsFusionGpu. Gate: MvsFusionGpuTests.
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var acc = _gpu.WebGPUAccelerator;
+        using var fusionGpu = new MvsFusionGpu(acc);
+
+        bool hasConf = mvResult.HasConfidence;
+        int pixelsPerView = w * h;
+        var rawViews = new List<MemoryBuffer1D<float, Stride1D.Dense>>(n);
+        var confViews = new List<MemoryBuffer1D<float, Stride1D.Dense>>(n);
+        for (int i = 0; i < n; i++)
+        {
+            var d = mvResult.DepthResults[i];
+            if (d.RawDepthGpu == null || d.Width != w || d.Height != h)
+            {
+                mvResult.Dispose();
+                SetStatus("Error: Depth view size mismatch.");
+                return null;
+            }
+            rawViews.Add(d.RawDepthGpu);
+            if (hasConf && d.ConfidenceGpu != null) confViews.Add(d.ConfidenceGpu);
+        }
+
+        using var rawPacked = fusionGpu.PackViews(rawViews, pixelsPerView);
+        using var confPacked = confViews.Count == n
+            ? fusionGpu.PackViews(confViews, pixelsPerView)
+            : acc.Allocate1D<float>(1);
+        using var camBuf = fusionGpu.UploadCameras(cameras);
+
+        // ── Multi-anchor metric depths for DN-Splatter affine fit ──
+        // The anchors plus lookAt are a few dozen pixel samples, gathered on the device. That is the
+        // scalar exemption used properly: n * (anchors + 1) * 2 floats cross, never a map.
+        var anchors = BuildTempleAnchors(lookAt, isTemple);
+        var probePoints = new List<Vector3>(anchors) { lookAt };
+        int lookAtIdx = probePoints.Count - 1;
+        var rawSamples = await fusionGpu.GatherAnchorsAsync(
+            rawPacked.View, camBuf.View, probePoints, w, h, n);
+
+        var scaleA = new float[n];
+        var scaleB = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            var rawList = new List<float>();
+            var metList = new List<float>();
+            for (int ai = 0; ai < anchors.Count; ai++)
+            {
+                var (raw, zCam) = rawSamples[i][ai];
+                if (raw < 0f || zCam <= 1e-4f) continue;
+                rawList.Add(raw);
+                metList.Add(zCam);
+            }
+
+            float a = 1f, b = 0f;
+            bool fitted = false;
+            if (MvsGeometricFusion.TryFitScaleOnly(rawList, metList, out float aOnly))
+            {
+                a = aOnly; b = 0f; fitted = true;
+                // Affine only when it stays near scale-only (tiny-a + large-b flattens relative MDE → sheets).
+                if (MvsGeometricFusion.TryFitAffineScaleShift(rawList, metList, out float aAb, out float bAb)
+                    && aAb > 0.5f * aOnly && aAb < 2f * aOnly)
+                {
+                    float medZ = metList.OrderBy(z => z).ElementAt(metList.Count / 2);
+                    if (MathF.Abs(bAb) < 0.25f * MathF.Max(medZ, 1e-3f))
+                    {
+                        double residAb = 0, residA = 0;
+                        for (int k = 0; k < rawList.Count; k++)
+                        {
+                            float e1 = aAb * rawList[k] + bAb - metList[k];
+                            float e2 = aOnly * rawList[k] - metList[k];
+                            residAb += e1 * e1; residA += e2 * e2;
+                        }
+                        if (residAb < residA * 0.85)
+                        { a = aAb; b = bAb; }
+                    }
+                }
+            }
+            else
+            {
+                var (raw, zCam) = rawSamples[i][lookAtIdx];
+                if (raw > 1e-4f && zCam > 1e-4f) { a = zCam / raw; b = 0f; fitted = true; }
+            }
+            if (!fitted) { a = 1f; b = 0f; }
+
+            scaleA[i] = a; scaleB[i] = b;
+            Console.WriteLine($"[MultiView-GT] View {i} affine a={a:F4} b={b:F4} anchors={rawList.Count}");
+        }
+
+        // ── One global fit, pooled across every view ──
+        // HYPOTHESIS under test: DAv3 JOINT inference already emits depth that is consistent
+        // ACROSS views in one shared relative frame. Fitting a separate affine per view (the
+        // DN-Splatter recipe, designed for INDEPENDENTLY estimated monocular depths) would then
+        // manufacture divergence rather than remove it - and the measured near-depths span
+        // 0.313 to 0.467 across four cameras that all sit ~0.52 from the object, which is
+        // exactly that signature. Pool the anchors and fit once.
+        var poolRaw = new List<float>();
+        var poolMet = new List<float>();
+        for (int i = 0; i < n; i++)
+        {
+            for (int ai = 0; ai < anchors.Count; ai++)
+            {
+                var (raw, zCam) = rawSamples[i][ai];
+                if (raw < 0f || zCam <= 1e-4f) continue;
+                poolRaw.Add(raw);
+                poolMet.Add(zCam);
+            }
+        }
+        float gA = 1f, gB = 0f;
+        bool gFitted = MvsGeometricFusion.TryFitScaleOnly(poolRaw, poolMet, out float gAOnly);
+        if (gFitted) gA = gAOnly;
+        float spread = 0f;
+        {
+            float mn = float.MaxValue, mx = float.MinValue;
+            for (int i = 0; i < n; i++) { mn = MathF.Min(mn, scaleA[i]); mx = MathF.Max(mx, scaleA[i]); }
+            spread = mn > 0 ? (mx - mn) / mn : 0f;
+        }
+        Console.WriteLine($"[MultiView-GT] global_fit a={gA:F4} (pooled {poolRaw.Count} anchors, fitted={gFitted}) " +
+            $"| per-view a spread={spread:P1}");
+
+        if (globalScale && gFitted)
+        {
+            for (int i = 0; i < n; i++) { scaleA[i] = gA; scaleB[i] = 0f; }
+            Console.WriteLine("[MultiView-GT] USING GLOBAL SCALE for all views (per-view affine overridden)");
+        }
+
+        // metric = a*raw + b for every view, on device.
+        using var metricPacked = fusionGpu.Metricize(rawPacked.View, scaleA, scaleB, pixelsPerView);
+        Console.WriteLine($"[MultiView-GT] pose=gt+mvs scaleMode={(globalScale ? "GLOBAL" : "per-view")}");
+
+        // Fail-closed: lookAt residual after affine must be ≤5%.
+        // If multi-anchor SSI drifts, re-anchor each view to lookAt scale-only (still per-view, not shared).
+        float maxLookAtResid = 0f;
+        bool reAnchored = false;
+        for (int i = 0; i < n; i++)
+        {
+            var (raw, zCam) = rawSamples[i][lookAtIdx];
+            if (!(zCam > 1e-4f)) continue;
+            // metric at lookAt is a*raw+b by construction; no need to sample the map back.
+            float zm = raw > 1e-6f ? scaleA[i] * raw + scaleB[i] : 0f;
+            float rel = zm > 1e-4f ? MathF.Abs(zm - zCam) / zCam : 1f;
+            if (rel > 0.05f)
+            {
+                if (!(raw > 1e-4f))
+                {
+                    Console.WriteLine($"[MultiView-GT] FAIL affine_probe view {i} lookAt raw invalid");
+                    mvResult.Dispose();
+                    SetStatus($"Error: View {i} lookAt depth invalid.");
+                    return null;
+                }
+                float aFix = zCam / raw;
+                scaleA[i] = aFix; scaleB[i] = 0f;
+                reAnchored = true;
+                rel = 0f;
+                Console.WriteLine($"[MultiView-GT] View {i} re-anchored lookAt scale={aFix:F4} (affine residual was high)");
+            }
+            maxLookAtResid = MathF.Max(maxLookAtResid, rel);
+            Console.WriteLine($"[MultiView-GT] View {i} lookAt residual={rel:P2}");
+        }
+        if (reAnchored)
+        {
+            // Rebuild in place. ⚠️ NOT via a temp buffer + CopyFrom: the temp would be disposed
+            // before WebGPU's batched submit ran, which is the 'used in submit while destroyed'
+            // trap that cost this session a CDP cycle.
+            fusionGpu.MetricizeInto(rawPacked.View, scaleA, scaleB, pixelsPerView, metricPacked.View);
+        }
+        Console.WriteLine($"[MultiView-GT] affine_probe maxLookAtResid={maxLookAtResid:P2}");
+        if (isTemple && maxLookAtResid > 0.05f)
+        {
+            SetStatus($"Error: Affine lookAt residual {maxLookAtResid:P1} >5% — fail-closed.");
+            Console.WriteLine($"[MultiView-GT] FAIL affine_probe residual={maxLookAtResid:P2}");
+            mvResult.Dispose();
+            return null;
+        }
+
+        // ── Scale refine: maximize FB agreements per view ──
+        SetStatus("Refining per-view scales for multi-view consistency...");
+        var refine = new float[n];
+        for (int i = 0; i < n; i++)
+        {
+            refine[i] = await fusionGpu.OptimizeScaleFactorAsync(
+                metricPacked.View, camBuf.View, i, w, h, n,
+                maxDepthError: 0.05f, maxReprojPx: 2f, probeSubsample: 8);
+            if (MathF.Abs(refine[i] - 1f) > 1e-3f)
+            {
+                scaleA[i] *= refine[i];
+                Console.WriteLine($"[MultiView-GT] View {i} scale refine x{refine[i]:F3} -> a={scaleA[i]:F4}");
+            }
+        }
+        fusionGpu.ApplyScales(metricPacked.View, refine, pixelsPerView);
+
+        // Probe: COLMAP FB keep-ratio (fail-closed)
+        const float mvsDepthErr = 0.05f;
+        int minViews = Math.Min(MvsGeometricFusion.DefaultMinViews, n);
+        SetStatus($"MVS consistency probe ({mvsDepthErr:P0}, minViews={minViews})...");
+        // Depth range per view going INTO the probe. If these are zero the metric maps were wiped
+        // upstream and the keep-ratio gate below will fail with kept=0/0 for the wrong reason.
+        var ranges = await fusionGpu.MinMaxPerViewAsync(metricPacked.View, pixelsPerView, n);
+        for (int i = 0; i < n; i++)
+            Console.WriteLine($"[MultiView-GT] metric view {i} depth=[{ranges[i].min:F5}, {ranges[i].max:F5}]");
+
+        // ⚠️ This was MvsGeometricFusion.FuseDepthMaps with its point list DISCARDED: a full-resolution
+        // CPU fusion run purely to produce these stats and the gate below. It is a kernel now, and only
+        // the 5-int stats buffer comes back.
+        var fuseStats = await fusionGpu.ForwardBackAsync(
+            metricPacked.View, confPacked.View, camBuf.View,
+            w, h, n,
+            subsample: Math.Max(2, subsample),
+            maxDepthError: mvsDepthErr,
+            maxReprojPx: MvsGeometricFusion.DefaultMaxReprojPx,
+            minViews: minViews,
+            hasConf: false, confMin: 0f);
+        float keepRatio = fuseStats.Input > 0 ? (float)fuseStats.Kept / fuseStats.Input : 0f;
+        Console.WriteLine(
+            $"[MultiView-GT] mvs_fuse kept={fuseStats.Kept}/{fuseStats.Input} keepRatio={keepRatio:P1} " +
+            $"minview_rej={fuseStats.MinViewReject} (thresh={mvsDepthErr:P0}/2px/minViews={minViews}) "
+            + $"[gpu threads={fusionGpu.LastFbThreads}]");
+
+        // ── POSITIVE CONTROL: does this probe report agreement AT ALL? ──
+        // I have been reading keepRatio=0.8% as "the views disagree" without ever checking the
+        // probe can return a high number. Feed it n copies of view 0 with n copies of view 0's
+        // CAMERA: every pixel then agrees with itself by construction, so a correct probe must
+        // keep nearly everything. If this comes back low, keepRatio was never evidence about
+        // the scene and every conclusion drawn from it is void.
+        var ctlAcc = _gpu.WebGPUAccelerator;
+        using (var selfDepth = ctlAcc.Allocate1D<float>((long)n * pixelsPerView))
+        using (var selfCams = ctlAcc.Allocate1D<float>(camBuf.Length))
+        {
+            for (int i = 0; i < n; i++)
+                selfDepth.View.SubView((long)i * pixelsPerView, pixelsPerView)
+                    .CopyFrom(metricPacked.View.SubView(0, pixelsPerView));
+            long camStride = camBuf.Length / n;
+            for (int i = 0; i < n; i++)
+                selfCams.View.SubView(i * camStride, camStride).CopyFrom(camBuf.View.SubView(0, camStride));
+            await ctlAcc.SynchronizeAsync();
+
+            var ctl = await fusionGpu.ForwardBackAsync(
+                selfDepth.View, confPacked.View, selfCams.View,
+                w, h, n,
+                subsample: Math.Max(4, subsample),
+                maxDepthError: 0.05f,
+                maxReprojPx: MvsGeometricFusion.DefaultMaxReprojPx,
+                minViews: minViews,
+                hasConf: false, confMin: 0f);
+            float ctlKeep = ctl.Input > 0 ? (float)ctl.Kept / ctl.Input : 0f;
+            Console.WriteLine($"[MultiView-GT] CONTROL self-vs-self keep={ctlKeep:P2} " +
+                $"({ctl.Kept}/{ctl.Input}) - expect ~100%; anything low means the PROBE is broken");
+        }
+
+        // ── Alignment diagnostic: keep-ratio vs tolerance ──
+        // MEASURED 2026-09-20: one view alone reproduces its own photo at 27.7 dB, four views
+        // merged drop it to 19.2 dB, and this probe keeps only ~0.8% at 5%. The merge is
+        // destructive, so the question is WHY the views disagree, and the shape of this sweep
+        // answers it without guessing:
+        //   climbs steeply with tolerance -> a per-view SCALE/offset error, fixable by a better
+        //                                    metric fit (the depth SHAPE is right)
+        //   stays flat                    -> the per-view depth shape itself disagrees, and no
+        //                                    scalar correction will ever reconcile them
+        // Cheap: reuses the same kernel, one extra GPU pass per threshold, stats only.
+        // Sweep BOTH thresholds. The first sweep moved only maxDepthError and came back dead
+        // flat (0.78% -> 0.79% across a 20x relaxation), which does not mean "the depths
+        // disagree" - it means rejection happens before the depth test is reached, i.e. the
+        // REPROJECTION gate is the binding one. Sweeping one of two thresholds answers nothing.
+        foreach (var (tol, px) in new[]
+        {
+            (0.05f, 2f), (0.40f, 2f),           // depth relaxed, reprojection tight
+            (0.05f, 8f), (0.05f, 32f),          // reprojection relaxed, depth tight
+            (0.40f, 32f), (0.40f, 128f),        // both wide open
+        })
+        {
+            var st = await fusionGpu.ForwardBackAsync(
+                metricPacked.View, confPacked.View, camBuf.View,
+                w, h, n,
+                subsample: Math.Max(4, subsample),   // coarser: this is a statistic, not output
+                maxDepthError: tol,
+                maxReprojPx: px,
+                minViews: minViews,
+                hasConf: false, confMin: 0f);
+            float kr = st.Input > 0 ? (float)st.Kept / st.Input : 0f;
+            Console.WriteLine($"[MultiView-GT] align_sweep depth={tol:P0} reproj={px:F0}px keep={kr:P2} " +
+                $"({st.Kept}/{st.Input}, minview_rej={st.MinViewReject})");
+        }
+
+        if (isTemple && (keepRatio < 0.001f || keepRatio > 0.95f))
+        {
+            mvResult.Dispose();
+            SetStatus($"Error: MVS keepRatio={keepRatio:P2} out of bounds.");
+            Console.WriteLine($"[MultiView-GT] FAIL mvs_fuse keepRatio={keepRatio:P2}");
+            return null;
+        }
+
+        // Best visual so far: dense per-view metric unproject + consistency (~323k, columns visible).
+        SetStatus($"Dense GPU unproject ({n} metric views)...");
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+        var device = accelerator.NativeAccelerator.NativeDevice!;
+        var queue = accelerator.NativeAccelerator.Queue!;
+
+        var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
+        int totalSplats = 0;
+        int fuseSub = Math.Max(1, subsample);
+
+        // ── Pass A: materialise every view's metric depth ──
+        // Done up front so pass B can screen ANY view against ANY other. Previously the depth
+        // was sliced inside the unproject loop, so at i=0 no other view existed yet and view 0
+        // simply skipped consistency filtering - its entire unfiltered cloud survived, border
+        // ring and all. metricPacked already holds all n views; this is device-to-device
+        // slicing, no readback.
+        for (int i = 0; i < n; i++)
+        {
+            var depthGpu = accelerator.Allocate1D<float>(pixelsPerView);
+            depthGpu.View.CopyFrom(metricPacked.View.SubView((long)i * pixelsPerView, pixelsPerView));
+
+            var dr = mvResult.DepthResults[i];
+            dr.RawDepthGpu?.Dispose();
+            dr.RawDepthGpu = depthGpu;
+            // KEEP the DAv3 confidence. Metricizing rescales depth VALUES; it does not change
+            // which pixels the network was confident about, so the per-pixel confidence still
+            // applies. Disposing and nulling it here meant SplatWorldParams arrived with
+            // HasConfidence=0 and the ConfMin gate never ran on the live path at all.
+            dr.MinDepth = ranges[i].min;
+            dr.MaxDepth = ranges[i].max;
+        }
+        await accelerator.SynchronizeAsync();
+
+        int confRetained = 0;
+        for (int i = 0; i < n; i++) if (mvResult.DepthResults[i].ConfidenceGpu != null) confRetained++;
+        Console.WriteLine($"[MultiView-GT] metric depths ready for {n} views, confidence retained on {confRetained}/{n}");
+
+        // ── Pass B: unproject each view and screen it against a DIFFERENT view ──
+        // onlyView isolates ONE view's cloud. Diagnostic, not a product path: rendering a
+        // training view from its own depth map alone separates "the per-view depth is wrong"
+        // from "the views disagree with each other". Joint depth still runs over all N views,
+        // so only the unprojection is restricted.
+        if (onlyView >= 0)
+            Console.WriteLine($"[MultiView-GT] DIAGNOSTIC onlyView={onlyView} - unprojecting a single view, no cross-view merge");
+
+        for (int i = 0; i < n; i++)
+        {
+            if (onlyView >= 0 && i != onlyView) continue;
+            var src = mvResult.DepthResults[i];
+
+            SetStatus($"Unprojecting metric view {i + 1}/{n}...");
+            var (buf, count) = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
+                src, images[i], cameras[i], fuseSub, edgeSharpness, depthScale: 1f);
+            int rawCount = count;
+
+            // View 0 is NOT screened, and that exemption is load-bearing rather than an
+            // oversight. MEASURED 2026-09-20: screening it against view 1 cost templeR0001
+            // 3.55 dB, because the views are not in a common metric frame (keepRatio 0.8%) -
+            // so the filter discards view 0's GOOD data for disagreeing with a bad reference.
+            // Revisit only once cross-view alignment is fixed; screening against a misaligned
+            // reference is worse than not screening at all.
+            int refIdx = 0;
+            if (onlyView < 0 && i > 0 && count > 0 && n > 1
+                && mvResult.DepthResults[refIdx].RawDepthGpu != null)
+            {
+                (buf, count) = await _gaussianKernel.FuseConsistencyVsRefAsync(
+                    buf, count, mvResult.DepthResults[refIdx], cameras[refIdx],
+                    depthScale: 1f, relThresh: 0.08f);
+            }
+
+            viewResults.Add((buf, count));
+            totalSplats += count;
+            Console.WriteLine($"[MultiView-GT] View {i}: {count:N0} dense splats " +
+                $"(raw {rawCount:N0}, {(i > 0 ? $"screened vs view {refIdx}" : "reference, unscreened")})");
+        }
+
+        mvResult.Dispose();
+
+        if (totalSplats == 0)
+        {
+            foreach (var (buf, _) in viewResults) buf.Dispose();
+            SetStatus("Error: No views produced splats.");
+            return null;
+        }
+
+        SetStatus($"Merging {totalSplats:N0} dense MVS splats...");
+        var merged = accelerator.Allocate1D<float>(totalSplats * SplatFormat.Floats);
+        long offsetBytes = 0;
+        int actualTotal = 0;
+        foreach (var (buf, count) in viewResults)
+        {
+            if (count <= 0) { buf.Dispose(); continue; }
+            ulong byteCount = (ulong)count * SplatFormat.Floats * sizeof(float);
+            using (var encoder = device.CreateCommandEncoder())
+            {
+                encoder.CopyBufferToBuffer(buf.GetGPUBuffer()!, 0, merged.GetGPUBuffer()!, (ulong)offsetBytes, byteCount);
+                queue.Submit(new[] { encoder.Finish() });
+            }
+            offsetBytes += (long)byteCount;
+            actualTotal += count;
+            buf.Dispose();
+        }
+        await accelerator.SynchronizeAsync();
+
+        if (isTemple)
+        {
+            SetStatus("Culling background away from temple...");
+            (merged, actualTotal) = await _gaussianKernel.CullOutsideSphereAsync(
+                merged, actualTotal, lookAt, radius: 0.13f);
+            if (actualTotal == 0)
+            {
+                SetStatus("Error: Sphere cull removed all splats.");
+                return null;
+            }
+        }
+
+        Console.WriteLine($"[MultiView-GT] mvs_voxel=dense-gpu-full count={actualTotal:N0}");
+        SetStatus($"GT complete: {actualTotal:N0} splats pose=gt+mvs");
+        Console.WriteLine($"[MultiView-GT] Total: {actualTotal:N0} pose=gt+mvs");
+        return (merged, actualTotal);
+    }
+
+    /// <summary>Multi-anchor points for DN-Splatter affine fit (lookAt + offset ring).</summary>
+    private static List<Vector3> BuildTempleAnchors(Vector3 lookAt, bool isTemple)
+    {
+        var anchors = new List<Vector3> { lookAt };
+        float s = isTemple ? 0.04f : 0.1f;
+        anchors.Add(lookAt + new Vector3(s, 0, 0));
+        anchors.Add(lookAt + new Vector3(-s, 0, 0));
+        anchors.Add(lookAt + new Vector3(0, s, 0));
+        anchors.Add(lookAt + new Vector3(0, -s, 0));
+        anchors.Add(lookAt + new Vector3(0, 0, s));
+        anchors.Add(lookAt + new Vector3(0, 0, -s));
+        anchors.Add(lookAt + new Vector3(s, s, 0));
+        anchors.Add(lookAt + new Vector3(-s, s, 0));
+        anchors.Add(lookAt + new Vector3(s, -s, 0));
+        anchors.Add(lookAt + new Vector3(-s, -s, 0));
+        return anchors;
+    }
+
+    /// <summary>Monocular depth + per-view lookAt scale + GT poses.</summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
+        GenerateWithGroundTruthMonocularFallbackAsync(
+            IReadOnlyList<ImportedImage> images, IReadOnlyList<CameraParams> cameras,
+            int subsample, float edgeSharpness)
+    {
+        bool isTemple = images.Any(im => im.FileName.StartsWith("templeR", StringComparison.OrdinalIgnoreCase));
+        var lookAt = isTemple
+            ? new Vector3(0.028f, 0.042f, -0.054f)
+            : cameras.Aggregate(Vector3.Zero, (a, c) => a + c.Position) / cameras.Count;
+
+        Console.WriteLine($"[MultiView-GT] lookAt=({lookAt.X:F4},{lookAt.Y:F4},{lookAt.Z:F4}) subsample={subsample} pose=gt (monocular fallback)");
+
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+        var device = accelerator.NativeAccelerator.NativeDevice!;
+        var queue = accelerator.NativeAccelerator.Queue!;
+
+        var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
         int totalSplats = 0;
 
         for (int i = 0; i < images.Count; i++)
         {
             SetStatus($"Depth estimation: {images[i].FileName} ({i + 1}/{images.Count})...");
             var depthResult = await _depthService.EstimateDepthAsync(images[i]);
-            if (depthResult == null) { Console.WriteLine($"[MultiView-GT] Depth failed for {i}"); continue; }
-
-            // Compute per-view depth scale: project scene center into this camera,
-            // sample MDE depth there, and scale so MDE depth = actual depth to center.
-            float viewScale = depthScale; // fallback
-            try
+            if (depthResult == null)
             {
-                var cam = cameras[i];
-                float[] depthData = await depthResult.RawDepthGpu!.CopyToHostAsync<float>(0, depthResult.RawDepthGpu.Length);
-                float range = depthResult.MaxDepth - depthResult.MinDepth;
+                Console.WriteLine($"[MultiView-GT] Depth failed for {i}");
+                continue;
+            }
 
-                // Project scene center into this camera
-                var delta = camCentroid - cam.Position;
-                float camZ = Vector3.Dot(cam.Forward, delta);
-
-                if (camZ > 0.01f && range > 1e-6f)
+            var cam = cameras[i];
+            float viewScale = 1f;
+            if (WorldSpaceGeometry.Project(cam, lookAt, out float u, out float v, out float zCam) && zCam > 1e-4f)
+            {
+                try
                 {
-                    float camX = Vector3.Dot(cam.Right, delta);
-                    float camY = Vector3.Dot(-cam.Up, delta);
-                    float px = cam.FocalX * camX / camZ + cam.CenterX;
-                    float py = cam.FocalY * camY / camZ + cam.CenterY;
-                    int ix = Math.Clamp((int)px, 0, depthResult.Width - 1);
-                    int iy = Math.Clamp((int)py, 0, depthResult.Height - 1);
-
-                    float rawMde = depthData[iy * depthResult.Width + ix];
-                    float norm = (rawMde - depthResult.MinDepth) / range;
-                    if (norm > 0.01f)
+                    float[] host = await depthResult.RawDepthGpu!.CopyToHostAsync<float>(0, depthResult.RawDepthGpu.Length);
+                    int ix = Math.Clamp((int)MathF.Round(u), 0, depthResult.Width - 1);
+                    int iy = Math.Clamp((int)MathF.Round(v), 0, depthResult.Height - 1);
+                    float raw = host[iy * depthResult.Width + ix];
+                    if (raw > 1e-4f)
                     {
-                        float mdeDepth = 1.0f / (norm + 0.01f);
-                        viewScale = camZ / mdeDepth;
-                        Console.WriteLine($"[MultiView-GT] View {i} depth align: center at pixel ({ix},{iy}), camZ={camZ:F4}, mdeDepth={mdeDepth:F2}, scale={viewScale:F4}");
+                        viewScale = zCam / raw;
+                        Console.WriteLine($"[MultiView-GT] View {i} lookAt uv=({u:F1},{v:F1}) z={zCam:F4} raw={raw:F4} scale={viewScale:F4}");
                     }
                 }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[MultiView-GT] View {i} scale: {ex.Message}");
+                }
             }
-            catch { }
 
-            SetStatus($"Generating splats: {images[i].FileName} ({i + 1}/{images.Count})...");
+            SetStatus($"Generating splats: {images[i].FileName} ({i + 1}/{images.Count}, pose=gt)...");
             var (buf, count) = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
-                depthResult, images[i], cameras[i], subsample, edgeSharpness, viewScale);
-
-            viewCounts.Add((i, count, viewScale));
-            totalSplats += count;
-            buf.Dispose();
+                depthResult, images[i], cam, subsample, edgeSharpness, viewScale);
             depthResult.Dispose();
-            Console.WriteLine($"[MultiView-GT] View {i}: {count:N0} splats, scale={viewScale:F4}");
+
+            viewResults.Add((buf, count));
+            totalSplats += count;
+            Console.WriteLine($"[MultiView-GT] View {i}: {count:N0} splats scale={viewScale:F4}");
         }
 
-        if (viewCounts.Count == 0 || totalSplats == 0)
+        if (totalSplats == 0)
         {
+            foreach (var (buf, _) in viewResults) buf.Dispose();
             SetStatus("Error: No views produced splats.");
             return null;
         }
 
-        // Pass 2: regenerate + merge
-        SetStatus($"Merging {totalSplats:N0} splats from {viewCounts.Count} views...");
-        var accelerator = _gpu.WebGPUAccelerator;
-        var nativeAccel = accelerator.NativeAccelerator;
-        var device = nativeAccel.NativeDevice!;
-        var queue = nativeAccel.Queue!;
-
-        var merged = accelerator.Allocate1D<float>(totalSplats * 10);
-        var mergedGpuBuf = merged.GetGPUBuffer();
-
-        ulong byteOffset = 0;
-        foreach (var (idx, expectedCount, viewScale) in viewCounts)
+        SetStatus($"Merging {totalSplats:N0} splats (pose=gt)...");
+        var merged = accelerator.Allocate1D<float>(totalSplats * SplatFormat.Floats);
+        long offsetBytes = 0;
+        int actualTotal = 0;
+        foreach (var (buf, count) in viewResults)
         {
-            SetStatus($"Fusing view {idx + 1}/{images.Count}...");
-            var depthResult = await _depthService.EstimateDepthAsync(images[idx]);
-            if (depthResult == null) continue;
-
-            var (buf, count) = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
-                depthResult, images[idx], cameras[idx], subsample, edgeSharpness, viewScale);
-            depthResult.Dispose();
-
-            var srcGpuBuf = buf.GetGPUBuffer();
-            ulong byteCount = (ulong)count * 10 * sizeof(float);
-
-            if (srcGpuBuf != null && mergedGpuBuf != null)
+            if (count <= 0) { buf.Dispose(); continue; }
+            ulong byteCount = (ulong)count * SplatFormat.Floats * sizeof(float);
+            using (var encoder = device.CreateCommandEncoder())
             {
-                using var encoder = device.CreateCommandEncoder();
-                encoder.CopyBufferToBuffer(srcGpuBuf, 0, mergedGpuBuf, byteOffset, byteCount);
-                using var cmdBuf = encoder.Finish();
-                queue.Submit(new[] { cmdBuf });
+                encoder.CopyBufferToBuffer(buf.GetGPUBuffer()!, 0, merged.GetGPUBuffer()!, (ulong)offsetBytes, byteCount);
+                queue.Submit(new[] { encoder.Finish() });
             }
-
-            byteOffset += byteCount;
+            offsetBytes += (long)byteCount;
+            actualTotal += count;
             buf.Dispose();
         }
+        await accelerator.SynchronizeAsync();
 
-        int actualTotal = (int)(byteOffset / (10 * sizeof(float)));
-        SetStatus($"GT generation complete: {actualTotal:N0} splats from {viewCounts.Count} views.");
-        Console.WriteLine($"[MultiView-GT] Total: {actualTotal:N0} splats from {viewCounts.Count} views");
-
-        return (merged, totalSplats);
+        SetStatus($"GT complete: {actualTotal:N0} splats pose=gt");
+        Console.WriteLine($"[MultiView-GT] Total: {actualTotal:N0} pose=gt (monocular)");
+        return (merged, actualTotal);
     }
 
     /// <summary>
     /// Parse a Middlebury-format camera parameter file (templeR_par.txt, dinoSR_par.txt).
-    /// Returns (filename, CameraParams) for each camera line.
-    /// Format: filename K[0..8] R[0..8] t[0..2]
+    /// See <see cref="WorldSpaceGeometry.ParseMiddleburyParams"/>.
     /// </summary>
     public static List<(string filename, CameraParams camera)> ParseMiddleburyParams(string parFileContent, int imageWidth, int imageHeight)
-    {
-        var results = new List<(string, CameraParams)>();
-        var lines = parFileContent.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-
-        // First line is count
-        for (int i = 1; i < lines.Length; i++)
-        {
-            var parts = lines[i].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 22) continue;
-
-            string filename = parts[0];
-            // K matrix (row-major): parts[1..9]
-            float fx = float.Parse(parts[1]);
-            float fy = float.Parse(parts[5]);
-            float cx = float.Parse(parts[3]);
-            float cy = float.Parse(parts[6]);
-
-            // R matrix (row-major): parts[10..18]
-            var R = new double[3, 3];
-            for (int r = 0; r < 3; r++)
-                for (int c = 0; c < 3; c++)
-                    R[r, c] = double.Parse(parts[10 + r * 3 + c]);
-
-            // t vector: parts[19..21]
-            var t = new double[] {
-                double.Parse(parts[19]),
-                double.Parse(parts[20]),
-                double.Parse(parts[21])
-            };
-
-            var cam = new CameraParams
-            {
-                Width = imageWidth,
-                Height = imageHeight,
-                FocalX = fx,
-                FocalY = fy,
-                CenterX = cx,
-                CenterY = cy,
-            };
-
-            // Use the same SetCameraPose logic: Position = -R^T * t, Forward = R[2,:], Up = -R[1,:]
-            cam.Forward = new Vector3((float)R[2, 0], (float)R[2, 1], (float)R[2, 2]);
-            cam.Up = new Vector3(-(float)R[1, 0], -(float)R[1, 1], -(float)R[1, 2]);
-            cam.Position = new Vector3(
-                -((float)(R[0, 0] * t[0] + R[1, 0] * t[1] + R[2, 0] * t[2])),
-                -((float)(R[0, 1] * t[0] + R[1, 1] * t[1] + R[2, 1] * t[2])),
-                -((float)(R[0, 2] * t[0] + R[1, 2] * t[1] + R[2, 2] * t[2])));
-
-            results.Add((filename, cam));
-        }
-
-        return results;
-    }
+        => WorldSpaceGeometry.ParseMiddleburyParams(parFileContent, imageWidth, imageHeight);
 
     private void SetStatus(string status)
     {

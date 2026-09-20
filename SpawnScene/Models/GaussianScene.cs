@@ -33,6 +33,20 @@ public class GaussianScene
     /// <summary>Optional: camera parameters from training views.</summary>
     public List<CameraParams> TrainingCameras { get; set; } = [];
 
+    /// <summary>
+    /// Every posed image available as photometric supervision, which is NOT the same set as the
+    /// views used to initialise geometry.
+    ///
+    /// Depth initialisation is capped by the joint-depth model
+    /// (<c>DepthEstimationService.MaxMultiViewImages</c>); training supervision only needs an
+    /// image and a pose, so it should use everything available. TempleRing ships 16 posed photos
+    /// and the pipeline was initialising - and therefore supervising - from 4.
+    ///
+    /// Images are referenced by name rather than held as pixels: 16 x 640 x 480 RGBA is ~20 MB
+    /// and belongs on the GPU at training time, not in the scene model.
+    /// </summary>
+    public List<TrainingView> TrainingViews { get; set; } = [];
+
     /// <summary>Source file path or name (for display purposes).</summary>
     public string? SourceName { get; set; }
 
@@ -72,4 +86,17 @@ public class GaussianScene
         scene.ComputeBounds();
         return scene;
     }
+}
+
+/// <summary>A posed image usable as photometric supervision during optimisation.</summary>
+public sealed class TrainingView
+{
+    /// <summary>Pose and intrinsics this image was taken with.</summary>
+    public required CameraParams Camera { get; init; }
+
+    /// <summary>Resolvable source name, e.g. a dataset filename.</summary>
+    public required string ImageName { get; init; }
+
+    /// <summary>True when this view also seeded geometry (vs supervision only).</summary>
+    public bool UsedForInit { get; init; }
 }

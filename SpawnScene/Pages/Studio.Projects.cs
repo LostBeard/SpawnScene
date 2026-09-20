@@ -24,7 +24,8 @@ public partial class Studio
             Console.WriteLine($"[Studio] Project created in OPFS, refreshing list...");
             _projects = await _projectService.ListProjectsAsync();
             _activeProject = project;
-            BuildProjectBrowserUI();
+            _state = StudioState.ProjectDetail;
+            BuildProjectDetailUI();
             Console.WriteLine($"[Studio] Created project '{project.Name}' ({project.Id}), {_projects.Count} total");
         }
         catch (Exception ex)
@@ -232,6 +233,7 @@ public partial class Studio
                 var projectScene = new ProjectScene
                 {
                     SplatCount = splatCount,
+                    FloatsPerSplat = SplatFormat.Floats,
                     QualityPreset = _activeProject.Settings.QualityPreset,
                 };
                 await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
@@ -243,8 +245,9 @@ public partial class Studio
                 var projectScene = new ProjectScene
                 {
                     SplatCount = splatCount,
+                    FloatsPerSplat = SplatFormat.Floats,
                     QualityPreset = _activeProject.Settings.QualityPreset,
-                    SizeBytes = (long)splatCount * 10 * sizeof(float),
+                    SizeBytes = (long)splatCount * SplatFormat.Floats * sizeof(float),
                 };
                 _activeProject.Scenes.Add(projectScene);
                 await _projectService.UpdateProjectAsync(_activeProject);
@@ -277,7 +280,7 @@ public partial class Studio
 
     // ─── Dataset Testing ───
 
-    private async Task GenerateFromTempleRingAsync()
+    private async Task GenerateFromTempleRingAsync(int onlyView = -1, bool globalScale = false)
     {
         if (_activeProject == null) return;
 
@@ -293,20 +296,49 @@ public partial class Studio
             var gtCameras = MultiViewGenerationService.ParseMiddleburyParams(parText, 640, 480);
             Console.WriteLine($"[Studio] TempleRing: {gtCameras.Count} cameras in par file");
 
-            // Load first 4 available images (some par entries may not have files on disk)
-            int maxImages = 4;
+            // Discover which par entries exist on disk, then pick 4 views spaced around the ring.
+            // (First 4 consecutive frames are near-identical viewpoints → floating near-duplicates.)
+            // DAv3 joint multi-view: 4 spaced ring views (6+ with minViews=3 over-culls relative MDE).
+            const int maxImages = 4;
+            var available = new List<(string filename, CameraParams cam)>();
+            foreach (var (filename, cam) in gtCameras)
+            {
+                try
+                {
+                    // GET (not HEAD): some static hosts lie on HEAD. Reject SPA HTML fallbacks.
+                    using var resp = await _http.GetAsync($"datasets/TempleRing/{filename}",
+                        HttpCompletionOption.ResponseHeadersRead);
+                    if (!resp.IsSuccessStatusCode) continue;
+                    var ctype = resp.Content.Headers.ContentType?.MediaType ?? "";
+                    var len = resp.Content.Headers.ContentLength ?? -1;
+                    if (!ctype.StartsWith("image/", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (len >= 0 && len < 1024) continue; // empty / stub
+                    available.Add((filename, cam));
+                }
+                catch { /* missing */ }
+            }
+            Console.WriteLine($"[Studio] TempleRing: {available.Count} images on disk");
+            if (available.Count < 2)
+            {
+                _statusMessage = "TempleRing: need at least 2 images on disk.";
+                BuildProjectDetailUI();
+                return;
+            }
+
+            var pickIdx = WorldSpaceGeometry.PickFarthestCameras(
+                available.Select(a => a.cam).ToList(), Math.Min(maxImages, available.Count));
+            Console.WriteLine($"[Studio] TempleRing farthest picks: [{string.Join(",", pickIdx)}]");
+
             var images = new List<ImportedImage>();
             var cameras = new List<CameraParams>();
 
-            for (int i = 0; i < gtCameras.Count && images.Count < maxImages; i++)
+            foreach (int i in pickIdx)
             {
-                var (filename, cam) = gtCameras[i];
-                _statusMessage = $"Loading {filename} ({images.Count + 1}/{maxImages})...";
+                var (filename, cam) = available[i];
+                _statusMessage = $"Loading {filename} ({images.Count + 1}/{pickIdx.Count})...";
                 BuildProjectDetailUI();
 
-                byte[] bytes;
-                try { bytes = await _http.GetByteArrayAsync($"datasets/TempleRing/{filename}"); }
-                catch { Console.WriteLine($"[Studio] Skipping {filename} (not on disk)"); continue; }
+                byte[] bytes = await _http.GetByteArrayAsync($"datasets/TempleRing/{filename}");
                 using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
                 using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
                 int w = (int)bitmap.Width;
@@ -319,16 +351,16 @@ public partial class Studio
                 using var dataArray = imageData.Data;
                 var rgba = dataArray.ReadBytes();
 
-                // Update camera dimensions to actual image size
                 cam.Width = w;
                 cam.Height = h;
 
                 images.Add(new ImportedImage { FileName = filename, Width = w, Height = h, RgbaPixels = rgba });
                 cameras.Add(cam);
+                Console.WriteLine($"[Studio] TempleRing pick[{images.Count - 1}]={filename} pos=({cam.Position.X:F3},{cam.Position.Y:F3},{cam.Position.Z:F3})");
             }
 
-            // Generate using ground truth cameras (bypass SfM)
-            int subsample = _activeProject.Settings.Subsample;
+            // Full-res GT regression — TempleRing is only 4×640×480; prefer subsample 1.
+            int subsample = 1;
             float edgeSharpness = _activeProject.Settings.EdgeSharpness;
 
             void OnStatus() { _statusMessage = _multiViewService.Status; BuildProjectDetailUI(); }
@@ -337,7 +369,7 @@ public partial class Studio
             try
             {
                 var result = await _multiViewService.GenerateWithGroundTruthAsync(
-                    images, cameras, Math.Max(subsample, 2), edgeSharpness);
+                    images, cameras, subsample, edgeSharpness, onlyView, globalScale);
 
                 if (result == null) { _statusMessage = _multiViewService.Status; BuildProjectDetailUI(); return; }
 
@@ -352,15 +384,37 @@ public partial class Studio
                 foreach (var cam in cameras)
                     scene.TrainingCameras.Add(cam);
 
+                // Every posed photo on disk becomes photometric supervision, not just the ones
+                // that seeded geometry. The 4-view cap comes from the joint-depth model; training
+                // only needs an image plus a pose, and TempleRing ships 16 of those. Nothing
+                // consumes this yet - the optimiser does - so it cannot change current output.
+                var initNames = pickIdx.Select(i => available[i].filename).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                foreach (var (filename, cam) in available)
+                {
+                    scene.TrainingViews.Add(new TrainingView
+                    {
+                        Camera = cam,
+                        ImageName = $"datasets/TempleRing/{filename}",
+                        UsedForInit = initNames.Contains(filename),
+                    });
+                }
+                Console.WriteLine($"[Studio] TempleRing supervision: {scene.TrainingViews.Count} posed views " +
+                    $"({initNames.Count} also used for depth init)");
+
                 _renderService.SetActiveSceneGpuLoaded(scene);
                 _sceneManager.ActiveScene = scene;
+
+                // Sharper demo presentation: sorted alpha for dense MVS (stochastic looks holey at <200k).
+                _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
+                _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
+                _gpuRenderer.StochasticSPP = 4;
 
                 _statusMessage = null;
                 _state = StudioState.SceneViewer;
                 _cameraController?.FitToScene();
                 BuildViewerHudUI();
 
-                Console.WriteLine($"[Studio] TempleRing GT scene: {splatCount:N0} splats");
+                Console.WriteLine($"[Studio] TempleRing GT scene: {splatCount:N0} splats ({images.Count}-view mvs fuse)");
             }
             finally
             {
@@ -442,10 +496,7 @@ public partial class Studio
                 int subsample = _activeProject.Settings.Subsample;
                 float edgeSharpness = _activeProject.Settings.EdgeSharpness;
 
-                // Multi-view generates N× more splats — enforce minimum subsample of 2
-                int multiViewSubsample = Math.Max(subsample, 2);
-
-                var result = await _multiViewService.GenerateAsync(images, multiViewSubsample, edgeSharpness);
+                var result = await _multiViewService.GenerateAsync(images, subsample, edgeSharpness);
                 if (result == null)
                 {
                     _statusMessage = _multiViewService.Status;
@@ -464,7 +515,8 @@ public partial class Studio
                 var scene = new GaussianScene
                 {
                     GpuSplatCount = splatCount,
-                    SourceName = "depth-splat", // same camera model as single-image
+                    // Hybrid path may lack TrainingCameras; FitToScene uses depth-splat origin then.
+                    SourceName = "depth-splat",
                 };
 
                 _renderService.SetActiveSceneGpuLoaded(scene);
@@ -481,6 +533,7 @@ public partial class Studio
                     var projectScene = new ProjectScene
                     {
                         SplatCount = splatCount,
+                        FloatsPerSplat = SplatFormat.Floats,
                         QualityPreset = _activeProject.Settings.QualityPreset,
                     };
                     await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
@@ -542,7 +595,7 @@ public partial class Studio
             _statusMessage = $"Streaming {scene.SplatCount:N0} splats to GPU...";
             BuildProjectDetailUI();
 
-            await _gpuRenderer.UploadSceneFromStream(sceneStream, scene.SplatCount);
+            await _gpuRenderer.UploadSceneFromStream(sceneStream, scene.SplatCount, scene.EffectiveFloatsPerSplat);
 
             var gaussianScene = new GaussianScene
             {

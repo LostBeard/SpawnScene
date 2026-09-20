@@ -13,8 +13,10 @@ namespace SpawnScene.Services;
 ///   3. Rasterize: for each Gaussian, alpha-blend its contribution to covered pixels
 ///   4. Output: byte[] RGBA framebuffer ready for canvas putImageData
 ///
-/// This is a reference implementation. GPU-accelerated version via ILGPU
-/// will eventually replace the inner loops for real-time performance.
+/// NOT the shipped path and currently referenced by nothing: <see cref="GpuGaussianRenderer"/>
+/// renders every scene. This is kept as a readable CPU reference, and it shares the covariance
+/// projection in <see cref="SplatCovariance"/> with the WGSL vertex stage so it cannot drift into
+/// being a second, differently-wrong answer.
 /// </summary>
 public class GaussianRenderer
 {
@@ -47,7 +49,6 @@ public class GaussianRenderer
     /// </summary>
     private ProjectedGaussian[] ProjectGaussians(GaussianScene scene, CameraParams camera)
     {
-        var viewMatrix = camera.ViewMatrix;
         var projected = new List<ProjectedGaussian>(scene.Count);
 
         float fx = camera.FocalX;
@@ -55,72 +56,47 @@ public class GaussianRenderer
         float cx = camera.CenterX;
         float cy = camera.CenterY;
 
+        // One implementation of the covariance projection, shared with the WGSL vertex stage and
+        // unit-tested in SplatCovarianceTests. This used to be a second, inline copy of the Kerbl
+        // math that transposed the view rotation - Sigma_cam came out as A^T Sigma A.
+        WorldSpaceGeometry.ViewMatrixToCameraBasis(
+            camera.ViewMatrix, out var right, out var up, out var forward, out var eye);
+
         for (int i = 0; i < scene.Count; i++)
         {
             ref readonly var g = ref scene.Gaussians[i];
 
-            // Transform to camera space
-            var pos = g.Position;
-            var camPos = Vector3.Transform(pos, viewMatrix);
-
-            // In .NET's right-handed CreateLookAt, objects in front of the camera
-            // have NEGATIVE Z. We negate it for our calculations.
-            float depth = -camPos.Z;
+            // Camera space: x right, y UP, z forward and positive in front.
+            var rel = g.Position - eye;
+            float camX = Vector3.Dot(right, rel);
+            float camY = Vector3.Dot(up, rel);
+            float depth = Vector3.Dot(forward, rel);
 
             // Cull: behind camera or too close/far
             if (depth <= camera.Near || depth >= camera.Far) continue;
 
             float invZ = 1.0f / depth;
 
-            // Project to screen (pinhole model)
-            float screenX = fx * (-camPos.X) * invZ + cx;
-            float screenY = fy * (-camPos.Y) * invZ + cy;
+            // Project to screen (pinhole). The framebuffer's y grows DOWNWARD, so the up-measured
+            // camera y is negated here - and the covariance's off-diagonal term with it.
+            float screenX = fx * camX * invZ + cx;
+            float screenY = -fy * camY * invZ + cy;
 
-            // Compute 3D covariance
-            var cov3D = g.CovarianceMatrix;
+            var q = g.Rotation;
+            var cov3 = SplatCovariance.Cov3DFromScaleQuat(
+                g.Scale.X, g.Scale.Y, g.Scale.Z,
+                new SplatCovariance.Quat { X = q.X, Y = q.Y, Z = q.Z, W = q.W });
 
-            // Project covariance to 2D using the Jacobian of the projection
-            float j00 = fx * invZ;
-            float j02 = -fx * (-camPos.X) * invZ * invZ;
-            float j11 = fy * invZ;
-            float j12 = -fy * (-camPos.Y) * invZ * invZ;
+            var camCov = SplatCovariance.RotateToCamera(cov3,
+                right.X, right.Y, right.Z,
+                up.X, up.Y, up.Z,
+                forward.X, forward.Y, forward.Z);
 
-            // Extract view rotation
-            float r00 = viewMatrix.M11, r01 = viewMatrix.M12, r02 = viewMatrix.M13;
-            float r10 = viewMatrix.M21, r11 = viewMatrix.M22, r12 = viewMatrix.M23;
-            float r20 = viewMatrix.M31, r21 = viewMatrix.M32, r22 = viewMatrix.M33;
+            var cov2 = SplatCovariance.ProjectCov2D(camCov, camX, camY, depth, fx, fy);
 
-            // Cov3D elements (symmetric)
-            float s00 = cov3D.M11, s01 = cov3D.M12, s02 = cov3D.M13;
-            float s11 = cov3D.M22, s12 = cov3D.M23;
-            float s22 = cov3D.M33;
-
-            // W = R * S * R^T
-            float rs00 = r00 * s00 + r01 * s01 + r02 * s02;
-            float rs01 = r00 * s01 + r01 * s11 + r02 * s12;
-            float rs02 = r00 * s02 + r01 * s12 + r02 * s22;
-            float rs10 = r10 * s00 + r11 * s01 + r12 * s02;
-            float rs11 = r10 * s01 + r11 * s11 + r12 * s12;
-            float rs12 = r10 * s02 + r11 * s12 + r12 * s22;
-            float rs20 = r20 * s00 + r21 * s01 + r22 * s02;
-            float rs21 = r20 * s01 + r21 * s11 + r22 * s12;
-            float rs22 = r20 * s02 + r21 * s12 + r22 * s22;
-
-            float w00 = rs00 * r00 + rs01 * r01 + rs02 * r02;
-            float w01 = rs00 * r10 + rs01 * r11 + rs02 * r12;
-            float w02 = rs00 * r20 + rs01 * r21 + rs02 * r22;
-            float w11 = rs10 * r10 + rs11 * r11 + rs12 * r12;
-            float w12 = rs10 * r20 + rs11 * r21 + rs12 * r22;
-            float w22 = rs20 * r20 + rs21 * r21 + rs22 * r22;
-
-            // Cov2D = J * W * J^T (2x2 symmetric)
-            float cov00 = j00 * j00 * w00 + 2 * j00 * j02 * w02 + j02 * j02 * w22;
-            float cov01 = j00 * j11 * w01 + j00 * j12 * w02 + j02 * j11 * w12 + j02 * j12 * w22;
-            float cov11 = j11 * j11 * w11 + 2 * j11 * j12 * w12 + j12 * j12 * w22;
-
-            // Numerical stability
-            cov00 += 0.3f;
-            cov11 += 0.3f;
+            float cov00 = cov2.A;
+            float cov01 = -cov2.B;   // y flip: up-positive covariance into a y-down framebuffer
+            float cov11 = cov2.C;
 
             // Get color and opacity
             var color = g.BaseColor;
@@ -128,14 +104,10 @@ public class GaussianRenderer
 
             if (opacity < 1.0f / 255.0f) continue;
 
-            float det = cov00 * cov11 - cov01 * cov01;
-            if (det <= 0) continue;
+            var ellipse = SplatCovariance.EigenAxes(cov2, 3.0f);
+            if (!ellipse.Valid) continue;
 
-            float trace = cov00 + cov11;
-            float mid = 0.5f * trace;
-            float disc = MathF.Max(0.1f, mid * mid - det);
-            float lambda1 = mid + MathF.Sqrt(disc);
-            float radius = 3.0f * MathF.Sqrt(lambda1);
+            float radius = MathF.Sqrt(ellipse.Ax * ellipse.Ax + ellipse.Ay * ellipse.Ay);
 
             if (screenX + radius < 0 || screenX - radius >= camera.Width ||
                 screenY + radius < 0 || screenY - radius >= camera.Height) continue;

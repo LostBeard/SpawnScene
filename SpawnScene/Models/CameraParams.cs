@@ -57,26 +57,67 @@ public class CameraParams
     public Matrix4x4 ViewMatrix => Matrix4x4.CreateLookAt(Position, Position + Forward, Up);
 
     /// <summary>
-    /// Build the 4x4 projection matrix (camera → clip space).
-    /// Uses a pinhole camera model matching the intrinsics.
+    /// Build the 4x4 projection matrix (camera → clip space) from the real intrinsics.
+    ///
+    /// Row-vector convention (<c>clip = v * M</c>) to match <see cref="ViewMatrix"/> and
+    /// System.Numerics, and WebGPU clip depth (z in [0,1], not OpenGL's [-1,1]).
+    ///
+    /// Unlike a symmetric fov/aspect projection this carries the PRINCIPAL POINT and allows
+    /// fx != fy, so it agrees with the pinhole model the splat covariance Jacobian uses.
+    /// TempleRing is the case that needs it: fx=1520.4, fy=1525.9, and a principal point of
+    /// (302.32, 246.87) against a 640x480 image - 18px off centre.
     /// </summary>
     public Matrix4x4 ProjectionMatrix
-    {
-        get
-        {
-            // OpenGL-style projection from intrinsics
-            float l = -CenterX * Near / FocalX;
-            float r = (Width - CenterX) * Near / FocalX;
-            float b = -(Height - CenterY) * Near / FocalY;
-            float t = CenterY * Near / FocalY;
+        => CreateWebGpuProjection(FocalX, FocalY, CenterX, CenterY, Width, Height, Near, Far);
 
-            return new Matrix4x4(
-                2 * Near / (r - l), 0, (r + l) / (r - l), 0,
-                0, 2 * Near / (t - b), (t + b) / (t - b), 0,
-                0, 0, -(Far + Near) / (Far - Near), -2 * Far * Near / (Far - Near),
-                0, 0, -1, 0
-            );
-        }
+    /// <summary>
+    /// Off-axis pinhole projection for WebGPU, row-vector convention.
+    ///
+    /// Reduces EXACTLY to the symmetric fov/aspect form when the principal point is centred
+    /// and fx == fy - that equivalence is pinned by
+    /// <c>CameraProjectionTests.CentredIntrinsics_MatchTheSymmetricPerspectiveItReplaces</c>.
+    /// </summary>
+    public static Matrix4x4 CreateWebGpuProjection(
+        float focalX, float focalY, float centerX, float centerY,
+        int width, int height, float near, float far)
+    {
+        // Eye space is right-handed looking down -Z, so depth = -z_eye and clip.w = -z_eye.
+        //   pixel_x = fx * (x_eye / depth) + cx            ndc_x = 2*pixel_x/W - 1
+        //   pixel_y = fy * (-y_eye / depth) + cy           ndc_y = 1 - 2*pixel_y/H
+        // Multiplying through by depth gives the clip-space rows below.
+        float m11 = 2f * focalX / width;
+        float m31 = 1f - 2f * centerX / width;
+
+        float m22 = 2f * focalY / height;
+        float m32 = 2f * centerY / height - 1f;
+
+        float rangeInv = 1f / (near - far); // negative
+        return new Matrix4x4(
+            m11, 0, 0, 0,
+            0, m22, 0, 0,
+            m31, m32, far * rangeInv, -1,   // -1 for right-handed → w = -z_eye
+            0, 0, near * far * rangeInv, 0
+        );
+    }
+
+    /// <summary>
+    /// Recover pinhole intrinsics from a projection matrix in the convention
+    /// <see cref="CreateWebGpuProjection"/> produces. Exact inverse of it.
+    ///
+    /// This is what makes XR correct. A VR headset's per-eye frustum is ASYMMETRIC by design -
+    /// the principal point sits off centre so the two eyes converge - so reading a focal length
+    /// as <c>|M11| * width / 2</c> and assuming a centred principal point silently discards the
+    /// stereo offset. The splat covariance Jacobian needs the real fx/fy/cx/cy of whatever
+    /// frustum WebXR hands us, per eye, or every splat ellipse is computed for the wrong point.
+    /// </summary>
+    public static void ExtractIntrinsics(
+        Matrix4x4 proj, int width, int height,
+        out float focalX, out float focalY, out float centerX, out float centerY)
+    {
+        focalX = proj.M11 * width * 0.5f;
+        focalY = proj.M22 * height * 0.5f;
+        centerX = width * (1f - proj.M31) * 0.5f;
+        centerY = height * (1f + proj.M32) * 0.5f;
     }
 
     /// <summary>

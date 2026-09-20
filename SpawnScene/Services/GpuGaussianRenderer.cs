@@ -42,6 +42,7 @@ public class GpuGaussianRenderer : IDisposable
 {
     private readonly GpuService _gpu;
     private readonly GpuSplatSorter _sorter;
+    private readonly DepthToGaussianKernel _gaussianKernel; // owns the packed-layout GPU kernels
 
     // WebGPU objects
     private GPUDevice? _device;
@@ -51,10 +52,10 @@ public class GpuGaussianRenderer : IDisposable
     private GPURenderPipeline? _casPipeline;
     private string _canvasFormat = "bgra8unorm";
 
-    // Gaussian vertex buffer: packed format (position f32x3 + color_alpha u8x4 + scale f16x4)
+    // Gaussian vertex buffer: packed format (position f32x3 + color_alpha u8x4 + scale f16x4 + quat f16x4)
     private GPUBuffer? _splatBuffer;
     private int _splatCount;
-    private const int PackedBytesPerSplat = 24; // 12 (pos) + 4 (color) + 8 (scale) = 24
+    private const int PackedBytesPerSplat = SplatFormat.PackedBytes; // 12 pos + 4 color/alpha + 8 scale + 8 quat
 
     // Pack compute pipeline: converts Float32 sort output → packed vertex format
     private GPUComputePipeline? _packPipeline;
@@ -64,11 +65,26 @@ public class GpuGaussianRenderer : IDisposable
     private GPUBuffer? _packCountBuf;  // uniform: visible count for pack dispatch guard
     private Uint32Array? _packCountJsArray; // cached JS array for WriteBuffer (no per-frame alloc)
 
-    // Uniform buffer: MVP matrix (64 bytes) + viewport (8 bytes) + focal (8 bytes) + frame_index (4 bytes) + pad (12 bytes) = 96 bytes
+    // ── Splat uniform block ──
+    // Named slots, because these indices are written from four call sites (sorted, stochastic and
+    // two XR paths) and a silent off-by-one between them is invisible until something renders wrong.
+    // Layout must match `struct Uniforms` in SplatShaderSource / StochasticSplatShaderSource.
+    private const int UMvp = 0;         // mat4x4            [0..15]
+    private const int UCamRight = 16;   // vec4 (xyz used)   [16..19]
+    private const int UCamUp = 20;      // vec4              [20..23]
+    private const int UCamFwd = 24;     // vec4              [24..27]
+    private const int UCamPos = 28;     // vec4              [28..31]
+    private const int UViewport = 32;   // vec2              [32..33]
+    private const int UFocal = 34;      // vec2              [34..35]
+    private const int UFrameIndex = 36; // u32 (bitcast)
+    private const int UDilation = 37;   // f32
+    private const int UMinAlpha = 38;   // f32
+    private const int UniformFloats = 40; // + 1 pad, 160 bytes
+
     private GPUBuffer? _uniformBuffer;
     private GPUBindGroup? _uniformBindGroup;        // for stochastic pipeline
     private GPUBindGroup? _uniformBindGroupSorted;  // for sorted pipeline (separate auto-layout)
-    private readonly float[] _uniformData = new float[24]; // 16 (mat4) + 2 (viewport) + 2 (focal) + 1 (frame_index) + 3 (pad)
+    private readonly float[] _uniformData = new float[UniformFloats];
     private byte[]? _uniformByteData; // pre-allocated byte mirror of _uniformData for direct WriteBuffer
 
     // CAS sharpening pass
@@ -166,6 +182,46 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>Controls adaptive resolution behavior.</summary>
     public AdaptiveResMode AdaptiveResMode { get; set; } = AdaptiveResMode.Auto;
 
+    // ── Background ──
+    // Was hardcoded at seven sites, two of which are attachment objects CACHED at texture
+    // creation - so setting it has to refresh those or half the passes keep the old colour.
+    // Needed beyond taste: scoring a render against a dataset shot on black is dominated by a
+    // background mismatch (61% of a TempleRing frame is near-black), and SuperSplat exposes a
+    // custom background too (NOTES.md parity list).
+    private double _bgR = 0.04, _bgG = 0.04, _bgB = 0.10;
+
+    /// <summary>Scene clear colour, linear 0..1. Alpha is always 1.</summary>
+    public (double R, double G, double B) BackgroundColor
+    {
+        get => (_bgR, _bgG, _bgB);
+        set
+        {
+            (_bgR, _bgG, _bgB) = value;
+            ApplyBackgroundToCachedAttachments();
+        }
+    }
+
+    /// <summary>
+    /// Push the background onto every CACHED colour attachment.
+    ///
+    /// There are four, and they are built at different times: the stochastic and accumulation
+    /// ones when the textures are (re)created, the direct and CAS ones in
+    /// <see cref="RebuildCachedDescriptors"/>. Missing any of them means the colour changes on
+    /// some passes and not others - which is exactly what happened when only the two stochastic
+    /// attachments were refreshed and the SORTED path kept rendering on the old blue.
+    /// Anything added here must also be listed here.
+    /// </summary>
+    private void ApplyBackgroundToCachedAttachments()
+    {
+        if (_stochasticColorAttach != null) _stochasticColorAttach.ClearValue = NewClear();
+        if (_accumColorAttach != null) _accumColorAttach.ClearValue = NewClear();
+        if (_splatColorAttachDirect != null) _splatColorAttachDirect.ClearValue = NewClear();
+        if (_splatColorAttachCas != null) _splatColorAttachCas.ClearValue = NewClear();
+    }
+
+    /// <summary>Fresh clear-colour POCO. Never share one instance across descriptors.</summary>
+    private GPUColorDict NewClear() => new() { R = _bgR, G = _bgG, B = _bgB, A = 1.0 };
+
     /// <summary>Controls whether to use sorted alpha blending or stochastic rasterization.</summary>
     private SplatRenderMode _renderMode = SplatRenderMode.Stochastic;
     public SplatRenderMode RenderMode
@@ -193,10 +249,11 @@ public class GpuGaussianRenderer : IDisposable
         set => _sorter.SkipSort = value;
     }
 
-    public GpuGaussianRenderer(GpuService gpuService, GpuSplatSorter sorter)
+    public GpuGaussianRenderer(GpuService gpuService, GpuSplatSorter sorter, DepthToGaussianKernel gaussianKernel)
     {
         _gpu = gpuService;
         _sorter = sorter;
+        _gaussianKernel = gaussianKernel;
     }
 
     /// <summary>Whether the GPU has a valid packed splat buffer ready to render.</summary>
@@ -266,7 +323,8 @@ public class GpuGaussianRenderer : IDisposable
                         {
                             new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },  // position (12B)
                             new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.UNorm8x4 },   // color+alpha (4B)
-                            new() { ShaderLocation = 2, Offset = 16, Format = GPUVertexFormat.Float16x4 },  // scale (8B)
+                            new() { ShaderLocation = 2, Offset = 16, Format = GPUVertexFormat.Float16x4 },  // scale sx,sy,sz (8B)
+                            new() { ShaderLocation = 3, Offset = 24, Format = GPUVertexFormat.Float16x4 },  // rotation quat (8B)
                         }
                     }
                 }
@@ -319,6 +377,7 @@ public class GpuGaussianRenderer : IDisposable
                     new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },
                     new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.UNorm8x4 },
                     new() { ShaderLocation = 2, Offset = 16, Format = GPUVertexFormat.Float16x4 },
+                    new() { ShaderLocation = 3, Offset = 24, Format = GPUVertexFormat.Float16x4 },
                 }
             }
         };
@@ -404,10 +463,10 @@ public class GpuGaussianRenderer : IDisposable
         // Depth texture
         CreateDepthTexture();
 
-        // Uniform buffer (96 bytes: mat4(64) + viewport(8) + focal(8) + frame_index(4) + pad(12))
+        // Uniform buffer: see the U* slot constants (mat4 + 4 camera vec4s + viewport/focal/flags).
         _uniformBuffer = _device.CreateBuffer(new GPUBufferDescriptor
         {
-            Size = 96,
+            Size = (ulong)UniformFloats * sizeof(float),
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
 
@@ -574,7 +633,7 @@ public class GpuGaussianRenderer : IDisposable
             View = _stochasticView,
             LoadOp = GPULoadOp.Clear,
             StoreOp = GPUStoreOp.Store,
-            ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+            ClearValue = NewClear(),
         };
         _stochasticPassDesc = new GPURenderPassDescriptor
         {
@@ -594,7 +653,7 @@ public class GpuGaussianRenderer : IDisposable
             View = _accumView,
             LoadOp = GPULoadOp.Clear, // toggled per frame
             StoreOp = GPUStoreOp.Store,
-            ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+            ClearValue = NewClear(),
         };
         _accumPassDesc = new GPURenderPassDescriptor
         {
@@ -656,6 +715,10 @@ public class GpuGaussianRenderer : IDisposable
     /// </summary>
     private void RebuildCachedDescriptors()
     {
+        // Every attachment below is constructed with NewClear(), so a rebuild already picks up
+        // the current background. ApplyBackgroundToCachedAttachments() covers the other
+        // direction: a background change AFTER the rebuild.
+
         // Direct splat pass (no CAS) — depth stencil is stable; color View updated per frame
         if (_depthView != null)
         {
@@ -663,7 +726,7 @@ public class GpuGaussianRenderer : IDisposable
             {
                 LoadOp = GPULoadOp.Clear,
                 StoreOp = GPUStoreOp.Store,
-                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+                ClearValue = NewClear(),
             };
             _splatPassDescDirect = new GPURenderPassDescriptor
             {
@@ -686,7 +749,7 @@ public class GpuGaussianRenderer : IDisposable
                 View = _offscreenView,
                 LoadOp = GPULoadOp.Clear,
                 StoreOp = GPUStoreOp.Store,
-                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+                ClearValue = NewClear(),
             };
             _splatPassDescCas = new GPURenderPassDescriptor
             {
@@ -772,11 +835,19 @@ public class GpuGaussianRenderer : IDisposable
     /// the bytes JS-side chunk-by-chunk directly into the GPU buffer — they never enter the .NET/WASM managed
     /// heap. This is the only scalable load path for large scenes (a 5K image ≈ 14.7M splats ≈ 588 MB).
     /// </summary>
-    public async Task UploadSceneFromStream(Stream sceneStream, int splatCount)
+    /// <summary>
+    /// Stream a saved scene .bin straight into a GPU buffer and upload it.
+    /// <paramref name="floatsPerSplat"/> is the stride the FILE was written at, which is not
+    /// necessarily the current one: scenes saved before splats carried a rotation are 10 floats
+    /// wide and get widened on the GPU. Reading an old file at the new stride would not fail,
+    /// it would just render noise, so the stride is always passed explicitly.
+    /// </summary>
+    public async Task UploadSceneFromStream(Stream sceneStream, int splatCount, int floatsPerSplat)
     {
         var accelerator = _gpu.WebGPUAccelerator;
-        var packedBuf = accelerator.Allocate1D<float>((long)splatCount * 10);
+        var packedBuf = accelerator.Allocate1D<float>((long)splatCount * floatsPerSplat);
         await packedBuf.View.CopyFromStreamAsync(sceneStream);
+        packedBuf = await _gaussianKernel.WidenPackedAsync(packedBuf, splatCount, floatsPerSplat);
         await UploadSceneFromGpuBuffer(packedBuf, splatCount);
     }
 
@@ -803,7 +874,7 @@ public class GpuGaussianRenderer : IDisposable
 
     /// <summary>
     /// Read packed splat data back from GPU to CPU as a .NET float[]. // CPU transfer: file I/O
-    /// Returns float[splatCount * 10] or null if buffer unavailable.
+    /// Returns float[splatCount * SplatFormat.Floats] or null if buffer unavailable.
     /// NOTE: This marshals every byte into the .NET/WASM managed heap — only use for SMALL,
     /// genuinely CPU-bound needs (e.g. PLY export). For OPFS save, use
     /// <see cref="ReadPackedUint8ArrayAsync"/> so the bytes stay in JS.
@@ -816,7 +887,7 @@ public class GpuGaussianRenderer : IDisposable
         {
             var accelerator = _gpu.WebGPUAccelerator;
             await accelerator.SynchronizeAsync();
-            return await buf.CopyToHostAsync<float>(0, splatCount * 10);
+            return await buf.CopyToHostAsync<float>(0, splatCount * SplatFormat.Floats);
         }
         catch (Exception ex)
         {
@@ -841,7 +912,7 @@ public class GpuGaussianRenderer : IDisposable
         {
             var accelerator = _gpu.WebGPUAccelerator;
             await accelerator.SynchronizeAsync();
-            long byteCount = (long)splatCount * 10 * sizeof(float);
+            long byteCount = (long)splatCount * SplatFormat.Floats * sizeof(float);
             return await buf.CopyToHostUint8ArrayAsync(0, byteCount);
         }
         catch (Exception ex)
@@ -958,23 +1029,27 @@ public class GpuGaussianRenderer : IDisposable
         }
 
         // ── Build MVP (needed by both modes) ──
+        // Scale the camera's intrinsics to the CANVAS resolution, then build the projection and
+        // the shader uniforms from the SAME numbers. Previously the projection came from a
+        // symmetric fovY (which uses fy for both axes and cannot carry a principal point) while
+        // the shader was handed fx and fy separately -- identical for a centred square-pixel
+        // camera, but they disagree for any real one: a dataset GT pose or an AR passthrough
+        // camera. Equivalence for the centred case is pinned by
+        // CameraProjectionTests.CentredIntrinsics_MatchTheSymmetricPerspectiveItReplaces.
         var view = camera.ViewMatrix;
-        float fovY = 2f * MathF.Atan(camera.Height / (2f * camera.FocalY));
-        float aspect = (float)camera.Width / camera.Height;
-        var proj = CreateWebGPUPerspective(fovY, aspect, camera.Near, camera.Far);
-        var mvp = view * proj;
-
-        // ── Upload MVP + viewport uniforms ──
-        _uniformData[0] = mvp.M11; _uniformData[1] = mvp.M12; _uniformData[2] = mvp.M13; _uniformData[3] = mvp.M14;
-        _uniformData[4] = mvp.M21; _uniformData[5] = mvp.M22; _uniformData[6] = mvp.M23; _uniformData[7] = mvp.M24;
-        _uniformData[8] = mvp.M31; _uniformData[9] = mvp.M32; _uniformData[10] = mvp.M33; _uniformData[11] = mvp.M34;
-        _uniformData[12] = mvp.M41; _uniformData[13] = mvp.M42; _uniformData[14] = mvp.M43; _uniformData[15] = mvp.M44;
         float focalScaleX = camera.Width > 0 ? (float)_canvasWidth / camera.Width : 1f;
         float focalScaleY = camera.Height > 0 ? (float)_canvasHeight / camera.Height : 1f;
-        _uniformData[16] = _canvasWidth;
-        _uniformData[17] = _canvasHeight;
-        _uniformData[18] = camera.FocalX * focalScaleX;
-        _uniformData[19] = camera.FocalY * focalScaleY;
+        float fx = camera.FocalX * focalScaleX;
+        float fy = camera.FocalY * focalScaleY;
+        float cx = camera.CenterX * focalScaleX;
+        float cy = camera.CenterY * focalScaleY;
+
+        var proj = CameraParams.CreateWebGpuProjection(
+            fx, fy, cx, cy, _canvasWidth, _canvasHeight, camera.Near, camera.Far);
+        var mvp = view * proj;
+
+        // ── Upload MVP + camera basis + viewport uniforms ──
+        WriteCameraUniforms(mvp, view, _canvasWidth, _canvasHeight, fx, fy);
 
         if (RenderMode == SplatRenderMode.Stochastic)
         {
@@ -986,15 +1061,42 @@ public class GpuGaussianRenderer : IDisposable
         }
     }
 
+    /// <summary>
+    /// Fill the shared uniform slots from a view/projection pair. Every render path goes through
+    /// here: the splat vertex shader needs the camera BASIS (not just the MVP) to build the
+    /// screen-space covariance, and the XR paths only ever have a view matrix to get it from.
+    /// </summary>
+    private void WriteCameraUniforms(Matrix4x4 mvp, Matrix4x4 view,
+        float viewportW, float viewportH, float focalX, float focalY)
+    {
+        // .NET stores row-major and WGSL reads a mat4x4 column-major, so a straight row-order copy
+        // transposes it — which is exactly what turns `world * M` into `M * world` in the shader.
+        _uniformData[UMvp + 0] = mvp.M11; _uniformData[UMvp + 1] = mvp.M12; _uniformData[UMvp + 2] = mvp.M13; _uniformData[UMvp + 3] = mvp.M14;
+        _uniformData[UMvp + 4] = mvp.M21; _uniformData[UMvp + 5] = mvp.M22; _uniformData[UMvp + 6] = mvp.M23; _uniformData[UMvp + 7] = mvp.M24;
+        _uniformData[UMvp + 8] = mvp.M31; _uniformData[UMvp + 9] = mvp.M32; _uniformData[UMvp + 10] = mvp.M33; _uniformData[UMvp + 11] = mvp.M34;
+        _uniformData[UMvp + 12] = mvp.M41; _uniformData[UMvp + 13] = mvp.M42; _uniformData[UMvp + 14] = mvp.M43; _uniformData[UMvp + 15] = mvp.M44;
+
+        WorldSpaceGeometry.ViewMatrixToCameraBasis(view, out var right, out var up, out var fwd, out var pos);
+        _uniformData[UCamRight + 0] = right.X; _uniformData[UCamRight + 1] = right.Y; _uniformData[UCamRight + 2] = right.Z; _uniformData[UCamRight + 3] = 0f;
+        _uniformData[UCamUp + 0] = up.X; _uniformData[UCamUp + 1] = up.Y; _uniformData[UCamUp + 2] = up.Z; _uniformData[UCamUp + 3] = 0f;
+        _uniformData[UCamFwd + 0] = fwd.X; _uniformData[UCamFwd + 1] = fwd.Y; _uniformData[UCamFwd + 2] = fwd.Z; _uniformData[UCamFwd + 3] = 0f;
+        _uniformData[UCamPos + 0] = pos.X; _uniformData[UCamPos + 1] = pos.Y; _uniformData[UCamPos + 2] = pos.Z; _uniformData[UCamPos + 3] = 1f;
+
+        _uniformData[UViewport + 0] = viewportW;
+        _uniformData[UViewport + 1] = viewportH;
+        _uniformData[UFocal + 0] = focalX;
+        _uniformData[UFocal + 1] = focalY;
+    }
+
     /// <summary>Sorted alpha-blend rendering: cull → sort → pack → render → optional CAS.</summary>
     private void RenderSorted(CameraParams camera, Matrix4x4 mvp)
     {
         var (dataBuf, idxBuf, sortRan, visibleCount) = _sorter.Sort(camera, mvp);
 
         // Upload uniforms (frame_index/dilation/min_alpha not used in sorted mode)
-        _uniformData[20] = 0f;
-        _uniformData[21] = 1f; // no dilation
-        _uniformData[22] = 0f; // no alpha floor
+        _uniformData[UFrameIndex] = 0f;
+        _uniformData[UDilation] = 1f; // no dilation
+        _uniformData[UMinAlpha] = 0f; // no alpha floor
         Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
         _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
 
@@ -1061,13 +1163,13 @@ public class GpuGaussianRenderer : IDisposable
         // ── Velocity-adaptive parameters ──
 
         // Dilation: very subtle splat fattening to bridge sub-pixel spatial gaps (max +5%)
-        _uniformData[21] = 1f + MathF.Min(MathF.Sqrt(velocity) * DilationScale, MaxDilationFactor);
+        _uniformData[UDilation] = 1f + MathF.Min(MathF.Sqrt(velocity) * DilationScale, MaxDilationFactor);
 
         // Min alpha floor: boost survival of low-alpha edge fragments during movement.
         // At splat edges, Gaussian alpha drops to 0.05-0.1 → 90%+ discard rate → holes.
         // Floor of 0.15 ensures at least 15% survival at edges, filling gaps between splats.
         // During convergence: floor=0 restores exact Monte Carlo sampling for correct result.
-        _uniformData[22] = moving ? 0.15f : 0f;
+        _uniformData[UMinAlpha] = moving ? 0.15f : 0f;
 
         // When moving: RESET accumulation each frame to prevent ghosting entirely.
         // Each frame's SPP sub-samples are still properly averaged (weight = 1/1, 1/2, 1/3...),
@@ -1101,7 +1203,7 @@ public class GpuGaussianRenderer : IDisposable
 
             // Upload uniforms: unique seed per sub-sample (global counter, never repeats)
             _globalFrameCount++;
-            _uniformData[20] = BitConverter.Int32BitsToSingle(_globalFrameCount);
+            _uniformData[UFrameIndex] = BitConverter.Int32BitsToSingle(_globalFrameCount);
             Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
             _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
 
@@ -1177,19 +1279,17 @@ public class GpuGaussianRenderer : IDisposable
         var mvp = viewMatrix * projMatrix;
 
         // Upload uniforms for this eye
-        _uniformData[0] = mvp.M11; _uniformData[1] = mvp.M12; _uniformData[2] = mvp.M13; _uniformData[3] = mvp.M14;
-        _uniformData[4] = mvp.M21; _uniformData[5] = mvp.M22; _uniformData[6] = mvp.M23; _uniformData[7] = mvp.M24;
-        _uniformData[8] = mvp.M31; _uniformData[9] = mvp.M32; _uniformData[10] = mvp.M33; _uniformData[11] = mvp.M34;
-        _uniformData[12] = mvp.M41; _uniformData[13] = mvp.M42; _uniformData[14] = mvp.M43; _uniformData[15] = mvp.M44;
-        _uniformData[16] = viewportWidth;
-        _uniformData[17] = viewportHeight;
-        // Use reasonable focal length for XR (based on projection matrix)
-        _uniformData[18] = MathF.Abs(projMatrix.M11) * viewportWidth * 0.5f;
-        _uniformData[19] = MathF.Abs(projMatrix.M22) * viewportHeight * 0.5f;
+        // WebXR gives no intrinsics, but its per-eye frustum encodes them. Recover rather than
+        // assume: a headset eye is ASYMMETRIC (off-centre principal point, that is how the eyes
+        // converge), so anything that assumes a centred frustum is wrong in one eye each way.
+        CameraParams.ExtractIntrinsics(projMatrix, viewportWidth, viewportHeight,
+            out float eyeFx, out float eyeFy, out _, out _);
+        WriteCameraUniforms(mvp, viewMatrix, viewportWidth, viewportHeight,
+            MathF.Abs(eyeFx), MathF.Abs(eyeFy));
         _globalFrameCount++;
-        _uniformData[20] = BitConverter.Int32BitsToSingle(_globalFrameCount);
-        _uniformData[21] = 1f; // no dilation in XR
-        _uniformData[22] = 0.1f; // slight min_alpha floor for XR (reduce holes)
+        _uniformData[UFrameIndex] = BitConverter.Int32BitsToSingle(_globalFrameCount);
+        _uniformData[UDilation] = 1f; // no dilation in XR
+        _uniformData[UMinAlpha] = 0.1f; // slight min_alpha floor for XR (reduce holes)
 
         Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
         _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
@@ -1213,7 +1313,7 @@ public class GpuGaussianRenderer : IDisposable
             View = colorView,
             LoadOp = GPULoadOp.Clear,
             StoreOp = GPUStoreOp.Store,
-            ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+            ClearValue = NewClear(),
         };
         var passDesc = new GPURenderPassDescriptor
         {
@@ -1255,18 +1355,14 @@ public class GpuGaussianRenderer : IDisposable
         var mvp = viewMatrix * projMatrix;
 
         // Upload uniforms for this eye
-        _uniformData[0] = mvp.M11; _uniformData[1] = mvp.M12; _uniformData[2] = mvp.M13; _uniformData[3] = mvp.M14;
-        _uniformData[4] = mvp.M21; _uniformData[5] = mvp.M22; _uniformData[6] = mvp.M23; _uniformData[7] = mvp.M24;
-        _uniformData[8] = mvp.M31; _uniformData[9] = mvp.M32; _uniformData[10] = mvp.M33; _uniformData[11] = mvp.M34;
-        _uniformData[12] = mvp.M41; _uniformData[13] = mvp.M42; _uniformData[14] = mvp.M43; _uniformData[15] = mvp.M44;
-        _uniformData[16] = width;
-        _uniformData[17] = height;
-        _uniformData[18] = MathF.Abs(projMatrix.M11) * width * 0.5f;
-        _uniformData[19] = MathF.Abs(projMatrix.M22) * height * 0.5f;
+        CameraParams.ExtractIntrinsics(projMatrix, width, height,
+            out float eyeFx, out float eyeFy, out _, out _);
+        WriteCameraUniforms(mvp, viewMatrix, width, height,
+            MathF.Abs(eyeFx), MathF.Abs(eyeFy));
         _globalFrameCount++;
-        _uniformData[20] = BitConverter.Int32BitsToSingle(_globalFrameCount);
-        _uniformData[21] = 1f; // no dilation in XR
-        _uniformData[22] = 0.1f; // slight min_alpha floor for XR (reduce holes)
+        _uniformData[UFrameIndex] = BitConverter.Int32BitsToSingle(_globalFrameCount);
+        _uniformData[UDilation] = 1f; // no dilation in XR
+        _uniformData[UMinAlpha] = 0.1f; // slight min_alpha floor for XR (reduce holes)
 
         Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
         _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
@@ -1285,7 +1381,7 @@ public class GpuGaussianRenderer : IDisposable
                 View = _xrBridgeStochasticView,
                 LoadOp = GPULoadOp.Clear,
                 StoreOp = GPUStoreOp.Store,
-                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+                ClearValue = NewClear(),
             };
             var passDesc = new GPURenderPassDescriptor
             {
@@ -1338,7 +1434,7 @@ public class GpuGaussianRenderer : IDisposable
                 View = canvasView,
                 LoadOp = GPULoadOp.Clear,
                 StoreOp = GPUStoreOp.Store,
-                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.10, A = 1.0 },
+                ClearValue = NewClear(),
             };
             var passDesc = new GPURenderPassDescriptor
             {
@@ -1562,29 +1658,28 @@ public class GpuGaussianRenderer : IDisposable
         _accumUniformBuffer?.Dispose();
     }
 
-    /// <summary>
-    /// Create a perspective projection matrix for WebGPU (clip-space Z = [0, 1]).
-    /// Compatible with System.Numerics.Matrix4x4.CreateLookAt (right-handed view space).
-    /// In right-handed view space, objects in front have Z < 0, so w = -z_eye.
-    /// </summary>
-    private static Matrix4x4 CreateWebGPUPerspective(float fovY, float aspect, float near, float far)
-    {
-        float f = 1.0f / MathF.Tan(fovY * 0.5f);
-        float rangeInv = 1.0f / (near - far); // Note: near - far (negative)
-        return new Matrix4x4(
-            f / aspect, 0, 0, 0,
-            0, f, 0, 0,
-            0, 0, far * rangeInv, -1,  // -1 for right-handed → w = -z_eye
-            0, 0, near * far * rangeInv, 0
-        );
-    }
-
-    // ════════════════════════════════════════════════════════════
-    //  WGSL Splat Shader — with EWA anti-aliasing filter
-    // ════════════════════════════════════════════════════════════
-    private const string SplatShaderSource = @"
+    // ============================================================
+    //  WGSL Splat Vertex Stage - 3D covariance EWA (Zwicker / Kerbl 3DGS)
+    //
+    //  Shared verbatim by the sorted and stochastic pipelines: the projection is the part that
+    //  is easy to get subtly wrong, so there is exactly one copy of it. Only the fragment stage
+    //  differs between the two.
+    //
+    //  MUST match Services/SplatCovariance.cs, which is unit-tested against analytic answers
+    //  (SpawnScene.Tests/SplatCovarianceTests.cs). Change one, change both.
+    //
+    //  The splat is emitted as a quad aligned to the eigenvectors of the screen-space covariance
+    //  and spanning SIGMA_CUTOFF sigmas along each. That makes the quad coordinate `uv` a
+    //  whitened coordinate, so the fragment stage evaluates the Gaussian with dot(uv, uv) and
+    //  needs no conic matrix at all.
+    // ============================================================
+    private const string SplatVertexWgsl = @"
 struct Uniforms {
     mvp         : mat4x4<f32>,
+    cam_right   : vec4<f32>,   // world-space camera basis; xyz used, w padding
+    cam_up      : vec4<f32>,
+    cam_fwd     : vec4<f32>,   // direction the camera LOOKS
+    cam_pos     : vec4<f32>,
     viewport    : vec2<f32>,
     focal       : vec2<f32>,
     frame_index : u32,
@@ -1597,103 +1692,168 @@ struct Uniforms {
 
 struct VertexInput {
     @location(0) position    : vec3<f32>,
-    @location(1) color_alpha : vec4<f32>,  // Unorm8x4: RGBA packed as 4 bytes
-    @location(2) scale       : vec4<f32>,  // Float16x4: sx,sy,sz,pad
+    @location(1) color_alpha : vec4<f32>,  // Unorm8x4
+    @location(2) scale       : vec4<f32>,  // Float16x4: sx, sy, sz, pad (world units, 1 sigma)
+    @location(3) quat        : vec4<f32>,  // Float16x4: x, y, z, w
 };
 
 struct VertexOutput {
     @builtin(position) clip_pos : vec4<f32>,
     @location(0) color   : vec3<f32>,
     @location(1) opacity : f32,
-    @location(2) uv      : vec2<f32>,
+    @location(2) uv      : vec2<f32>,      // whitened splat coordinate; unit disk = the footprint
 };
 
-@vertex
-fn vs_main(
-    input : VertexInput,
-    @builtin(vertex_index) vid : u32,
-    @builtin(instance_index) iid : u32
-) -> VertexOutput {
-    // Billboard quad vertices (2 triangles)
+// Footprint cutoff in standard deviations. 3 sigma captures 98.9% of the mass; below ~2.5 the
+// truncation shows up as a visible hard edge on large splats.
+const SIGMA_CUTOFF : f32 = 3.0;
+
+// Zwicker EWA antialiasing prefilter, in pixels squared. Keeps a sub-pixel splat at about a
+// half-pixel sigma instead of letting it alias into a flickering dot. Replaces the old
+// max(radius, 0.25px) clamp, which fattened every splat instead of only the sub-pixel ones.
+const EWA_FILTER_PX2 : f32 = 0.3;
+
+// A splat this large is either sitting on the near plane or numerically broken; either way it
+// can only cost fill rate. A rasterizer guard, not a workaround for a defect elsewhere.
+const MAX_AXIS_PX_FACTOR : f32 = 4.0;
+
+fn quad_corner(vid : u32) -> vec2<f32> {
     var quad_pos = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
         vec2<f32>(-1.0,  1.0), vec2<f32>(1.0, -1.0), vec2<f32>( 1.0, 1.0)
     );
+    return quad_pos[vid];
+}
 
-    let uv = quad_pos[vid];
-
-    // Project Gaussian center to clip space
-    let center_clip = u.mvp * vec4<f32>(input.position, 1.0);
-
+// Degenerate vertex behind the near plane with zero opacity: cheapest possible discard.
+fn splat_reject(uv : vec2<f32>, color : vec3<f32>) -> VertexOutput {
     var out : VertexOutput;
-    // ── Frustum Culling (all 6 planes) ──
-    // Discard behind camera
-    if (center_clip.w <= 0.001) {
-        out.clip_pos = vec4<f32>(0.0, 0.0, -2.0, 1.0);
-        out.color = input.color_alpha.rgb;
-        out.opacity = 0.0;
-        out.uv = uv;
-        return out;
-    }
-
-    // NDC center
-    let ndc_center = center_clip.xyz / center_clip.w;
-
-    // ── Anisotropic splat: use separate X and Y scales ──
-    let scale_x = max(input.scale.x * u.dilation, 0.001);
-    let scale_y = max(input.scale.y * u.dilation, 0.001);
-
-    // Project each axis to screen pixels: pixels = world_size * focal / depth
-    let screen_rx = scale_x * u.focal.x / center_clip.w;
-    let screen_ry = scale_y * u.focal.y / center_clip.w;
-
-    // EWA Anti-Alias Filter: minimum 0.8px radius per axis
-    let ewa_rx = max(screen_rx, 0.8);
-    let ewa_ry = max(screen_ry, 0.8);
-
-    // Convert pixel radii to NDC
-    let ndc_radius_x = ewa_rx * 2.0 / u.viewport.x;
-    let ndc_radius_y = ewa_ry * 2.0 / u.viewport.y;
-    let ndc_radius_max = max(ndc_radius_x, ndc_radius_y) * 3.0; // 3σ cutoff
-
-    // Frustum cull: discard if splat (including its radius) is entirely outside NDC cube
-    if (ndc_center.x + ndc_radius_max < -1.0 || ndc_center.x - ndc_radius_max > 1.0 ||
-        ndc_center.y + ndc_radius_max < -1.0 || ndc_center.y - ndc_radius_max > 1.0 ||
-        ndc_center.z < -0.1 || ndc_center.z > 1.1) {
-        out.clip_pos = vec4<f32>(0.0, 0.0, -2.0, 1.0);
-        out.color = input.color_alpha.rgb;
-        out.opacity = 0.0;
-        out.uv = uv;
-        return out;
-    }
-
-    // Offset quad vertex from center (3x radius = Gaussian cutoff at 3 sigma)
-    let offset_ndc = uv * vec2<f32>(ndc_radius_x, ndc_radius_y) * 3.0;
-    let final_ndc = vec3<f32>(ndc_center.xy + offset_ndc, ndc_center.z);
-
-    out.clip_pos = vec4<f32>(final_ndc * center_clip.w, center_clip.w);
-    out.color = input.color_alpha.rgb;
-    out.opacity = input.color_alpha.a;
+    out.clip_pos = vec4<f32>(0.0, 0.0, -2.0, 1.0);
+    out.color = color;
+    out.opacity = 0.0;
     out.uv = uv;
     return out;
 }
 
+@vertex
+fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutput {
+    let uv = quad_corner(vid);
+    let rgb = input.color_alpha.rgb;
+
+    let center_clip = u.mvp * vec4<f32>(input.position, 1.0);
+    if (center_clip.w <= 0.001) { return splat_reject(uv, rgb); }
+
+    // -- Camera-space centre. Basis rows are (right, up, forward), z forward and positive,
+    //    y measured UPWARD so a pixel offset maps to NDC with no sign flip. --
+    let rel = input.position - u.cam_pos.xyz;
+    let cx = dot(u.cam_right.xyz, rel);
+    let cy = dot(u.cam_up.xyz, rel);
+    let cz = dot(u.cam_fwd.xyz, rel);
+    if (cz <= 1e-6) { return splat_reject(uv, rgb); }
+
+    // -- Sigma_world = R S S^T R^T --
+    let q = normalize(input.quat);
+    let s = max(input.scale.xyz, vec3<f32>(1e-9, 1e-9, 1e-9)) * u.dilation;
+
+    let xx = q.x * q.x; let yy = q.y * q.y; let zz = q.z * q.z;
+    let xy = q.x * q.y; let xz = q.x * q.z; let yz = q.y * q.z;
+    let wx = q.w * q.x; let wy = q.w * q.y; let wz = q.w * q.z;
+
+    // Columns of R, each pre-scaled by its axis: M = R * S, so Sigma = M * M^T.
+    let m0 = vec3<f32>(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)) * s.x;
+    let m1 = vec3<f32>(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)) * s.y;
+    let m2 = vec3<f32>(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy)) * s.z;
+    let M = mat3x3<f32>(m0, m1, m2);
+    let sigma_world = M * transpose(M);
+
+    // -- Rotate into camera space: Sigma_cam = A * Sigma * A^T, A rows = (right, up, fwd) --
+    let A = transpose(mat3x3<f32>(u.cam_right.xyz, u.cam_up.xyz, u.cam_fwd.xyz));
+    let sc = A * sigma_world * transpose(A);
+
+    // -- Perspective Jacobian of (u, v) = (fx * x / z, fy * y / z) at the centre --
+    let invz = 1.0 / cz;
+    let invz2 = invz * invz;
+    let j00 = u.focal.x * invz;
+    let j02 = -u.focal.x * cx * invz2;
+    let j11 = u.focal.y * invz;
+    let j12 = -u.focal.y * cy * invz2;
+
+    // mat[col][row]; sigma_cam is symmetric so the order does not matter.
+    let s00 = sc[0][0]; let s01 = sc[1][0]; let s02 = sc[2][0];
+    let s11 = sc[1][1]; let s12 = sc[2][1]; let s22 = sc[2][2];
+
+    let a0 = j00 * s00 + j02 * s02;
+    let a1 = j00 * s01 + j02 * s12;
+    let a2 = j00 * s02 + j02 * s22;
+    let b1 = j11 * s11 + j12 * s12;
+    let b2 = j11 * s12 + j12 * s22;
+
+    let cov_a = a0 * j00 + a2 * j02 + EWA_FILTER_PX2;
+    let cov_b = a1 * j11 + a2 * j12;
+    let cov_c = b1 * j11 + b2 * j12 + EWA_FILTER_PX2;
+
+    // -- Eigen-decompose the 2x2 into principal screen axes --
+    let det = cov_a * cov_c - cov_b * cov_b;
+    if (det <= 1e-20) { return splat_reject(uv, rgb); }
+
+    let mid = 0.5 * (cov_a + cov_c);
+    let disc = sqrt(max(mid * mid - det, 0.0));
+    let l1 = mid + disc;
+    var l2 = mid - disc;
+    if (l2 <= 0.0) { l2 = det / max(l1, 1e-20); }
+    if (l1 <= 0.0) { return splat_reject(uv, rgb); }
+
+    // Both candidates span the l1 eigenspace; take the longer so a near-isotropic covariance
+    // does not normalize rounding noise into an arbitrary direction.
+    let p1 = vec2<f32>(cov_b, l1 - cov_a);
+    let p2 = vec2<f32>(l1 - cov_c, cov_b);
+    var e1 = select(p2, p1, dot(p1, p1) >= dot(p2, p2));
+    let elen = length(e1);
+    e1 = select(vec2<f32>(1.0, 0.0), e1 / max(elen, 1e-20), elen > 1e-12);
+
+    let r1 = SIGMA_CUTOFF * sqrt(l1);
+    let r2 = SIGMA_CUTOFF * sqrt(l2);
+    if (r1 > MAX_AXIS_PX_FACTOR * max(u.viewport.x, u.viewport.y)) { return splat_reject(uv, rgb); }
+
+    let axis_major = e1 * r1;                          // pixels
+    let axis_minor = vec2<f32>(-e1.y, e1.x) * r2;      // pixels, orthogonal by construction
+
+    // -- Cull against NDC using the ellipse's real extent --
+    let px_to_ndc = vec2<f32>(2.0 / u.viewport.x, 2.0 / u.viewport.y);
+    let ndc_center = center_clip.xyz / center_clip.w;
+    let ext = (abs(axis_major) + abs(axis_minor)) * px_to_ndc;
+
+    if (ndc_center.x + ext.x < -1.0 || ndc_center.x - ext.x > 1.0 ||
+        ndc_center.y + ext.y < -1.0 || ndc_center.y - ext.y > 1.0 ||
+        ndc_center.z < -0.1 || ndc_center.z > 1.1) {
+        return splat_reject(uv, rgb);
+    }
+
+    let offset_ndc = (uv.x * axis_major + uv.y * axis_minor) * px_to_ndc;
+    let final_ndc = vec3<f32>(ndc_center.xy + offset_ndc, ndc_center.z);
+
+    var out : VertexOutput;
+    out.clip_pos = vec4<f32>(final_ndc * center_clip.w, center_clip.w);
+    out.color = rgb;
+    out.opacity = input.color_alpha.a;
+    out.uv = uv;
+    return out;
+}
+";
+
+    // ============================================================
+    //  Sorted pipeline - classic back-to-front alpha blending.
+    // ============================================================
+    private const string SplatShaderSource = SplatVertexWgsl + @"
 @fragment
 fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    // Gaussian alpha falloff: exp(-dist^2 / 2)
-    let dist_sq = dot(input.uv, input.uv);
+    // uv is whitened: the unit disk IS the SIGMA_CUTOFF ellipse, so the Mahalanobis distance
+    // squared is simply SIGMA_CUTOFF^2 * dot(uv, uv). No conic, no inverse covariance.
+    let r2 = dot(input.uv, input.uv);
+    if (r2 > 1.0) { discard; }
 
-    // Discard pixels outside the Gaussian radius
-    if (dist_sq > 9.0) {
-        discard;
-    }
-
-    let alpha = input.opacity * exp(-dist_sq * 0.5);
-
-    // Minimum alpha threshold
-    if (alpha < 0.002) {
-        discard;
-    }
+    let alpha = input.opacity * exp(-0.5 * SIGMA_CUTOFF * SIGMA_CUTOFF * r2);
+    if (alpha < 0.004) { discard; }
 
     return vec4<f32>(input.color, alpha);
 }
@@ -1773,39 +1933,14 @@ fn fs_cas(input : VSOutput) -> @location(0) vec4<f32> {
 }
 ";
 
-    // ════════════════════════════════════════════════════════════
-    //  WGSL Stochastic Splat Shader — sort-free rendering via stochastic transparency
-    //  Same vertex shader as sorted mode. Fragment shader does stochastic discard + depth test.
-    //  Per-pixel: random u ∈ [0,1), discard if u >= alpha. Depth test selects closest survivor.
-    //  Over multiple frames, temporal accumulation converges to correct alpha-blended result.
-    // ════════════════════════════════════════════════════════════
-    private const string StochasticSplatShaderSource = @"
-struct Uniforms {
-    mvp         : mat4x4<f32>,
-    viewport    : vec2<f32>,
-    focal       : vec2<f32>,
-    frame_index : u32,
-    dilation    : f32,
-    min_alpha   : f32,
-    _pad3       : u32,
-};
-
-@group(0) @binding(0) var<uniform> u : Uniforms;
-
-struct VertexInput {
-    @location(0) position    : vec3<f32>,
-    @location(1) color_alpha : vec4<f32>,
-    @location(2) scale       : vec4<f32>,
-};
-
-struct VertexOutput {
-    @builtin(position) clip_pos : vec4<f32>,
-    @location(0) color   : vec3<f32>,
-    @location(1) opacity : f32,
-    @location(2) uv      : vec2<f32>,
-};
-
-// lowbias32 hash — fast, good avalanche properties
+    // ============================================================
+    //  WGSL Stochastic Splat Shader - sort-free rendering via stochastic transparency
+    //  Same EWA vertex stage as the sorted pipeline. The fragment stage does a stochastic
+    //  discard plus the hardware depth test; over accumulated frames this converges to the
+    //  correct alpha-blended result without ever sorting.
+    // ============================================================
+    private const string StochasticSplatShaderSource = SplatVertexWgsl + @"
+// lowbias32 hash - fast, good avalanche properties
 fn hash_u32(x_in: u32) -> u32 {
     var x = x_in;
     x ^= x >> 16u;
@@ -1816,70 +1951,12 @@ fn hash_u32(x_in: u32) -> u32 {
     return x;
 }
 
-@vertex
-fn vs_main(
-    input : VertexInput,
-    @builtin(vertex_index) vid : u32,
-    @builtin(instance_index) iid : u32
-) -> VertexOutput {
-    var quad_pos = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(-1.0, 1.0),
-        vec2<f32>(-1.0,  1.0), vec2<f32>(1.0, -1.0), vec2<f32>( 1.0, 1.0)
-    );
-
-    let uv = quad_pos[vid];
-    let center_clip = u.mvp * vec4<f32>(input.position, 1.0);
-
-    var out : VertexOutput;
-    if (center_clip.w <= 0.001) {
-        out.clip_pos = vec4<f32>(0.0, 0.0, -2.0, 1.0);
-        out.color = input.color_alpha.rgb;
-        out.opacity = 0.0;
-        out.uv = uv;
-        return out;
-    }
-
-    let ndc_center = center_clip.xyz / center_clip.w;
-
-    let scale_x = max(input.scale.x * u.dilation, 0.001);
-    let scale_y = max(input.scale.y * u.dilation, 0.001);
-
-    let screen_rx = scale_x * u.focal.x / center_clip.w;
-    let screen_ry = scale_y * u.focal.y / center_clip.w;
-
-    let ewa_rx = max(screen_rx, 0.8);
-    let ewa_ry = max(screen_ry, 0.8);
-
-    let ndc_radius_x = ewa_rx * 2.0 / u.viewport.x;
-    let ndc_radius_y = ewa_ry * 2.0 / u.viewport.y;
-    let ndc_radius_max = max(ndc_radius_x, ndc_radius_y) * 3.0;
-
-    if (ndc_center.x + ndc_radius_max < -1.0 || ndc_center.x - ndc_radius_max > 1.0 ||
-        ndc_center.y + ndc_radius_max < -1.0 || ndc_center.y - ndc_radius_max > 1.0 ||
-        ndc_center.z < -0.1 || ndc_center.z > 1.1) {
-        out.clip_pos = vec4<f32>(0.0, 0.0, -2.0, 1.0);
-        out.color = input.color_alpha.rgb;
-        out.opacity = 0.0;
-        out.uv = uv;
-        return out;
-    }
-
-    let offset_ndc = uv * vec2<f32>(ndc_radius_x, ndc_radius_y) * 3.0;
-    let final_ndc = vec3<f32>(ndc_center.xy + offset_ndc, ndc_center.z);
-
-    out.clip_pos = vec4<f32>(final_ndc * center_clip.w, center_clip.w);
-    out.color = input.color_alpha.rgb;
-    out.opacity = input.color_alpha.a;
-    out.uv = uv;
-    return out;
-}
-
 @fragment
 fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    let dist_sq = dot(input.uv, input.uv);
-    if (dist_sq > 9.0) { discard; }
+    let r2 = dot(input.uv, input.uv);
+    if (r2 > 1.0) { discard; }
 
-    let alpha = input.opacity * exp(-dist_sq * 0.5);
+    let alpha = input.opacity * exp(-0.5 * SIGMA_CUTOFF * SIGMA_CUTOFF * r2);
     if (alpha < 0.002) { discard; }
 
     // Stochastic transparency: discard with probability (1 - effective_alpha).
@@ -1891,7 +1968,7 @@ fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
     let u_rand = f32(hash_u32(seed)) / 4294967295.0;
     if (u_rand >= effective_alpha) { discard; }
 
-    return vec4<f32>(input.color, 1.0);  // Opaque write — no alpha blending
+    return vec4<f32>(input.color, 1.0);  // Opaque write - no alpha blending
 }
 ";
 
@@ -1941,9 +2018,9 @@ fn fs_accum(input : VSOutput) -> @location(0) vec4<f32> {
 
     // ════════════════════════════════════════════════════════════
     //  WGSL Pack Compute — Float32 sort output → packed vertex format
-    //  Input:  10 floats per splat (pos3, color3, scale3, opacity1)
-    //  Output: 6 u32s per splat (pos3_bitcast, color_alpha_u8x4, scale_f16x4)
-    //  = 24 bytes per splat (was 40 bytes)
+    //  Input:  SplatFormat.Floats per splat (pos3, color3, scale3, opacity1, quat4)
+    //  Output: SplatFormat.PackedWords u32s per splat
+    //          (pos3_bitcast, color_alpha_u8x4, scale_f16x4, quat_f16x4) = 32 bytes
     // ════════════════════════════════════════════════════════════
     private const string PackComputeSource = @"
 @group(0) @binding(0) var<storage, read>       src     : array<f32>;  // original packed splat data (10 floats/splat)
@@ -1959,7 +2036,7 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     let i = gid.y * nwg.x * 64u + gid.x;
     if (i >= u_count) { return; }
 
-    let dstOff = i * 6u;
+    let dstOff = i * 8u;
 
     // Culled splats have idx=-1 sentinel (sorted last by DescendingInt32).
     // Write a fully-transparent vertex so the fragment shader discards it cheaply.
@@ -1971,11 +2048,13 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
         dst[dstOff + 3u] = 0u;  // opacity = 0 → fragment discard
         dst[dstOff + 4u] = 0u;
         dst[dstOff + 5u] = 0u;
+        dst[dstOff + 6u] = 0u;
+        dst[dstOff + 7u] = 0u;
         return;
     }
 
     // Index lookup: maps sorted position i to original splat data — eliminates CPU reorder pass
-    let srcOff = u32(origIdx) * 10u;
+    let srcOff = u32(origIdx) * 14u;
 
     // Position: 3 floats bitcast to 3 u32s (preserve full precision)
     dst[dstOff + 0u] = bitcast<u32>(src[srcOff + 0u]);  // pos.x
@@ -1994,6 +2073,11 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     // Scale: pack as Float16x4 (sx, sy, sz, 0)
     dst[dstOff + 4u] = pack2x16float(vec2<f32>(src[srcOff + 6u], src[srcOff + 7u]));
     dst[dstOff + 5u] = pack2x16float(vec2<f32>(src[srcOff + 8u], 0.0));
+
+    // Rotation: unit quaternion (x, y, z, w) as Float16x4. f16 carries ~3 decimal digits, which
+    // on a unit quaternion is well under a tenth of a degree — invisible at any splat size.
+    dst[dstOff + 6u] = pack2x16float(vec2<f32>(src[srcOff + 10u], src[srcOff + 11u]));
+    dst[dstOff + 7u] = pack2x16float(vec2<f32>(src[srcOff + 12u], src[srcOff + 13u]));
 }
 ";
 }

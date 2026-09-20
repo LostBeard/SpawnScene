@@ -190,7 +190,9 @@ public partial class Studio : IAsyncDisposable
             // ?onlyview=N restricts the dense unproject to a single view (diagnostic).
             int onlyView = query.TryGetValue("onlyview", out var ov) && int.TryParse(ov, out var ovi) ? ovi : -1;
             bool globalScale = query.TryGetValue("globalscale", out var gs) && gs is "1" or "true";
-            await RunNovelViewAutotestAsync(viewName ?? "templeR0016", onlyView, globalScale);
+            // ?train=N runs N photometric optimisation steps before the first pose is parked.
+            int trainIters = query.TryGetValue("train", out var tr) && int.TryParse(tr, out var tri) ? tri : 0;
+            await RunNovelViewAutotestAsync(viewName ?? "templeR0016", onlyView, globalScale, trainIters);
             return;
         }
 

@@ -33,6 +33,9 @@ const MAX_VIEWS = parseInt(process.argv[3] || '6', 10);
 let EXTRA = '';
 if (process.env.ONLYVIEW) EXTRA += `&onlyview=${process.env.ONLYVIEW}`;
 if (process.env.GLOBALSCALE) EXTRA += `&globalscale=${process.env.GLOBALSCALE}`;
+// TRAIN=<iters> runs photometric optimisation against the posed photographs BEFORE the first
+// pose is parked, on the same page load, so the captured frames are of the trained scene.
+if (process.env.TRAIN) EXTRA += `&train=${process.env.TRAIN}`;
 const OUT = path.join(ROOT, '_shots/novelview', RUN_TAG);
 
 // GT render size. Must match the dataset images or the comparison resamples.
@@ -109,7 +112,7 @@ const imagesOnDisk = () =>
         // Wide on purpose: pipeline diagnostics ([MultiView-GT] keepRatio, per-view counts,
         // confidence retained) were being filtered out, so I was reading a metric without
         // being able to confirm the code that produced it had run.
-        if (/NovelView|MultiView|DepthGPU|farthest picks|FAIL|Error/i.test(s)) console.log('  CON', s.slice(0, 200));
+        if (/NovelView|MultiView|DepthGPU|Train|Trainer|farthest picks|FAIL|Error/i.test(s)) console.log('  CON', s.slice(0, 200));
       }
     });
     const send = (method, params = {}) => new Promise((res, rej) => {

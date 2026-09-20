@@ -29,9 +29,10 @@ public partial class Studio
     /// <summary>Project the harness reuses, so the scene is generated once and then loaded.</summary>
     private const string NovelViewProjectName = "NovelView TempleRing";
 
-    private async Task RunNovelViewAutotestAsync(string viewName, int onlyView = -1, bool globalScale = false)
+    private async Task RunNovelViewAutotestAsync(string viewName, int onlyView = -1, bool globalScale = false,
+        int trainIters = 0)
     {
-        Console.WriteLine($"[NovelView] starting view={viewName}");
+        Console.WriteLine($"[NovelView] starting view={viewName} train={trainIters}");
         try
         {
             // ── 0. Resolve the pose FIRST ──
@@ -110,6 +111,13 @@ public partial class Studio
             {
                 _sceneManager.OnSceneChanged -= OnDone;
             }
+
+            // ── 1b. Optimise, in this same page load ──
+            // Training here rather than as its own autotest keeps the trained scene resident:
+            // measuring it would otherwise have to round-trip through OPFS, which is the exact
+            // step that made earlier runs intermittently regenerate from scratch.
+            if (trainIters > 0)
+                await TrainOnTrainingViewsAsync(trainIters);
 
             // ── 2. Deterministic render settings ──
             // Sorted, not stochastic: stochastic converges over many frames via temporal

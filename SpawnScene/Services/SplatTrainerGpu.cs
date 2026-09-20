@@ -196,7 +196,7 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public async Task<float[]> RenderForwardAsync(
         MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
-        CameraParams cam, float depthNear, float depthFar)
+        CameraParams cam, float depthNear, float depthFar, bool readback = true)
     {
         if (_device == null || _emitKeys == null) throw new InvalidOperationException("not initialized");
 
@@ -252,7 +252,7 @@ public sealed class SplatTrainerGpu : IDisposable
         if (LastKeyCount == 0)
         {
             Console.WriteLine("[Trainer] no keys emitted - nothing visible from this view");
-            return new float[_width * _height * 3];
+            return readback ? new float[_width * _height * 3] : System.Array.Empty<float>();
         }
 
         // ── 2. Sort by key: groups by tile AND orders front-to-back within each tile ──
@@ -312,7 +312,9 @@ public sealed class SplatTrainerGpu : IDisposable
         }
         await accel.SynchronizeAsync();
 
-        // CPU transfer: gate comparison only. Training keeps this on the GPU.
+        // CPU transfer: gate comparison only. Training passes readback:false and the colour
+        // stays on the GPU - at 640x480 this copy is 3.7 MB, which would dwarf the iteration.
+        if (!readback) return System.Array.Empty<float>();
         return await _outColour!.CopyToHostAsync<float>(0, _width * _height * 3);
     }
 
@@ -323,6 +325,41 @@ public sealed class SplatTrainerGpu : IDisposable
             throw new ArgumentException($"target is {rgb.Length}, expected {_width * _height * 3}");
         _target!.CopyFromCPU(rgb);
     }
+
+    /// <summary>
+    /// Point the loss at one image inside a GPU-resident stack of targets (view-major,
+    /// width*height*3 floats each). Device-to-device, so a multi-view run pays the upload once.
+    /// </summary>
+    public void SetTargetFrom(MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex)
+    {
+        long len = (long)_width * _height * 3;
+        long off = (long)viewIndex * len;
+        if (off + len > stack.Length)
+            throw new ArgumentOutOfRangeException(nameof(viewIndex),
+                $"view {viewIndex} needs floats [{off},{off + len}) of a {stack.Length}-float stack");
+        // A kernel, not ArrayView.CopyTo: the WebGPU backend has no synchronous device-to-device
+        // copy ("Synchronous GPU to CPU copies are not supported"), and this stays on the GPU.
+        var accel = _gpu.WebGPUAccelerator;
+        _copyKernel ??= accel.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>>(CopyKernel);
+        _copyKernel((int)len, stack.View.SubView(off, len), _target!.View);
+    }
+
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>? _copyKernel;
+
+    static void CopyKernel(
+        Index1D index,
+        ArrayView1D<float, Stride1D.Dense> src,
+        ArrayView1D<float, Stride1D.Dense> dst)
+    {
+        int i = index;
+        if (i >= dst.Length) return;
+        dst[i] = src[i];
+    }
+
+    /// <summary>The viewport the trainer is currently sized for.</summary>
+    public (int Width, int Height) Size => (_width, _height);
 
     /// <summary>Seed opacity logits from the splats' current opacity. Call once before training.</summary>
     public void InitOptimizerState(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
@@ -356,7 +393,7 @@ public sealed class SplatTrainerGpu : IDisposable
         var splatGpu = splatBuf.GetGPUBuffer()!;
 
         // Forward also refreshes the tile binning for this view.
-        await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar);
+        await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false);
         if (LastKeyCount == 0) return 0f;
 
         int pixels = _width * _height;

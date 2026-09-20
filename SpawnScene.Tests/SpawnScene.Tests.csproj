@@ -19,6 +19,7 @@
     <Compile Include="..\SpawnScene\Models\ExifReader.cs" Link="Linked\ExifReader.cs" />
     <Compile Include="..\SpawnScene\Services\WorldSpaceGeometry.cs" Link="Linked\WorldSpaceGeometry.cs" />
     <Compile Include="..\SpawnScene\Services\SplatCovariance.cs" Link="Linked\SplatCovariance.cs" />
+    <Compile Include="..\SpawnScene\Services\SplatBounds.cs" Link="Linked\SplatBounds.cs" />
     <Compile Include="..\SpawnScene\Services\SplatRasterizer.cs" Link="Linked\SplatRasterizer.cs" />
     <Compile Include="..\SpawnScene\Services\SplatOptimizer.cs" Link="Linked\SplatOptimizer.cs" />
     <Compile Include="..\SpawnScene\Services\SplatTileRasterizer.cs" Link="Linked\SplatTileRasterizer.cs" />

@@ -260,6 +260,27 @@ public class GpuGaussianRenderer : IDisposable
     public bool HasGpuData => _splatCount > 0;
 
     /// <summary>
+    /// The live packed splat buffer (SplatFormat.Floats per splat), for the optimiser to write
+    /// through. Training mutates these values in place, so callers must
+    /// <see cref="RepackForDisplay"/> afterwards or the viewer keeps showing the pre-training
+    /// vertex data.
+    /// </summary>
+    public MemoryBuffer1D<float, Stride1D.Dense>? PackedSplatBuffer => _sorter.PackedDataBuf;
+
+    /// <summary>Splats currently uploaded.</summary>
+    public int SplatCount => _splatCount;
+
+    /// <summary>
+    /// Rebuild the display vertex buffer from the packed splat data. Needed after anything
+    /// mutates the splats behind the renderer's back - the optimiser does exactly that.
+    /// </summary>
+    public void RepackForDisplay()
+    {
+        PackAtUpload();
+        _accumFrameCount = 0;
+    }
+
+    /// <summary>
     /// Initialize the WebGPU render pipeline. Called once when canvas is attached.
     /// <paramref name="canvasRef"/> is stored for adaptive-resolution canvas pixel resizing.
     /// </summary>

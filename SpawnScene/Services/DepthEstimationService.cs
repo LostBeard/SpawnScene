@@ -291,19 +291,43 @@ public class DepthEstimationService : IAsyncDisposable
             DepthResults.Count > 0 && DepthResults.All(d => d.ConfidenceGpu != null);
         public void Dispose()
         {
-            foreach (var d in DepthResults) d.Dispose();
+            // Null-tolerant: a caller may take ownership of individual views (the chunked pose
+            // pass keeps the ones it posed and lets the rest go) by nulling the slot.
+            foreach (var d in DepthResults) d?.Dispose();
             DepthResults.Clear();
         }
     }
 
-    /// <summary>Max views for a single joint DAv3 forward (WebGPU memory / compile cost).</summary>
-    public const int MaxMultiViewImages = 6;
+    /// <summary>
+    /// Views per joint DAv3 forward. A STARTING POINT, not a measured limit.
+    ///
+    /// This was a <c>const 6</c> introduced with the comment "(WebGPU memory / compile cost)" and
+    /// no measurement anywhere behind it - the ML library's own DAv3 multi-view test runs N=2,
+    /// and nothing in either repo queries a device limit on this path. A compile-time constant
+    /// here decides how much of a stranger's capture gets posed, on hardware we have never seen:
+    /// too high and the forward fails outright rather than degrading, too low and views are
+    /// discarded for nothing.
+    ///
+    /// So it is a knob, and callers are expected to back off rather than trust it - see
+    /// <c>MultiViewGenerationService.PoseAllViewsChunkedAsync</c>, which retries at a smaller N
+    /// and still poses every view, just in more chunks. The number that matters for coverage is
+    /// no longer this one.
+    ///
+    /// Note the model recompiles per distinct N ("Session shape-recompile handles N != the
+    /// compile-time num_images"), so a caller should keep N the same across a run.
+    /// </summary>
+    public static int MaxMultiViewImages { get; set; } = 6;
 
     /// <summary>
     /// Joint multi-view depth via DAv3 <c>[1,N,3,H,W]</c>. Fills <see cref="MultiViewDepthResult.Extrinsics"/>
-    /// when the model emits usable poses. Caps at <see cref="MaxMultiViewImages"/>.
+    /// when the model emits usable poses.
+    ///
+    /// <paramref name="maxViews"/> overrides <see cref="MaxMultiViewImages"/> for this call, so a
+    /// caller that has just watched a forward fail can retry smaller instead of giving up. Zero
+    /// or less means use the default.
     /// </summary>
-    public async Task<MultiViewDepthResult?> EstimateDepthMultiViewAsync(IReadOnlyList<ImportedImage> images)
+    public async Task<MultiViewDepthResult?> EstimateDepthMultiViewAsync(
+        IReadOnlyList<ImportedImage> images, int maxViews = 0)
     {
         if (_pipe == null)
         {
@@ -312,9 +336,10 @@ public class DepthEstimationService : IAsyncDisposable
         }
         if (images.Count == 0) return null;
 
-        int n = Math.Min(images.Count, MaxMultiViewImages);
-        if (images.Count > MaxMultiViewImages)
-            Console.WriteLine($"[Depth] Cap multi-view at {MaxMultiViewImages} (got {images.Count})");
+        int cap = maxViews > 0 ? maxViews : MaxMultiViewImages;
+        int n = Math.Min(images.Count, cap);
+        if (images.Count > cap)
+            Console.WriteLine($"[Depth] Cap multi-view at {cap} (got {images.Count})");
 
         Status = $"Running joint DAv3 multi-view ({n} images)...";
         OnStateChanged?.Invoke();

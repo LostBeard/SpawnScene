@@ -54,6 +54,24 @@ public class MultiViewGenerationService
     /// </summary>
     public string PosePreference { get; set; } = "auto";
 
+    /// <summary>
+    /// Pose every view by running the joint depth model in chunks that share anchor views, rather
+    /// than posing only the handful one forward pass accepts. See
+    /// <see cref="MultiViewChunkPlan"/> for why this removes the geometry-versus-supervision fork
+    /// instead of picking a side of it.
+    /// </summary>
+    public bool ChunkedPoses { get; set; } = true;
+
+    /// <summary>
+    /// Views the chunked pass shares between every chunk. Three is the minimum that determines a
+    /// similarity; more costs capacity for new views per chunk (and so more chunks) but makes the
+    /// fold more tolerant of one anchor coming back badly posed.
+    /// </summary>
+    public int ChunkAnchorCount { get; set; } = MultiViewChunkPlan.MinAnchors;
+
+    /// <summary>How many views the last chunked run actually put in one forward pass.</summary>
+    public int LastChunkSize { get; private set; }
+
     public MultiViewGenerationService(
         SpawnJSRuntime js,
         GpuService gpu,
@@ -263,6 +281,18 @@ public class MultiViewGenerationService
     private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
         GenerateWithDav3MultiViewAsync(IReadOnlyList<ImportedImage> images, int subsample, float edgeSharpness)
     {
+        // Chunked poses supersede the single-pass cascade whenever there are more views than one
+        // forward accepts: same model, same unproject, every view posed instead of six.
+        if (ChunkedPoses
+            && !string.Equals(PosePreference, "sfm", StringComparison.OrdinalIgnoreCase)
+            && images.Count > DepthEstimationService.MaxMultiViewImages)
+        {
+            var chunked = await GenerateWithChunkedDav3Async(images, subsample, edgeSharpness);
+            if (chunked != null) return chunked;
+            Console.WriteLine(
+                "[MultiView] chunked poses produced nothing; falling back to the single-pass cascade.");
+        }
+
         if (!_depthService.IsReady)
         {
             SetStatus("Loading DAv3 model...");
@@ -536,6 +566,414 @@ public class MultiViewGenerationService
         SetStatus($"Multi-view complete: {actualTotal:N0} splats from {viewResults.Count} views (pose={poseSource}).");
         Console.WriteLine($"[MultiView] Total: {actualTotal:N0} splats pose={poseSource}");
         return (merged, actualTotal);
+    }
+
+    /// <summary>
+    /// Generate from every view the chunked pose pass could place, all in one world frame.
+    ///
+    /// The difference from <see cref="GenerateWithDav3MultiViewAsync"/> is coverage, not method:
+    /// the same joint depth model, the same world-space unproject, but run over all 35 of
+    /// Bathroom's frames instead of the 6 one forward pass accepts.
+    /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
+        GenerateWithChunkedDav3Async(IReadOnlyList<ImportedImage> images, int subsample, float edgeSharpness)
+    {
+        using var poses = await PoseAllViewsChunkedAsync(images);
+        if (poses == null || poses.PosedCount == 0)
+        {
+            SetStatus("Error: the chunked pose pass placed no views.");
+            return null;
+        }
+
+        var posed = new List<int>();
+        for (int i = 0; i < images.Count; i++)
+            if (poses.Cameras[i] != null && poses.Depths[i] != null) posed.Add(i);
+
+        if (posed.Count == 0)
+        {
+            SetStatus("Error: posed views have no depth maps.");
+            return null;
+        }
+
+        // Depth scale composes in one order and only one. A view's raw depth is in ITS CHUNK's
+        // frame, so it takes the fold's scale first; only then are the views comparable enough to
+        // share one base scale mapping relative depth onto the camera rig. Computing the base
+        // scale over raw values from different chunk frames would average numbers that do not
+        // share a unit.
+        var scales = new float[images.Count];
+        {
+            var placedCams = posed.Select(i => poses.Cameras[i]!).ToList();
+            var centroid = new Vector3(
+                placedCams.Average(c => c.Position.X),
+                placedCams.Average(c => c.Position.Y),
+                placedCams.Average(c => c.Position.Z));
+            float avgDist = placedCams.Average(c => Vector3.Distance(c.Position, centroid));
+            if (avgDist < 1e-3f) avgDist = 1f;
+
+            double midInFrame = posed.Average(i =>
+                (poses.Depths[i]!.MinDepth + poses.Depths[i]!.MaxDepth) * 0.5f * poses.FrameScales[i]);
+            if (midInFrame < 1e-4) midInFrame = 1.0;
+
+            float baseScale = (float)(avgDist / midInFrame);
+            foreach (int i in posed) scales[i] = poses.FrameScales[i] * baseScale;
+
+            Console.WriteLine(
+                $"[MultiView] depth scale: base={baseScale:F4} (avg camera distance {avgDist:F4}, " +
+                $"mid depth in frame {midInFrame:F4}); per-view span " +
+                $"{posed.Min(i => scales[i]):F4} to {posed.Max(i => scales[i]):F4}");
+        }
+
+        if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+        var accelerator = _gpu.WebGPUAccelerator;
+        var device = accelerator.NativeAccelerator.NativeDevice!;
+        var queue = accelerator.NativeAccelerator.Queue!;
+
+        // Coverage now scales with the capture, so the splat budget has to as well: at subsample 2
+        // Bathroom's 35 views of 768x1024 would emit 6.9M splats where 6 views emitted 1.2M.
+        int effectiveSub = ChooseSubsample(subsample, posed.Select(i => poses.Depths[i]!).ToList());
+
+        int refView = posed[0];
+        var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
+        int totalSplats = 0, nonRefIn = 0, nonRefKept = 0;
+
+        foreach (int i in posed)
+        {
+            SetStatus($"Generating splats: {images[i].FileName} ({viewResults.Count + 1}/{posed.Count})...");
+            var (buf, count) = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
+                poses.Depths[i]!, images[i], poses.Cameras[i]!, effectiveSub, edgeSharpness, scales[i]);
+
+            if (i != refView && count > 0)
+            {
+                nonRefIn += count;
+                (buf, count) = await _gaussianKernel.FuseConsistencyVsRefAsync(
+                    buf, count, poses.Depths[refView]!, poses.Cameras[refView]!,
+                    scales[refView], relThresh: 0.06f);
+                nonRefKept += count;
+            }
+
+            viewResults.Add((buf, count));
+            totalSplats += count;
+        }
+
+        if (nonRefIn > 0)
+            Console.WriteLine(
+                $"[MultiView] consistency: non-ref kept {nonRefKept:N0}/{nonRefIn:N0} " +
+                $"({(float)nonRefKept / nonRefIn:P0})");
+
+        if (totalSplats == 0)
+        {
+            foreach (var (buf, _) in viewResults) buf.Dispose();
+            SetStatus("Error: No splats generated.");
+            return null;
+        }
+
+        SetStatus($"Merging {totalSplats:N0} splats from {viewResults.Count} views...");
+        var merged = accelerator.Allocate1D<float>((long)totalSplats * SplatFormat.Floats);
+        long offsetBytes = 0;
+        int actualTotal = 0;
+        foreach (var (buf, count) in viewResults)
+        {
+            if (count <= 0) { buf.Dispose(); continue; }
+            ulong byteCount = (ulong)count * SplatFormat.Floats * sizeof(float);
+            using (var encoder = device.CreateCommandEncoder())
+            {
+                encoder.CopyBufferToBuffer(
+                    buf.GetGPUBuffer()!, 0, merged.GetGPUBuffer()!, (ulong)offsetBytes, byteCount);
+                queue.Submit(new[] { encoder.Finish() });
+            }
+            offsetBytes += (long)byteCount;
+            actualTotal += count;
+            buf.Dispose();
+        }
+        await accelerator.SynchronizeAsync();
+
+        LastCameras = poses.Cameras;
+        LastPoseSource = "dav3-chunked";
+
+        Console.WriteLine(
+            $"[MultiView] Total: {actualTotal:N0} splats from {posed.Count}/{images.Count} views " +
+            $"pose=dav3-chunked N={poses.ChunkSize} subsample={effectiveSub}");
+        SetStatus($"Multi-view complete: {actualTotal:N0} splats from {posed.Count} views.");
+        return (merged, actualTotal);
+    }
+
+    /// <summary>
+    /// Target splats for one initialisation. A 3DGS optimiser densifies from an initialisation;
+    /// emitting a splat per pixel per view is not a better start, it is a bigger one, and the
+    /// key-indexed training buffers are bounded by a single storage binding rather than by VRAM
+    /// (see <c>SplatTrainerGpu</c>). Coarser sampling across MORE views beats dense sampling of
+    /// a few, because the extra views are the new information.
+    /// </summary>
+    public int SplatBudget { get; set; } = 1_500_000;
+
+    private int ChooseSubsample(int requested, IReadOnlyList<DepthResult> depths)
+    {
+        int sub = Math.Max(1, requested);
+        long PixelsAt(int s) => depths.Sum(d => (long)(d.Width / s) * (d.Height / s));
+
+        long at = PixelsAt(sub);
+        if (at <= SplatBudget) return sub;
+
+        int chosen = sub;
+        while (chosen < 16 && PixelsAt(chosen) > SplatBudget) chosen++;
+        Console.WriteLine(
+            $"[MultiView] subsample {sub} -> {chosen}: {depths.Count} views would emit " +
+            $"{at:N0} splats against a {SplatBudget:N0} budget, now {PixelsAt(chosen):N0}");
+        return chosen;
+    }
+
+    /// <summary>
+    /// What a chunked pose pass recovered, indexed by GLOBAL image index. A null camera means
+    /// that view was never placed in the world frame and must not contribute to the merge.
+    /// </summary>
+    private sealed class ChunkedPoseResult : IDisposable
+    {
+        public required CameraParams?[] Cameras { get; init; }
+        public required DepthResult?[] Depths { get; init; }
+
+        /// <summary>Factor carrying this view's raw depth into the reference frame.</summary>
+        public required float[] FrameScales { get; init; }
+
+        /// <summary>Views per forward pass this device actually sustained.</summary>
+        public int ChunkSize { get; set; }
+        public int ChunkCount { get; set; }
+        public int ChunksRejected { get; set; }
+        public int PosedCount => Cameras.Count(c => c != null);
+
+        public void Dispose()
+        {
+            foreach (var d in Depths) d?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Pose EVERY view in one world frame by running the joint depth model in chunks that share
+    /// anchor views, folding each chunk in with a similarity fitted to those anchors.
+    ///
+    /// See <see cref="MultiViewChunkPlan"/> for why this is the answer to the fork commit eeedfff
+    /// left open, rather than a third option alongside it.
+    ///
+    /// The chunk size is PROVEN on the device by the first pass rather than assumed: if that
+    /// forward fails it is retried smaller, and only the size that actually ran is used for the
+    /// rest. Every view still gets posed either way, just in more chunks - which is the whole
+    /// reason the cap stopped being a coverage decision.
+    /// </summary>
+    private async Task<ChunkedPoseResult?> PoseAllViewsChunkedAsync(IReadOnlyList<ImportedImage> images)
+    {
+        if (!_depthService.IsReady)
+        {
+            SetStatus("Loading DAv3 model...");
+            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+        }
+
+        var shapes = images.Select(im => (im.Width, im.Height)).ToArray();
+        int anchors = Math.Max(MultiViewChunkPlan.MinAnchors, ChunkAnchorCount);
+        int chunkSize = Math.Max(anchors + 1, DepthEstimationService.MaxMultiViewImages);
+
+        var result = new ChunkedPoseResult
+        {
+            Cameras = new CameraParams?[images.Count],
+            Depths = new DepthResult?[images.Count],
+            FrameScales = Enumerable.Repeat(1f, images.Count).ToArray(),
+        };
+
+        IReadOnlyList<MultiViewChunkPlan.MultiViewShapeGroup>? groups = null;
+        DepthEstimationService.MultiViewDepthResult? firstRun = null;
+
+        while (chunkSize > anchors)
+        {
+            groups = MultiViewChunkPlan.PlanByShape(shapes, chunkSize, anchors);
+            SetStatus($"Joint depth pass 1 of {groups[0].Chunks.Count} (N={chunkSize})...");
+            firstRun = await TryRunChunkAsync(images, groups[0].Chunks[0], chunkSize);
+            if (firstRun != null) break;
+
+            int next = chunkSize - 1;
+            Console.WriteLine(
+                $"[MultiView] the joint forward did not run at N={chunkSize}; retrying at N={next}. " +
+                "That cap is a starting point, not a measured limit - every view still gets " +
+                "posed, in more chunks.");
+            chunkSize = next;
+        }
+
+        if (firstRun == null || groups == null)
+        {
+            result.Dispose();
+            Console.WriteLine(
+                $"[MultiView] no joint depth pass ran, down to N={anchors + 1}. " +
+                "Nothing can be posed in a shared frame.");
+            return null;
+        }
+
+        var reference = groups[0];
+        result.ChunkSize = chunkSize;
+        result.ChunkCount = reference.Chunks.Count;
+        Console.WriteLine(
+            $"[MultiView] chunked poses: {reference.ViewCount} views at " +
+            $"{reference.Width}x{reference.Height} in {reference.Chunks.Count} pass(es) of N={chunkSize}, " +
+            $"{anchors} shared anchors [{string.Join(",", reference.Chunks[0].Anchors.ToArray())}]");
+
+        // Chunk 0 defines the world frame: its own output, untransformed.
+        AdoptChunk(result, reference.Chunks[0],
+            CamerasFromRun(images, reference.Chunks[0], firstRun), firstRun,
+            Similarity3.Identity, adoptAnchors: true);
+        firstRun.Dispose();
+
+        var placed = BuildPlacedLookup(result);
+        if (placed.Count < MultiViewChunkPlan.MinAnchors && reference.Chunks.Count > 1)
+        {
+            Console.WriteLine(
+                $"[MultiView] the reference pass posed only {placed.Count} view(s), fewer than the " +
+                $"{MultiViewChunkPlan.MinAnchors} anchors a fold needs. Later chunks cannot be placed.");
+        }
+
+        for (int ci = 1; ci < reference.Chunks.Count; ci++)
+        {
+            var chunk = reference.Chunks[ci];
+            SetStatus($"Joint depth pass {ci + 1} of {reference.Chunks.Count} (N={chunkSize})...");
+
+            var run = await TryRunChunkAsync(images, chunk, chunkSize);
+            if (run == null)
+            {
+                // One failed pass costs its own new views, not the run. Every other chunk holds
+                // the same anchors and folds in independently.
+                result.ChunksRejected++;
+                Console.WriteLine(
+                    $"[MultiView] chunk {ci} did not run; its " +
+                    $"{chunk.NewViews.Length} view(s) stay unposed.");
+                continue;
+            }
+
+            var cams = CamerasFromRun(images, chunk, run);
+            if (!MultiViewChunkPlan.TryFitChunkToReference(
+                    chunk, cams, placed, out var sim, out float rms, out int used))
+            {
+                result.ChunksRejected++;
+                Console.WriteLine(
+                    $"[MultiView] chunk {ci} rejected: {used}/{chunk.AnchorCount} anchors recovered, " +
+                    $"fit residual {rms:F4}. Placing it anyway would put a full cloud in the wrong " +
+                    "part of the scene looking measured.");
+                run.Dispose();
+                continue;
+            }
+
+            Console.WriteLine(
+                $"[MultiView] chunk {ci}: folded on {used} anchors, residual {rms:F4}, " +
+                $"depth scale {sim.Scale:F4}, {chunk.NewViews.Length} new view(s)");
+            AdoptChunk(result, chunk, cams, run, sim, adoptAnchors: false);
+            run.Dispose();
+        }
+
+        foreach (var group in groups.Skip(1))
+            Console.WriteLine(
+                $"[MultiView] {group.ViewCount} view(s) at {group.Width}x{group.Height} are a " +
+                "different shape from the reference group. The joint pass emits every view at its " +
+                "FIRST view's resolution, so they cannot share a pass, and sharing no anchors they " +
+                "cannot be folded in either. Skipped rather than placed.");
+
+        LastChunkSize = chunkSize;
+        Console.WriteLine(
+            $"[MultiView] chunked poses done: {result.PosedCount}/{images.Count} views posed in one " +
+            $"frame, {result.ChunksRejected} chunk(s) rejected");
+        return result;
+    }
+
+    /// <summary>One joint forward, returning null rather than throwing when the device refuses it.</summary>
+    private async Task<DepthEstimationService.MultiViewDepthResult?> TryRunChunkAsync(
+        IReadOnlyList<ImportedImage> images, MultiViewChunk chunk, int chunkSize)
+    {
+        var views = chunk.Views.Select(v => images[v]).ToList();
+        try
+        {
+            var run = await _depthService.EstimateDepthMultiViewAsync(views, maxViews: chunkSize);
+            if (run == null || run.DepthResults.Count < views.Count)
+            {
+                Console.WriteLine(
+                    $"[MultiView] joint forward returned {run?.DepthResults.Count ?? 0} depth view(s) " +
+                    $"for {views.Count} image(s)");
+                run?.Dispose();
+                return null;
+            }
+            return run;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MultiView] joint forward failed at N={views.Count}: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Cameras for one chunk's slots, in that chunk's own frame. Each is a FRESH object: an
+    /// anchor image appears in every chunk, and writing its pose back into the shared
+    /// <c>ImportedImage.EstimatedCamera</c> would let one pass overwrite another's answer.
+    /// </summary>
+    private static CameraParams?[] CamerasFromRun(
+        IReadOnlyList<ImportedImage> images, MultiViewChunk chunk, DepthEstimationService.MultiViewDepthResult run)
+    {
+        var cams = new CameraParams?[chunk.Views.Length];
+        if (run.Extrinsics == null) return cams;
+
+        for (int slot = 0; slot < chunk.Views.Length && slot < run.Extrinsics.Length; slot++)
+        {
+            var ext = run.Extrinsics[slot];
+            if (ext == null || ext.Length < 12 || !IsSaneExtrinsics(ext)) continue;
+
+            var img = images[chunk.Views[slot]];
+            var seed = img.EstimatedCamera;
+            var cam = CameraParams.CreateDefault(img.Width, img.Height);
+            if (seed != null)
+            {
+                cam.FocalX = seed.FocalX; cam.FocalY = seed.FocalY;
+                cam.CenterX = seed.CenterX; cam.CenterY = seed.CenterY;
+            }
+            ApplyExtrinsicsToCamera(cam, ext);
+
+            if (run.Intrinsics != null && slot < run.Intrinsics.Length
+                && run.Intrinsics[slot] is { Length: >= 9 } K)
+            {
+                cam.FocalX = K[0];
+                cam.FocalY = K[4];
+                cam.CenterX = K[2];
+                cam.CenterY = K[5];
+            }
+            cams[slot] = cam;
+        }
+        return cams;
+    }
+
+    /// <summary>
+    /// Move a chunk's posed views into the world frame, taking ownership of their depth maps.
+    /// A view already placed by an earlier chunk is left alone, so anchors keep the reference
+    /// pass's answer rather than the last one to run.
+    /// </summary>
+    private static void AdoptChunk(
+        ChunkedPoseResult into, MultiViewChunk chunk, CameraParams?[] cams,
+        DepthEstimationService.MultiViewDepthResult run, Similarity3 sim, bool adoptAnchors)
+    {
+        int from = adoptAnchors ? 0 : chunk.AnchorCount;
+        for (int slot = from; slot < chunk.Views.Length; slot++)
+        {
+            int g = chunk.Views[slot];
+            if (cams[slot] == null || into.Cameras[g] != null) continue;
+
+            sim.ApplyToCamera(cams[slot]!);
+            into.Cameras[g] = cams[slot];
+            into.FrameScales[g] = sim.Scale;
+
+            if (slot < run.DepthResults.Count)
+            {
+                into.Depths[g] = run.DepthResults[slot];
+                run.DepthResults[slot] = null!;   // ownership moved; the run no longer disposes it
+            }
+        }
+    }
+
+    private static Dictionary<int, CameraParams> BuildPlacedLookup(ChunkedPoseResult result)
+    {
+        var placed = new Dictionary<int, CameraParams>();
+        for (int i = 0; i < result.Cameras.Length; i++)
+            if (result.Cameras[i] is { } cam) placed[i] = cam;
+        return placed;
     }
 
     private static bool IsSaneExtrinsics(float[] ext)

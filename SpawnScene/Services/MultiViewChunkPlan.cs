@@ -108,6 +108,16 @@ public static class MultiViewChunkPlan
     /// consecutive run. Every non-anchor view appears in exactly one chunk.
     /// </summary>
     public static IReadOnlyList<MultiViewChunk> Plan(int viewCount, int chunkSize, int anchorCount)
+        => Plan(viewCount, chunkSize, anchorCount, null);
+
+    /// <summary>
+    /// As above, with <paramref name="anchorsOverride"/> naming the anchor views explicitly
+    /// (local indices). Passing null keeps the even spread, which suits a capture that orbits a
+    /// subject; a walk-through wants anchors that actually saw each other - see
+    /// <see cref="PickAnchorsByOverlap"/>.
+    /// </summary>
+    public static IReadOnlyList<MultiViewChunk> Plan(
+        int viewCount, int chunkSize, int anchorCount, int[]? anchorsOverride)
     {
         if (viewCount <= 0)
             throw new ArgumentOutOfRangeException(nameof(viewCount), viewCount, "No views to plan.");
@@ -125,7 +135,11 @@ public static class MultiViewChunkPlan
         if (viewCount <= chunkSize)
             return new[] { new MultiViewChunk(Enumerable.Range(0, viewCount).ToArray(), viewCount) };
 
-        var anchors = SpreadPick(viewCount, anchorCount);
+        var anchors = anchorsOverride is { Length: > 0 }
+            ? anchorsOverride.Where(i => i >= 0 && i < viewCount).Distinct().OrderBy(i => i).ToArray()
+            : SpreadPick(viewCount, anchorCount);
+        if (anchors.Length != anchorCount)
+            anchors = SpreadPick(viewCount, anchorCount);
         var anchorSet = anchors.ToHashSet();
         var rest = Enumerable.Range(0, viewCount).Where(i => !anchorSet.Contains(i)).ToArray();
 
@@ -180,6 +194,16 @@ public static class MultiViewChunkPlan
     /// </summary>
     public static IReadOnlyList<MultiViewShapeGroup> PlanByShape(
         IReadOnlyList<(int Width, int Height)> shapes, int chunkSize, int anchorCount)
+        => PlanByShape(shapes, chunkSize, anchorCount, null);
+
+    /// <summary>
+    /// As above, with <paramref name="pickAnchors"/> choosing each group's anchors. It is handed
+    /// that group's GLOBAL image indices and the count wanted, and returns GLOBAL indices;
+    /// mapping back into the group is done here so a caller never has to think in local indices.
+    /// </summary>
+    public static IReadOnlyList<MultiViewShapeGroup> PlanByShape(
+        IReadOnlyList<(int Width, int Height)> shapes, int chunkSize, int anchorCount,
+        Func<IReadOnlyList<int>, int, int[]>? pickAnchors)
     {
         if (shapes.Count == 0)
             throw new ArgumentOutOfRangeException(nameof(shapes), "No views to plan.");
@@ -194,7 +218,21 @@ public static class MultiViewChunkPlan
             .ThenBy(g => g.Key.Height))
         {
             var global = byShape.Select(x => x.Index).ToArray();
-            var local = Plan(global.Length, chunkSize, anchorCount);
+
+            int[]? localAnchors = null;
+            if (pickAnchors != null && global.Length > chunkSize)
+            {
+                var chosen = pickAnchors(global, anchorCount);
+                var toLocal = new Dictionary<int, int>();
+                for (int i = 0; i < global.Length; i++) toLocal[global[i]] = i;
+                localAnchors = chosen
+                    .Where(toLocal.ContainsKey)
+                    .Select(g => toLocal[g])
+                    .Distinct()
+                    .ToArray();
+            }
+
+            var local = Plan(global.Length, chunkSize, anchorCount, localAnchors);
 
             var mapped = local
                 .Select(c => new MultiViewChunk(

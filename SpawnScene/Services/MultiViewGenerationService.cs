@@ -72,6 +72,16 @@ public class MultiViewGenerationService
     /// <summary>How many views the last chunked run actually put in one forward pass.</summary>
     public int LastChunkSize { get; private set; }
 
+    /// <summary>
+    /// Choose the shared anchors by how much the views actually OVERLAP, rather than spreading
+    /// them evenly over the capture. See <see cref="MultiViewChunkPlan.PickAnchorsByOverlap"/>:
+    /// an even spread is right for an orbit and close to the worst choice for a walk-through.
+    /// </summary>
+    public bool OverlapAnchors { get; set; } = true;
+
+    /// <summary>Anchor views the last chunked run used, and why they were picked.</summary>
+    public string LastAnchorSource { get; private set; } = "none";
+
     public MultiViewGenerationService(
         SpawnJSRuntime js,
         GpuService gpu,
@@ -780,9 +790,27 @@ public class MultiViewGenerationService
         IReadOnlyList<MultiViewChunkPlan.MultiViewShapeGroup>? groups = null;
         DepthEstimationService.MultiViewDepthResult? firstRun = null;
 
+        // Anchor choice is independent of N, so it is decided once, before any backoff.
+        Func<IReadOnlyList<int>, int, int[]>? pickAnchors = null;
+        LastAnchorSource = "spread";
+        if (OverlapAnchors && images.Count > chunkSize)
+        {
+            var overlap = await BuildOverlapMatrixAsync(images);
+            if (overlap != null)
+            {
+                LastAnchorSource = "overlap";
+                pickAnchors = (global, count) =>
+                {
+                    var local = MultiViewChunkPlan.PickAnchorsByOverlap(
+                        global.Count, (a, b) => overlap[global[a], global[b]], count);
+                    return local.Select(i => global[i]).ToArray();
+                };
+            }
+        }
+
         while (chunkSize > anchors)
         {
-            groups = MultiViewChunkPlan.PlanByShape(shapes, chunkSize, anchors);
+            groups = MultiViewChunkPlan.PlanByShape(shapes, chunkSize, anchors, pickAnchors);
             SetStatus($"Joint depth pass 1 of {groups[0].Chunks.Count} (N={chunkSize})...");
             firstRun = await TryRunChunkAsync(images, groups[0].Chunks[0], chunkSize);
 
@@ -827,7 +855,8 @@ public class MultiViewGenerationService
         Console.WriteLine(
             $"[MultiView] chunked poses: {reference.ViewCount} views at " +
             $"{reference.Width}x{reference.Height} in {reference.Chunks.Count} pass(es) of N={chunkSize}, " +
-            $"{anchors} shared anchors [{string.Join(",", reference.Chunks[0].Anchors.ToArray())}]");
+            $"{anchors} shared anchors [{string.Join(",", reference.Chunks[0].Anchors.ToArray())}] " +
+            $"chosen by {LastAnchorSource}");
 
         // Chunk 0 defines the world frame: its own output, untransformed.
         AdoptChunk(result, reference.Chunks[0],
@@ -869,11 +898,16 @@ public class MultiViewGenerationService
             // call nobody can check, and at MinAnchors the fit is over-determined by only two -
             // so a non-zero residual is not rounding, it says the model gave a differently SHAPED
             // anchor triangle in this pass than in the reference one.
+            // When no subset found support there is no fit, and rms is still the sentinel:
+            // printing it gives 3.4e38 and reads as a broken number rather than as "no fit".
+            string residual = inliers >= MultiViewChunkPlan.MinAnchors
+                ? $"residual {rms:F4} on a spread of {spread:F4} " +
+                  $"({(spread > 0 ? rms / spread : float.NaN):P1} of it, limit " +
+                  $"{MultiViewChunkPlan.MaxAnchorRmsFraction:P0})"
+                : $"no subset of them agreed (spread {spread:F4}, tolerance " +
+                  $"{MultiViewChunkPlan.InlierAnchorFraction:P0})";
             string fitLine =
-                $"anchors {used}/{chunk.AnchorCount} recovered, {inliers} agreeing, residual " +
-                $"{rms:F4} on a spread of {spread:F4} " +
-                $"({(spread > 0 ? rms / spread : float.NaN):P1} of it, limit " +
-                $"{MultiViewChunkPlan.MaxAnchorRmsFraction:P0})";
+                $"anchors {used}/{chunk.AnchorCount} recovered, {inliers} agreeing, {residual}";
 
             LogAnchorTriangle(ci, chunk, cams, placed);
 
@@ -906,6 +940,61 @@ public class MultiViewGenerationService
             $"[MultiView] chunked poses done: {result.PosedCount}/{images.Count} views posed in one " +
             $"frame, {result.ChunksRejected} chunk(s) rejected");
         return result;
+    }
+
+    /// <summary>
+    /// How much each pair of views actually saw of each other, as geometrically verified feature
+    /// matches.
+    ///
+    /// This runs the feature matcher on a path that deliberately SKIPS SfM, so to be explicit
+    /// about why that is not a contradiction: commit eeedfff skipped SfM because taking DEPTHS
+    /// from DAv3 and CAMERAS from SfM puts geometry and cameras in different frames at different
+    /// scales. Nothing here takes any geometry. The only question asked is which frames have
+    /// pixels in common, so that the anchors shared between passes are views the depth model can
+    /// actually relate to each other. Every pose still comes from DAv3, in one frame.
+    ///
+    /// Returns null when matching produces nothing, and the even spread is used instead.
+    /// </summary>
+    private async Task<int[,]?> BuildOverlapMatrixAsync(IReadOnlyList<ImportedImage> images)
+    {
+        try
+        {
+            var t0 = DateTime.UtcNow;
+            SetStatus($"Measuring view overlap ({images.Count} images)...");
+            _importService.Clear();
+            await _importService.ImportFromImagesAsync(images);
+
+            var pairs = _importService.MatchedPairs;
+            if (pairs.Count == 0)
+            {
+                Console.WriteLine(
+                    "[MultiView] no matched pairs - anchors fall back to an even spread across " +
+                    "the capture.");
+                return null;
+            }
+
+            var m = new int[images.Count, images.Count];
+            foreach (var pair in pairs)
+            {
+                int a = pair.ImageIndexA, b = pair.ImageIndexB;
+                if (a < 0 || b < 0 || a >= images.Count || b >= images.Count) continue;
+                // Inliers where the pair was verified; raw matches are the fallback, since a pair
+                // that was never verified still says something about overlap.
+                int weight = pair.InlierCount > 0 ? pair.InlierCount : pair.Matches.Count;
+                m[a, b] = weight;
+                m[b, a] = weight;
+            }
+
+            Console.WriteLine(
+                $"[MultiView] overlap from {pairs.Count} matched pairs in " +
+                $"{(DateTime.UtcNow - t0).TotalSeconds:F1}s");
+            return m;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[MultiView] overlap measurement failed ({ex.Message}); using an even spread.");
+            return null;
+        }
     }
 
     /// <summary>One joint forward, returning null rather than throwing when the device refuses it.</summary>

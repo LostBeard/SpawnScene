@@ -50,6 +50,12 @@ public partial class Studio
     public static bool SkipZeroGradientSteps { get; set; }
 
     /// <summary>
+    /// Fit the fixed-point gradient scales to the scene from the measured gradients. On by
+    /// default; a knob so a run can be compared against the old fixed constants.
+    /// </summary>
+    public static bool AdaptGradientScales { get; set; } = true;
+
+    /// <summary>
     /// Ceiling on the resident target stack, which holds every view as float RGB.
     ///
     /// 256 MiB leaves room for the splats, the Adam moments, the key-indexed gradient buffers
@@ -431,8 +437,8 @@ public partial class Studio
     {
         var st = await _trainer!.ReadGradientStatsAsync(n);
 
-        float centreQuantum = 1f / SplatTrainerGpu.FixedScaleFor(4);
-        float conicQuantum = 1f / SplatTrainerGpu.FixedScaleFor(6);
+        float centreQuantum = 1f / _trainer!.FixedScaleFor(4);
+        float conicQuantum = 1f / _trainer!.FixedScaleFor(6);
 
         if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
         {
@@ -466,6 +472,20 @@ public partial class Studio
             $"saturates at {centreCeiling:G3}); " +
             $"conic max {maxConic:G3} ({st.MaxConicQuanta:G3} quanta, " +
             $"saturates at {conicCeiling:G3})");
+
+        // Fit the scales to what this scene actually produces.
+        //
+        // Watching was not enough. Both scales were consts and on drjohnson they were wrong in
+        // OPPOSITE directions at the same time - the centre gradient carried one quantum of 32
+        // while the conic sat at 96% of the i32 wrap - so a warning alone just reported a
+        // reconstruction that could not work.
+        if (AdaptGradientScales && _trainer.RecalibrateGradientScales(st))
+        {
+            // The scales changed, so the numbers just printed were measured at the old ones.
+            Console.WriteLine(
+                "[Train] the readings above were taken at the previous scales; the next report " +
+                "is the one to compare against.");
+        }
 
         // The conic gradient grows with a splat's pixel AREA, so it is the one that can run out
         // of range rather than out of precision - and an i32 atomic wraps silently rather than

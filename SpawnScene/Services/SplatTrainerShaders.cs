@@ -88,14 +88,21 @@ const ADAM_QUAT : u32 = 10u;
 // else gets 64x finer. That matters: dL/d(pixel) is 1/(3*W*H) ~ 1e-6, and at the coarse scale a
 // small splat's POSITION gradient was 1.1 quanta - half of it was rounding, and only 1.4% of
 // splats got a non-zero one at all.
-const FIXED_SCALE : f32 = 1048576.0;          // 2^20, conic slots 6..8
-const FIXED_SCALE_FINE : f32 = 67108864.0;    // 2^26, slots 0..5
-
-// i32 saturates at 2^31, so the coarse scale tops out near 2048 and the fine one near 32.
-// Both leave about 100x over the largest value measured on a real scene.
-fn fixed_scale_for(slot : u32) -> f32 {
-    return select(FIXED_SCALE, FIXED_SCALE_FINE, slot < 6u);
-}
+// The scales are UNIFORMS now, not constants - see SplatTrainerGpu.GradientScales.
+//
+// These two values were consts, 2^20 and 2^26, and the comment above them claimed they left
+// about 100x headroom over the largest value measured on a real scene. That was true of the only
+// scenes that existed when it was written. MEASURED on drjohnson, a 14.5-unit room against
+// Bathroom's 3.8:
+//
+//   centre |grad| mean 1.84E-08  ->  ONE quantum of 32. Position is rounded away entirely.
+//   conic max      1.98E+03      ->  2.07e9 of 2.147e9, 96% of the i32 WRAP point.
+//
+// Wrong in opposite directions at the same time, on the same scene, and the atomic wraps
+// rather than clamping so the conic ones are wrong rather than coarse. A scale chosen for one
+// scene size cannot serve another: the conic gradient grows with a splat's screen AREA.
+//
+// fixed_scale_for() is gone with them. It was dead in every shader that included this block.
 const EWA_FILTER_PX2 : f32 = 0.3;
 ";
 
@@ -577,11 +584,10 @@ fn raster_backward(
 @group(0) @binding(3) var<storage, read>       values     : array<u32>;
 @group(0) @binding(4) var<storage, read_write> grad_fixed : array<atomic<i32>>;
 @group(0) @binding(5) var<uniform>             counts     : vec4<u32>;   // x = key count
+@group(0) @binding(6) var<uniform>             grad_scale : vec4<f32>;  // x=fine (slots 0..5), y=conic (6..8)
 
 // Gradients here are sums over a tile's pixels of quantities around 1e-4..1e-1. 2^20 keeps
 // ~6 decimal digits while leaving headroom before a 32-bit overflow.
-const FIXED_SCALE : f32 = 1048576.0;         // conic
-const FIXED_SCALE_FINE : f32 = 67108864.0;   // colour, opacity, screen centre
 const GRADS_PER_SPLAT : u32 = 9u;
 
 // 2D workgroup grid - see the note on tile_ranges.
@@ -602,13 +608,13 @@ fn scatter_gradients(
     // splat's pixel area, so only the conic needs the coarse range.
     for (var c = 0u; c < 3u; c = c + 1u) {
         let va = grad_a[b3 + c];
-        if (va != 0.0) { atomicAdd(&grad_fixed[out + c], i32(round(va * FIXED_SCALE_FINE))); }
+        if (va != 0.0) { atomicAdd(&grad_fixed[out + c], i32(round(va * grad_scale.x))); }
 
         let vb = grad_b[b3 + c];
-        if (vb != 0.0) { atomicAdd(&grad_fixed[out + 3u + c], i32(round(vb * FIXED_SCALE_FINE))); }
+        if (vb != 0.0) { atomicAdd(&grad_fixed[out + 3u + c], i32(round(vb * grad_scale.x))); }
 
         let vc = grad_c[b3 + c];
-        if (vc != 0.0) { atomicAdd(&grad_fixed[out + 6u + c], i32(round(vc * FIXED_SCALE))); }
+        if (vc != 0.0) { atomicAdd(&grad_fixed[out + 6u + c], i32(round(vc * grad_scale.y))); }
     }
 }
 ";
@@ -667,11 +673,11 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 14 per splat
 @group(0) @binding(5) var<uniform>             cfg        : vec4<f32>;        // x=colourLr y=opacityLr z=step w=splatCount
 @group(0) @binding(6) var<uniform>             flags      : vec4<f32>;        // x=skip zero-gradient splats
+@group(0) @binding(7) var<uniform>             grad_scale : vec4<f32>;        // x=fine (slots 0..5)
 
 const FLOATS_PER_SPLAT : u32 = 14u;
 const GRADS_PER_SPLAT : u32 = 9u;
 const ADAM_SLOTS : u32 = 14u;
-const FIXED_SCALE : f32 = 67108864.0;   // colour and opacity live in slots 0..3, the fine scale
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
 const EPS : f32 = 1e-15;
@@ -712,7 +718,7 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     // Colour (SH degree 0 / DC term).
     for (var c = 0u; c < 3u; c = c + 1u) {
-        let g = f32(grad_fixed[i * GRADS_PER_SPLAT + c]) / FIXED_SCALE;
+        let g = f32(grad_fixed[i * GRADS_PER_SPLAT + c]) / grad_scale.x;
         var m = adam_m[i * ADAM_SLOTS + c];
         var v = adam_v[i * ADAM_SLOTS + c];
         let updated = adam(splats[o + 3u + c], g, cfg.x, step, &m, &v);
@@ -723,7 +729,7 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     // Opacity, optimised in logit space.
     let a = splats[o + 9u];
-    let g_op = f32(grad_fixed[i * GRADS_PER_SPLAT + 3u]) / FIXED_SCALE;
+    let g_op = f32(grad_fixed[i * GRADS_PER_SPLAT + 3u]) / grad_scale.x;
     let g_logit = g_op * a * (1.0 - a);
     var m3 = adam_m[i * ADAM_SLOTS + 3u];
     var v3 = adam_v[i * ADAM_SLOTS + 3u];
@@ -1131,6 +1137,7 @@ struct GeomCfg {
 // The GPU gate compares these against SplatGeometryGradients.Backward, and density control
 // will read the screen-space position gradient that feeds them.
 @group(0) @binding(7) var<storage, read_write> geom_out : array<f32>;
+@group(0) @binding(8) var<uniform> grad_scale : vec4<f32>;   // x=fine (slots 4,5), y=conic (6..8)
 
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
@@ -1151,11 +1158,11 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (i >= u32(g.limit.x)) { return; }
 
     let gb = i * GRADS_PER_SPLAT;
-    let up_cx = f32(grad_fixed[gb + 4u]) / FIXED_SCALE_FINE;
-    let up_cy = f32(grad_fixed[gb + 5u]) / FIXED_SCALE_FINE;
-    let up_ca = f32(grad_fixed[gb + 6u]) / FIXED_SCALE;
-    let up_cb = f32(grad_fixed[gb + 7u]) / FIXED_SCALE;
-    let up_cc = f32(grad_fixed[gb + 8u]) / FIXED_SCALE;
+    let up_cx = f32(grad_fixed[gb + 4u]) / grad_scale.x;
+    let up_cy = f32(grad_fixed[gb + 5u]) / grad_scale.x;
+    let up_ca = f32(grad_fixed[gb + 6u]) / grad_scale.y;
+    let up_cb = f32(grad_fixed[gb + 7u]) / grad_scale.y;
+    let up_cc = f32(grad_fixed[gb + 8u]) / grad_scale.y;
 
     // A splat this view never touched has no gradient. Taking a step anyway would let stale
     // momentum drag geometry that nothing is currently constraining - harmless for colour,

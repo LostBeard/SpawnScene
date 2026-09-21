@@ -279,7 +279,7 @@ public partial class Studio
                 // and everything else, so one absolute bound would mean two different things.
                 // The RELATIVE check must use the unscaled error; multiplying the quantised
                 // one by 2^20 turned a 0.17% disagreement into a reported 1800x.
-                double quanta = err * SplatTrainerGpu.FixedScaleFor(k);
+                double quanta = err * trainer.FixedScaleFor(k);
                 sumAbs += quanta;
                 if (quanta > maxAbs) maxAbs = quanta;
                 compared++;
@@ -401,13 +401,13 @@ public partial class Studio
             // gpu2d is already divided by the fixed-point scales; the reduction reports QUANTA,
             // so scale back to compare like with like.
             double cen = Math.Max(Math.Abs(gpu2d[b + 4]), Math.Abs(gpu2d[b + 5]))
-                         * SplatTrainerGpu.FixedScaleFor(4);
+                         * trainer.FixedScaleFor(4);
             if (cen > 0) { cCentre++; cSumCentre += cen; }
             cMaxCentre = Math.Max(cMaxCentre, cen);
 
             double con = Math.Max(Math.Abs(gpu2d[b + 6]),
                          Math.Max(Math.Abs(gpu2d[b + 7]), Math.Abs(gpu2d[b + 8])))
-                         * SplatTrainerGpu.FixedScaleFor(6);
+                         * trainer.FixedScaleFor(6);
             if (con > 0) cConic++;
             cMaxConic = Math.Max(cMaxConic, con);
         }

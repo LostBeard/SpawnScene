@@ -270,6 +270,9 @@ public partial class Studio : IAsyncDisposable
             // held-out curve is the measurement.
             if (query.TryGetValue("skipzerograd", out var sz))
                 SkipZeroGradientSteps = sz is "1" or "true";
+            // ?adaptscales=0 keeps the old fixed 2^26 / 2^20 gradient scales, for comparison.
+            if (query.TryGetValue("adaptscales", out var asc))
+                AdaptGradientScales = asc is "1" or "true";
             // ?gtposes=1 uses the dataset's own COLMAP poses and skips pose recovery, so the
             // optimiser can be measured without the pose error folded in.
             bool gtPoses = query.TryGetValue("gtposes", out var gp) && gp is "1" or "true";

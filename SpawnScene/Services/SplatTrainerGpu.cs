@@ -83,6 +83,7 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUBuffer? _ssimDimsBuf;
     GPUBuffer? _ssimCfgBuf;
     GPUBuffer? _adamFlagsBuf;
+    GPUBuffer? _gradScaleBuf;
     GPUBuffer? _adamCfgBuf;
     GPUBuffer? _geomCfgBuf;
     GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
@@ -103,7 +104,72 @@ public sealed class SplatTrainerGpu : IDisposable
     /// grows with a splat's pixel area and keeps 2^20 for the range. See the note in
     /// SplatTrainerShaders.UniformsBlock.
     /// </summary>
-    public static float FixedScaleFor(int slot) => slot < 6 ? 67108864f : 1048576f;
+    /// <summary>Fixed-point scale for gradient slots 0..5 (colour, opacity, screen centre).</summary>
+    public float FineScale { get; private set; } = DefaultFineScale;
+
+    /// <summary>Fixed-point scale for slots 6..8, the conic - the one that grows with AREA.</summary>
+    public float ConicScale { get; private set; } = DefaultConicScale;
+
+    public const float DefaultFineScale = 67108864f;   // 2^26
+    public const float DefaultConicScale = 1048576f;   // 2^20
+
+    /// <summary>
+    /// The scale a gradient slot is stored at. Was a static with two literals in it, which is
+    /// precisely why both ended up wrong for a scene nobody had tried yet.
+    /// </summary>
+    public float FixedScaleFor(int slot) => slot < 6 ? FineScale : ConicScale;
+
+    /// <summary>
+    /// Re-scale the fixed-point gradients from what the last step actually produced.
+    ///
+    /// Both scales were consts chosen for TempleRing and Bathroom, and on drjohnson they were
+    /// wrong in OPPOSITE directions at once: the screen-centre gradient carried ONE quantum of
+    /// 32, so position was rounded away and the geometry could not move, while the conic sat at
+    /// 96% of the i32 wrap point - and the atomic WRAPS rather than clamping, so those gradients
+    /// were wrong rather than merely coarse. The conic grows with a splat's screen AREA, so no
+    /// single constant can serve a 3.8-unit scene and a 14.5-unit one.
+    ///
+    /// Aim each scale so the largest value seen lands at <see cref="TargetSaturation"/> of the
+    /// ceiling: far enough from the wrap to be safe, close enough that the small values still
+    /// land on several quanta rather than rounding to zero. Driven by the measurement rather
+    /// than by a formula, because the thing being measured is the whole problem.
+    ///
+    /// Returns true when anything moved, so a caller can say so.
+    /// </summary>
+    public bool RecalibrateGradientScales(GradientStats stats)
+    {
+        const float TargetSaturation = 0.25f;
+        float ceiling = int.MaxValue * TargetSaturation;
+
+        static float Retarget(float current, double maxQuanta, float ceiling, float fallback)
+        {
+            // Nothing was measured, so there is nothing to fit to - leave it alone rather than
+            // inventing a scale from an empty sample.
+            if (maxQuanta <= 0) return fallback;
+            double maxValue = maxQuanta / current;
+            double wanted = ceiling / maxValue;
+            // Keep it a power of two: the quantisation error is then exactly representable and
+            // a scale change cannot introduce a rounding difference of its own.
+            double exp = Math.Round(Math.Log2(wanted));
+            return (float)Math.Pow(2, Math.Clamp(exp, 4, 40));
+        }
+
+        float fine = Retarget(FineScale, stats.MaxCentreQuanta, ceiling, FineScale);
+        float conic = Retarget(ConicScale, stats.MaxConicQuanta, ceiling, ConicScale);
+
+        if (Math.Abs(Math.Log2(fine / FineScale)) < 0.5 && Math.Abs(Math.Log2(conic / ConicScale)) < 0.5)
+            return false;
+
+        Console.WriteLine(
+            $"[Trainer] gradient scales: fine 2^{Math.Log2(FineScale):F0} -> 2^{Math.Log2(fine):F0}, " +
+            $"conic 2^{Math.Log2(ConicScale):F0} -> 2^{Math.Log2(conic):F0} " +
+            $"(max centre {stats.MaxCentreQuanta:G3} quanta, max conic {stats.MaxConicQuanta:G3} quanta, " +
+            $"aiming at {TargetSaturation:P0} of the i32 ceiling)");
+
+        FineScale = fine;
+        ConicScale = conic;
+        return true;
+    }
 
     RadixSortPairs<uint, Stride1D.Dense, uint, Stride1D.Dense>? _sortPairs;
 
@@ -186,6 +252,14 @@ public sealed class SplatTrainerGpu : IDisposable
         // its allocation gives the driver's unhelpful "[Invalid CommandBuffer] ... previous
         // error", reported from whichever dispatch runs next rather than from the guilty one.
         _adamFlagsBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+
+        // Shared by scatter_gradients (writer) and both adam passes (readers). One buffer so a
+        // step cannot write at one scale and read at another.
+        _gradScaleBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
             Size = 16,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
@@ -802,18 +876,22 @@ public sealed class SplatTrainerGpu : IDisposable
         {
             Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
             Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
-            Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
+            Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!), Buf(6, _gradScaleBuf!),
         });
 
         // ── Adam ──
         _adamStepCount++;
         WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
         WriteVec4(_adamFlagsBuf!, SkipZeroGradientSteps ? 1f : 0f, 0f, 0f, 0f);
+        // One buffer for writer and readers, written before the scatter, so a step cannot
+        // accumulate at one scale and divide by another.
+        WriteVec4(_gradScaleBuf!, FineScale, ConicScale, 0f, 0f);
         Dispatch(_adamStep!, (splatCount + 63) / 64, 1, new[]
         {
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),
             Buf(2, _opacityLogit!.GetGPUBuffer()!), Buf(3, _adamM!.GetGPUBuffer()!),
             Buf(4, _adamV!.GetGPUBuffer()!), Buf(5, _adamCfgBuf!), Buf(6, _adamFlagsBuf!),
+            Buf(7, _gradScaleBuf!),
         });
 
         // -- Geometry: the 2D gradients chained back to position, scale and rotation --
@@ -829,7 +907,7 @@ public sealed class SplatTrainerGpu : IDisposable
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
                 Buf(3, _logScale!.GetGPUBuffer()!), Buf(4, _adamM!.GetGPUBuffer()!),
                 Buf(5, _adamV!.GetGPUBuffer()!), Buf(6, _geomCfgBuf!),
-                Buf(7, _geomOut!.GetGPUBuffer()!),
+                Buf(7, _geomOut!.GetGPUBuffer()!), Buf(8, _gradScaleBuf!),
             });
         }
 
@@ -1026,6 +1104,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _dimsBuf?.Destroy(); _dimsBuf?.Dispose();
         _adamCfgBuf?.Destroy(); _adamCfgBuf?.Dispose();
         _adamFlagsBuf?.Destroy(); _adamFlagsBuf?.Dispose();
+        _gradScaleBuf?.Destroy(); _gradScaleBuf?.Dispose();
         _ssimDimsBuf?.Destroy(); _ssimDimsBuf?.Dispose();
         _ssimCfgBuf?.Destroy(); _ssimCfgBuf?.Dispose();
         _scratch4?.Dispose();

@@ -33,6 +33,16 @@ public partial class Studio
     /// Logs <c>[Train] ...</c> throughout; never throws (a failed optimisation must still leave
     /// a renderable scene behind for the measurement that follows).
     /// </summary>
+    /// <summary>
+    /// Splat size ceiling as a fraction of the scene diagonal. 0.1 is the reference's PRUNE
+    /// threshold being used as a bound because nothing prunes yet; tightening it is the cheap
+    /// test of whether bloated splats are what melts the render.
+    /// </summary>
+    public static float MaxScaleFraction { get; set; } = 0.1f;
+
+    /// <summary>Multiplier on the position learning rate, for measuring rather than guessing.</summary>
+    public static float PositionLrScale { get; set; } = 1f;
+
     private async Task TrainOnTrainingViewsAsync(
         int iterations, int keysPerSplat = 8, bool optimiseGeometry = false,
         int maxTrainDimension = 720)
@@ -146,14 +156,19 @@ public partial class Studio
                 if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
 
                 geo = new SplatTrainerGpu.GeometryStep(
-                    PositionLr: 1.6e-4f * rigRadius,
+                    PositionLr: PositionLrScale * 1.6e-4f * rigRadius,
                     LogScaleLr: 0.005f,
                     RotationLr: 0.001f,
                     // Without density control nothing prunes, so a splat that stops being
-                    // constrained has to be bounded instead of pruned. The upper bound is the
-                    // reference's own prune threshold; the lower one just keeps it positive.
+                    // constrained has to be BOUNDED rather than removed - and a bound is not a
+                    // substitute for a prune. The reference uses 0.1 * scene extent to DELETE a
+                    // bloated Gaussian; used as a ceiling instead, a splat grows to it and stays
+                    // there, so one splat can span a tenth of the room. MEASURED on Bathroom with
+                    // a 12.41 dB initialisation: training took held-out to 10.81 while supervised
+                    // climbed, and the render melted into vertical drips. That is what a
+                    // population of splats sitting on the ceiling looks like.
                     MinScale: 1e-6f,
-                    MaxScale: 0.1f * MathF.Max(box.Diagonal, 1e-3f));
+                    MaxScale: MaxScaleFraction * MathF.Max(box.Diagonal, 1e-3f));
 
                 Console.WriteLine(
                     $"[Train] geometry ON: rig radius {rigRadius:F3}, " +

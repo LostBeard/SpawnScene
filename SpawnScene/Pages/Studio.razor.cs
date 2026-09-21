@@ -257,6 +257,11 @@ public partial class Studio : IAsyncDisposable
             // gave each view ~31k splats where a 6-view run gave ~40k each.
             if (query.TryGetValue("budget", out var bg) && int.TryParse(bg, out var bgi))
                 _multiViewService.SplatBudget = bgi;
+            // ?maxscale=N caps a splat at N * scene diagonal; ?poslr=N scales the position rate.
+            if (query.TryGetValue("maxscale", out var ms) && float.TryParse(ms, out var msf))
+                MaxScaleFraction = msf;
+            if (query.TryGetValue("poslr", out var pl) && float.TryParse(pl, out var plf))
+                PositionLrScale = plf;
             await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }

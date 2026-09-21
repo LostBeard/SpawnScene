@@ -30,6 +30,9 @@ const NVIEWS = process.env.N ? `&n=${process.env.N}` : '';
 const EXTRA = process.env.EXTRA || '';
 // BUDGET=N splats for the initialisation.
 const BUDGET = process.env.BUDGET ? `&budget=${process.env.BUDGET}` : '';
+// MAXSCALE=N caps a splat at N * scene diagonal; POSLR=N scales the position learning rate.
+const MAXSCALE = process.env.MAXSCALE ? `&maxscale=${process.env.MAXSCALE}` : '';
+const POSLR = process.env.POSLR ? `&poslr=${process.env.POSLR}` : '';
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -84,7 +87,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${EXTRA}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

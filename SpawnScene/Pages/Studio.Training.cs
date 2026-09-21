@@ -301,6 +301,7 @@ public partial class Studio
             double cycleSum = 0;
             int cycleN = 0;
             var curve = new List<EvalScores>();
+            var probeIterations = TrainingSchedule.ProbeIterations(iterations, supervised.Count);
             double firstCycle = double.NaN, lastCycle = double.NaN;
             for (int it = 0; it < iterations; it++)
             {
@@ -311,15 +312,14 @@ public partial class Studio
                 _trainer.SetTargetFrom(targets, vi);
                 float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo);
 
-                // Once, early: how much of the geometry gradient survives the fixed-point
-                // atomic? Gradients cross it as integers scaled by 2^20, and dL/d(pixel) is
-                // 1/(3*W*H) - about 1e-6 at this resolution - so a small splat's position
-                // gradient can be only a few QUANTA. If most splats quantise to zero the
-                // geometry cannot move and the run would look like a bad learning rate.
-                // Not gated on geometry: the colour/opacity stale-step fraction matters
-                // either way, and at 6 KB a call this is affordable more than once.
-                if (it == 0 || it == supervised.Count * 2 || it == iterations - 1)
-                    await ReportGradientHealthAsync(n);
+                // How much of the gradient survives the fixed-point atomic? Gradients cross it
+                // as scaled integers, and dL/d(pixel) is 1/(3*W*H) - about 1e-6 at this
+                // resolution - so a small splat's position gradient can be only a few QUANTA.
+                // If most splats quantise to zero the geometry cannot move and the run would
+                // look like a bad learning rate. Not gated on geometry: the colour/opacity
+                // stale-step fraction matters either way, and at 6 KB a call this is cheap.
+                if (probeIterations.Contains(it))
+                    await ReportGradientHealthAsync(n, vi);
                 if (_trainer.LastOverflowed) overflowed++;
 
                 cycleSum += loss;
@@ -451,7 +451,7 @@ public partial class Studio
     /// can legitimately be all zero. Every Bathroom run today printed "INCONCLUSIVE" because of
     /// it. A prefix of a view-major buffer is not a sample.
     /// </summary>
-    private async Task ReportGradientHealthAsync(int n)
+    private async Task ReportGradientHealthAsync(int n, int viewIndex)
     {
         var st = await _trainer!.ReadGradientStatsAsync(n);
 
@@ -464,13 +464,14 @@ public partial class Studio
             // to be reported as INCONCLUSIVE because the probe could not tell "nothing has a
             // gradient" from "I looked in the wrong place".
             Console.WriteLine(
-                "[Train] gradient health: NO splat received a gradient this step. The backward " +
-                "pass produced nothing - that is a defect, not a small number.");
+                $"[Train] gradient health (view {viewIndex}): NO splat received a gradient " +
+                "this step. The backward pass produced nothing for THIS view - which is a " +
+                "property of the view, not of the run, unless every probe says the same.");
             return;
         }
 
         Console.WriteLine(
-            $"[Train] gradient health (all {n:N0} splats): " +
+            $"[Train] gradient health (view {viewIndex}, all {n:N0} splats): " +
             $"colour {st.ColourLive * 100.0 / n:F1}% nonzero, " +
             $"centre {st.CentreLive * 100.0 / n:F1}%, conic {st.ConicLive * 100.0 / n:F1}%");
 

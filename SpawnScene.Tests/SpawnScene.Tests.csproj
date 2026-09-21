@@ -24,6 +24,7 @@
     <Compile Include="..\SpawnScene\Models\Gaussian3D.cs" Link="Linked\Gaussian3D.cs" />
     <Compile Include="..\SpawnScene\Models\PointCloud.cs" Link="Linked\PointCloud.cs" />
     <Compile Include="..\SpawnScene\Services\ImageQuality.cs" Link="Linked\ImageQuality.cs" />
+    <Compile Include="..\SpawnScene\Services\TrainingSchedule.cs" Link="Linked\TrainingSchedule.cs" />
     <Compile Include="..\SpawnScene\Services\MultiViewChunkPlan.cs" Link="Linked\MultiViewChunkPlan.cs" />
     <Compile Include="..\SpawnScene\Services\ImageOrientation.cs" Link="Linked\ImageOrientation.cs" />
     <Compile Include="..\SpawnScene\Services\SplatCovariance.cs" Link="Linked\SplatCovariance.cs" />

@@ -176,6 +176,35 @@ public partial class Studio
                 $"[Train] supervising on {supervised.Count} views, " +
                 $"{views.Count - supervised.Count} held out");
 
+            // -- Size the key budget from a measurement, not a guess --
+            // How many tiles a splat covers is a property of the scene: TempleRing wants about
+            // 3, a room wants about 13. Probe one view, then resize once if the budget was
+            // short. This must happen before InitOptimizerState, because Resize reallocates.
+            {
+                // EVERY supervised view, not one. Demand varies a lot between views - on
+                // Bathroom the first view fits and 6% of the rest do not, so a single probe
+                // reports success and the run then loses gradients on 94 frames.
+                int peak = 0;
+                foreach (int si in supervised)
+                {
+                    var probeCam = views[si].Camera.ScaledTo(w, h);
+                    var (pn, pf) = SplatBounds.DepthRangeFor(box, probeCam);
+                    await _trainer.RenderForwardAsync(packed, n, probeCam, pn, pf, readback: false);
+                    peak = Math.Max(peak, _trainer.LastKeyDemand);
+                }
+                if (peak > n * keysPerSplat)
+                {
+                    int want = (int)Math.Ceiling(peak * 1.25 / n);
+                    Console.WriteLine(
+                        $"[Train] peak demand {peak:N0} keys for {n:N0} splats " +
+                        $"({peak / (double)n:F1} per splat) across {supervised.Count} views; " +
+                        $"re-sizing to {want} per splat with 25% headroom");
+                    // The target STACK is a separate allocation and stays filled; Resize only
+                    // reallocates the trainer's own per-frame buffers.
+                    _trainer.Resize(w, h, n, want);
+                }
+            }
+
             // -- Baseline: how well does the untrained scene already explain each photo? --
             var (baseInit, baseHeld) = await EvaluateAsync(_trainer, packed, n, views, targets, box);
 
@@ -281,6 +310,19 @@ public partial class Studio
             if (con > maxConic) maxConic = con;
         }
         double meanCentre = liveCentre > 0 ? sumCentre / liveCentre : 0;
+
+        if (liveColour == 0 && liveCentre == 0 && liveConic == 0)
+        {
+            // Do not report this as "0% of splats have a gradient". The accumulator is cleared
+            // at the start of each step and read after it, and on larger scenes that readback
+            // has come back empty while the loss was demonstrably falling - so an all-zero
+            // result means the probe saw nothing, not that nothing has a gradient. Saying the
+            // latter would send the next reader after an optimiser bug that is not there.
+            Console.WriteLine(
+                "[Train] gradient health: readback saw an empty accumulator - INCONCLUSIVE, " +
+                "not a measurement of zero. Trust the loss curve instead for this run.");
+            return;
+        }
 
         Console.WriteLine(
             $"[Train] gradient health: colour {liveColour * 100.0 / n:F1}% nonzero, " +

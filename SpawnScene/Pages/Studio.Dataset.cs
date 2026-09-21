@@ -85,6 +85,31 @@ public partial class Studio
             _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
             _state = StudioState.SceneViewer;
 
+            // Stand the viewer where one of the photographs was actually taken.
+            //
+            // Two reasons not to use FitToScene here. It leaves the camera at the origin looking
+            // down -Z when there is nothing to fit to, and an SfM reconstruction can be anywhere
+            // - Bathroom lands at z 0.49 to 1.44, entirely behind that - so the viewer renders
+            // half a million splats at 58 fps and shows an empty frame. And its multi-view
+            // branch aims at a HARDCODED TempleRing point (0.028, 0.042, -0.054), which has
+            // nothing to do with a bathroom.
+            //
+            // A capture pose needs no heuristic: it is a viewpoint that definitely saw the
+            // subject, because a photograph was taken from it.
+            if (scene.TrainingCameras.Count > 0 && _cameraController != null)
+            {
+                var seat = scene.TrainingCameras[0];
+                _cameraController.SetPose(seat.Position, seat.Forward, seat.Up);
+                Console.WriteLine(
+                    $"[Dataset] viewer seated at capture pose 0: " +
+                    $"pos=({seat.Position.X:F3},{seat.Position.Y:F3},{seat.Position.Z:F3}) " +
+                    $"fwd=({seat.Forward.X:F3},{seat.Forward.Y:F3},{seat.Forward.Z:F3})");
+            }
+            else
+            {
+                _cameraController?.FitToScene();
+            }
+
             if (scene.TrainingViews.Count == 0)
             {
                 Console.WriteLine(
@@ -99,6 +124,11 @@ public partial class Studio
                     trainIters, optimiseGeometry: optimiseGeometry,
                     maxTrainDimension: maxTrainDimension);
 
+            // Announce before DONE so the harness can capture a frame of the finished scene.
+            _hideUiOverlay = true;
+            await Task.Delay(1500);
+            Console.WriteLine("[Dataset] READY-FOR-CAPTURE");
+            await Task.Delay(2500);
             Console.WriteLine("[Dataset] DONE");
         }
         catch (Exception ex)

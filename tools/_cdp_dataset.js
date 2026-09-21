@@ -52,13 +52,14 @@ const closeTab = (id) => new Promise(res =>
     await new Promise(r => ws.on('open', r));
     let id = 1;
     const pend = new Map();
-    let done = false, failed = null;
+    let done = false, failed = null, ready = false;
     ws.on('message', raw => {
       const m = JSON.parse(raw.toString());
       if (m.id && pend.has(m.id)) pend.get(m.id)(m);
       if (m.method === 'Runtime.consoleAPICalled') {
         const s = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
         if (/Dataset|Train|MultiView|SfM|Studio|DepthGPU|FAIL|Error/i.test(s)) console.log(s.slice(0, 240));
+        if (/\[Dataset\] READY-FOR-CAPTURE/.test(s)) ready = true;
         if (/\[Dataset\] DONE/.test(s)) done = true;
         if (/\[Dataset\] FAIL/.test(s)) failed = s;
       }
@@ -77,7 +78,19 @@ const closeTab = (id) => new Promise(res =>
     await send('Page.navigate', { url });
 
     const deadline = Date.now() + 55 * 60 * 1000;
-    while (Date.now() < deadline && !done && !failed) await new Promise(r => setTimeout(r, 500));
+    let shot = false;
+    while (Date.now() < deadline && !done && !failed) {
+      await new Promise(r => setTimeout(r, 500));
+      // Capture the finished scene, so the reconstruction can be LOOKED at and not only scored.
+      if (ready && !shot) {
+        shot = true;
+        const png = await send('Page.captureScreenshot', { format: 'png' });
+        const out = path.join(__dirname, '..', '_shots', 'dataset', `${NAME}.png`);
+        require('fs').mkdirSync(path.dirname(out), { recursive: true });
+        require('fs').writeFileSync(out, Buffer.from(png.result.data, 'base64'));
+        console.log('captured ' + out);
+      }
+    }
     if (failed) { console.log('\nFAILED'); process.exitCode = 1; }
     else if (!done) { console.log('\nTIMED OUT'); process.exitCode = 1; }
     else console.log('\nOK');

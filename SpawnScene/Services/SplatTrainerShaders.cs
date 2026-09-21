@@ -233,8 +233,14 @@ fn splat_weight(conic : vec3<f32>, centre : vec2<f32>, pixel : vec2<f32>) -> f32
 const DEPTH_BITS : u32 = 18u;
 const DEPTH_MAX : f32 = 262143.0;
 
+// 2D workgroup grid - see the note on tile_ranges.
 @compute @workgroup_size(64)
-fn emit_keys(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn emit_keys(
+    @builtin(workgroup_id) wg_ : vec3<u32>,
+    @builtin(num_workgroups) nwg_ : vec3<u32>,
+    @builtin(local_invocation_index) li_ : u32
+) {
+    let gid = vec3<u32>((wg_.y * nwg_.x + wg_.x) * 64u + li_, 0u, 0u);
     let i = gid.x;
     if (i >= u.splat_count) { return; }
 
@@ -281,9 +287,17 @@ fn emit_keys(@builtin(global_invocation_id) gid : vec3<u32>) {
 
 const DEPTH_BITS : u32 = 18u;
 
+// The index comes from a 2D workgroup grid, not from global_invocation_id.x.
+// maxComputeWorkgroupsPerDimension is 65535, so anything dispatched one-dimensionally caps out
+// at 4.19M threads at 64 per group - and a 580k-splat room emits 7.5M keys. Going over does
+// not clamp; the dispatch is rejected and the error surfaces later, from some other pass.
 @compute @workgroup_size(64)
-fn tile_ranges(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn tile_ranges(
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(num_workgroups) nwg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    let i = (wg.y * nwg.x + wg.x) * 64u + li;
     if (i >= counts.x) { return; }
 
     let tile = keys[i] >> DEPTH_BITS;
@@ -413,9 +427,15 @@ fn raster_forward(
 @group(0) @binding(4) var<storage, read> final_t : array<f32>;   // 1 per pixel, from forward
 @group(0) @binding(5) var<storage, read> end_idx : array<u32>;   // 1 per pixel, from forward
 @group(0) @binding(6) var<storage, read> dL_dpix : array<f32>;   // 3 per pixel
-// 9 per KEY: dL/dR, dL/dG, dL/dB, dL/dopacity, dL/d(centre.x, centre.y), dL/d(conic a, b, c).
-// One slot per (tile, splat) pair.
-@group(0) @binding(7) var<storage, read_write> grad_per_key : array<f32>;
+// Nine gradients per KEY, split across THREE bindings of three.
+//
+// Not cosmetic: maxStorageBufferBindingSize is guaranteed to be only 128 MiB, and it applies
+// per BINDING rather than per dispatch. As one buffer at 36 bytes a key the ceiling was about
+// 3.7M keys, and a 580k-splat room wants 13 keys each - so it overflowed and lost gradients.
+// Three bindings of 12 bytes each raise the same ceiling to about 11M.
+@group(0) @binding(7) var<storage, read_write> grad_a : array<f32>;   // dR, dG, dB
+@group(0) @binding(8) var<storage, read_write> grad_b : array<f32>;   // dOpacity, dCentre.x, dCentre.y
+@group(0) @binding(9) var<storage, read_write> grad_c : array<f32>;   // dConic a, b, c
 
 // Three tile-wide reductions, 12 KB of workgroup storage against a 16 KB guaranteed minimum.
 // One pass rather than three sequential ones: the space is affordable and tripling the barrier
@@ -527,16 +547,16 @@ fn raster_backward(
         }
 
         if (li == 0u) {
-            let base = k * GRADS_PER_SPLAT;
-            grad_per_key[base + 0u] = redA[0].x;
-            grad_per_key[base + 1u] = redA[0].y;
-            grad_per_key[base + 2u] = redA[0].z;
-            grad_per_key[base + 3u] = redA[0].w;
-            grad_per_key[base + 4u] = redB[0].x;
-            grad_per_key[base + 5u] = redB[0].y;
-            grad_per_key[base + 6u] = redB[0].z;
-            grad_per_key[base + 7u] = redB[0].w;
-            grad_per_key[base + 8u] = redC[0];
+            let b3 = k * 3u;
+            grad_a[b3 + 0u] = redA[0].x;
+            grad_a[b3 + 1u] = redA[0].y;
+            grad_a[b3 + 2u] = redA[0].z;
+            grad_b[b3 + 0u] = redA[0].w;
+            grad_b[b3 + 1u] = redB[0].x;
+            grad_b[b3 + 2u] = redB[0].y;
+            grad_c[b3 + 0u] = redB[0].z;
+            grad_c[b3 + 1u] = redB[0].w;
+            grad_c[b3 + 2u] = redC[0];
         }
         workgroupBarrier();
     }
@@ -551,10 +571,12 @@ fn raster_backward(
     /// through fixed point because WebGPU only offers integer atomics.
     /// </summary>
     public const string ScatterGradients = @"
-@group(0) @binding(0) var<storage, read>       grad_per_key : array<f32>;
-@group(0) @binding(1) var<storage, read>       values       : array<u32>;
-@group(0) @binding(2) var<storage, read_write> grad_fixed   : array<atomic<i32>>;
-@group(0) @binding(3) var<uniform>             counts       : vec4<u32>;   // x = key count
+@group(0) @binding(0) var<storage, read>       grad_a     : array<f32>;   // dR, dG, dB
+@group(0) @binding(1) var<storage, read>       grad_b     : array<f32>;   // dOpacity, dCentre.xy
+@group(0) @binding(2) var<storage, read>       grad_c     : array<f32>;   // dConic a, b, c
+@group(0) @binding(3) var<storage, read>       values     : array<u32>;
+@group(0) @binding(4) var<storage, read_write> grad_fixed : array<atomic<i32>>;
+@group(0) @binding(5) var<uniform>             counts     : vec4<u32>;   // x = key count
 
 // Gradients here are sums over a tile's pixels of quantities around 1e-4..1e-1. 2^20 keeps
 // ~6 decimal digits while leaving headroom before a 32-bit overflow.
@@ -562,20 +584,31 @@ const FIXED_SCALE : f32 = 1048576.0;         // conic
 const FIXED_SCALE_FINE : f32 = 67108864.0;   // colour, opacity, screen centre
 const GRADS_PER_SPLAT : u32 = 9u;
 
+// 2D workgroup grid - see the note on tile_ranges.
 @compute @workgroup_size(64)
-fn scatter_gradients(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let k = gid.x;
+fn scatter_gradients(
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(num_workgroups) nwg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    let k = (wg.y * nwg.x + wg.x) * 64u + li;
     if (k >= counts.x) { return; }
 
     let splat = values[k];
-    for (var c = 0u; c < GRADS_PER_SPLAT; c = c + 1u) {
-        let v = grad_per_key[k * GRADS_PER_SPLAT + c];
-        if (v != 0.0) {
-            // Slots 0..5 are bounded small and get 64x the precision; only the conic can grow
-            // with a splat's pixel area, so only the conic needs the coarse range.
-            let scale = select(FIXED_SCALE, FIXED_SCALE_FINE, c < 6u);
-            atomicAdd(&grad_fixed[splat * GRADS_PER_SPLAT + c], i32(round(v * scale)));
-        }
+    let b3 = k * 3u;
+    let out = splat * GRADS_PER_SPLAT;
+
+    // Slots 0..5 are bounded small and get 64x the precision; only the conic grows with a
+    // splat's pixel area, so only the conic needs the coarse range.
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        let va = grad_a[b3 + c];
+        if (va != 0.0) { atomicAdd(&grad_fixed[out + c], i32(round(va * FIXED_SCALE_FINE))); }
+
+        let vb = grad_b[b3 + c];
+        if (vb != 0.0) { atomicAdd(&grad_fixed[out + 3u + c], i32(round(vb * FIXED_SCALE_FINE))); }
+
+        let vc = grad_c[b3 + c];
+        if (vc != 0.0) { atomicAdd(&grad_fixed[out + 6u + c], i32(round(vc * FIXED_SCALE))); }
     }
 }
 ";

@@ -60,7 +60,11 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<int, Stride1D.Dense>? _sortTemp;   // radix temp is int-typed
     MemoryBuffer1D<float, Stride1D.Dense>? _target;      // 3 per pixel
     MemoryBuffer1D<float, Stride1D.Dense>? _dLdPix;      // 3 per pixel
-    MemoryBuffer1D<float, Stride1D.Dense>? _gradPerKey;  // 4 per key
+    // Three bindings of three floats per key, not one of nine: maxStorageBufferBindingSize
+    // applies per BINDING, so splitting triples how many keys fit. See Resize.
+    MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyA;
+    MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyB;
+    MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyC;
     MemoryBuffer1D<int, Stride1D.Dense>? _gradFixed;     // 4 per splat, fixed point
     MemoryBuffer1D<float, Stride1D.Dense>? _opacityLogit;
     MemoryBuffer1D<float, Stride1D.Dense>? _logScale;    // 3 per splat
@@ -108,6 +112,13 @@ public sealed class SplatTrainerGpu : IDisposable
 
     /// <summary>True when the last render overflowed the key buffer and is therefore incomplete.</summary>
     public bool LastOverflowed { get; private set; }
+
+    /// <summary>
+    /// Keys the last render actually WANTED, which exceeds <see cref="LastKeyCount"/> when it
+    /// overflowed. Lets a caller size the budget from a measurement instead of a guess: how
+    /// many tiles a splat covers depends on the scene, and a room is not a turntable.
+    /// </summary>
+    public int LastKeyDemand { get; private set; }
 
     public SplatTrainerGpu(GpuService gpu) => _gpu = gpu;
 
@@ -204,15 +215,16 @@ public sealed class SplatTrainerGpu : IDisposable
                 $"({width}x{height}). Reduce the training resolution or widen the key.");
 
         // The key budget is bounded by what a single storage BINDING may be, not by free VRAM.
-        // grad_per_key is the widest thing indexed by key - 9 floats, 36 bytes - so it hits the
-        // ceiling first: 580k splats at 8 keys each is 159 MiB against a guaranteed 128 MiB,
-        // and the driver rejects the bind group with "[Invalid CommandBuffer] is invalid due to
-        // a previous error", which says nothing about which limit was exceeded.
+        // The nine per-key gradients are split across three bindings of three floats, so the
+        // widest key-indexed binding is 12 bytes rather than 36. As one buffer, 580k splats at
+        // 8 keys each came to 159 MiB against a guaranteed 128 MiB, and the driver rejected the
+        // bind group with "[Invalid CommandBuffer] is invalid due to a previous error" - naming
+        // neither the buffer nor the limit, and surfacing from whichever dispatch ran next.
         //
         // 128 MiB is the WebGPU guaranteed minimum for maxStorageBufferBindingSize. Sizing to
         // the guarantee rather than querying means this behaves the same on every device.
         const long MaxBindingBytes = 128L * 1024 * 1024;
-        long bytesPerKey = GradsPerSplat * sizeof(float);
+        const long bytesPerKey = 3 * sizeof(float);   // the widest single key-indexed binding
         long maxKeys = MaxBindingBytes / bytesPerKey;
 
         int requested = keysPerSplat;
@@ -251,7 +263,9 @@ public sealed class SplatTrainerGpu : IDisposable
             Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
         });
         _dLdPix = accel.Allocate1D<float>((long)width * height * 3);
-        _gradPerKey = accel.Allocate1D<float>((long)_keyCapacity * GradsPerSplat);
+        _gradKeyA = accel.Allocate1D<float>((long)_keyCapacity * 3);
+        _gradKeyB = accel.Allocate1D<float>((long)_keyCapacity * 3);
+        _gradKeyC = accel.Allocate1D<float>((long)_keyCapacity * 3);
         _gradFixed = accel.Allocate1D<int>((long)splatCount * GradsPerSplat);
         _opacityLogit = accel.Allocate1D<float>(splatCount);
         _logScale = accel.Allocate1D<float>((long)splatCount * 3);
@@ -312,7 +326,8 @@ public sealed class SplatTrainerGpu : IDisposable
                 },
             });
             pass.SetBindGroup(0, bg);
-            pass.DispatchWorkgroups((uint)((splatCount + 63) / 64), 1, 1);
+            var (ekX, ekY) = LinearGrid(splatCount);
+            pass.DispatchWorkgroups((uint)ekX, (uint)ekY, 1);
             pass.End();
             using var cmd = enc.Finish();
             _queue!.Submit(new[] { cmd });
@@ -322,6 +337,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // 4 bytes back to learn how many keys exist. A scalar, not bulk data.
         int[] counted = await _counter.CopyToHostAsync<int>(0, 1);
         int keyCount = counted[0];
+        LastKeyDemand = keyCount;
         LastOverflowed = keyCount > _keyCapacity;
         LastKeyCount = Math.Min(keyCount, _keyCapacity);
         if (LastOverflowed)
@@ -358,7 +374,8 @@ public sealed class SplatTrainerGpu : IDisposable
                 },
             });
             pass.SetBindGroup(0, bg);
-            pass.DispatchWorkgroups((uint)((LastKeyCount + 63) / 64), 1, 1);
+            var (trX, trY) = LinearGrid(LastKeyCount);
+            pass.DispatchWorkgroups((uint)trX, (uint)trY, 1);
             pass.End();
             using var cmd = enc.Finish();
             _queue!.Submit(new[] { cmd });
@@ -555,17 +572,19 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _ranges!.GetGPUBuffer()!),
             Buf(3, _values!.GetGPUBuffer()!), Buf(4, _outFinalT!.GetGPUBuffer()!),
             Buf(5, _outEnd!.GetGPUBuffer()!), Buf(6, _dLdPix!.GetGPUBuffer()!),
-            Buf(7, _gradPerKey!.GetGPUBuffer()!),
+            Buf(7, _gradKeyA!.GetGPUBuffer()!), Buf(8, _gradKeyB!.GetGPUBuffer()!),
+            Buf(9, _gradKeyC!.GetGPUBuffer()!),
         });
 
         // ── Scatter per-key gradients into per-splat totals ──
         _gradFixed!.MemSetToZero();
         await accel.SynchronizeAsync();
         WriteU32(_countBuf!, (uint)LastKeyCount);
-        Dispatch(_scatterGrad!, (LastKeyCount + 63) / 64, 1, new[]
+        DispatchLinear(_scatterGrad!, LastKeyCount, new[]
         {
-            Buf(0, _gradPerKey!.GetGPUBuffer()!), Buf(1, _values!.GetGPUBuffer()!),
-            Buf(2, _gradFixed!.GetGPUBuffer()!), Buf(3, _countBuf!),
+            Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
+            Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
+            Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
         });
 
         // ── Adam ──
@@ -620,6 +639,7 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public async Task<float[]> ReadGradientsAsync(int splatCount)
     {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
         int[] raw = await _gradFixed!.CopyToHostAsync<int>(0, (long)splatCount * GradsPerSplat);
         var outp = new float[raw.Length];
         for (int i = 0; i < raw.Length; i++) outp[i] = raw[i] / FixedScaleFor(i % GradsPerSplat);
@@ -635,6 +655,33 @@ public sealed class SplatTrainerGpu : IDisposable
 
     static GPUBindGroupEntry Buf(uint binding, GPUBuffer b) =>
         new() { Binding = binding, Resource = new GPUBufferBinding { Buffer = b } };
+
+    /// <summary>
+    /// Largest workgroup count WebGPU guarantees in any one dimension. Exceeding it does not
+    /// clamp - the dispatch is rejected, and the driver reports it from whatever runs next.
+    /// </summary>
+    const int MaxWorkgroupsPerDim = 65535;
+
+    /// <summary>
+    /// Dispatch enough 64-thread workgroups to cover <paramref name="threads"/>, wrapping into
+    /// a second dimension past the per-dimension limit. One dimension tops out at 4.19M threads
+    /// and a room-scale scene emits more keys than that, so every key-indexed pass needs this.
+    /// The shader recovers the flat index from workgroup_id and num_workgroups.
+    /// </summary>
+    void DispatchLinear(GPUComputePipeline pipeline, long threads, GPUBindGroupEntry[] entries)
+    {
+        var (wgX, wgY) = LinearGrid(threads);
+        Dispatch(pipeline, wgX, wgY, entries);
+    }
+
+    /// <summary>Workgroup grid covering <paramref name="threads"/> at 64 per group.</summary>
+    static (int X, int Y) LinearGrid(long threads)
+    {
+        long groups = Math.Max(1, (threads + 63) / 64);
+        int x = (int)Math.Min(groups, MaxWorkgroupsPerDim);
+        int y = (int)((groups + MaxWorkgroupsPerDim - 1) / MaxWorkgroupsPerDim);
+        return (x, y);
+    }
 
     void Dispatch(GPUComputePipeline pipeline, int wgX, int wgY, GPUBindGroupEntry[] entries)
     {
@@ -718,7 +765,9 @@ public sealed class SplatTrainerGpu : IDisposable
         _sortTemp?.Dispose(); _sortTemp = null;
         _target?.Dispose(); _target = null;
         _dLdPix?.Dispose(); _dLdPix = null;
-        _gradPerKey?.Dispose(); _gradPerKey = null;
+        _gradKeyA?.Dispose(); _gradKeyA = null;
+        _gradKeyB?.Dispose(); _gradKeyB = null;
+        _gradKeyC?.Dispose(); _gradKeyC = null;
         _gradFixed?.Dispose(); _gradFixed = null;
         _opacityLogit?.Dispose(); _opacityLogit = null;
         _logScale?.Dispose(); _logScale = null;

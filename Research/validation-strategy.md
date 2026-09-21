@@ -82,6 +82,13 @@ initialisation reproduced to **0.09 dB**, final differed by **1.40 dB**, and hel
 **2.74 dB within a single run**. Several conclusions drawn that day compared final numbers
 differing by less than that. Measure the repeat before believing a difference.
 
+**Compare runs on a mean, never on the last sample.** Held-out PSNR swings 1.88 to 2.74 dB
+*within* a single run, and two runs of the same configuration ended 1.52 dB apart. The final
+number is one sample of an oscillation, so an A/B read off endpoints cannot resolve anything
+smaller than the swing - and beating that by averaging whole extra runs costs GPU hours. The
+per-cycle curve is already collected; its mean has roughly half the standard error of any one
+sample and is free. The run log prints it on a line labelled `COMPARE:` for exactly this reason.
+
 **Count occurrences, not appearances.** One `KEY OVERFLOW` line looked like a persistent condition
 and produced a wrong diagnosis, a shipped fix and a lost GPU device. `grep -c` said 1, and the very
 next line said the trainer had already re-sized itself with headroom. A system that recovers
@@ -107,10 +114,45 @@ hypothesis.
 | trainer rasteriser | **proven** - `Studio.TrainerGate.cs` compares forward, gradients and the geometry chain against CPU oracles |
 | gradient accumulation | **proven** - reduction gated against a CPU pass over the same buffer |
 | display renderer | ungated, but substantial positive evidence: 14M splats and DAv2 scenes render correctly |
-| camera layer (`CameraController`) | 🔴 **ungated AND implicated** - both viewer failures on 2026-09-21 were here |
+| camera layer (`CameraController`) | unit-tested since 2026-09-21 (`CameraControllerTests`) - pose survives an input event, `FitToScene` aims at ray convergence. Still no end-to-end viewer check |
 | depth -> splats | partly - unit-tested unproject, but no end-to-end check against a reference reconstruction |
 | poses | measured on TempleRing (5% of camera spread) and on a posed ROOM (in progress) |
-| optimiser | 🔴 unproven against known-good poses - that is what Deep Blending is for |
+| optimiser | 🔴 **tested against known-good poses and it FAILED** - drjohnson with COLMAP poses still overfits, so poses were never why training hurts |
+| splat sampling schedule | proven - `TrainingScheduleTests` asserts probes do not alias with the round robin |
+| view support counter | proven - CPU-gated in `Studio.TrainerGate.cs` |
+
+## The hypothesis this chain has never tested
+
+Written down **before** the measurement, so it cannot be rationalised afterwards.
+
+Every optimiser experiment here - fixed-point scales, the zero-gradient Adam guard, shuffled
+view order, an SSIM loss term - assumes training *could* generalise and is being held back by a
+step rule. On drjohnson, with COLMAP **ground-truth** poses, supervised PSNR rises 13.13 -> 14.34
+while held-out falls 12.58 -> 11.84. That is textbook overfitting, and the poses were not the
+cause, because they were correct by construction.
+
+There is a structural reason it might be unfixable by any optimiser knob. Initialisation
+unprojects a monocular depth map **per view**: 44 views give 44 private depth shells stacked in
+one world, 25,344 splats each. If a splat only ever receives a gradient from the single view it
+came from, then training is not a reconstruction - it is 44 independent per-view fits sharing a
+buffer. Each can lower its own view's loss while saying nothing about a view nobody trained on,
+and nothing can contradict it.
+
+**Prediction if true:** most splats will be constrained by at most one view, and the
+single-view fraction will be far above what a genuinely shared scene would produce.
+
+**Prediction if false:** a substantial fraction of splats will be moved by two or more views,
+the overfitting has an ordinary cause, and the optimiser experiments are worth finishing.
+
+`[Train] view support over N views` reports this after the first full cycle. It is gated against
+a CPU pass in `Studio.TrainerGate.cs`, accumulated twice over the same gradients so the check
+covers the counting and not just the threshold.
+
+**Either way it is decisive**, which is why it is worth measuring before spending more runs: if
+the shells never overlap, the next work is fusing them (`MvsGeometricFusion` already exists),
+not tuning Adam.
+
+## Where to look first
 
 The gap that matters most is the CAMERA layer: it is ungated, and it is where both wrong
 conclusions actually came from. It is also the cheaper thing to gate - a unit test that sets a

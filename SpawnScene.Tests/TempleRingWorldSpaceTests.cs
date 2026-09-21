@@ -264,6 +264,66 @@ public class TempleRingWorldSpaceTests
         }
     }
 
+    /// <summary>
+    /// Regression: the fit used to come back TRUE with a wrong transform.
+    ///
+    /// <see cref="UmeyamaSimilarity_RecoversKnownSimilarity"/> passed throughout, because four
+    /// points and a 90-degree turn about Y happen to land on the good side of the bug. Three
+    /// non-collinear points determine a similarity exactly, and with a general rotation the old
+    /// power iteration converged to the most NEGATIVE eigenvalue of Horn's traceless N - the
+    /// worst rotation rather than the best - returning scale 1.94 against a true 2.5 with a
+    /// residual of 0.43 and no error. A caller that trusted the bool placed geometry by it.
+    /// </summary>
+    [Test]
+    public void UmeyamaSimilarity_ThreePointsLargeRotation_IsExactNotMerelySuccessful()
+    {
+        float trueScale = 2.5f;
+        var trueR = Matrix4x4.CreateFromYawPitchRoll(0.7f, -0.35f, 1.1f);
+        var trueT = new Vector3(-4f, 2f, 9f);
+
+        var src = new[] { new Vector3(0, 0, 0), new Vector3(1, 0.4f, 0), new Vector3(0, 1, 0.6f) };
+        var dst = src.Select(p => trueScale * Vector3.Transform(p, trueR) + trueT).ToList();
+
+        Assert.That(WorldSpaceGeometry.TryUmeyamaSimilarity(
+            src, dst, out float s, out var R, out var t, out float rms), Is.True);
+        Assert.That(rms, Is.LessThan(1e-4f), "an exactly determined fit must be exact, not close");
+        Assert.That(s, Is.EqualTo(trueScale).Within(1e-3f));
+        for (int i = 0; i < src.Length; i++)
+            Assert.That(Vector3.Distance(WorldSpaceGeometry.ApplySimilarity(src[i], s, R, t), dst[i]),
+                Is.LessThan(1e-3f));
+    }
+
+    /// <summary>
+    /// The same solver over many random rotations. One rotation is a sample, and the old bug was
+    /// invisible to the sample that happened to be in the test.
+    /// </summary>
+    [Test]
+    public void UmeyamaSimilarity_IsExactAcrossRandomRotations()
+    {
+        var rng = new Random(20260921);
+        float F() => (float)(rng.NextDouble() * 2.0 - 1.0);
+
+        float worst = 0f;
+        for (int trial = 0; trial < 200; trial++)
+        {
+            float trueScale = 0.2f + (float)rng.NextDouble() * 4f;
+            var trueR = Matrix4x4.CreateFromYawPitchRoll(F() * 3.1f, F() * 1.5f, F() * 3.1f);
+            var trueT = new Vector3(F() * 10f, F() * 10f, F() * 10f);
+
+            var src = new List<Vector3>();
+            for (int i = 0; i < 3 + trial % 4; i++) src.Add(new Vector3(F(), F(), F()));
+            var dst = src.Select(p => trueScale * Vector3.Transform(p, trueR) + trueT).ToList();
+
+            Assert.That(WorldSpaceGeometry.TryUmeyamaSimilarity(
+                src, dst, out float s, out _, out _, out float rms), Is.True, $"trial {trial}");
+            float spread = src.Select(p => p.Length()).Max();
+            Assert.That(rms, Is.LessThan(1e-3f * Math.Max(1f, trueScale * spread)), $"trial {trial}");
+            Assert.That(s, Is.EqualTo(trueScale).Within(1e-2f * trueScale), $"trial {trial}");
+            worst = MathF.Max(worst, rms);
+        }
+        TestContext.Out.WriteLine($"worst residual over 200 random similarities: {worst:E3}");
+    }
+
     [Test]
     public void UmeyamaSimilarity_TempleRingCameras_SelfAligns()
     {

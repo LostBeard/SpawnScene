@@ -1,0 +1,442 @@
+using System.Numerics;
+using NUnit.Framework;
+using SpawnScene.Models;
+using SpawnScene.Services;
+
+namespace SpawnScene.Tests;
+
+/// <summary>
+/// Gate for posing every view in ONE frame with a depth model that only sees a few at a time.
+///
+/// Why this exists: commit eeedfff measured joint DAv3 poses as ~5 dB better initialisation than
+/// SfM on Bathroom, but DAv3 only poses the six views it is handed, so supervision fell from 17
+/// views to 5. The way out is to run it repeatedly with shared anchor views and fold each pass
+/// into the first pass's frame. The whole risk of that is the fold: a similarity fitted to the
+/// wrong thing places a chunk's splats confidently in the wrong part of the room, and nothing
+/// downstream can tell that from measured geometry.
+///
+/// <see cref="ChunkedPasses_InArbitraryFrames_ReassembleToTheGroundTruthRig"/> is the real gate -
+/// it hands each chunk its cameras in a DIFFERENT random frame, exactly as independent forward
+/// passes would, and demands the ground-truth rig back.
+///
+/// Run: <c>dotnet test SpawnScene.Tests -c Release --filter MultiViewChunkPlan</c>
+/// </summary>
+public class MultiViewChunkPlanTests
+{
+    private const int ChunkSize = 6;   // DepthEstimationService.MaxMultiViewImages
+    private const int Anchors = 3;
+
+    // ---- Planning ----
+
+    [Test]
+    public void Plan_PosesEveryViewExactlyOnce()
+    {
+        var plan = MultiViewChunkPlan.Plan(viewCount: 35, ChunkSize, Anchors);
+
+        var seen = new List<int>();
+        foreach (var chunk in plan) seen.AddRange(chunk.NewViews.ToArray());
+        var anchorSet = plan[0].Anchors.ToArray().ToHashSet();
+
+        Assert.That(seen, Is.Unique, "a view posed by two chunks would be merged in twice");
+        Assert.That(seen.Concat(anchorSet).OrderBy(i => i), Is.EqualTo(Enumerable.Range(0, 35)),
+            "every one of the 35 frames must be posed - dropping views is the bug being fixed");
+    }
+
+    [Test]
+    public void Plan_EveryChunkCarriesTheSameAnchorsAndFitsTheModelCap()
+    {
+        var plan = MultiViewChunkPlan.Plan(viewCount: 35, ChunkSize, Anchors);
+        var anchors = plan[0].Anchors.ToArray();
+
+        Assert.That(anchors, Has.Length.EqualTo(Anchors));
+        foreach (var chunk in plan)
+        {
+            Assert.That(chunk.Views, Has.Length.LessThanOrEqualTo(ChunkSize),
+                "a chunk larger than the cap is a forward pass the model will refuse");
+            Assert.That(chunk.Anchors.ToArray(), Is.EqualTo(anchors),
+                "anchors are shared globally so each chunk fits the reference DIRECTLY, " +
+                "with no error chained through its neighbours");
+            Assert.That(chunk.Views, Is.Unique);
+        }
+    }
+
+    [Test]
+    public void Plan_SpreadsAnchorsAcrossTheCapture()
+    {
+        var anchors = MultiViewChunkPlan.Plan(35, ChunkSize, Anchors)[0].Anchors.ToArray();
+        // Adjacent handheld frames are near-parallel: the worst case for both the depth model
+        // and the similarity fit. Endpoints included, evenly spaced.
+        Assert.That(anchors, Is.EqualTo(new[] { 0, 17, 34 }));
+    }
+
+    [Test]
+    public void Plan_SpreadsEachChunksNewViewsToo()
+    {
+        var plan = MultiViewChunkPlan.Plan(35, ChunkSize, Anchors);
+        // 32 non-anchor views, 3 per chunk => 11 chunks, dealt round-robin. Chunk 0 must not be
+        // three consecutive frames.
+        Assert.That(plan, Has.Count.EqualTo(11));
+        var first = plan[0].NewViews.ToArray();
+        Assert.That(first.Max() - first.Min(), Is.GreaterThan(3),
+            "a chunk of consecutive frames is the near-parallel case this deals around");
+    }
+
+    [Test]
+    public void Plan_UsesOnePassWhenEverythingFits()
+    {
+        var plan = MultiViewChunkPlan.Plan(viewCount: 4, ChunkSize, Anchors);
+        Assert.That(plan, Has.Count.EqualTo(1));
+        Assert.That(plan[0].Views, Is.EqualTo(new[] { 0, 1, 2, 3 }));
+        Assert.That(plan[0].NewViews.Length, Is.Zero, "one pass IS the reference frame");
+    }
+
+    [Test]
+    public void Plan_RejectsAnchorCountsThatCannotDetermineASimilarity()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => MultiViewChunkPlan.Plan(35, ChunkSize, 2),
+            "two anchors leave a free roll about the line joining them");
+        Assert.Throws<ArgumentOutOfRangeException>(() => MultiViewChunkPlan.Plan(35, ChunkSize, 6),
+            "anchors filling the chunk leave no view to pose");
+        Assert.Throws<ArgumentOutOfRangeException>(() => MultiViewChunkPlan.Plan(35, 3, 3));
+    }
+
+    // ---- The fold ----
+
+    [Test]
+    public void Similarity_AppliesScaleAndTranslationToPointsButNotToDirections()
+    {
+        var sim = new Similarity3(3f, Matrix4x4.CreateRotationY(MathF.PI / 2f), new Vector3(10, 0, 0));
+
+        var p = sim.Apply(new Vector3(1, 0, 0));
+        Assert.That(p.Length(), Is.GreaterThan(1f), "a point takes the scale and the offset");
+
+        var d = sim.ApplyDirection(new Vector3(1, 0, 0));
+        Assert.That(d.Length(), Is.EqualTo(1f).Within(1e-5f),
+            "a camera's forward is a direction: scaling or translating it aims the camera at nothing");
+    }
+
+    [Test]
+    public void FitChunkToReference_RecoversAKnownTransform()
+    {
+        var truth = new Similarity3(
+            2.5f, Matrix4x4.CreateFromYawPitchRoll(0.7f, -0.35f, 1.1f), new Vector3(-4f, 2f, 9f));
+
+        var chunk = new MultiViewChunk(new[] { 0, 1, 2, 7 }, AnchorCount: 3);
+        var reference = new Dictionary<int, CameraParams>
+        {
+            [0] = CamAt(new Vector3(0, 0, 0)),
+            [1] = CamAt(new Vector3(1, 0.4f, 0)),
+            [2] = CamAt(new Vector3(0, 1, 0.6f)),
+        };
+        // The chunk sees the same cameras through the INVERSE of truth, so fitting must return truth.
+        var chunkCams = new CameraParams?[]
+        {
+            CamAt(InverseOf(truth, reference[0].Position)),
+            CamAt(InverseOf(truth, reference[1].Position)),
+            CamAt(InverseOf(truth, reference[2].Position)),
+            CamAt(new Vector3(5, 5, 5)),
+        };
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+            chunk, chunkCams, reference, out var sim, out var rms, out var used), Is.True);
+        Assert.That(used, Is.EqualTo(3));
+        Assert.That(rms, Is.LessThan(1e-3f));
+        Assert.That(sim.Scale, Is.EqualTo(truth.Scale).Within(1e-3f));
+
+        var probe = new Vector3(0.3f, -0.8f, 2f);
+        var viaTruth = truth.Apply(probe);
+        var viaFit = sim.Apply(probe);
+        Assert.That(Vector3.Distance(viaTruth, viaFit), Is.LessThan(1e-3f));
+    }
+
+    /// <summary>
+    /// The gate. Eleven independent forward passes, each reporting the shared anchors in its own
+    /// arbitrary frame, must reassemble into the one rig the photographs were actually taken from.
+    /// </summary>
+    [Test]
+    public void ChunkedPasses_InArbitraryFrames_ReassembleToTheGroundTruthRig()
+    {
+        const int Views = 35;
+        var truthRig = BuildHandheldRig(Views);
+        var plan = MultiViewChunkPlan.Plan(Views, ChunkSize, Anchors);
+
+        var rng = new Random(20260921);
+        var placed = new Dictionary<int, CameraParams>();
+        var depthScale = new Dictionary<int, float>();
+
+        for (int c = 0; c < plan.Count; c++)
+        {
+            var chunk = plan[c];
+            // Chunk 0 IS the reference frame; every later pass gets a random frame of its own.
+            var frame = c == 0 ? Similarity3.Identity : RandomSimilarity(rng);
+
+            var asSeen = new CameraParams?[chunk.Views.Length];
+            for (int slot = 0; slot < chunk.Views.Length; slot++)
+            {
+                var cam = Clone(truthRig[chunk.Views[slot]]);
+                InverseSimilarity(frame).ApplyToCamera(cam);   // truth -> this pass's frame
+                asSeen[slot] = cam;
+            }
+
+            if (c == 0)
+            {
+                for (int slot = 0; slot < chunk.Views.Length; slot++)
+                {
+                    placed[chunk.Views[slot]] = asSeen[slot]!;
+                    depthScale[chunk.Views[slot]] = 1f;
+                }
+                continue;
+            }
+
+            Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+                    chunk, asSeen, placed, out var sim, out var rms, out _), Is.True,
+                $"chunk {c} must fold into the reference frame");
+            Assert.That(rms, Is.LessThan(1e-3f), $"chunk {c} residual");
+
+            foreach (var slot in Enumerable.Range(chunk.AnchorCount, chunk.NewViews.Length))
+            {
+                var cam = asSeen[slot]!;
+                sim.ApplyToCamera(cam);
+                placed[chunk.Views[slot]] = cam;
+                // Depths came out of the pass in the pass's frame, so they take the same scale.
+                depthScale[chunk.Views[slot]] = sim.Scale;
+            }
+        }
+
+        Assert.That(placed, Has.Count.EqualTo(Views), "every frame posed, in one world");
+
+        for (int i = 0; i < Views; i++)
+        {
+            var got = placed[i];
+            var want = truthRig[i];
+            Assert.That(Vector3.Distance(got.Position, want.Position), Is.LessThan(2e-3f),
+                $"view {i} position");
+            Assert.That(Vector3.Dot(got.Forward, want.Forward), Is.EqualTo(1f).Within(1e-3f),
+                $"view {i} forward - a camera in the right place looking the wrong way renders nothing");
+            Assert.That(Vector3.Dot(got.Up, want.Up), Is.EqualTo(1f).Within(1e-3f),
+                $"view {i} up - a rolled camera unprojects its depth map into a twisted shell");
+        }
+    }
+
+    /// <summary>
+    /// Mixed per-view image rotations - some clockwise, some counter - must not disturb the fold.
+    ///
+    /// A real capture has them: <c>QuarterTurnsToUpright</c> is decided per frame, and Bathroom
+    /// asked for four different answers across six cameras of one room. The reason it cannot
+    /// matter here is worth stating, because "it should be fine" is how this kind of thing gets
+    /// shipped: turning a photograph adds ROLL to the camera that reports it, and roll does not
+    /// move the camera's centre. The fit reads centres and nothing else.
+    ///
+    /// What rotation DOES change is the image SHAPE, and that is handled where it bites - see
+    /// <c>MultiViewChunkPlan.PlanByShape</c>.
+    /// </summary>
+    [Test]
+    public void MixedPerViewImageRotations_DoNotDisturbTheFold()
+    {
+        const int Views = 35;
+        var truthRig = BuildHandheldRig(Views);
+
+        // Roll each camera about its own forward axis by a different amount and direction,
+        // which is exactly what turning its photograph does.
+        var rolls = new float[Views];
+        for (int i = 0; i < Views; i++)
+        {
+            int turns = (i * 7) % 4;                       // 0, 1, 2, 3 - both directions
+            rolls[i] = turns * MathF.PI / 2f * (i % 2 == 0 ? 1f : -1f);
+            var q = Quaternion.CreateFromAxisAngle(truthRig[i].Forward, rolls[i]);
+            truthRig[i].Up = Vector3.Normalize(Vector3.Transform(truthRig[i].Up, q));
+        }
+
+        var plan = MultiViewChunkPlan.Plan(Views, ChunkSize, Anchors);
+        var rng = new Random(7);
+        var placed = new Dictionary<int, CameraParams>();
+
+        for (int c = 0; c < plan.Count; c++)
+        {
+            var chunk = plan[c];
+            var frame = c == 0 ? Similarity3.Identity : RandomSimilarity(rng);
+            var asSeen = new CameraParams?[chunk.Views.Length];
+            for (int slot = 0; slot < chunk.Views.Length; slot++)
+            {
+                var cam = Clone(truthRig[chunk.Views[slot]]);
+                InverseSimilarity(frame).ApplyToCamera(cam);
+                asSeen[slot] = cam;
+            }
+
+            if (c == 0)
+            {
+                for (int slot = 0; slot < chunk.Views.Length; slot++)
+                    placed[chunk.Views[slot]] = asSeen[slot]!;
+                continue;
+            }
+
+            Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+                    chunk, asSeen, placed, out var sim, out var rms, out _), Is.True,
+                $"chunk {c} with mixed image rotations");
+            Assert.That(rms, Is.LessThan(1e-3f));
+            foreach (var slot in Enumerable.Range(chunk.AnchorCount, chunk.NewViews.Length))
+            {
+                var cam = asSeen[slot]!;
+                sim.ApplyToCamera(cam);
+                placed[chunk.Views[slot]] = cam;
+            }
+        }
+
+        for (int i = 0; i < Views; i++)
+        {
+            Assert.That(Vector3.Distance(placed[i].Position, truthRig[i].Position), Is.LessThan(2e-3f),
+                $"view {i} position");
+            Assert.That(Vector3.Dot(placed[i].Up, truthRig[i].Up), Is.EqualTo(1f).Within(1e-3f),
+                $"view {i} roll must be carried through, not straightened");
+        }
+    }
+
+    /// <summary>
+    /// Where image rotation DOES matter: a quarter turn swaps width and height, and the joint
+    /// depth pass emits every view at its FIRST view's resolution. A portrait frame sharing a
+    /// pass with landscape ones comes back at the wrong shape and unprojects into a stretched
+    /// shell, silently. Chunks are therefore planned per shape.
+    /// </summary>
+    [Test]
+    public void PlanByShape_NeverPutsTwoShapesInOnePass()
+    {
+        // 34 portrait frames and one landscape - Bathroom's actual mix.
+        var shapes = new (int W, int H)[35];
+        for (int i = 0; i < 35; i++) shapes[i] = (768, 1024);
+        shapes[11] = (1024, 768);
+
+        var groups = MultiViewChunkPlan.PlanByShape(shapes, ChunkSize, Anchors);
+
+        foreach (var group in groups)
+            foreach (var chunk in group.Chunks)
+            {
+                var distinct = chunk.Views.Select(v => shapes[v]).Distinct().ToList();
+                Assert.That(distinct, Has.Count.EqualTo(1),
+                    "one pass, one shape: the model emits every view at the first one's resolution");
+            }
+
+        var posed = groups.SelectMany(g => g.Chunks).SelectMany(c => c.Views).Distinct().ToList();
+        Assert.That(posed, Has.Count.EqualTo(35), "the odd frame is still posed, in its own group");
+    }
+
+    /// <summary>
+    /// Red check: the gate above must be able to FAIL. Forget to rotate the directions - the
+    /// single most tempting simplification, since positions already line up - and it catches it.
+    /// </summary>
+    [Test]
+    public void RedCheck_PlacingPositionsWithoutRotatingDirectionsIsDetected()
+    {
+        var rig = BuildHandheldRig(8);
+        var frame = new Similarity3(1.7f, Matrix4x4.CreateFromYawPitchRoll(0.9f, 0.2f, -0.6f),
+            new Vector3(3f, -1f, 2f));
+
+        var cam = Clone(rig[5]);
+        var inverse = InverseSimilarity(frame);
+        inverse.ApplyToCamera(cam);
+
+        // Position only, directions left in the pass's frame.
+        var halfDone = Clone(cam);
+        halfDone.Position = frame.Apply(cam.Position);
+
+        Assert.That(Vector3.Distance(halfDone.Position, rig[5].Position), Is.LessThan(1e-4f),
+            "positions agree, which is exactly why this is easy to miss");
+        Assert.That(Vector3.Dot(halfDone.Forward, rig[5].Forward), Is.LessThan(0.99f),
+            "and the camera is aimed somewhere else entirely");
+    }
+
+    [Test]
+    public void FitChunkToReference_RefusesTooFewSurvivingAnchors()
+    {
+        var chunk = new MultiViewChunk(new[] { 0, 1, 2, 7 }, AnchorCount: 3);
+        var reference = new Dictionary<int, CameraParams>
+        {
+            [0] = CamAt(Vector3.Zero),
+            [1] = CamAt(new Vector3(1, 0, 0)),
+            [2] = CamAt(new Vector3(0, 1, 0)),
+        };
+        var cams = new CameraParams?[] { CamAt(Vector3.Zero), null, CamAt(new Vector3(0, 1, 0)), CamAt(Vector3.One) };
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+            chunk, cams, reference, out _, out _, out var used), Is.False,
+            "two anchors cannot pin the roll; placing the chunk anyway puts real splats in the wrong room");
+        Assert.That(used, Is.EqualTo(2));
+    }
+
+    [Test]
+    public void FitChunkToReference_RefusesAChunkWhoseAnchorsDisagree()
+    {
+        var chunk = new MultiViewChunk(new[] { 0, 1, 2, 3, 7 }, AnchorCount: 4);
+        var reference = new Dictionary<int, CameraParams>
+        {
+            [0] = CamAt(Vector3.Zero),
+            [1] = CamAt(new Vector3(1, 0, 0)),
+            [2] = CamAt(new Vector3(0, 1, 0)),
+            [3] = CamAt(new Vector3(0, 0, 1)),
+        };
+        // Anchor 3 is badly misplaced in this pass - no similarity explains all four.
+        var cams = new CameraParams?[]
+        {
+            CamAt(Vector3.Zero), CamAt(new Vector3(1, 0, 0)),
+            CamAt(new Vector3(0, 1, 0)), CamAt(new Vector3(0, 0, -4f)),
+            CamAt(Vector3.One),
+        };
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+            chunk, cams, reference, out _, out var rms, out _), Is.False,
+            "a residual this large means the pass did not recover the anchors; it must not be placed");
+        Assert.That(rms, Is.GreaterThan(0.1f));
+    }
+
+    // ---- helpers ----
+
+    private static CameraParams CamAt(Vector3 p) => new()
+    {
+        Width = 640, Height = 480, FocalX = 500, FocalY = 500, CenterX = 320, CenterY = 240,
+        Position = p, Forward = -Vector3.UnitZ, Up = Vector3.UnitY,
+    };
+
+    private static CameraParams Clone(CameraParams c) => new()
+    {
+        Width = c.Width, Height = c.Height, FocalX = c.FocalX, FocalY = c.FocalY,
+        CenterX = c.CenterX, CenterY = c.CenterY, Near = c.Near, Far = c.Far,
+        Position = c.Position, Forward = c.Forward, Up = c.Up,
+    };
+
+    /// <summary>Cameras walking an arc and looking inward, roughly what a handheld room capture is.</summary>
+    private static CameraParams[] BuildHandheldRig(int n)
+    {
+        var rig = new CameraParams[n];
+        for (int i = 0; i < n; i++)
+        {
+            float t = i / (float)(n - 1);
+            float a = t * 2.2f;
+            var pos = new Vector3(MathF.Cos(a) * 1.6f, 0.2f + 0.3f * MathF.Sin(t * 5f), MathF.Sin(a) * 1.6f);
+            var fwd = Vector3.Normalize(new Vector3(0, 0.1f, 0) - pos);
+            var right = Vector3.Normalize(Vector3.Cross(fwd, Vector3.UnitY));
+            var up = Vector3.Normalize(Vector3.Cross(right, fwd));
+            rig[i] = CamAt(pos);
+            rig[i].Forward = fwd;
+            rig[i].Up = up;
+        }
+        return rig;
+    }
+
+    private static Similarity3 RandomSimilarity(Random rng)
+    {
+        float F() => (float)(rng.NextDouble() * 2.0 - 1.0);
+        return new Similarity3(
+            0.3f + (float)rng.NextDouble() * 3f,
+            Matrix4x4.CreateFromYawPitchRoll(F() * 3f, F() * 1.4f, F() * 3f),
+            new Vector3(F() * 8f, F() * 8f, F() * 8f));
+    }
+
+    private static Similarity3 InverseSimilarity(Similarity3 s)
+    {
+        Matrix4x4.Invert(s.Rotation, out var rInv);
+        float invScale = 1f / s.Scale;
+        // p = R^-1 (p' - t) / scale  =>  scale' = 1/scale, R' = R^-1, t' = -R^-1 t / scale
+        return new Similarity3(invScale, rInv, -invScale * Vector3.Transform(s.Translation, rInv));
+    }
+
+    private static Vector3 InverseOf(Similarity3 s, Vector3 p) => InverseSimilarity(s).Apply(p);
+}

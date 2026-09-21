@@ -236,18 +236,8 @@ public static class WorldSpaceGeometry
         N[12] = h01 - h10;
         N[13] = h02 + h20; N[14] = h12 + h21; N[15] = -h00 - h11 + h22;
 
-        // Power iteration for dominant eigenvector of symmetric N (quaternion).
-        float qw = 1, qx = 0, qy = 0, qz = 0;
-        for (int it = 0; it < 64; it++)
-        {
-            float rw = N[0] * qw + N[1] * qx + N[2] * qy + N[3] * qz;
-            float rx = N[4] * qw + N[5] * qx + N[6] * qy + N[7] * qz;
-            float ry = N[8] * qw + N[9] * qx + N[10] * qy + N[11] * qz;
-            float rz = N[12] * qw + N[13] * qx + N[14] * qy + N[15] * qz;
-            float len = MathF.Sqrt(rw * rw + rx * rx + ry * ry + rz * rz);
-            if (len < 1e-20f) return false;
-            qw = rw / len; qx = rx / len; qy = ry / len; qz = rz / len;
-        }
+        if (!TryDominantEigenvector(N, out float qw, out float qx, out float qy, out float qz))
+            return false;
 
         // Quaternion → rotation matrix (row-major action on column vectors).
         float xx = qx * qx, yy = qy * qy, zz = qz * qz;
@@ -293,6 +283,104 @@ public static class WorldSpaceGeometry
 
     public static Vector3 ApplySimilarity(Vector3 p, float scale, Matrix4x4 rotation, Vector3 translation)
         => scale * Vector3.Transform(p, rotation) + translation;
+
+    /// <summary>
+    /// Eigenvector of the LARGEST eigenvalue of the symmetric 4x4 <paramref name="n16"/> (row
+    /// major), which for Horn's N matrix is the optimal rotation as a quaternion.
+    ///
+    /// This is a cyclic Jacobi eigendecomposition rather than a power iteration, and it got here
+    /// by two MEASURED failures of the iteration it replaces:
+    ///
+    /// 1. Power iteration converges to the largest eigenvalue by MAGNITUDE, and Horn's N is
+    ///    traceless - its four eigenvalues sum to zero, so a negative one always exists.
+    ///    Whenever |lambda_min| &gt; lambda_max it converged to the WORST rotation and returned
+    ///    it as success: at 3 anchors with a general rotation, scale 1.94 against a true 2.5 and
+    ///    a residual of 0.43, reported true. A caller that trusted the bool placed geometry by it.
+    /// 2. Shifting the spectrum to fix that is a trap. N + cI with a Gershgorin c is positive
+    ///    semidefinite, so the right eigenvector wins - but the convergence RATIO is
+    ///    (lambda_1 + c)/(lambda_2 + c), which the shift drives toward 1. The fix for
+    ///    correctness destroyed the convergence rate, and a 200-rotation sweep found the
+    ///    survivors at residual 0.056.
+    ///
+    /// Jacobi needs no shift, converges quadratically, and a 4x4 is small enough that the whole
+    /// decomposition is cheaper than the iteration was. Eigenvalues come out on the diagonal and
+    /// eigenvectors as the columns of the accumulated rotation.
+    ///
+    /// Gate: <c>TempleRingWorldSpaceTests.UmeyamaSimilarity_IsExactAcrossRandomRotations</c> -
+    /// one rotation is a sample, and the original bug was invisible to the sample in the test.
+    /// </summary>
+    private static bool TryDominantEigenvector(
+        float[] n16, out float qw, out float qx, out float qy, out float qz)
+    {
+        qw = 1; qx = 0; qy = 0; qz = 0;
+
+        // Work in double: the eigenvector feeds a rotation matrix that geometry is placed by.
+        var a = new double[4, 4];
+        double magnitude = 0;
+        for (int r = 0; r < 4; r++)
+            for (int c = 0; c < 4; c++)
+            {
+                a[r, c] = n16[r * 4 + c];
+                magnitude += Math.Abs(a[r, c]);
+            }
+        if (magnitude < 1e-20) return false;      // N is all zeros: no rotation is determined.
+
+        var v = new double[4, 4];
+        for (int i = 0; i < 4; i++) v[i, i] = 1.0;
+
+        for (int sweep = 0; sweep < 64; sweep++)
+        {
+            double off = 0;
+            for (int p = 0; p < 4; p++)
+                for (int q = p + 1; q < 4; q++) off += a[p, q] * a[p, q];
+            if (off < 1e-28) break;
+
+            for (int p = 0; p < 3; p++)
+                for (int q = p + 1; q < 4; q++)
+                {
+                    double apq = a[p, q];
+                    if (Math.Abs(apq) < 1e-300) continue;
+
+                    // Rotation that zeroes a[p,q]; the numerically stable branch for t.
+                    double theta = (a[q, q] - a[p, p]) / (2.0 * apq);
+                    double t = theta >= 0
+                        ? 1.0 / (theta + Math.Sqrt(theta * theta + 1.0))
+                        : -1.0 / (-theta + Math.Sqrt(theta * theta + 1.0));
+                    double cs = 1.0 / Math.Sqrt(t * t + 1.0);
+                    double sn = t * cs;
+
+                    for (int k = 0; k < 4; k++)
+                    {
+                        double akp = a[k, p], akq = a[k, q];
+                        a[k, p] = cs * akp - sn * akq;
+                        a[k, q] = sn * akp + cs * akq;
+                    }
+                    for (int k = 0; k < 4; k++)
+                    {
+                        double apk = a[p, k], aqk = a[q, k];
+                        a[p, k] = cs * apk - sn * aqk;
+                        a[q, k] = sn * apk + cs * aqk;
+                    }
+                    for (int k = 0; k < 4; k++)
+                    {
+                        double vkp = v[k, p], vkq = v[k, q];
+                        v[k, p] = cs * vkp - sn * vkq;
+                        v[k, q] = sn * vkp + cs * vkq;
+                    }
+                }
+        }
+
+        int best = 0;
+        for (int i = 1; i < 4; i++) if (a[i, i] > a[best, best]) best = i;
+
+        double q0 = v[0, best], q1 = v[1, best], q2 = v[2, best], q3 = v[3, best];
+        double len = Math.Sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+        if (!(len > 1e-12)) return false;
+
+        qw = (float)(q0 / len); qx = (float)(q1 / len);
+        qy = (float)(q2 / len); qz = (float)(q3 / len);
+        return true;
+    }
 
     /// <summary>
     /// Forward vector for a yaw/pitch FPS camera. Yaw turns about world +Y, pitch is the

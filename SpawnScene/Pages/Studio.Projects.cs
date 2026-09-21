@@ -405,19 +405,45 @@ public partial class Studio
                 // only needs an image plus a pose, and TempleRing ships 16 of those. Nothing
                 // consumes this yet - the optimiser does - so it cannot change current output.
                 var initNames = pickIdx.Select(i => available[i].filename).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+                // Hold every third non-init view out of SUPERVISION entirely. It is still posed,
+                // still loaded and still scored - its pixels just never reach the loss. Training
+                // on all sixteen and then reporting the twelve that did not seed depth as
+                // "held out" measures reconstruction of the training set, which is a much
+                // larger number than novel-view quality and not the question being asked.
+                // Init views are never held out: their geometry is already baked in, so they
+                // could not be novel to anything.
+                int nonInitSeen = 0;
+                var heldOut = new List<string>();
                 foreach (var (filename, cam) in available)
                 {
+                    bool isInit = initNames.Contains(filename);
+                    bool supervise = true;
+                    if (!isInit)
+                    {
+                        supervise = nonInitSeen % 3 != 0;
+                        nonInitSeen++;
+                    }
+                    if (!supervise) heldOut.Add(filename);
+
                     int turns = upright ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
                     scene.TrainingViews.Add(new TrainingView
                     {
                         Camera = turns != 0 ? ImageOrientation.Rotate(cam, turns) : cam,
                         ImageName = $"datasets/TempleRing/{filename}",
-                        UsedForInit = initNames.Contains(filename),
+                        UsedForInit = isInit,
                         QuarterTurns = turns,
+                        UsedForSupervision = supervise,
                     });
                 }
-                Console.WriteLine($"[Studio] TempleRing supervision: {scene.TrainingViews.Count} posed views " +
-                    $"({initNames.Count} also used for depth init)");
+                // The harness reads this line to decide what to score. Emitted even when
+                // training is off, so a run can never disagree with the scorer about it.
+                Console.WriteLine($"[Studio] heldout: {string.Join(", ", heldOut)}");
+                Console.WriteLine(
+                    $"[Studio] TempleRing supervision: " +
+                    $"{scene.TrainingViews.Count(v => v.UsedForSupervision)} of {scene.TrainingViews.Count} " +
+                    $"posed views ({initNames.Count} also used for depth init), " +
+                    $"{scene.TrainingViews.Count(v => !v.UsedForSupervision)} held out");
 
                 _renderService.SetActiveSceneGpuLoaded(scene);
                 _sceneManager.ActiveScene = scene;

@@ -38,7 +38,12 @@ internal static class SplatTrainerShaders
     /// Shared declarations: uniforms, the packed splat layout, and the projection.
     /// Concatenated ahead of each kernel so projection exists in exactly one place.
     /// </summary>
-    public const string Common = @"
+    /// <summary>
+    /// Camera and viewport, shared by every pass. Split out of <see cref="Common"/> because the
+    /// optimiser kernels need the same uniforms with a WRITABLE splat buffer, and a binding
+    /// cannot be declared twice.
+    /// </summary>
+    public const string UniformsBlock = @"
 struct TrainUniforms {
     cam_right  : vec4<f32>,   // world-space camera basis; xyz used
     cam_up     : vec4<f32>,
@@ -60,17 +65,30 @@ struct TrainUniforms {
 
 @group(0) @binding(0) var<uniform> u : TrainUniforms;
 
+const FLOATS_PER_SPLAT : u32 = 14u;
+// Gradient slots accumulated per splat: 3 colour, 1 opacity, 2 screen centre, 3 conic.
+// Must match SplatTileRasterizer.GradsPerKey.
+const GRADS_PER_SPLAT : u32 = 9u;
+// Adam moment slots per splat: 3 colour, 1 opacity logit, 3 position, 3 log-scale, 4 quaternion.
+const ADAM_SLOTS : u32 = 14u;
+const ADAM_POS : u32 = 4u;
+const ADAM_SCALE : u32 = 7u;
+const ADAM_QUAT : u32 = 10u;
+// Gradients are summed across tiles through integer atomics; WebGPU has no float ones.
+const FIXED_SCALE : f32 = 1048576.0;
+const EWA_FILTER_PX2 : f32 = 0.3;
+";
+
+    public const string Common = UniformsBlock + @"
 // Packed splat source: SplatFormat.Floats (14) per splat.
 //   0..2 pos   3..5 colour   6..8 scale   9 opacity   10..13 quat(x,y,z,w)
 @group(0) @binding(1) var<storage, read> splats : array<f32>;
 
-const FLOATS_PER_SPLAT : u32 = 14u;
 const TILE : u32 = 16u;
 const MIN_ALPHA : f32 = 0.00392156862;   // 1/255, matches SplatRasterizer.MinAlpha
 const MAX_ALPHA : f32 = 0.99;            // matches SplatRasterizer.MaxAlpha
 const MIN_T : f32 = 1e-4;                // matches SplatRasterizer.MinTransmittance
 const SIGMA_CUTOFF : f32 = 3.0;
-const EWA_FILTER_PX2 : f32 = 0.3;
 
 struct Projected {
     valid  : bool,
@@ -375,10 +393,16 @@ fn raster_forward(
 @group(0) @binding(4) var<storage, read> final_t : array<f32>;   // 1 per pixel, from forward
 @group(0) @binding(5) var<storage, read> end_idx : array<u32>;   // 1 per pixel, from forward
 @group(0) @binding(6) var<storage, read> dL_dpix : array<f32>;   // 3 per pixel
-// 4 per KEY: dL/dR, dL/dG, dL/dB, dL/dopacity. One slot per (tile, splat) pair.
+// 9 per KEY: dL/dR, dL/dG, dL/dB, dL/dopacity, dL/d(centre.x, centre.y), dL/d(conic a, b, c).
+// One slot per (tile, splat) pair.
 @group(0) @binding(7) var<storage, read_write> grad_per_key : array<f32>;
 
-var<workgroup> red : array<vec4<f32>, 256>;
+// Three tile-wide reductions, 12 KB of workgroup storage against a 16 KB guaranteed minimum.
+// One pass rather than three sequential ones: the space is affordable and tripling the barrier
+// count in the innermost loop is not.
+var<workgroup> redA : array<vec4<f32>, 256>;   // dR, dG, dB, dOpacity
+var<workgroup> redB : array<vec4<f32>, 256>;   // dCentreX, dCentreY, dConicA, dConicB
+var<workgroup> redC : array<f32, 256>;         // dConicC
 
 @compute @workgroup_size(16, 16, 1)
 fn raster_backward(
@@ -414,6 +438,8 @@ fn raster_backward(
         k = k - 1u;
 
         var contrib = vec4<f32>(0.0);
+        var geom = vec4<f32>(0.0);
+        var geom_cc = 0.0;
 
         // A thread only participates for splats its own pixel actually reached.
         if (inside && k < my_end) {
@@ -440,6 +466,21 @@ fn raster_backward(
                         // up without bound.
                         if (raw_alpha < MAX_ALPHA) {
                             contrib.w = g * dL_dalpha;
+
+                            // Geometry, at the 2D level. The chain on to position, scale and
+                            // rotation is linear in these and depends only on the splat and the
+                            // view, so it runs ONCE PER SPLAT after the scatter - not per pixel.
+                            // Mirrors SplatRasterizer.Backward, which is finite-difference
+                            // verified, and SplatTileRasterizer.Backward, which the GPU gate
+                            // compares against.
+                            let d = pixel - p.centre;
+                            let dL_dpower = p.opacity * dL_dalpha * g;
+                            geom = vec4<f32>(
+                                dL_dpower * (p.conic.x * d.x + p.conic.y * d.y),
+                                dL_dpower * (p.conic.z * d.y + p.conic.y * d.x),
+                                dL_dpower * (-0.5 * d.x * d.x),
+                                dL_dpower * (-d.x * d.y));
+                            geom_cc = dL_dpower * (-0.5 * d.y * d.y);
                         }
 
                         rec = alpha * p.colour + (1.0 - alpha) * rec;
@@ -448,22 +489,34 @@ fn raster_backward(
             }
         }
 
-        // Reduce this splat's contribution across the tile's 256 pixels.
-        red[li] = contrib;
+        // Reduce this contribution across the tile's 256 pixels.
+        redA[li] = contrib;
+        redB[li] = geom;
+        redC[li] = geom_cc;
         workgroupBarrier();
         var stride = 128u;
         loop {
             if (stride == 0u) { break; }
-            if (li < stride) { red[li] = red[li] + red[li + stride]; }
+            if (li < stride) {
+                redA[li] = redA[li] + redA[li + stride];
+                redB[li] = redB[li] + redB[li + stride];
+                redC[li] = redC[li] + redC[li + stride];
+            }
             workgroupBarrier();
             stride = stride >> 1u;
         }
 
         if (li == 0u) {
-            grad_per_key[k * 4u + 0u] = red[0].x;
-            grad_per_key[k * 4u + 1u] = red[0].y;
-            grad_per_key[k * 4u + 2u] = red[0].z;
-            grad_per_key[k * 4u + 3u] = red[0].w;
+            let base = k * GRADS_PER_SPLAT;
+            grad_per_key[base + 0u] = redA[0].x;
+            grad_per_key[base + 1u] = redA[0].y;
+            grad_per_key[base + 2u] = redA[0].z;
+            grad_per_key[base + 3u] = redA[0].w;
+            grad_per_key[base + 4u] = redB[0].x;
+            grad_per_key[base + 5u] = redB[0].y;
+            grad_per_key[base + 6u] = redB[0].z;
+            grad_per_key[base + 7u] = redB[0].w;
+            grad_per_key[base + 8u] = redC[0];
         }
         workgroupBarrier();
     }
@@ -486,6 +539,7 @@ fn raster_backward(
 // Gradients here are sums over a tile's pixels of quantities around 1e-4..1e-1. 2^20 keeps
 // ~6 decimal digits while leaving headroom before a 32-bit overflow.
 const FIXED_SCALE : f32 = 1048576.0;
+const GRADS_PER_SPLAT : u32 = 9u;
 
 @compute @workgroup_size(64)
 fn scatter_gradients(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -493,10 +547,10 @@ fn scatter_gradients(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (k >= counts.x) { return; }
 
     let splat = values[k];
-    for (var c = 0u; c < 4u; c = c + 1u) {
-        let v = grad_per_key[k * 4u + c];
+    for (var c = 0u; c < GRADS_PER_SPLAT; c = c + 1u) {
+        let v = grad_per_key[k * GRADS_PER_SPLAT + c];
         if (v != 0.0) {
-            atomicAdd(&grad_fixed[splat * 4u + c], i32(round(v * FIXED_SCALE)));
+            atomicAdd(&grad_fixed[splat * GRADS_PER_SPLAT + c], i32(round(v * FIXED_SCALE)));
         }
     }
 }
@@ -550,13 +604,15 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
     /// </summary>
     public const string AdamStep = @"
 @group(0) @binding(0) var<storage, read_write> splats     : array<f32>;       // 14 per splat
-@group(0) @binding(1) var<storage, read>       grad_fixed : array<i32>;       // 4 per splat
+@group(0) @binding(1) var<storage, read>       grad_fixed : array<i32>;       // 9 per splat
 @group(0) @binding(2) var<storage, read_write> opacity_logit : array<f32>;    // 1 per splat
-@group(0) @binding(3) var<storage, read_write> adam_m     : array<f32>;       // 4 per splat
-@group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 4 per splat
+@group(0) @binding(3) var<storage, read_write> adam_m     : array<f32>;       // 14 per splat
+@group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 14 per splat
 @group(0) @binding(5) var<uniform>             cfg        : vec4<f32>;        // x=colourLr y=opacityLr z=step w=splatCount
 
 const FLOATS_PER_SPLAT : u32 = 14u;
+const GRADS_PER_SPLAT : u32 = 9u;
+const ADAM_SLOTS : u32 = 14u;
 const FIXED_SCALE : f32 = 1048576.0;
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
@@ -580,24 +636,24 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     // Colour (SH degree 0 / DC term).
     for (var c = 0u; c < 3u; c = c + 1u) {
-        let g = f32(grad_fixed[i * 4u + c]) / FIXED_SCALE;
-        var m = adam_m[i * 4u + c];
-        var v = adam_v[i * 4u + c];
+        let g = f32(grad_fixed[i * GRADS_PER_SPLAT + c]) / FIXED_SCALE;
+        var m = adam_m[i * ADAM_SLOTS + c];
+        var v = adam_v[i * ADAM_SLOTS + c];
         let updated = adam(splats[o + 3u + c], g, cfg.x, step, &m, &v);
-        adam_m[i * 4u + c] = m;
-        adam_v[i * 4u + c] = v;
+        adam_m[i * ADAM_SLOTS + c] = m;
+        adam_v[i * ADAM_SLOTS + c] = v;
         splats[o + 3u + c] = clamp(updated, 0.0, 1.0);
     }
 
     // Opacity, optimised in logit space.
     let a = splats[o + 9u];
-    let g_op = f32(grad_fixed[i * 4u + 3u]) / FIXED_SCALE;
+    let g_op = f32(grad_fixed[i * GRADS_PER_SPLAT + 3u]) / FIXED_SCALE;
     let g_logit = g_op * a * (1.0 - a);
-    var m3 = adam_m[i * 4u + 3u];
-    var v3 = adam_v[i * 4u + 3u];
+    var m3 = adam_m[i * ADAM_SLOTS + 3u];
+    var v3 = adam_v[i * ADAM_SLOTS + 3u];
     let new_logit = adam(opacity_logit[i], g_logit, cfg.y, step, &m3, &v3);
-    adam_m[i * 4u + 3u] = m3;
-    adam_v[i * 4u + 3u] = v3;
+    adam_m[i * ADAM_SLOTS + 3u] = m3;
+    adam_v[i * ADAM_SLOTS + 3u] = v3;
     opacity_logit[i] = new_logit;
     splats[o + 9u] = 1.0 / (1.0 + exp(-new_logit));
 }
@@ -608,15 +664,278 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read>       splats        : array<f32>;
 @group(0) @binding(1) var<storage, read_write> opacity_logit : array<f32>;
 @group(0) @binding(2) var<uniform>             cfg           : vec4<u32>;   // x = splat count
+@group(0) @binding(3) var<storage, read_write> log_scale     : array<f32>;  // 3 per splat
 
 const FLOATS_PER_SPLAT : u32 = 14u;
+const MIN_SCALE : f32 = 1e-7;
 
 @compute @workgroup_size(64)
 fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>) {
     let i = gid.x;
     if (i >= cfg.x) { return; }
-    let a = clamp(splats[i * FLOATS_PER_SPLAT + 9u], 1e-6, 1.0 - 1e-6);
+    let o = i * FLOATS_PER_SPLAT;
+
+    let a = clamp(splats[o + 9u], 1e-6, 1.0 - 1e-6);
     opacity_logit[i] = log(a / (1.0 - a));
+
+    // Scale is optimised in LOG space, as the reference does. The published learning rate is
+    // meaningless in any other parameterisation, and it keeps a scale from going negative.
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        log_scale[i * 3u + c] = log(max(splats[o + 6u + c], MIN_SCALE));
+    }
+}
+";
+
+    /// <summary>
+    /// Pass 9: carry the 2D gradients back to GEOMETRY, and step it.
+    ///
+    /// The rasteriser produces dL/d(screen centre) and dL/d(conic). Turning those into
+    /// dL/d(position, scale, rotation) is a chain that depends only on the splat and the view -
+    /// not on the pixel - so it runs once per splat here rather than once per pixel in the
+    /// backward or once per key in the scatter. That is the whole reason the tile rasteriser
+    /// only ever accumulates nine numbers per splat.
+    ///
+    /// This is a line-for-line transcription of <see cref="SplatGeometryGradients.Backward"/>,
+    /// which is verified against central finite differences of its own forward. The GPU gate
+    /// compares this kernel back against that oracle on real data.
+    ///
+    /// Parameterisation matches the reference implementation or the published learning rates
+    /// mean nothing: scale in log space, rotation as a quaternion normalised on use.
+    /// </summary>
+    public const string GeometryAdam = UniformsBlock + @"
+@group(0) @binding(1) var<storage, read_write> splats     : array<f32>;   // 14 per splat
+@group(0) @binding(2) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(3) var<storage, read_write> log_scale  : array<f32>;   // 3 per splat
+@group(0) @binding(4) var<storage, read_write> adam_m     : array<f32>;   // 14 per splat
+@group(0) @binding(5) var<storage, read_write> adam_v     : array<f32>;   // 14 per splat
+
+struct GeomCfg {
+    lr    : vec4<f32>,   // x = position, y = log-scale, z = rotation, w = Adam step number
+    limit : vec4<f32>,   // x = splat count, y = max scale, z = min scale, w unused
+};
+@group(0) @binding(6) var<uniform> g : GeomCfg;
+// 10 per splat: dL/d(pos xyz, scale xyz, quat xyzw), written before the step.
+// The GPU gate compares these against SplatGeometryGradients.Backward, and density control
+// will read the screen-space position gradient that feeds them.
+@group(0) @binding(7) var<storage, read_write> geom_out : array<f32>;
+
+const BETA1 : f32 = 0.9;
+const BETA2 : f32 = 0.999;
+const EPS : f32 = 1e-15;
+
+fn adam(value : f32, grad : f32, lr : f32, step : f32,
+        m : ptr<function, f32>, v : ptr<function, f32>) -> f32 {
+    *m = BETA1 * (*m) + (1.0 - BETA1) * grad;
+    *v = BETA2 * (*v) + (1.0 - BETA2) * grad * grad;
+    let m_hat = *m / (1.0 - pow(BETA1, step));
+    let v_hat = *v / (1.0 - pow(BETA2, step));
+    return value - lr * m_hat / (sqrt(v_hat) + EPS);
+}
+
+@compute @workgroup_size(64)
+fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= u32(g.limit.x)) { return; }
+
+    let gb = i * GRADS_PER_SPLAT;
+    let up_cx = f32(grad_fixed[gb + 4u]) / FIXED_SCALE;
+    let up_cy = f32(grad_fixed[gb + 5u]) / FIXED_SCALE;
+    let up_ca = f32(grad_fixed[gb + 6u]) / FIXED_SCALE;
+    let up_cb = f32(grad_fixed[gb + 7u]) / FIXED_SCALE;
+    let up_cc = f32(grad_fixed[gb + 8u]) / FIXED_SCALE;
+
+    // A splat this view never touched has no gradient. Taking a step anyway would let stale
+    // momentum drag geometry that nothing is currently constraining - harmless for colour,
+    // but for position it sends invisible splats travelling.
+    if (up_cx == 0.0 && up_cy == 0.0 && up_ca == 0.0 && up_cb == 0.0 && up_cc == 0.0) { return; }
+
+    let o = i * FLOATS_PER_SPLAT;
+    let pos = vec3<f32>(splats[o + 0u], splats[o + 1u], splats[o + 2u]);
+    let s_raw = vec3<f32>(splats[o + 6u], splats[o + 7u], splats[o + 8u]);
+    let q_raw = vec4<f32>(splats[o + 10u], splats[o + 11u], splats[o + 12u], splats[o + 13u]);
+
+    // ---- forward again, keeping the intermediates ----
+    let rel = pos - u.cam_pos.xyz;
+    let tx = dot(u.cam_right.xyz, rel);
+    let ty = dot(u.cam_up.xyz, rel);
+    let tz = dot(u.cam_fwd.xyz, rel);
+    if (tz <= 1e-6) { return; }
+
+    let qlen = length(q_raw);
+    if (qlen < 1e-20) { return; }
+    let q = q_raw / qlen;
+
+    let sc3 = max(s_raw, vec3<f32>(1e-9, 1e-9, 1e-9));
+    let xx = q.x * q.x; let yy = q.y * q.y; let zz = q.z * q.z;
+    let xy = q.x * q.y; let xz = q.x * q.z; let yz = q.y * q.z;
+    let wx = q.w * q.x; let wy = q.w * q.y; let wz = q.w * q.z;
+
+    let r00 = 1.0 - 2.0 * (yy + zz); let r01 = 2.0 * (xy - wz); let r02 = 2.0 * (xz + wy);
+    let r10 = 2.0 * (xy + wz); let r11 = 1.0 - 2.0 * (xx + zz); let r12 = 2.0 * (yz - wx);
+    let r20 = 2.0 * (xz - wy); let r21 = 2.0 * (yz + wx); let r22 = 1.0 - 2.0 * (xx + yy);
+
+    let m00 = r00 * sc3.x; let m01 = r01 * sc3.y; let m02 = r02 * sc3.z;
+    let m10 = r10 * sc3.x; let m11 = r11 * sc3.y; let m12 = r12 * sc3.z;
+    let m20 = r20 * sc3.x; let m21 = r21 * sc3.y; let m22 = r22 * sc3.z;
+
+    let M = mat3x3<f32>(
+        vec3<f32>(m00, m10, m20),
+        vec3<f32>(m01, m11, m21),
+        vec3<f32>(m02, m12, m22));
+    let sigma_world = M * transpose(M);
+    let A = transpose(mat3x3<f32>(u.cam_right.xyz, u.cam_up.xyz, u.cam_fwd.xyz));
+    let sc = A * sigma_world * transpose(A);
+
+    let S00 = sc[0][0]; let S01 = sc[1][0]; let S02 = sc[2][0];
+    let S11 = sc[1][1]; let S12 = sc[2][1]; let S22 = sc[2][2];
+
+    let invz = 1.0 / tz;
+    let invz2 = invz * invz;
+    let j00 = u.focal.x * invz;
+    let j02 = -u.focal.x * tx * invz2;
+    let j11 = u.focal.y * invz;
+    let j12 = -u.focal.y * ty * invz2;
+
+    let cov_a = j00 * j00 * S00 + 2.0 * j00 * j02 * S02 + j02 * j02 * S22 + EWA_FILTER_PX2;
+    let cov_b = j00 * j11 * S01 + j00 * j12 * S02 + j02 * j11 * S12 + j02 * j12 * S22;
+    let cov_c = j11 * j11 * S11 + 2.0 * j11 * j12 * S12 + j12 * j12 * S22 + EWA_FILTER_PX2;
+
+    let det = cov_a * cov_c - cov_b * cov_b;
+    if (det <= 1e-20) { return; }
+    let iD = 1.0 / det;
+    let iD2 = iD * iD;
+
+    // ---- 1. conic = Sigma_2D^-1 ----
+    let gA = up_ca * (-cov_c * cov_c * iD2)
+           + up_cb * (cov_b * cov_c * iD2)
+           + up_cc * (iD - cov_a * cov_c * iD2);
+    let gB = up_ca * (2.0 * cov_b * cov_c * iD2)
+           + up_cb * (-iD - 2.0 * cov_b * cov_b * iD2)
+           + up_cc * (2.0 * cov_a * cov_b * iD2);
+    let gC = up_ca * (iD - cov_a * cov_c * iD2)
+           + up_cb * (cov_a * cov_b * iD2)
+           + up_cc * (-cov_a * cov_a * iD2);
+
+    // ---- 2. Sigma_2D = J Sigma_cam J^T ----
+    let gS00 = gA * j00 * j00;
+    let gS01 = gB * j00 * j11;
+    let gS02 = gA * 2.0 * j00 * j02 + gB * j00 * j12;
+    let gS11 = gC * j11 * j11;
+    let gS12 = gB * j02 * j11 + gC * 2.0 * j11 * j12;
+    let gS22 = gA * j02 * j02 + gB * j02 * j12 + gC * j12 * j12;
+
+    let gj00 = gA * 2.0 * (j00 * S00 + j02 * S02) + gB * (j11 * S01 + j12 * S02);
+    let gj02 = gA * 2.0 * (j00 * S02 + j02 * S22) + gB * (j11 * S12 + j12 * S22);
+    let gj11 = gB * (j00 * S01 + j02 * S12) + gC * 2.0 * (j11 * S11 + j12 * S12);
+    let gj12 = gB * (j00 * S02 + j02 * S22) + gC * 2.0 * (j11 * S12 + j12 * S22);
+
+    // ---- 3. Sigma_cam = A Sigma_world A^T, so dL/dSigma_world = A^T (dL/dSigma_cam) A ----
+    // Unique-component gradients become a full symmetric matrix by HALVING the off-diagonals.
+    // The result of A^T G A is already a matrix, so it must NOT be halved again on the way out -
+    // doing so scales every scale and rotation gradient by a view-dependent 1.2 to 1.3.
+    let h01 = 0.5 * gS01; let h02 = 0.5 * gS02; let h12 = 0.5 * gS12;
+    let G = mat3x3<f32>(
+        vec3<f32>(gS00, h01, h02),
+        vec3<f32>(h01, gS11, h12),
+        vec3<f32>(h02, h12, gS22));
+    let W = transpose(A) * G * A;
+
+    // ---- 4. Sigma_world = M M^T ----
+    let dM = 2.0 * W * M;
+    let gsx = dM[0][0] * r00 + dM[0][1] * r10 + dM[0][2] * r20;
+    let gsy = dM[1][0] * r01 + dM[1][1] * r11 + dM[1][2] * r21;
+    let gsz = dM[2][0] * r02 + dM[2][1] * r12 + dM[2][2] * r22;
+
+    let gr00 = dM[0][0] * sc3.x; let gr10 = dM[0][1] * sc3.x; let gr20 = dM[0][2] * sc3.x;
+    let gr01 = dM[1][0] * sc3.y; let gr11 = dM[1][1] * sc3.y; let gr21 = dM[1][2] * sc3.y;
+    let gr02 = dM[2][0] * sc3.z; let gr12 = dM[2][1] * sc3.z; let gr22 = dM[2][2] * sc3.z;
+
+    // ---- 5. R from the NORMALISED quaternion, then back through the normalisation ----
+    let gnx = 2.0 * q.y * (gr01 + gr10) + 2.0 * q.z * (gr02 + gr20)
+            - 4.0 * q.x * (gr11 + gr22) + 2.0 * q.w * (gr21 - gr12);
+    let gny = -4.0 * q.y * (gr00 + gr22) + 2.0 * q.x * (gr01 + gr10)
+            + 2.0 * q.w * (gr02 - gr20) + 2.0 * q.z * (gr12 + gr21);
+    let gnz = -4.0 * q.z * (gr00 + gr11) + 2.0 * q.w * (gr10 - gr01)
+            + 2.0 * q.x * (gr02 + gr20) + 2.0 * q.y * (gr12 + gr21);
+    let gnw = 2.0 * q.z * (gr10 - gr01) + 2.0 * q.y * (gr02 - gr20)
+            + 2.0 * q.x * (gr21 - gr12);
+
+    let gn = vec4<f32>(gnx, gny, gnz, gnw);
+    let gq = (gn - dot(gn, q) * q) / qlen;
+
+    // ---- 6. Camera-space position: through the screen centre AND through J ----
+    var gt = vec3<f32>(
+        up_cx * u.focal.x * invz,
+        up_cy * (-u.focal.y * invz),
+        up_cx * (-u.focal.x * tx * invz2) + up_cy * (u.focal.y * ty * invz2));
+
+    gt.x = gt.x + gj02 * (-u.focal.x * invz2);
+    gt.y = gt.y + gj12 * (-u.focal.y * invz2);
+    gt.z = gt.z
+         + gj00 * (-u.focal.x * invz2)
+         + gj02 * (2.0 * u.focal.x * tx * invz2 * invz)
+         + gj11 * (-u.focal.y * invz2)
+         + gj12 * (2.0 * u.focal.y * ty * invz2 * invz);
+
+    let gpos = u.cam_right.xyz * gt.x + u.cam_up.xyz * gt.y + u.cam_fwd.xyz * gt.z;
+
+    let gb_out = i * 10u;
+    geom_out[gb_out + 0u] = gpos.x;
+    geom_out[gb_out + 1u] = gpos.y;
+    geom_out[gb_out + 2u] = gpos.z;
+    geom_out[gb_out + 3u] = select(0.0, gsx, s_raw.x > 1e-9);
+    geom_out[gb_out + 4u] = select(0.0, gsy, s_raw.y > 1e-9);
+    geom_out[gb_out + 5u] = select(0.0, gsz, s_raw.z > 1e-9);
+    geom_out[gb_out + 6u] = gq.x;
+    geom_out[gb_out + 7u] = gq.y;
+    geom_out[gb_out + 8u] = gq.z;
+    geom_out[gb_out + 9u] = gq.w;
+
+    // ---- Adam ----
+    let step = g.lr.w;
+    let ab = i * ADAM_SLOTS;
+
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        var m = adam_m[ab + ADAM_POS + c];
+        var v = adam_v[ab + ADAM_POS + c];
+        let updated = adam(splats[o + c], gpos[c], g.lr.x, step, &m, &v);
+        adam_m[ab + ADAM_POS + c] = m;
+        adam_v[ab + ADAM_POS + c] = v;
+        splats[o + c] = updated;
+    }
+
+    // Scale in log space. d/d(log s) = s * d/ds. A clamped scale contributed nothing to the
+    // forward, so it gets no gradient either - see SplatGeometryGradients.
+    let gs = vec3<f32>(gsx, gsy, gsz);
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        let live = select(0.0, 1.0, s_raw[c] > 1e-9);
+        var m = adam_m[ab + ADAM_SCALE + c];
+        var v = adam_v[ab + ADAM_SCALE + c];
+        let updated = adam(log_scale[i * 3u + c], gs[c] * sc3[c] * live, g.lr.y, step, &m, &v);
+        adam_m[ab + ADAM_SCALE + c] = m;
+        adam_v[ab + ADAM_SCALE + c] = v;
+        let bounded = clamp(updated, log(g.limit.z), log(g.limit.y));
+        log_scale[i * 3u + c] = bounded;
+        splats[o + 6u + c] = exp(bounded);
+    }
+
+    var qn = vec4<f32>(0.0);
+    for (var c = 0u; c < 4u; c = c + 1u) {
+        var m = adam_m[ab + ADAM_QUAT + c];
+        var v = adam_v[ab + ADAM_QUAT + c];
+        qn[c] = adam(q_raw[c], gq[c], g.lr.z, step, &m, &v);
+        adam_m[ab + ADAM_QUAT + c] = m;
+        adam_v[ab + ADAM_QUAT + c] = v;
+    }
+    // Renormalise. The gradient is already orthogonal to q, so the length only drifts through
+    // Adam curvature - but letting it drift makes the effective rotation rate depend on how
+    // long the splat has been training.
+    let ql = length(qn);
+    let qout = select(vec4<f32>(0.0, 0.0, 0.0, 1.0), qn / ql, ql > 1e-12);
+    splats[o + 10u] = qout.x;
+    splats[o + 11u] = qout.y;
+    splats[o + 12u] = qout.z;
+    splats[o + 13u] = qout.w;
 }
 ";
 }

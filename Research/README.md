@@ -215,3 +215,40 @@ MVSplat at 12M is the only plausible browser port, and it needs known poses. Rev
 - **LiteGS** — 13.4x faster. https://arxiv.org/abs/2503.01199
 - **Gaussians on a Diet** — 80% lower peak memory, runs on Jetson. https://arxiv.org/abs/2604.20046
 - **PocketGS** — on-device mobile training. https://arxiv.org/abs/2601.17354
+
+---
+
+## 8. Measured on this project (keep this current)
+
+Held-out novel views on TempleRing, scored by `tools/score_novel_view.py` against the real
+photographs, rendered by the display renderer at the ground-truth poses.
+
+| change | PSNR dB | SSIM | MVS depth agreement |
+|---|---|---|---|
+| depth fusion only, no optimiser | 13.06 | 0.4600 | 0.8% |
+| + colour and opacity optimised, 1600 iters | 16.08 | 0.5368 | 0.8% |
+| + source photographs turned upright before depth | 18.31 | 0.5943 | 2.2% |
+
+Reference points for what to expect, from section 2: vanilla 3DGS **with full training** gets
+~16.9 dB at 3 views and ~17.7 at 6; depth-regularised sparse-view methods reach ~20 dB at 3
+views; 27-29 dB needs 100-300 views. TempleRing gives us 16.
+
+### Things this project measured that the papers do not discuss
+
+- **Feed a monocular depth model an upright picture.** All 47 TempleRing calibration entries put
+  world-up within ~2 degrees of image-RIGHT. Correcting it was worth +2.23 dB and nearly tripled
+  the fraction of pixels where independent per-view depths agree in 3D. Nothing in the pipeline
+  was wrong - the calibration is self-consistent with the rotated pixels - so it produced no
+  error, only worse depth. Any capture pipeline taking video from a handheld device has this
+  problem and will not be told about it.
+
+- **Fixed-point quantisation is a real constraint on gradient precision, not just on range.**
+  WebGPU has no float atomics, so per-splat gradients cross an i32 atomic scaled by 2^20. With
+  an L1 loss averaged over the image, dL/d(pixel) is 1/(3*W*H) - about 1e-6 at 640x480 - so a
+  small splat's gradient is only a few quanta. The GPU gate therefore reports agreement in
+  QUANTA as well as relatively; at 128x96 the whole 2D gradient set agrees to 0.38 quanta mean,
+  which reads as a 3% relative error and is entirely rounding.
+
+- **The depth sort key needs the scene's actual depth range.** Quantising `depth * 1024` into an
+  18-bit field spent ~400 of 262143 levels on a scene 0.4 deep, so distinct splats collapsed onto
+  one key and composited in whatever order the atomic allocator handed out.

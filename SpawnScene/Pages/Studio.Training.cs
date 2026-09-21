@@ -33,7 +33,8 @@ public partial class Studio
     /// Logs <c>[Train] ...</c> throughout; never throws (a failed optimisation must still leave
     /// a renderable scene behind for the measurement that follows).
     /// </summary>
-    private async Task TrainOnTrainingViewsAsync(int iterations, int keysPerSplat = 8)
+    private async Task TrainOnTrainingViewsAsync(
+        int iterations, int keysPerSplat = 8, bool optimiseGeometry = false)
     {
         try
         {
@@ -110,6 +111,53 @@ public partial class Studio
                 $"[Train] {views.Count} targets at {w}x{h} uploaded in " +
                 $"{(DateTime.UtcNow - loadStart).TotalSeconds:F1}s");
 
+            // -- Geometric learning rates --
+            // Position is quoted in the reference relative to the scene extent, and the extent
+            // it means is the camera rig, not the object: a rate in world units is meaningless
+            // without it. Scale and rotation are scale-free parameterisations (log and unit
+            // quaternion), so their published rates are absolute.
+            SplatTrainerGpu.GeometryStep? geo = null;
+            if (optimiseGeometry)
+            {
+                var centroid = Vector3.Zero;
+                foreach (var v in views) centroid += v.Camera.Position;
+                centroid /= views.Count;
+                float rigRadius = 0f;
+                foreach (var v in views)
+                    rigRadius = MathF.Max(rigRadius, Vector3.Distance(v.Camera.Position, centroid));
+                if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
+
+                geo = new SplatTrainerGpu.GeometryStep(
+                    PositionLr: 1.6e-4f * rigRadius,
+                    LogScaleLr: 0.005f,
+                    RotationLr: 0.001f,
+                    // Without density control nothing prunes, so a splat that stops being
+                    // constrained has to be bounded instead of pruned. The upper bound is the
+                    // reference's own prune threshold; the lower one just keeps it positive.
+                    MinScale: 1e-6f,
+                    MaxScale: 0.1f * MathF.Max(box.Diagonal, 1e-3f));
+
+                Console.WriteLine(
+                    $"[Train] geometry ON: rig radius {rigRadius:F3}, " +
+                    $"posLr {geo.Value.PositionLr:G3}, scaleLr {geo.Value.LogScaleLr:G3}, " +
+                    $"rotLr {geo.Value.RotationLr:G3}, scale in " +
+                    $"[{geo.Value.MinScale:G3}, {geo.Value.MaxScale:G3}]");
+            }
+
+            // Only supervised views drive the loss. Held-out ones are loaded and evaluated so
+            // the run reports a number that means something, and never fitted.
+            var supervised = new List<int>();
+            for (int i = 0; i < views.Count; i++)
+                if (views[i].UsedForSupervision) supervised.Add(i);
+            if (supervised.Count == 0)
+            {
+                Console.WriteLine("[Train] FAIL: every view is held out - nothing to fit to");
+                return;
+            }
+            Console.WriteLine(
+                $"[Train] supervising on {supervised.Count} views, " +
+                $"{views.Count - supervised.Count} held out");
+
             // -- Baseline: how well does the untrained scene already explain each photo? --
             var (baseInit, baseHeld) = await EvaluateAsync(_trainer, packed, n, views, targets, box);
 
@@ -126,22 +174,29 @@ public partial class Studio
             double firstCycle = double.NaN, lastCycle = double.NaN;
             for (int it = 0; it < iterations; it++)
             {
-                int vi = it % views.Count;
+                int vi = supervised[it % supervised.Count];
                 var cam = views[vi].Camera;
                 var (near, far) = SplatBounds.DepthRangeFor(box, cam);
 
                 _trainer.SetTargetFrom(targets, vi);
-                float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far);
+                float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo);
+
+                // Once, early: how much of the geometry gradient survives the fixed-point
+                // atomic? Gradients cross it as integers scaled by 2^20, and dL/d(pixel) is
+                // 1/(3*W*H) - about 1e-6 at this resolution - so a small splat's position
+                // gradient can be only a few QUANTA. If most splats quantise to zero the
+                // geometry cannot move and the run would look like a bad learning rate.
+                if (geo != null && it == supervised.Count * 2) await ReportGradientHealthAsync(n);
                 if (_trainer.LastOverflowed) overflowed++;
 
                 cycleSum += loss;
                 cycleN++;
-                if (vi == views.Count - 1)
+                if (it % supervised.Count == supervised.Count - 1)
                 {
                     double mean = cycleSum / cycleN;
                     if (double.IsNaN(firstCycle)) firstCycle = mean;
                     lastCycle = mean;
-                    int cycle = (it + 1) / views.Count;
+                    int cycle = (it + 1) / supervised.Count;
                     if (cycle % 5 == 1 || cycle == 1)
                     {
                         double secs = (DateTime.UtcNow - start).TotalSeconds;
@@ -166,8 +221,8 @@ public partial class Studio
                     $"buffer (keysPerSplat={keysPerSplat}) - those gradients are incomplete");
 
             var (fitInit, fitHeld) = await EvaluateAsync(_trainer, packed, n, views, targets, box);
-            Console.WriteLine($"[Train] trainer PSNR init-views {baseInit:F2} -> {fitInit:F2} dB");
-            Console.WriteLine($"[Train] trainer PSNR held-out   {baseHeld:F2} -> {fitHeld:F2} dB");
+            Console.WriteLine($"[Train] trainer PSNR supervised {baseInit:F2} -> {fitInit:F2} dB");
+            Console.WriteLine($"[Train] trainer PSNR HELD OUT   {baseHeld:F2} -> {fitHeld:F2} dB");
 
             // The display renderer reads a packed vertex buffer built at upload time; training
             // wrote straight through to the splat data behind it.
@@ -181,9 +236,47 @@ public partial class Studio
     }
 
     /// <summary>
+    /// How much of the gradient survives quantisation. Reported once per run, from one readback.
+    /// </summary>
+    private async Task ReportGradientHealthAsync(int n)
+    {
+        float[] g = await _trainer!.ReadGradientsAsync(n);
+        const float quantum = 1f / 1048576f;
+
+        int stride = SplatTrainerGpu.GradsPerSplat;
+        int liveColour = 0, liveCentre = 0, liveConic = 0;
+        double sumCentre = 0;
+        float maxCentre = 0, maxConic = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * stride;
+            if (g[o] != 0f || g[o + 1] != 0f || g[o + 2] != 0f) liveColour++;
+
+            float cx = MathF.Abs(g[o + 4]), cy = MathF.Abs(g[o + 5]);
+            float cen = MathF.Max(cx, cy);
+            if (cen > 0f) { liveCentre++; sumCentre += cen; }
+            if (cen > maxCentre) maxCentre = cen;
+
+            float con = MathF.Max(MathF.Abs(g[o + 6]), MathF.Max(MathF.Abs(g[o + 7]), MathF.Abs(g[o + 8])));
+            if (con > 0f) liveConic++;
+            if (con > maxConic) maxConic = con;
+        }
+        double meanCentre = liveCentre > 0 ? sumCentre / liveCentre : 0;
+
+        Console.WriteLine(
+            $"[Train] gradient health: colour {liveColour * 100.0 / n:F1}% nonzero, " +
+            $"centre {liveCentre * 100.0 / n:F1}%, conic {liveConic * 100.0 / n:F1}%");
+        Console.WriteLine(
+            $"[Train] centre |grad| mean {meanCentre:G3} ({meanCentre / quantum:F1} quanta), " +
+            $"max {maxCentre:G3}; conic max {maxConic:G3} " +
+            $"({maxConic / quantum:G3} quanta, i32 overflows at {int.MaxValue * (double)quantum:G3})");
+    }
+
+    /// <summary>
     /// Mean PSNR of the trainer's own forward render against the targets, split by whether the
-    /// view seeded the geometry. Held-out is the number that matters; init-views is the control -
-    /// if those do not improve, no gradient is reaching the parameters at all.
+    /// optimiser was allowed to fit to the view. Held-out is the number that matters; the
+    /// supervised set is the control - if THAT does not improve, no gradient is reaching the
+    /// parameters at all, and any held-out movement is noise.
     /// </summary>
     static async Task<(float Init, float Held)> EvaluateAsync(
         SplatTrainerGpu trainer,
@@ -214,7 +307,7 @@ public partial class Studio
             double mse = se / frameFloats;
             double psnr = mse <= 1e-12 ? 99.0 : 10.0 * Math.Log10(1.0 / mse);
 
-            if (views[i].UsedForInit) { sumInit += psnr; nInit++; }
+            if (views[i].UsedForSupervision) { sumInit += psnr; nInit++; }
             else { sumHeld += psnr; nHeld++; }
         }
         return (

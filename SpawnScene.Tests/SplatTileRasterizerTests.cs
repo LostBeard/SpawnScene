@@ -115,21 +115,45 @@ public class SplatTileRasterizerTests
         for (int i = 0; i < target.Length; i++) target[i] = (float)rng.NextDouble();
         var dPix = SplatRasterizer.L1Gradient(colour, target);
 
-        var (dColTiled, dOpaTiled) = SplatTileRasterizer.Backward(splats, b, finalT, endIdx, dPix);
+        var tiled = SplatTileRasterizer.Backward(splats, b, finalT, endIdx, dPix);
 
         var order = DepthOrder(splats);
         var fwd = SplatRasterizer.Render(splats, W, H, order);
-        var dColRef = new float[splats.Count * 3];
-        var dOpaRef = new float[splats.Count];
-        SplatRasterizer.BackwardColorOpacity(splats, fwd, dPix, dColRef, dOpaRef);
+        var reference = new SplatRasterizer.Grad2D[splats.Count];
+        SplatRasterizer.Backward(splats, fwd, dPix, reference);
 
-        for (int i = 0; i < splats.Count; i++)
+        AssertGradsMatch(tiled, reference);
+    }
+
+    /// <summary>
+    /// Compare every component, not just colour and opacity. The screen-position and conic
+    /// gradients are what the geometry chain consumes, and they travel the same lockstep walk -
+    /// checking only the two that were there first would leave the other five unverified.
+    /// </summary>
+    static void AssertGradsMatch(SplatRasterizer.Grad2D[] tiled, SplatRasterizer.Grad2D[] reference)
+    {
+        Assert.That(tiled.Length, Is.EqualTo(reference.Length));
+        for (int i = 0; i < reference.Length; i++)
         {
-            for (int c = 0; c < 3; c++)
-                Assert.That(dColTiled[i * 3 + c], Is.EqualTo(dColRef[i * 3 + c]).Within(2e-5f),
-                    $"colour gradient splat {i} channel {c}");
-            Assert.That(dOpaTiled[i], Is.EqualTo(dOpaRef[i]).Within(2e-5f),
-                $"opacity gradient splat {i}");
+            var t = tiled[i];
+            var r = reference[i];
+            // Position and conic gradients are far larger than the colour ones (a conic term
+            // carries a factor of dx*dy in pixels squared), so the bound scales with the
+            // reference rather than being one absolute number for all nine.
+            void Same(float got, float want, string what)
+            {
+                float tol = MathF.Max(2e-5f, 1e-4f * MathF.Abs(want));
+                Assert.That(got, Is.EqualTo(want).Within(tol), $"{what} gradient, splat {i}");
+            }
+            Same(t.R, r.R, "colour R");
+            Same(t.G, r.G, "colour G");
+            Same(t.B, r.B, "colour B");
+            Same(t.Opacity, r.Opacity, "opacity");
+            Same(t.Px, r.Px, "screen x");
+            Same(t.Py, r.Py, "screen y");
+            Same(t.ConicA, r.ConicA, "conic a");
+            Same(t.ConicB, r.ConicB, "conic b");
+            Same(t.ConicC, r.ConicC, "conic c");
         }
     }
 
@@ -179,22 +203,14 @@ public class SplatTileRasterizerTests
         for (int i = 0; i < target.Length; i++) target[i] = (float)rng.NextDouble();
         var dPix = SplatRasterizer.L1Gradient(colour, target);
 
-        var (dColTiled, dOpaTiled) = SplatTileRasterizer.Backward(splats, b, finalT, endIdx, dPix);
+        var tiled = SplatTileRasterizer.Backward(splats, b, finalT, endIdx, dPix);
 
         var order = DepthOrder(splats);
         var fwd = SplatRasterizer.Render(splats, W, H, order);
-        var dColRef = new float[splats.Count * 3];
-        var dOpaRef = new float[splats.Count];
-        SplatRasterizer.BackwardColorOpacity(splats, fwd, dPix, dColRef, dOpaRef);
+        var reference = new SplatRasterizer.Grad2D[splats.Count];
+        SplatRasterizer.Backward(splats, fwd, dPix, reference);
 
-        for (int i = 0; i < splats.Count; i++)
-        {
-            for (int c = 0; c < 3; c++)
-                Assert.That(dColTiled[i * 3 + c], Is.EqualTo(dColRef[i * 3 + c]).Within(2e-5f),
-                    $"colour gradient splat {i} channel {c}");
-            Assert.That(dOpaTiled[i], Is.EqualTo(dOpaRef[i]).Within(2e-5f),
-                $"opacity gradient splat {i}");
-        }
+        AssertGradsMatch(tiled, reference);
     }
 
     [Test]

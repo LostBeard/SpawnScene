@@ -207,11 +207,14 @@ public static class SplatTileRasterizer
     /// every splat in that tile's list back-to-front, contributing zero where it did not reach.
     /// Gradients are reduced per (tile, splat) into grad_per_key, then scattered per splat.
     /// </summary>
-    public static (float[] dColour, float[] dOpacity) Backward(
+    /// <summary>Gradient slots carried per (tile, splat) key. Must match GRADS_PER_KEY in WGSL.</summary>
+    public const int GradsPerKey = 9;
+
+    public static SplatRasterizer.Grad2D[] Backward(
         IReadOnlyList<SplatRasterizer.Splat2D> splats, Binned b,
         float[] finalT, int[] endIdx, float[] dLdPixel)
     {
-        var gradPerKey = new float[b.Keys.Length * 4];
+        var gradPerKey = new float[b.Keys.Length * GradsPerKey];
 
         for (int ty = 0; ty < b.TilesY; ty++)
         {
@@ -250,6 +253,7 @@ public static class SplatTileRasterizer
                 {
                     var s = splats[b.Values[k]];
                     float sumR = 0, sumG = 0, sumB = 0, sumO = 0;
+                    float sumPx = 0, sumPy = 0, sumCa = 0, sumCb = 0, sumCc = 0;
 
                     for (int li = 0; li < threads; li++)
                     {
@@ -278,32 +282,59 @@ public static class SplatTileRasterizer
                             (s.G - recG[li]) * t * dG[li] +
                             (s.B - recB[li]) * t * dB[li];
 
-                        if (rawAlpha < SplatRasterizer.MaxAlpha) sumO += g * dLdAlpha;
+                        if (rawAlpha < SplatRasterizer.MaxAlpha)
+                        {
+                            sumO += g * dLdAlpha;
+
+                            // Geometry, at the 2D level. The chain on to position, scale and
+                            // rotation is linear and depends only on the splat and the view, so
+                            // it is applied ONCE PER SPLAT after the scatter rather than per
+                            // pixel or per key - see SplatGeometryGradients.
+                            float dx = cx - s.Px;
+                            float dy = cy - s.Py;
+                            float dLdPower = s.Opacity * dLdAlpha * g;
+                            sumPx += dLdPower * (s.ConicA * dx + s.ConicB * dy);
+                            sumPy += dLdPower * (s.ConicC * dy + s.ConicB * dx);
+                            sumCa += dLdPower * (-0.5f * dx * dx);
+                            sumCb += dLdPower * (-dx * dy);
+                            sumCc += dLdPower * (-0.5f * dy * dy);
+                        }
 
                         recR[li] = alpha * s.R + (1f - alpha) * recR[li];
                         recG[li] = alpha * s.G + (1f - alpha) * recG[li];
                         recB[li] = alpha * s.B + (1f - alpha) * recB[li];
                     }
 
-                    gradPerKey[k * 4 + 0] = sumR;
-                    gradPerKey[k * 4 + 1] = sumG;
-                    gradPerKey[k * 4 + 2] = sumB;
-                    gradPerKey[k * 4 + 3] = sumO;
+                    int gk = k * GradsPerKey;
+                    gradPerKey[gk + 0] = sumR;
+                    gradPerKey[gk + 1] = sumG;
+                    gradPerKey[gk + 2] = sumB;
+                    gradPerKey[gk + 3] = sumO;
+                    gradPerKey[gk + 4] = sumPx;
+                    gradPerKey[gk + 5] = sumPy;
+                    gradPerKey[gk + 6] = sumCa;
+                    gradPerKey[gk + 7] = sumCb;
+                    gradPerKey[gk + 8] = sumCc;
                 }
             }
         }
 
         // Scatter: fold per-key gradients into per-splat totals.
-        var dColour = new float[splats.Count * 3];
-        var dOpacity = new float[splats.Count];
+        var grads = new SplatRasterizer.Grad2D[splats.Count];
         for (int k = 0; k < b.Keys.Length; k++)
         {
             int i = b.Values[k];
-            dColour[i * 3 + 0] += gradPerKey[k * 4 + 0];
-            dColour[i * 3 + 1] += gradPerKey[k * 4 + 1];
-            dColour[i * 3 + 2] += gradPerKey[k * 4 + 2];
-            dOpacity[i] += gradPerKey[k * 4 + 3];
+            int gk = k * GradsPerKey;
+            grads[i].R += gradPerKey[gk + 0];
+            grads[i].G += gradPerKey[gk + 1];
+            grads[i].B += gradPerKey[gk + 2];
+            grads[i].Opacity += gradPerKey[gk + 3];
+            grads[i].Px += gradPerKey[gk + 4];
+            grads[i].Py += gradPerKey[gk + 5];
+            grads[i].ConicA += gradPerKey[gk + 6];
+            grads[i].ConicB += gradPerKey[gk + 7];
+            grads[i].ConicC += gradPerKey[gk + 8];
         }
-        return (dColour, dOpacity);
+        return grads;
     }
 }

@@ -40,6 +40,9 @@ if (process.env.TRAIN) EXTRA += `&train=${process.env.TRAIN}`;
 // all a quarter turn off level, which is out of distribution for a monocular depth model.
 // Uses its own saved scene, so it never reuses the other orientation's geometry.
 if (process.env.UPRIGHT) EXTRA += `&upright=${process.env.UPRIGHT}`;
+// GEOM=1 also optimises position, scale and rotation. Off by default so a run can attribute a
+// change to the colours or to the geometry, never to both at once.
+if (process.env.GEOM) EXTRA += `&geom=${process.env.GEOM}`;
 const OUT = path.join(ROOT, '_shots/novelview', RUN_TAG);
 
 // GT render size. Must match the dataset images or the comparison resamples.
@@ -116,7 +119,7 @@ const imagesOnDisk = () =>
         // Wide on purpose: pipeline diagnostics ([MultiView-GT] keepRatio, per-view counts,
         // confidence retained) were being filtered out, so I was reading a metric without
         // being able to confirm the code that produced it had run.
-        if (/NovelView|MultiView|DepthGPU|Train|Trainer|farthest picks|FAIL|Error/i.test(s)) console.log('  CON', s.slice(0, 200));
+        if (/NovelView|MultiView|DepthGPU|Train|Trainer|farthest picks|heldout|FAIL|Error/i.test(s)) console.log('  CON', s.slice(0, 200));
       }
     });
     const send = (method, params = {}) => new Promise((res, rej) => {
@@ -172,10 +175,22 @@ const imagesOnDisk = () =>
       { url: `http://127.0.0.1:8080/studio?autotest=novel-view&view=${firstView}${EXTRA}&cb=${Date.now()}` });
     await waitReady(firstView, 900000, 0);
 
-    const picks = logs.find(l => /farthest picks/.test(l));
-    if (picks) {
-      const m = picks.match(/\[([\d,\s]+)\]/);
-      if (m) trainingNames = m[1].split(',').map(x => all[parseInt(x.trim(), 10)]).filter(Boolean);
+    // What the app actually SUPERVISED on. The depth-init picks are not the same set: once
+    // photometric training exists, every view it fits to is a training view, and scoring those
+    // as novel is how a reconstruction score silently becomes a training score.
+    const held = logs.find(l => /\[Studio\] heldout:/.test(l));
+    if (held) {
+      const names = held.split('heldout:')[1].split(',').map(x => x.trim()).filter(Boolean);
+      trainingNames = all.filter(f => !names.includes(f));
+      console.log(`  app held out: ${names.join(', ')}`);
+    } else {
+      // No training in this run, so the only views with any claim on the geometry are the
+      // ones depth was estimated from.
+      const picks = logs.find(l => /farthest picks/.test(l));
+      if (picks) {
+        const m = picks.match(/\[([\d,\s]+)\]/);
+        if (m) trainingNames = m[1].split(',').map(x => all[parseInt(x.trim(), 10)]).filter(Boolean);
+      }
     }
     const canvas = await send('Runtime.evaluate', {
       expression: `(()=>{const c=document.querySelector('canvas');return c?c.width+'x'+c.height:'none';})()`,

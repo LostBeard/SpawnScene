@@ -22,6 +22,7 @@
     <Compile Include="..\SpawnScene\Services\SplatCovariance.cs" Link="Linked\SplatCovariance.cs" />
     <Compile Include="..\SpawnScene\Services\SplatBounds.cs" Link="Linked\SplatBounds.cs" />
     <Compile Include="..\SpawnScene\Services\SplatGeometryGradients.cs" Link="Linked\SplatGeometryGradients.cs" />
+    <Compile Include="..\SpawnScene\Services\SplatDensityControl.cs" Link="Linked\SplatDensityControl.cs" />
     <Compile Include="..\SpawnScene\Services\SplatRasterizer.cs" Link="Linked\SplatRasterizer.cs" />
     <Compile Include="..\SpawnScene\Services\SplatOptimizer.cs" Link="Linked\SplatOptimizer.cs" />
     <Compile Include="..\SpawnScene\Services\SplatTileRasterizer.cs" Link="Linked\SplatTileRasterizer.cs" />

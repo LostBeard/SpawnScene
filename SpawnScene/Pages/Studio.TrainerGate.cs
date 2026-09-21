@@ -189,14 +189,243 @@ public partial class Studio
             bool lossFell = last < first * 0.5f;
             bool recovered = errAfter < errBefore * 0.6f;
 
-            if (!lossFell) Console.WriteLine("[TrainerGate] FAIL: loss did not fall");
-            else if (!recovered) Console.WriteLine("[TrainerGate] FAIL: colours did not move toward truth");
-            else Console.WriteLine("[TrainerGate] PASS");
+            if (!lossFell) { Console.WriteLine("[TrainerGate] FAIL: loss did not fall"); return; }
+            if (!recovered) { Console.WriteLine("[TrainerGate] FAIL: colours did not move toward truth"); return; }
+            Console.WriteLine("[TrainerGate] colour/opacity PASS");
+
+            // -- Gradients: do the shaders compute what the verified CPU oracles compute? --
+            if (!await GradientGateAsync(trainer, splatBuf, packed, n, cam, depthNear, depthFar)) return;
+
+            Console.WriteLine("[TrainerGate] PASS");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[TrainerGate] FAIL: {ex}");
         }
+    }
+
+    /// <summary>
+    /// Compare the GPU gradients against the CPU oracles, on the same data, for one step.
+    ///
+    /// Two separate comparisons, because two separate things can be wrong:
+    ///   the 2D gradients  -> SplatTileRasterizer.Backward, itself checked against the
+    ///                        finite-difference-verified SplatRasterizer.Backward
+    ///   the geometry chain -> SplatGeometryGradients.Backward, finite-difference verified
+    ///
+    /// Comparing only the second would pass with a broken rasteriser feeding it, and comparing
+    /// only the first would pass with the whole covariance chain transposed.
+    /// </summary>
+    async Task<bool> GradientGateAsync(
+        SplatTrainerGpu trainer,
+        MemoryBuffer1D<float, Stride1D.Dense> splatBuf,
+        float[] packed, int n, CameraParams cam, float depthNear, float depthFar)
+    {
+        // A fresh render against a target the splats do NOT already match, so the gradients
+        // are large enough to compare. Fitting to itself would compare two piles of noise.
+        var rng = new Random(31337);
+        var target = new float[GateWidth * GateHeight * 3];
+        for (int i = 0; i < target.Length; i++) target[i] = (float)rng.NextDouble();
+        trainer.SetTarget(target);
+
+        // Read back the splats as the optimiser last left them - the gradients must be
+        // evaluated at the state the GPU actually rendered.
+        float[] state = await splatBuf.CopyToHostAsync<float>(0, packed.Length);
+
+        var geoStep = new SplatTrainerGpu.GeometryStep(
+            PositionLr: 0f, LogScaleLr: 0f, RotationLr: 0f, MinScale: 1e-7f, MaxScale: 1f);
+        await trainer.TrainStepAsync(splatBuf, n, cam, depthNear, depthFar,
+            colourLr: 0f, opacityLr: 0f, geometry: geoStep);
+
+        float[] gpu2d = await trainer.ReadGradientsAsync(n);
+        float[] gpuGeo = await trainer.ReadGeometryGradientsAsync(n);
+
+        // -- CPU, from the same state --
+        var cpuSplats = ProjectForCpu(state, n, cam);
+        var bin = SplatTileRasterizer.Bin(cpuSplats, GateWidth, GateHeight);
+        var (colour, finalT, endIdx) = SplatTileRasterizer.Forward(cpuSplats, bin);
+        var dPix = SplatRasterizer.L1Gradient(colour, target);
+        var cpu2d = SplatTileRasterizer.Backward(cpuSplats, bin, finalT, endIdx, dPix);
+
+        // ProjectForCpu drops splats behind the camera, so CPU index != splat index. Rebuild
+        // the mapping rather than assuming they line up - they did not, and a silent
+        // misalignment would compare every splat against its neighbour.
+        var cpuIndexOf = MapProjectedIndices(state, n, cam);
+
+        // The gradients cross a 2^20 fixed-point atomic, once per KEY, so the error floor is
+        // quantisation and not algebra. Measuring this in QUANTA rather than as a ratio is what
+        // separates "the shader is wrong" from "the number is small": at this gate's 128x96,
+        // dL/d(pixel) is 1/(3*128*96) and a per-splat gradient can be only a few hundred quanta
+        // to begin with, so a 3% relative error on one of those is a rounding artefact. A
+        // relative bound is still applied, but only to the values large enough for it to mean
+        // something.
+        const double Quantum = 1.0 / 1048576.0;
+        const double RelevantMagnitude = 1e-4;   // ~100 quanta
+
+        double sumAbs = 0, maxAbs = 0;
+        double sumRelBig = 0, maxRelBig = 0;
+        int compared = 0, comparedBig = 0;
+        for (int i = 0; i < n; i++)
+        {
+            if (!cpuIndexOf.TryGetValue(i, out int ci)) continue;
+            var c = cpu2d[ci];
+            float[] want = { c.R, c.G, c.B, c.Opacity, c.Px, c.Py, c.ConicA, c.ConicB, c.ConicC };
+            for (int k = 0; k < want.Length; k++)
+            {
+                float got = gpu2d[i * SplatTrainerGpu.GradsPerSplat + k];
+                double abs = Math.Abs(got - want[k]);
+                sumAbs += abs;
+                if (abs > maxAbs) maxAbs = abs;
+                compared++;
+
+                if (Math.Abs(want[k]) > RelevantMagnitude)
+                {
+                    double rel = abs / Math.Abs(want[k]);
+                    sumRelBig += rel;
+                    if (rel > maxRelBig) maxRelBig = rel;
+                    comparedBig++;
+                }
+            }
+        }
+        double meanAbsQ = compared > 0 ? sumAbs / compared / Quantum : 1e9;
+        double maxAbsQ = maxAbs / Quantum;
+        double meanRelBig = comparedBig > 0 ? sumRelBig / comparedBig : 1.0;
+        Console.WriteLine(
+            $"[TrainerGate] 2D gradients: {compared} values, mean err {meanAbsQ:F2} quanta, " +
+            $"max {maxAbsQ:F1} quanta; of the {comparedBig} above {RelevantMagnitude:G2}, " +
+            $"mean rel {meanRelBig:F5}, max rel {maxRelBig:F5}");
+
+        if (compared < n * 5)
+        {
+            Console.WriteLine($"[TrainerGate] FAIL: only {compared} gradient values compared");
+            return false;
+        }
+        if (comparedBig < n)
+        {
+            Console.WriteLine(
+                $"[TrainerGate] FAIL: only {comparedBig} gradients are large enough to compare " +
+                "relatively - the fixture is not exercising the backward hard enough");
+            return false;
+        }
+        // A few quanta of disagreement is the rounding; a wrong shader is off by orders.
+        if (!(meanAbsQ < 4.0) || !(maxAbsQ < 400.0))
+        {
+            Console.WriteLine("[TrainerGate] FAIL: GPU and CPU 2D gradients disagree beyond quantisation");
+            return false;
+        }
+        if (!(meanRelBig < 0.02) || !(maxRelBig < 0.2))
+        {
+            Console.WriteLine("[TrainerGate] FAIL: GPU and CPU 2D gradients disagree on the large values");
+            return false;
+        }
+
+        // -- Geometry chain, fed with the GPU's OWN 2D gradients --
+        // Feeding the CPU chain the CPU 2D gradients would let a small disagreement above
+        // reappear here magnified, and report a chain bug that is not there.
+        var view = ViewFor(cam);
+        double sumGeo = 0, maxGeo = 0;
+        int comparedGeo = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * SplatFormat.Floats;
+            int gb = i * SplatTrainerGpu.GradsPerSplat;
+
+            var up = new SplatGeometryGradients.UpstreamGrad
+            {
+                ScreenX = gpu2d[gb + 4], ScreenY = gpu2d[gb + 5],
+                ConicA = gpu2d[gb + 6], ConicB = gpu2d[gb + 7], ConicC = gpu2d[gb + 8],
+            };
+            // The shader skips a splat with no gradient at all; so must this.
+            if (up.ScreenX == 0f && up.ScreenY == 0f &&
+                up.ConicA == 0f && up.ConicB == 0f && up.ConicC == 0f) continue;
+
+            var geom = new SplatGeometryGradients.Geometry
+            {
+                PosX = state[o + 0], PosY = state[o + 1], PosZ = state[o + 2],
+                ScaleX = state[o + 6], ScaleY = state[o + 7], ScaleZ = state[o + 8],
+                QuatX = state[o + 10], QuatY = state[o + 11],
+                QuatZ = state[o + 12], QuatW = state[o + 13],
+            };
+            var want = SplatGeometryGradients.Backward(geom, view, up);
+            float[] w = { want.PosX, want.PosY, want.PosZ,
+                          want.ScaleX, want.ScaleY, want.ScaleZ,
+                          want.QuatX, want.QuatY, want.QuatZ, want.QuatW };
+
+            for (int k = 0; k < w.Length; k++)
+            {
+                float got = gpuGeo[i * SplatTrainerGpu.GeomGradsPerSplat + k];
+                float scale = MathF.Max(MathF.Abs(w[k]), 1e-6f);
+                float rel = MathF.Abs(got - w[k]) / scale;
+                sumGeo += rel;
+                if (rel > maxGeo) maxGeo = rel;
+                comparedGeo++;
+            }
+        }
+        double meanGeo = comparedGeo > 0 ? sumGeo / comparedGeo : 1.0;
+        Console.WriteLine(
+            $"[TrainerGate] geometry chain: {comparedGeo} values, mean rel {meanGeo:F6}, max rel {maxGeo:F6}");
+
+        if (comparedGeo < n * 5)
+        {
+            Console.WriteLine($"[TrainerGate] FAIL: only {comparedGeo} geometry values compared");
+            return false;
+        }
+        // Same arithmetic on both sides here, in the same precision, so this one should be
+        // tight. A loose bound would accept a transposed matrix.
+        if (!(meanGeo < 1e-3) || !(maxGeo < 0.05))
+        {
+            Console.WriteLine("[TrainerGate] FAIL: WGSL geometry chain disagrees with the CPU oracle");
+            return false;
+        }
+
+        Console.WriteLine("[TrainerGate] gradients PASS");
+        return true;
+    }
+
+    /// <summary>Which entry of <see cref="ProjectForCpu"/> each splat index became.</summary>
+    static Dictionary<int, int> MapProjectedIndices(float[] packed, int n, CameraParams cam)
+    {
+        WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var right, out var up, out var fwd, out var pos);
+        var map = new Dictionary<int, int>();
+        int next = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * SplatFormat.Floats;
+            var rel = new Vector3(packed[o + 0], packed[o + 1], packed[o + 2]) - pos;
+            if (Vector3.Dot(fwd, rel) <= 1e-6f) continue;
+
+            var q = new SplatCovariance.Quat
+            {
+                X = packed[o + 10], Y = packed[o + 11], Z = packed[o + 12], W = packed[o + 13],
+            };
+            float len = MathF.Sqrt(q.X * q.X + q.Y * q.Y + q.Z * q.Z + q.W * q.W);
+            q = new SplatCovariance.Quat { X = q.X / len, Y = q.Y / len, Z = q.Z / len, W = q.W / len };
+            var cov3 = SplatCovariance.Cov3DFromScaleQuat(
+                MathF.Max(packed[o + 6], 1e-9f), MathF.Max(packed[o + 7], 1e-9f),
+                MathF.Max(packed[o + 8], 1e-9f), q);
+            var camCov = SplatCovariance.RotateToCamera(cov3,
+                right.X, right.Y, right.Z, up.X, up.Y, up.Z, fwd.X, fwd.Y, fwd.Z);
+            var cov2 = SplatCovariance.ProjectCov2D(camCov,
+                Vector3.Dot(right, rel), Vector3.Dot(up, rel), Vector3.Dot(fwd, rel),
+                cam.FocalX, cam.FocalY);
+            if (!(cov2.A * cov2.C - cov2.B * cov2.B > 1e-20f)) continue;
+
+            map[i] = next++;
+        }
+        return map;
+    }
+
+    static SplatGeometryGradients.View ViewFor(CameraParams cam)
+    {
+        WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var r, out var u, out var f, out var p);
+        return new SplatGeometryGradients.View
+        {
+            EyeX = p.X, EyeY = p.Y, EyeZ = p.Z,
+            Rx = r.X, Ry = r.Y, Rz = r.Z,
+            Ux = u.X, Uy = u.Y, Uz = u.Z,
+            Fx3 = f.X, Fy3 = f.Y, Fz3 = f.Z,
+            FocalX = cam.FocalX, FocalY = cam.FocalY,
+            CenterX = cam.CenterX, CenterY = cam.CenterY,
+        };
     }
 
     /// <summary>

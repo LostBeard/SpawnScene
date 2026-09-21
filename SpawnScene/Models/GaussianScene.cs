@@ -106,4 +106,14 @@ public sealed class TrainingView
     /// is what keeps a mixed-orientation capture (a phone turned mid-video) coherent.
     /// </summary>
     public int QuarterTurns { get; init; }
+
+    /// <summary>
+    /// Whether the optimiser is allowed to fit to this photograph.
+    ///
+    /// False marks a genuine HOLD-OUT: the view is still posed, still loaded and still scored,
+    /// but its pixels never reach the loss. Without this the only thing a novel-view score
+    /// measures is how well the model reproduces its own training images, which is not the
+    /// question - and is a much larger number.
+    /// </summary>
+    public bool UsedForSupervision { get; init; } = true;
 }

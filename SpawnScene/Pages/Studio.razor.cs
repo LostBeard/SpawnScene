@@ -194,7 +194,10 @@ public partial class Studio : IAsyncDisposable
             int trainIters = query.TryGetValue("train", out var tr) && int.TryParse(tr, out var tri) ? tri : 0;
             // ?upright=1 stands each source photograph up before depth inference.
             bool upright = query.TryGetValue("upright", out var ur) && ur is "1" or "true";
-            await RunNovelViewAutotestAsync(viewName ?? "templeR0016", onlyView, globalScale, trainIters, upright);
+            // ?geom=1 also optimises position, scale and rotation, not just colour and opacity.
+            bool geom = query.TryGetValue("geom", out var gm) && gm is "1" or "true";
+            await RunNovelViewAutotestAsync(
+                viewName ?? "templeR0016", onlyView, globalScale, trainIters, upright, geom);
             return;
         }
 

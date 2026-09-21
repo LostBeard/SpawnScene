@@ -36,9 +36,9 @@ public partial class Studio
     private const string NovelViewUprightProjectName = "NovelView TempleRing (upright)";
 
     private async Task RunNovelViewAutotestAsync(string viewName, int onlyView = -1, bool globalScale = false,
-        int trainIters = 0, bool upright = false)
+        int trainIters = 0, bool upright = false, bool optimiseGeometry = false)
     {
-        Console.WriteLine($"[NovelView] starting view={viewName} train={trainIters} upright={upright}");
+        Console.WriteLine($"[NovelView] starting view={viewName} train={trainIters} upright={upright} geom={optimiseGeometry}");
         try
         {
             // ── 0. Resolve the pose FIRST ──
@@ -124,7 +124,7 @@ public partial class Studio
             // measuring it would otherwise have to round-trip through OPFS, which is the exact
             // step that made earlier runs intermittently regenerate from scratch.
             if (trainIters > 0)
-                await TrainOnTrainingViewsAsync(trainIters);
+                await TrainOnTrainingViewsAsync(trainIters, optimiseGeometry: optimiseGeometry);
 
             // ── 2. Deterministic render settings ──
             // Sorted, not stochastic: stochastic converges over many frames via temporal

@@ -545,6 +545,30 @@ public partial class Studio
             splats, stats, sceneExtent,
             afterFirstOpacityReset: false, NextNormal, MaxDensifiedSplats);
 
+        // Always report, including - especially including - when the answer is "nothing".
+        //
+        // The first run of this decided nothing NINE times and printed not one line, so there
+        // was no way to tell "the scene does not need densifying" from "the signal never
+        // arrived". A step that declines to do the main work has to say why, and the why here
+        // is a distribution against a threshold, not a boolean.
+        var avg = new float[n];
+        int visible = 0;
+        for (int i = 0; i < n; i++)
+        {
+            avg[i] = stats[i].AverageGradient;
+            if (stats[i].VisibleCount > 0) visible++;
+        }
+        System.Array.Sort(avg);
+        float sizeSplit = SplatDensityControl.PercentDense * sceneExtent;
+        int big = 0;
+        foreach (var sp in splats) if (sp.MaxScale > sizeSplit) big++;
+
+        Console.WriteLine(
+            $"[Densify] signal: {visible * 100.0 / n:F1}% of {n:N0} splats visible, " +
+            $"avg |grad| median {avg[n / 2]:G3} p90 {avg[n * 9 / 10]:G3} max {avg[n - 1]:G3} " +
+            $"vs threshold {SplatDensityControl.GradientThresholdNdc:G3}; " +
+            $"{big:N0} splats above the {sizeSplit:G3} split size; plan: {plan}");
+
         if (plan.Add.Count == 0 && plan.Remove.Count == 0)
         {
             _trainer.ResetDensifyStats();

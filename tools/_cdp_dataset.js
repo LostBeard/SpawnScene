@@ -81,7 +81,15 @@ const closeTab = (id) => new Promise(res =>
       if (m.id && pend.has(m.id)) pend.get(m.id)(m);
       if (m.method === 'Runtime.consoleAPICalled') {
         const s = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
-        if (/Dataset|Train|MultiView|SfM|Studio|Depth|FAIL|Error/i.test(s)) console.log(s.slice(0, 240));
+        // Print EVERYTHING. This used to be an allowlist of prefixes - Dataset, Train,
+        // MultiView, SfM, Studio, Depth - and a new [Densify] prefix matched none of them, so
+        // nine density-control steps produced no output and were reported as "it did nothing".
+        // The diagnosis cost two full runs and was wrong.
+        //
+        // An allowlist of message prefixes drops exactly the output you added because something
+        // was unclear. Output goes to a redirected file anyway, and grep is free; GPU minutes
+        // are not. Same lesson as the pose-source whitelist, third time in one day.
+        console.log(s.slice(0, 400));
         const free = s.match(/\[Dataset\] READY-FOR-CAPTURE free-(\w+)/);
         if (free) { pendingFree.push(free[1]); }
         else if (/\[Dataset\] READY-FOR-CAPTURE/.test(s)) ready = true;

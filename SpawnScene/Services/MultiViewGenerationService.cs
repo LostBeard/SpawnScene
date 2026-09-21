@@ -2112,10 +2112,17 @@ public class MultiViewGenerationService
             {
                 try
                 {
-                    float[] host = await depthResult.RawDepthGpu!.CopyToHostAsync<float>(0, depthResult.RawDepthGpu.Length);
+                    // ONE pixel, not the whole map.
+                    //
+                    // This read the entire depth buffer back to the managed heap to sample a
+                    // single value: 1024x673 floats is 2.75 MB per view, and at 88 views that is
+                    // about 242 MB of churn inside a 2 GB WASM heap, for 88 floats' worth of
+                    // information. The index is known before the copy, so copy from it.
                     int ix = Math.Clamp((int)MathF.Round(u), 0, depthResult.Width - 1);
                     int iy = Math.Clamp((int)MathF.Round(v), 0, depthResult.Height - 1);
-                    float raw = host[iy * depthResult.Width + ix];
+                    long offset = (long)iy * depthResult.Width + ix;
+                    float[] one = await depthResult.RawDepthGpu!.CopyToHostAsync<float>(offset, 1);
+                    float raw = one[0];
                     if (raw > 1e-4f)
                     {
                         viewScale = zCam / raw;

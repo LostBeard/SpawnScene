@@ -83,20 +83,22 @@ public class CameraController : IDisposable
                 maxDist = MathF.Max(maxDist, Vector3.Distance(cam.Position, camCenter));
             _moveSpeed = MathF.Max(maxDist * 0.5f, 0.05f);
 
-            // Always aim at a point in front of the camera — never Normalize(0).
-            // TempleRing: Middlebury bbox mid. Otherwise camera-ring centroid, else Forward.
-            var temple = new Vector3(0.028f, 0.042f, -0.054f);
+            // Aim at what the cameras were looking at, never at a hardcoded point.
+            //
+            // This used to try a literal TempleRing bounding-box midpoint first -
+            // (0.028, 0.042, -0.054) - and fall back to the camera centroid only if that
+            // happened to be in front of the camera. For any scene that is not TempleRing that
+            // test is a coin toss on a meaningless coordinate, and when it won the viewer aimed
+            // at a point in the middle of nothing. MEASURED: a drjohnson run produced 1,129,128
+            // splats and a completely black frame this way.
+            //
+            // The camera-ring centroid is the general answer - it is where the photographer was
+            // pointing, by construction - and the camera's own forward is the fallback when the
+            // rig is degenerate, e.g. every camera at one spot.
             Vector3 dir = firstCam.Forward;
-            var toTemple = temple - _position;
-            if (toTemple.LengthSquared() > 1e-6f
-                && Vector3.Dot(Vector3.Normalize(toTemple), firstCam.Forward) > 0.2f)
-                dir = toTemple;
-            else
-            {
-                var toCenter = camCenter - _position;
-                if (toCenter.LengthSquared() > 1e-6f)
-                    dir = toCenter;
-            }
+            var toCenter = camCenter - _position;
+            if (toCenter.LengthSquared() > 1e-6f)
+                dir = toCenter;
             dir = Vector3.Normalize(dir);
             _yaw = MathF.Atan2(dir.X, -dir.Z);
             _pitch = MathF.Asin(Math.Clamp(dir.Y, -1f, 1f));

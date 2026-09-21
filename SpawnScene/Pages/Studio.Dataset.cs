@@ -1,3 +1,4 @@
+using System.Numerics;
 using SpawnScene.Models;
 using SpawnScene.Services;
 
@@ -155,11 +156,72 @@ public partial class Studio
             await Task.Delay(1500);
             Console.WriteLine("[Dataset] READY-FOR-CAPTURE");
             await Task.Delay(2500);
+
+            // Then LOOK AROUND. A capture-pose render is close to a re-projection of the photo
+            // it was taken from, so it flatters any reconstruction; the question a room has to
+            // answer is what it looks like from somewhere nobody stood. TJ found the scene
+            // rotated and tumbling this way while every number said it was fine.
+            await CaptureFreeViewsAsync(scene);
+
             Console.WriteLine("[Dataset] DONE");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Dataset] FAIL: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// Render from poses nobody captured from: step away from the seat and look back.
+    ///
+    /// Deliberately modest offsets. The point is not a flythrough, it is to catch a
+    /// reconstruction that only holds together from the exact pose it was seated at - which is
+    /// what an unaligned world frame, a broken depth sort or a set of per-view shells all look
+    /// like, and what a capture-pose screenshot cannot show.
+    /// </summary>
+    private async Task CaptureFreeViewsAsync(GaussianScene scene)
+    {
+        if (_cameraController == null || scene.TrainingCameras.Count == 0) return;
+
+        var seat = scene.TrainingCameras[0];
+        var fwd = Vector3.Normalize(seat.Forward);
+        var up = Vector3.Normalize(seat.Up);
+        var right = Vector3.Normalize(Vector3.Cross(fwd, up));
+
+        // Scale the steps to the scene so this means the same thing on any capture.
+        float span = 0.25f;
+        if (scene.TrainingCameras.Count > 1)
+        {
+            var centroid = Vector3.Zero;
+            foreach (var c in scene.TrainingCameras) centroid += c.Position;
+            centroid /= scene.TrainingCameras.Count;
+            float spread = 0f;
+            foreach (var c in scene.TrainingCameras)
+                spread = MathF.Max(spread, Vector3.Distance(c.Position, centroid));
+            if (spread > 1e-3f) span = spread * 0.35f;
+        }
+
+        var moves = new (string Name, Vector3 Offset, float Yaw)[]
+        {
+            ("left",  -right * span, 0f),
+            ("right",  right * span, 0f),
+            ("back",  -fwd * span,   0f),
+            ("up",     up * span * 0.5f, 0f),
+            ("turned", Vector3.Zero, 0.35f),
+        };
+
+        foreach (var (name, offset, yaw) in moves)
+        {
+            var look = fwd;
+            if (yaw != 0f)
+            {
+                var q = Quaternion.CreateFromAxisAngle(up, yaw);
+                look = Vector3.Normalize(Vector3.Transform(fwd, q));
+            }
+            _cameraController.SetPose(seat.Position + offset, look, up);
+            await Task.Delay(1200);
+            Console.WriteLine($"[Dataset] READY-FOR-CAPTURE free-{name}");
+            await Task.Delay(1800);
         }
     }
 }

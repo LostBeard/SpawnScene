@@ -71,13 +71,16 @@ const closeTab = (id) => new Promise(res =>
     let id = 1;
     const pend = new Map();
     let done = false, failed = null, ready = false;
+    const pendingFree = [];
     ws.on('message', raw => {
       const m = JSON.parse(raw.toString());
       if (m.id && pend.has(m.id)) pend.get(m.id)(m);
       if (m.method === 'Runtime.consoleAPICalled') {
         const s = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
         if (/Dataset|Train|MultiView|SfM|Studio|Depth|FAIL|Error/i.test(s)) console.log(s.slice(0, 240));
-        if (/\[Dataset\] READY-FOR-CAPTURE/.test(s)) ready = true;
+        const free = s.match(/\[Dataset\] READY-FOR-CAPTURE free-(\w+)/);
+        if (free) { pendingFree.push(free[1]); }
+        else if (/\[Dataset\] READY-FOR-CAPTURE/.test(s)) ready = true;
         if (/\[Dataset\] DONE/.test(s)) done = true;
         if (/\[Dataset\] FAIL/.test(s)) failed = s;
       }
@@ -100,6 +103,16 @@ const closeTab = (id) => new Promise(res =>
     while (Date.now() < deadline && !done && !failed) {
       await new Promise(r => setTimeout(r, 500));
       // Capture the finished scene, so the reconstruction can be LOOKED at and not only scored.
+      while (pendingFree.length) {
+        const name = pendingFree.shift();
+        const png = await send('Page.captureScreenshot', { format: 'png' });
+        const dir = path.join(__dirname, '..', '_shots', 'dataset');
+        require('fs').mkdirSync(dir, { recursive: true });
+        const tag = process.env.RUN_TAG ? `${NAME}__${process.env.RUN_TAG}__free-${name}.png`
+                                        : `${NAME}__free-${name}.png`;
+        require('fs').writeFileSync(path.join(dir, tag), Buffer.from(png.result.data, 'base64'));
+        console.log('captured ' + tag);
+      }
       if (ready && !shot) {
         shot = true;
         const png = await send('Page.captureScreenshot', { format: 'png' });

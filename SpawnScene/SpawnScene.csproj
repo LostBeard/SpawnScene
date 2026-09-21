@@ -8,6 +8,18 @@
 		<!-- Not compression needed -->
 		<CompressionEnabled>false</CompressionEnabled>
 		<!-- Disable IL trimming to preserve ILGPU kernel methods invoked via reflection -->
+		<!--
+		  Never treat build or intermediate output as project CONTENT.
+
+		  The harness publishes with a private BaseIntermediateOutputPath (an open Visual Studio
+		  otherwise stales the publish silently), and it publishes into bin/PublishRelease, which
+		  lives under the project. Passing DefaultItemExcludes on the command line REPLACES the
+		  SDK default list rather than adding to it, which drops the bin exclusion - and then the
+		  publish output is content, so every publish copies the previous one into itself. That
+		  reached 11 levels of nesting and 13 GB before anyone noticed it as "the publish is slow".
+		  Appending here keeps the SDK defaults and needs no command-line flag.
+		-->
+		<DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
 		<PublishTrimmed>false</PublishTrimmed>
 		<!-- Disable AOT compilation - ILGPU needs IL reflection to work -->
 		<RunAOTCompilation>false</RunAOTCompilation>

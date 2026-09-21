@@ -192,7 +192,9 @@ public partial class Studio : IAsyncDisposable
             bool globalScale = query.TryGetValue("globalscale", out var gs) && gs is "1" or "true";
             // ?train=N runs N photometric optimisation steps before the first pose is parked.
             int trainIters = query.TryGetValue("train", out var tr) && int.TryParse(tr, out var tri) ? tri : 0;
-            await RunNovelViewAutotestAsync(viewName ?? "templeR0016", onlyView, globalScale, trainIters);
+            // ?upright=1 stands each source photograph up before depth inference.
+            bool upright = query.TryGetValue("upright", out var ur) && ur is "1" or "true";
+            await RunNovelViewAutotestAsync(viewName ?? "templeR0016", onlyView, globalScale, trainIters, upright);
             return;
         }
 

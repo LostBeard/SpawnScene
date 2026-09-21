@@ -280,7 +280,8 @@ public partial class Studio
 
     // ─── Dataset Testing ───
 
-    private async Task GenerateFromTempleRingAsync(int onlyView = -1, bool globalScale = false)
+    private async Task GenerateFromTempleRingAsync(int onlyView = -1, bool globalScale = false,
+        bool upright = false)
     {
         if (_activeProject == null) return;
 
@@ -354,8 +355,23 @@ public partial class Studio
                 cam.Width = w;
                 cam.Height = h;
 
+                // Stand the photograph up before the depth model sees it. Every TempleRing image
+                // is a quarter turn off level (world-up projects to image-right in all 47
+                // calibration entries), and monocular depth networks are trained on upright
+                // photographs. The camera is turned with the pixels, so nothing downstream
+                // changes meaning - see ImageOrientation.
+                int turns = upright ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
+                if (turns != 0)
+                {
+                    rgba = ImageOrientation.RotateRgba(rgba, w, h, turns);
+                    cam = ImageOrientation.Rotate(cam, turns);
+                    (w, h) = (cam.Width, cam.Height);
+                }
+
                 images.Add(new ImportedImage { FileName = filename, Width = w, Height = h, RgbaPixels = rgba });
                 cameras.Add(cam);
+                if (turns != 0 && images.Count == 1)
+                    Console.WriteLine($"[Studio] TempleRing upright: {turns} quarter turn(s), now {w}x{h}");
                 Console.WriteLine($"[Studio] TempleRing pick[{images.Count - 1}]={filename} pos=({cam.Position.X:F3},{cam.Position.Y:F3},{cam.Position.Z:F3})");
             }
 
@@ -391,11 +407,13 @@ public partial class Studio
                 var initNames = pickIdx.Select(i => available[i].filename).ToHashSet(StringComparer.OrdinalIgnoreCase);
                 foreach (var (filename, cam) in available)
                 {
+                    int turns = upright ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
                     scene.TrainingViews.Add(new TrainingView
                     {
-                        Camera = cam,
+                        Camera = turns != 0 ? ImageOrientation.Rotate(cam, turns) : cam,
                         ImageName = $"datasets/TempleRing/{filename}",
                         UsedForInit = initNames.Contains(filename),
+                        QuarterTurns = turns,
                     });
                 }
                 Console.WriteLine($"[Studio] TempleRing supervision: {scene.TrainingViews.Count} posed views " +

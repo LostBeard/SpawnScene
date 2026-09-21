@@ -29,10 +29,16 @@ public partial class Studio
     /// <summary>Project the harness reuses, so the scene is generated once and then loaded.</summary>
     private const string NovelViewProjectName = "NovelView TempleRing";
 
+    /// <summary>
+    /// Separate saved scene for the upright variant. Sharing one would make the run reuse
+    /// whichever orientation happened to be generated first and report it as the other.
+    /// </summary>
+    private const string NovelViewUprightProjectName = "NovelView TempleRing (upright)";
+
     private async Task RunNovelViewAutotestAsync(string viewName, int onlyView = -1, bool globalScale = false,
-        int trainIters = 0)
+        int trainIters = 0, bool upright = false)
     {
-        Console.WriteLine($"[NovelView] starting view={viewName} train={trainIters}");
+        Console.WriteLine($"[NovelView] starting view={viewName} train={trainIters} upright={upright}");
         try
         {
             // ── 0. Resolve the pose FIRST ──
@@ -57,11 +63,12 @@ public partial class Studio
             // views, so regenerating per view would make the measurement unusable. This also
             // exercises the saved-scene load path on every run rather than only the fresh one.
             _projects = await _projectService.ListProjectsAsync();
-            var project = _projects.FirstOrDefault(p => p.Name == NovelViewProjectName);
+            string projectName = upright ? NovelViewUprightProjectName : NovelViewProjectName;
+            var project = _projects.FirstOrDefault(p => p.Name == projectName);
             bool mustGenerate = project == null || project.Scenes.Count == 0;
 
             if (project == null)
-                project = await _projectService.CreateProjectAsync(NovelViewProjectName);
+                project = await _projectService.CreateProjectAsync(projectName);
 
             _activeProject = project;
             OnOpenProject(project);
@@ -85,7 +92,7 @@ public partial class Studio
                 if (mustGenerate)
                 {
                     Console.WriteLine($"[NovelView] no saved scene — generating from TempleRing (slow path, onlyView={onlyView}, globalScale={globalScale})");
-                    _ = GenerateFromTempleRingAsync(onlyView, globalScale);
+                    _ = GenerateFromTempleRingAsync(onlyView, globalScale, upright);
                 }
                 else
                 {

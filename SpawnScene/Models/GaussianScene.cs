@@ -99,4 +99,11 @@ public sealed class TrainingView
 
     /// <summary>True when this view also seeded geometry (vs supervision only).</summary>
     public bool UsedForInit { get; init; }
+
+    /// <summary>
+    /// Counter-clockwise quarter turns already applied to <see cref="Camera"/>, which the
+    /// target image must be given too. Storing it on the view rather than as a global setting
+    /// is what keeps a mixed-orientation capture (a phone turned mid-video) coherent.
+    /// </summary>
+    public int QuarterTurns { get; init; }
 }

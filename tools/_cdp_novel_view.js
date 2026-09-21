@@ -36,6 +36,10 @@ if (process.env.GLOBALSCALE) EXTRA += `&globalscale=${process.env.GLOBALSCALE}`;
 // TRAIN=<iters> runs photometric optimisation against the posed photographs BEFORE the first
 // pose is parked, on the same page load, so the captured frames are of the trained scene.
 if (process.env.TRAIN) EXTRA += `&train=${process.env.TRAIN}`;
+// UPRIGHT=1 stands each source photograph up before depth inference. TempleRing's images are
+// all a quarter turn off level, which is out of distribution for a monocular depth model.
+// Uses its own saved scene, so it never reuses the other orientation's geometry.
+if (process.env.UPRIGHT) EXTRA += `&upright=${process.env.UPRIGHT}`;
 const OUT = path.join(ROOT, '_shots/novelview', RUN_TAG);
 
 // GT render size. Must match the dataset images or the comparison resamples.

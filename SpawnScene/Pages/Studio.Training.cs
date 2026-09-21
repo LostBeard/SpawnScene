@@ -97,7 +97,7 @@ public partial class Studio
             var loadStart = DateTime.UtcNow;
             for (int i = 0; i < views.Count; i++)
             {
-                bool ok = await LoadTargetAsync(views[i].ImageName, w, h, scratch);
+                bool ok = await LoadTargetAsync(views[i].ImageName, views[i].QuarterTurns, w, h, scratch);
                 if (!ok)
                 {
                     Console.WriteLine($"[Train] FAIL: could not load target {views[i].ImageName}");
@@ -227,25 +227,31 @@ public partial class Studio
     /// Matches how splat colour was created at import (byte/255), so the loss compares
     /// like with like.
     /// </summary>
-    private async Task<bool> LoadTargetAsync(string url, int w, int h, float[] dest)
+    private async Task<bool> LoadTargetAsync(string url, int quarterTurns, int w, int h, float[] dest)
     {
         try
         {
             byte[] bytes = await _http.GetByteArrayAsync(url);
             using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
             using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
-            if ((int)bitmap.Width != w || (int)bitmap.Height != h)
+
+            // The turn was applied to the camera at generation time; the picture has to get the
+            // same one or the loss compares a render of one framing against pixels from another.
+            int srcW = (quarterTurns % 2 == 0) ? w : h;
+            int srcH = (quarterTurns % 2 == 0) ? h : w;
+            if ((int)bitmap.Width != srcW || (int)bitmap.Height != srcH)
             {
                 Console.WriteLine(
-                    $"[Train] {url} is {bitmap.Width}x{bitmap.Height}, trainer is {w}x{h}");
+                    $"[Train] {url} is {bitmap.Width}x{bitmap.Height}, expected {srcW}x{srcH} " +
+                    $"for a {w}x{h} trainer with {quarterTurns} quarter turn(s)");
                 return false;
             }
-            using var osc = new OffscreenCanvas(w, h);
+            using var osc = new OffscreenCanvas(srcW, srcH);
             using var ctx = osc.Get2DContext();
             ctx.DrawImage(bitmap, 0, 0);
-            using var imageData = ctx.GetImageData(0, 0, w, h);
+            using var imageData = ctx.GetImageData(0, 0, srcW, srcH);
             using var dataArray = imageData.Data;
-            var rgba = dataArray.ReadBytes();
+            var rgba = ImageOrientation.RotateRgba(dataArray.ReadBytes(), srcW, srcH, quarterTurns);
 
             const float inv = 1f / 255f;
             for (int p = 0; p < w * h; p++)

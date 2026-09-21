@@ -86,14 +86,36 @@ def read_images(path):
 
 
 def read_points3d(path):
+    """Position by id for the reprojection check, plus the full records for the cloud export."""
     pts = {}
+    recs = []
     with open(path, "rb") as f:
         for _ in range(_read(f, 8, "Q")[0]):
             pid, x, y, z, r, g, b, err = _read(f, 43, "QdddBBBd")
             ntrack = _read(f, 8, "Q")[0]
             f.read(8 * ntrack)
             pts[pid] = (x, y, z)
-    return pts
+            # ntrack is the number of images that SAW this point. COLMAP triangulates from at
+            # least two, which is the entire reason this cloud is worth initialising from: every
+            # point is multi-view by construction, unlike a per-view depth unprojection.
+            recs.append((x, y, z, r, g, b, err, ntrack))
+    return pts, recs
+
+
+def write_point_cloud(path, recs, min_track=2, max_err=2.0):
+    """
+    Write the sparse cloud as a flat binary: i32 count, then per point 3x f32 xyz + 4x u8 rgba.
+
+    Kept binary and tiny (80k points is about 1.3 MB) because the browser reads it with one
+    fetch and no parsing. Filtered the way the 3DGS reference filters: a point seen by fewer
+    than two images is not triangulated, and a high reprojection error means the track is wrong.
+    """
+    kept = [r for r in recs if r[7] >= min_track and r[6] <= max_err]
+    with open(path, "wb") as f:
+        f.write(struct.pack("<i", len(kept)))
+        for x, y, z, r, g, b, _err, _n in kept:
+            f.write(struct.pack("<fffBBBB", x, y, z, r, g, b, 255))
+    return len(kept), len(recs)
 
 
 def quat_to_R(q):
@@ -155,7 +177,7 @@ def main():
 
     cams = read_cameras(os.path.join(sparse, "cameras.bin"))
     images = read_images(os.path.join(sparse, "images.bin"))
-    points = read_points3d(os.path.join(sparse, "points3D.bin"))
+    points, point_recs = read_points3d(os.path.join(sparse, "points3D.bin"))
     images.sort(key=lambda im: im["name"])
 
     bad = {c["model"] for c in cams.values()} - UNDISTORTED
@@ -188,6 +210,9 @@ def main():
             vals = " ".join(f"{v:.9g}" for v in k + flat + list(im["t"]))
             f.write(f"{im['name']} {vals}\n")
 
+    kept, total = write_point_cloud(os.path.join(out_dir, "points3d.bin"), point_recs)
+    print(f"sparse cloud: {kept:,} of {total:,} points kept (track >= 2, reproj err <= 2 px)")
+
     first = cams[picked[0]["cam"]]
     manifest = dict(
         name=args.name,
@@ -197,6 +222,8 @@ def main():
         width=first["width"],
         height=first["height"],
         poses="poses.par",
+        points="points3d.bin",
+        pointCount=kept,
         note="Converted from COLMAP by tools/colmap_to_dataset.py. Images are mounted, not "
              "copied - see MOUNTS in tools/_spa_server.js.",
     )

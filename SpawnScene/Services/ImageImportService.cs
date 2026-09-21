@@ -679,6 +679,36 @@ public class ImageImportService : IDisposable
         public int Height { get; set; }
         /// <summary>Middlebury-format camera parameters, or empty when the capture is unposed.</summary>
         public string Poses { get; set; } = "";
+
+        /// <summary>
+        /// Sparse SfM point cloud, or empty when the dataset has none.
+        ///
+        /// This is what 3DGS initialises from. Every point is triangulated from at least two
+        /// images, which is the property a per-view depth unprojection does not have.
+        /// </summary>
+        public string Points { get; set; } = "";
+
+        /// <summary>Points in <see cref="Points"/>, for reporting before the file is fetched.</summary>
+        public int PointCount { get; set; }
+    }
+
+    /// <summary>
+    /// Fetch a dataset's sparse SfM point cloud. Null when it has none.
+    /// </summary>
+    public async Task<byte[]?> TryLoadPointCloudAsync(string datasetName, string file)
+    {
+        if (string.IsNullOrEmpty(file)) return null;
+        try
+        {
+            using var resp = await _http.GetAsync($"datasets/{datasetName}/{file}");
+            if (!resp.IsSuccessStatusCode) return null;
+            return await resp.Content.ReadAsByteArrayAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Import] point cloud {datasetName}/{file} failed: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>

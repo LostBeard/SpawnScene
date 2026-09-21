@@ -276,7 +276,10 @@ public partial class Studio : IAsyncDisposable
             // ?gtposes=1 uses the dataset's own COLMAP poses and skips pose recovery, so the
             // optimiser can be measured without the pose error folded in.
             bool gtPoses = query.TryGetValue("gtposes", out var gp) && gp is "1" or "true";
-            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches, gtPoses);
+            // ?init=points initialises from the dataset's sparse SfM cloud instead of
+            // unprojecting a depth map per view - the 3DGS reference initialisation.
+            bool cloudInit = query.TryGetValue("init", out var ini) && ini is "points" or "cloud";
+            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches, gtPoses, cloudInit);
             return;
         }
 

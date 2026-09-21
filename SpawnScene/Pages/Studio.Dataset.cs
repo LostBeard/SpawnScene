@@ -22,10 +22,50 @@ namespace SpawnScene.Pages;
 /// </summary>
 public partial class Studio
 {
+    /// <summary>
+    /// Load a dataset's sparse SfM cloud and turn it into packed splats, or null when it has none.
+    ///
+    /// Reports the scale distribution because that is the one thing a wrong unit system shows up
+    /// in immediately: a cloud in different units than the cameras still loads, still renders,
+    /// and is silently unusable.
+    /// </summary>
+    private async Task<float[]?> LoadSparseCloudAsync(string datasetName)
+    {
+        var manifest = await _importService.TryLoadManifestAsync(datasetName);
+        if (manifest == null || string.IsNullOrEmpty(manifest.Points))
+        {
+            Console.WriteLine(
+                $"[Dataset] {datasetName} has no sparse cloud in its manifest - falling back to " +
+                "per-view depth init. Regenerate it with tools/colmap_to_dataset.py.");
+            return null;
+        }
+
+        var bytes = await _importService.TryLoadPointCloudAsync(datasetName, manifest.Points);
+        if (bytes == null)
+        {
+            Console.WriteLine($"[Dataset] FAIL: manifest lists {manifest.Points} but it did not fetch");
+            return null;
+        }
+
+        var t = DateTime.UtcNow;
+        var cloud = SparsePointCloudInit.Parse(bytes);
+        var packed = SparsePointCloudInit.BuildPacked(cloud);
+        int n = cloud.Count;
+
+        var scales = new float[n];
+        for (int i = 0; i < n; i++) scales[i] = packed[i * SplatFormat.Floats + SplatFormat.OffScale];
+        Array.Sort(scales);
+        Console.WriteLine(
+            $"[Dataset] sparse cloud: {n:N0} points in {(DateTime.UtcNow - t).TotalSeconds:F1}s, " +
+            $"splat scale p10 {scales[n / 10]:F4} median {scales[n / 2]:F4} p90 {scales[n * 9 / 10]:F4}, " +
+            $"opacity {SparsePointCloudInit.InitialOpacity}");
+        return packed;
+    }
+
     private async Task RunDatasetAutotestAsync(
         string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension,
         string posePreference = "auto", int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches,
-        bool useGroundTruthPoses = false)
+        bool useGroundTruthPoses = false, bool initFromPointCloud = false)
     {
         Console.WriteLine(
             $"[Dataset] starting name={datasetName} train={trainIters} geom={optimiseGeometry} " +
@@ -90,8 +130,23 @@ public partial class Studio
                         "- the pose cascade is skipped entirely");
                     _multiViewService.UseExternalCameras(
                         gtCameras.Select(c => (CameraParams?)c).ToArray(), "colmap");
-                    result = await _multiViewService.GenerateWithGroundTruthAsync(
-                        images, gtCameras, subsample: 2, edgeSharpness: 0.3f);
+
+                    // Sparse-cloud init, which is what 3DGS actually does.
+                    //
+                    // Unprojecting a monocular depth map per view gives one private shell per
+                    // camera: measured on drjohnson, 91.9% of those splats were constrained by
+                    // at most one view and 49.5% by none, so supervised loss fell while held-out
+                    // loss rose and no optimiser setting could fix it. Every point in an SfM
+                    // cloud is triangulated from two or more images by construction.
+                    float[]? cloud = initFromPointCloud
+                        ? await LoadSparseCloudAsync(datasetName)
+                        : null;
+
+                    result = cloud != null
+                        ? await _multiViewService.GenerateFromPointCloudAsync(
+                            cloud, cloud.Length / SplatFormat.Floats, gtCameras)
+                        : await _multiViewService.GenerateWithGroundTruthAsync(
+                            images, gtCameras, subsample: 2, edgeSharpness: 0.3f);
                 }
                 else
                 {

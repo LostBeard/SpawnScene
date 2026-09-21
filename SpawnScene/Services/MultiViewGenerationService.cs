@@ -1117,6 +1117,32 @@ public class MultiViewGenerationService
     /// ⚠ The cameras are mutated in place, deliberately: the training views hold the same
     /// objects, and a scene rotated away from its cameras would be worse than one left alone.
     /// </summary>
+    /// <summary>
+    /// Build the scene from a sparse SfM point cloud instead of per-view depth.
+    ///
+    /// The cloud arrives in the SAME world frame as the ground-truth cameras - both come out of
+    /// one COLMAP reconstruction - so there is nothing to register, which is the point. Gravity
+    /// alignment runs exactly as it does for the depth path, and moves the cameras with the
+    /// splats.
+    /// </summary>
+    public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
+        GenerateFromPointCloudAsync(float[] packed, int splatCount, IEnumerable<CameraParams> cameras)
+    {
+        if (splatCount <= 0) return null;
+        var accelerator = _gpu.Accelerator!;
+
+        SetStatus($"Uploading {splatCount:N0} splats from the sparse cloud...");
+        var buf = accelerator.Allocate1D<float>((long)splatCount * SplatFormat.Floats);
+        buf.CopyFromCPU(packed);
+        await accelerator.SynchronizeAsync();
+
+        await AlignToGravityAsync(buf, splatCount, cameras);
+
+        LastPoseSource = "colmap";
+        SetStatus($"Sparse-cloud init complete: {splatCount:N0} splats");
+        return (buf, splatCount);
+    }
+
     private async Task AlignToGravityAsync(
         MemoryBuffer1D<float, Stride1D.Dense> packed, int splatCount,
         IEnumerable<CameraParams> cameras)

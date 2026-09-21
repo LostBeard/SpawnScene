@@ -51,5 +51,7 @@
   "width": 1332,
   "height": 876,
   "poses": "poses.par",
+  "points": "points3d.bin",
+  "pointCount": 79922,
   "note": "Converted from COLMAP by tools/colmap_to_dataset.py. Images are mounted, not copied - see MOUNTS in tools/_spa_server.js."
 }

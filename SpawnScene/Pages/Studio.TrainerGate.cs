@@ -258,8 +258,7 @@ public partial class Studio
         // to begin with, so a 3% relative error on one of those is a rounding artefact. A
         // relative bound is still applied, but only to the values large enough for it to mean
         // something.
-        const double Quantum = 1.0 / 1048576.0;
-        const double RelevantMagnitude = 1e-4;   // ~100 quanta
+        const double RelevantMagnitude = 1e-4;
 
         double sumAbs = 0, maxAbs = 0;
         double sumRelBig = 0, maxRelBig = 0;
@@ -272,22 +271,28 @@ public partial class Studio
             for (int k = 0; k < want.Length; k++)
             {
                 float got = gpu2d[i * SplatTrainerGpu.GradsPerSplat + k];
-                double abs = Math.Abs(got - want[k]);
-                sumAbs += abs;
-                if (abs > maxAbs) maxAbs = abs;
+                double err = Math.Abs(got - want[k]);
+
+                // In QUANTA of this slot's own scale - they differ by 64x between the conic
+                // and everything else, so one absolute bound would mean two different things.
+                // The RELATIVE check must use the unscaled error; multiplying the quantised
+                // one by 2^20 turned a 0.17% disagreement into a reported 1800x.
+                double quanta = err * SplatTrainerGpu.FixedScaleFor(k);
+                sumAbs += quanta;
+                if (quanta > maxAbs) maxAbs = quanta;
                 compared++;
 
                 if (Math.Abs(want[k]) > RelevantMagnitude)
                 {
-                    double rel = abs / Math.Abs(want[k]);
+                    double rel = err / Math.Abs(want[k]);
                     sumRelBig += rel;
                     if (rel > maxRelBig) maxRelBig = rel;
                     comparedBig++;
                 }
             }
         }
-        double meanAbsQ = compared > 0 ? sumAbs / compared / Quantum : 1e9;
-        double maxAbsQ = maxAbs / Quantum;
+        double meanAbsQ = compared > 0 ? sumAbs / compared : 1e9;
+        double maxAbsQ = maxAbs;
         double meanRelBig = comparedBig > 0 ? sumRelBig / comparedBig : 1.0;
         Console.WriteLine(
             $"[TrainerGate] 2D gradients: {compared} values, mean err {meanAbsQ:F2} quanta, " +

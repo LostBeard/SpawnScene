@@ -74,8 +74,28 @@ const ADAM_SLOTS : u32 = 14u;
 const ADAM_POS : u32 = 4u;
 const ADAM_SCALE : u32 = 7u;
 const ADAM_QUAT : u32 = 10u;
-// Gradients are summed across tiles through integer atomics; WebGPU has no float ones.
-const FIXED_SCALE : f32 = 1048576.0;
+// Gradients are summed across tiles through integer atomics; WebGPU has no float ones, so
+// every gradient crosses this boundary as a scaled i32 and the scale sets BOTH the range and
+// the precision. One scale cannot serve all nine slots, because their bounds differ by orders
+// of magnitude:
+//
+//   colour      |dL/dc| <= 1/3          - sum of |dL/d(pixel)| over the image is exactly 1/3
+//   opacity     same order
+//   screen xy   ~ 85*sigma/(W*H)        - about 0.03 for a 100px splat
+//   conic       ~ 127*sigma^4/(W*H)     - about 4e4 for the same splat: grows with AREA
+//
+// So the conic keeps the coarse scale (it is the only one that can get large) and everything
+// else gets 64x finer. That matters: dL/d(pixel) is 1/(3*W*H) ~ 1e-6, and at the coarse scale a
+// small splat's POSITION gradient was 1.1 quanta - half of it was rounding, and only 1.4% of
+// splats got a non-zero one at all.
+const FIXED_SCALE : f32 = 1048576.0;          // 2^20, conic slots 6..8
+const FIXED_SCALE_FINE : f32 = 67108864.0;    // 2^26, slots 0..5
+
+// i32 saturates at 2^31, so the coarse scale tops out near 2048 and the fine one near 32.
+// Both leave about 100x over the largest value measured on a real scene.
+fn fixed_scale_for(slot : u32) -> f32 {
+    return select(FIXED_SCALE, FIXED_SCALE_FINE, slot < 6u);
+}
 const EWA_FILTER_PX2 : f32 = 0.3;
 ";
 
@@ -538,7 +558,8 @@ fn raster_backward(
 
 // Gradients here are sums over a tile's pixels of quantities around 1e-4..1e-1. 2^20 keeps
 // ~6 decimal digits while leaving headroom before a 32-bit overflow.
-const FIXED_SCALE : f32 = 1048576.0;
+const FIXED_SCALE : f32 = 1048576.0;         // conic
+const FIXED_SCALE_FINE : f32 = 67108864.0;   // colour, opacity, screen centre
 const GRADS_PER_SPLAT : u32 = 9u;
 
 @compute @workgroup_size(64)
@@ -550,7 +571,10 @@ fn scatter_gradients(@builtin(global_invocation_id) gid : vec3<u32>) {
     for (var c = 0u; c < GRADS_PER_SPLAT; c = c + 1u) {
         let v = grad_per_key[k * GRADS_PER_SPLAT + c];
         if (v != 0.0) {
-            atomicAdd(&grad_fixed[splat * GRADS_PER_SPLAT + c], i32(round(v * FIXED_SCALE)));
+            // Slots 0..5 are bounded small and get 64x the precision; only the conic can grow
+            // with a splat's pixel area, so only the conic needs the coarse range.
+            let scale = select(FIXED_SCALE, FIXED_SCALE_FINE, c < 6u);
+            atomicAdd(&grad_fixed[splat * GRADS_PER_SPLAT + c], i32(round(v * scale)));
         }
     }
 }
@@ -613,7 +637,7 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
 const FLOATS_PER_SPLAT : u32 = 14u;
 const GRADS_PER_SPLAT : u32 = 9u;
 const ADAM_SLOTS : u32 = 14u;
-const FIXED_SCALE : f32 = 1048576.0;
+const FIXED_SCALE : f32 = 67108864.0;   // colour and opacity live in slots 0..3, the fine scale
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
 const EPS : f32 = 1e-15;
@@ -738,8 +762,8 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (i >= u32(g.limit.x)) { return; }
 
     let gb = i * GRADS_PER_SPLAT;
-    let up_cx = f32(grad_fixed[gb + 4u]) / FIXED_SCALE;
-    let up_cy = f32(grad_fixed[gb + 5u]) / FIXED_SCALE;
+    let up_cx = f32(grad_fixed[gb + 4u]) / FIXED_SCALE_FINE;
+    let up_cy = f32(grad_fixed[gb + 5u]) / FIXED_SCALE_FINE;
     let up_ca = f32(grad_fixed[gb + 6u]) / FIXED_SCALE;
     let up_cb = f32(grad_fixed[gb + 7u]) / FIXED_SCALE;
     let up_cc = f32(grad_fixed[gb + 8u]) / FIXED_SCALE;

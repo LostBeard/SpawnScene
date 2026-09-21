@@ -241,7 +241,8 @@ public partial class Studio
     private async Task ReportGradientHealthAsync(int n)
     {
         float[] g = await _trainer!.ReadGradientsAsync(n);
-        const float quantum = 1f / 1048576f;
+        float centreQuantum = 1f / SplatTrainerGpu.FixedScaleFor(4);
+        float conicQuantum = 1f / SplatTrainerGpu.FixedScaleFor(6);
 
         int stride = SplatTrainerGpu.GradsPerSplat;
         int liveColour = 0, liveCentre = 0, liveConic = 0;
@@ -266,10 +267,23 @@ public partial class Studio
         Console.WriteLine(
             $"[Train] gradient health: colour {liveColour * 100.0 / n:F1}% nonzero, " +
             $"centre {liveCentre * 100.0 / n:F1}%, conic {liveConic * 100.0 / n:F1}%");
+        double centreCeiling = int.MaxValue * (double)centreQuantum;
+        double conicCeiling = int.MaxValue * (double)conicQuantum;
         Console.WriteLine(
-            $"[Train] centre |grad| mean {meanCentre:G3} ({meanCentre / quantum:F1} quanta), " +
-            $"max {maxCentre:G3}; conic max {maxConic:G3} " +
-            $"({maxConic / quantum:G3} quanta, i32 overflows at {int.MaxValue * (double)quantum:G3})");
+            $"[Train] centre |grad| mean {meanCentre:G3} ({meanCentre / centreQuantum:F0} quanta, " +
+            $"saturates at {centreCeiling:G3}); " +
+            $"conic max {maxConic:G3} ({maxConic / conicQuantum:G3} quanta, " +
+            $"saturates at {conicCeiling:G3})");
+
+        // The conic gradient grows with a splat's pixel AREA, so it is the one that can run out
+        // of range rather than out of precision - and an i32 atomic wraps silently rather than
+        // clamping, which would read as a wrong gradient, not as an error. Densification will
+        // create larger splats than exist today, so this needs to be watched, not assumed.
+        if (maxConic > 0.1 * conicCeiling || maxCentre > 0.1 * centreCeiling)
+            Console.WriteLine(
+                "[Train] WARNING: a fixed-point gradient is within 10% of saturating. The atomic " +
+                "WRAPS rather than clamping, so gradients past this point are wrong, not merely " +
+                "coarse. Lower the scale for that slot in SplatTrainerShaders.");
     }
 
     /// <summary>

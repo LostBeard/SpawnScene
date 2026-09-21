@@ -80,6 +80,14 @@ public sealed class SplatTrainerGpu : IDisposable
     /// <summary>Geometry gradients reported per splat: position xyz, scale xyz, quaternion xyzw.</summary>
     public const int GeomGradsPerSplat = 10;
 
+    /// <summary>
+    /// Fixed-point scale for each of the nine gradient slots. Must match the shaders.
+    /// Slots 0..5 (colour, opacity, screen centre) are bounded small and get 2^26; the conic
+    /// grows with a splat's pixel area and keeps 2^20 for the range. See the note in
+    /// SplatTrainerShaders.UniformsBlock.
+    /// </summary>
+    public static float FixedScaleFor(int slot) => slot < 6 ? 67108864f : 1048576f;
+
     RadixSortPairs<uint, Stride1D.Dense, uint, Stride1D.Dense>? _sortPairs;
 
     int _width, _height, _tilesX, _tilesY, _keyCapacity;
@@ -506,7 +514,7 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         int[] raw = await _gradFixed!.CopyToHostAsync<int>(0, (long)splatCount * GradsPerSplat);
         var outp = new float[raw.Length];
-        for (int i = 0; i < raw.Length; i++) outp[i] = raw[i] / 1048576f;
+        for (int i = 0; i < raw.Length; i++) outp[i] = raw[i] / FixedScaleFor(i % GradsPerSplat);
         return outp;
     }
 

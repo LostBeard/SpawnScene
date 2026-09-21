@@ -379,6 +379,15 @@ public partial class Studio
                 $"[Train] trainer HELD OUT   PSNR {baseline.HeldPsnr:F2} -> {fitted.HeldPsnr:F2} dB, " +
                 $"SSIM {baseline.HeldSsim:F4} -> {fitted.HeldSsim:F4}");
 
+            // The comparable number. Endpoints are single samples of an oscillation; this is
+            // what an A/B should be read off.
+            if (curve.Count >= 2)
+                Console.WriteLine(
+                    $"[Train] COMPARE: held-out mean over {curve.Count} samples - " +
+                    $"PSNR {curve.Average(c => c.HeldPsnr):F3} dB, " +
+                    $"SSIM {curve.Average(c => c.HeldSsim):F4} " +
+                    $"(baseline before training: PSNR {baseline.HeldPsnr:F3}, SSIM {baseline.HeldSsim:F4})");
+
             ReportCurve(curve);
 
             // The display renderer reads a packed vertex buffer built at upload time; training
@@ -402,8 +411,17 @@ public partial class Studio
     {
         if (curve.Count < 2) return;
 
+        // The MEAN is the comparison statistic, not the last value.
+        //
+        // Held-out oscillates - measured at 1.88 to 1.99 dB of spread within a single run - so
+        // the final number is one sample of that oscillation, and two runs of the SAME
+        // configuration differed by 1.52 dB. Comparing endpoints cannot resolve anything smaller
+        // than the swing, and averaging whole extra runs to beat it costs GPU hours. The mean
+        // over the samples already collected has roughly half the standard error of one of them,
+        // for free.
         static string Line(string metric, IReadOnlyList<float> v) =>
-            $"{metric} min {v.Min():F4} max {v.Max():F4} spread {v.Max() - v.Min():F4} last {v[^1]:F4}";
+            $"{metric} mean {v.Average():F4} (min {v.Min():F4} max {v.Max():F4} " +
+            $"spread {v.Max() - v.Min():F4} last {v[^1]:F4})";
 
         var psnr = curve.Select(c => c.HeldPsnr).ToList();
         var ssim = curve.Select(c => c.HeldSsim).ToList();

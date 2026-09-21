@@ -186,6 +186,16 @@ public partial class Studio : IAsyncDisposable
             return;
         }
 
+        if (mode == "dav3-pose")
+        {
+            // How good ARE the recovered cameras, measured against poses we know?
+            int poseN = query.TryGetValue("n", out var pn) && int.TryParse(pn, out var pni) ? pni : 6;
+            int posePatches = query.TryGetValue("patches", out var pq) && int.TryParse(pq, out var pqi)
+                ? pqi : DepthEstimationService.SafeMultiViewPatches;
+            await RunDav3PoseGateAsync(poseN, posePatches);
+            return;
+        }
+
         if (mode == "novel-view")
         {
             query.TryGetValue("view", out var viewName);

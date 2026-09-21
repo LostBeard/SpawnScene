@@ -89,10 +89,20 @@ const closeTab = (id) => new Promise(res =>
       if (ready && !shot) {
         shot = true;
         const png = await send('Page.captureScreenshot', { format: 'png' });
-        const out = path.join(__dirname, '..', '_shots', 'dataset', `${NAME}.png`);
-        require('fs').mkdirSync(path.dirname(out), { recursive: true });
-        require('fs').writeFileSync(out, Buffer.from(png.result.data, 'base64'));
+        const dir = path.join(__dirname, '..', '_shots', 'dataset');
+        require('fs').mkdirSync(dir, { recursive: true });
+        const bytes = Buffer.from(png.result.data, 'base64');
+        // Also write a TAGGED copy. A gate whose only output has a fixed name destroys its own
+        // baseline by running, and the question about a render is always "what is different",
+        // which needs two pictures. RUN_TAG=<name> to label this one.
+        const out = path.join(dir, `${NAME}.png`);
+        require('fs').writeFileSync(out, bytes);
         console.log('captured ' + out);
+        if (process.env.RUN_TAG) {
+          const tagged = path.join(dir, `${NAME}__${process.env.RUN_TAG}.png`);
+          require('fs').writeFileSync(tagged, bytes);
+          console.log('captured ' + tagged);
+        }
       }
     }
     if (failed) { console.log('\nFAILED'); process.exitCode = 1; }

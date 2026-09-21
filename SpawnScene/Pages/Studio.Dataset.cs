@@ -130,6 +130,14 @@ public partial class Studio
 
             if (scene.TrainingViews.Count == 0)
             {
+                // Still capture a frame. This branch has a full initialisation on screen - the
+                // run that hit it had 242,440 splats - and a finding with no picture beside it is
+                // how three runs got scored and committed while the viewer was blank. The
+                // question about any reconstruction is what it LOOKS like, especially this one.
+                _hideUiOverlay = true;
+                await Task.Delay(1500);
+                Console.WriteLine("[Dataset] READY-FOR-CAPTURE");
+                await Task.Delay(2500);
                 Console.WriteLine(
                     "[Dataset] DONE (no optimisation): the cascade produced no usable poses. " +
                     "That is the finding, not a failure of this test.");

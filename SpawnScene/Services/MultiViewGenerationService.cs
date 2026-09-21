@@ -844,21 +844,33 @@ public class MultiViewGenerationService
             }
 
             var cams = CamerasFromRun(images, chunk, run);
-            if (!MultiViewChunkPlan.TryFitChunkToReference(
-                    chunk, cams, placed, out var sim, out float rms, out int used))
+            bool fitted = MultiViewChunkPlan.TryFitChunkToReference(
+                chunk, cams, placed, out var sim, out float rms, out int used, out float spread);
+
+            // Always report residual AGAINST the spread. The threshold is otherwise a judgement
+            // call nobody can check, and at MinAnchors the fit is over-determined by only two -
+            // so a non-zero residual is not rounding, it says the model gave a differently SHAPED
+            // anchor triangle in this pass than in the reference one.
+            string fitLine =
+                $"anchors {used}/{chunk.AnchorCount}, residual {rms:F4} on a spread of {spread:F4} " +
+                $"({(spread > 0 ? rms / spread : float.NaN):P1} of it, limit " +
+                $"{MultiViewChunkPlan.MaxAnchorRmsFraction:P0})";
+
+            LogAnchorTriangle(ci, chunk, cams, placed);
+
+            if (!fitted)
             {
                 result.ChunksRejected++;
                 Console.WriteLine(
-                    $"[MultiView] chunk {ci} rejected: {used}/{chunk.AnchorCount} anchors recovered, " +
-                    $"fit residual {rms:F4}. Placing it anyway would put a full cloud in the wrong " +
-                    "part of the scene looking measured.");
+                    $"[MultiView] chunk {ci} REJECTED: {fitLine}. Placing it anyway would put a " +
+                    "full cloud in the wrong part of the scene looking measured.");
                 run.Dispose();
                 continue;
             }
 
             Console.WriteLine(
-                $"[MultiView] chunk {ci}: folded on {used} anchors, residual {rms:F4}, " +
-                $"depth scale {sim.Scale:F4}, {chunk.NewViews.Length} new view(s)");
+                $"[MultiView] chunk {ci} folded: {fitLine}, depth scale {sim.Scale:F4}, " +
+                $"{chunk.NewViews.Length} new view(s)");
             AdoptChunk(result, chunk, cams, run, sim, adoptAnchors: false);
             run.Dispose();
         }
@@ -966,6 +978,50 @@ public class MultiViewGenerationService
                 run.DepthResults[slot] = null!;   // ownership moved; the run no longer disposes it
             }
         }
+    }
+
+    /// <summary>
+    /// The anchor triangle in this pass versus in the reference pass, as pairwise distances.
+    ///
+    /// A similarity preserves SHAPE, so it can absorb any difference in the triangle's size,
+    /// position or orientation but none in its proportions. Printing the distance RATIOS
+    /// separates the two things a residual conflates: a fold that is merely rescaling (all
+    /// ratios equal, one number) from a model that reported genuinely different relative
+    /// geometry for the same three physical cameras (ratios that disagree with each other).
+    /// The second cannot be fixed by any transform, and knowing which one we have decides
+    /// whether the threshold is wrong or the approach is.
+    /// </summary>
+    private static void LogAnchorTriangle(
+        int chunkIndex, MultiViewChunk chunk, CameraParams?[] cams,
+        IReadOnlyDictionary<int, CameraParams> reference)
+    {
+        var parts = new List<string>();
+        var ratios = new List<float>();
+
+        for (int a = 0; a < chunk.AnchorCount; a++)
+            for (int b = a + 1; b < chunk.AnchorCount; b++)
+            {
+                if (cams[a] == null || cams[b] == null) continue;
+                if (!reference.TryGetValue(chunk.Views[a], out var refA)) continue;
+                if (!reference.TryGetValue(chunk.Views[b], out var refB)) continue;
+
+                float here = Vector3.Distance(cams[a]!.Position, cams[b]!.Position);
+                float there = Vector3.Distance(refA.Position, refB.Position);
+                if (!(there > 1e-6f)) continue;
+
+                float ratio = here / there;
+                ratios.Add(ratio);
+                parts.Add($"{chunk.Views[a]}-{chunk.Views[b]} {here:F4}/{there:F4}={ratio:F3}");
+            }
+
+        if (ratios.Count < 2) return;
+        float spreadPct = (ratios.Max() - ratios.Min()) / ratios.Average();
+        Console.WriteLine(
+            $"[MultiView]   chunk {chunkIndex} anchor triangle: {string.Join("  ", parts)} " +
+            $"-> ratios disagree by {spreadPct:P1} " +
+            (spreadPct < 0.02f
+                ? "(a pure rescale; a similarity absorbs this)"
+                : "(a SHAPE difference; no similarity can absorb this)"));
     }
 
     private static Dictionary<int, CameraParams> BuildPlacedLookup(ChunkedPoseResult result)

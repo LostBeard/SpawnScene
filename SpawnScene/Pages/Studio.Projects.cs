@@ -305,7 +305,10 @@ public partial class Studio
         var poses = _multiViewService.LastCameras;
         string poseSource = _multiViewService.LastPoseSource;
 
-        if (poseSource is not ("sfm" or "dav3") || poses.Length == 0)
+        // A whitelist of source STRINGS silently drops any new one: "dav3-chunked" is the same
+        // DAv3 extrinsics in the same world frame, from several passes instead of one, and it
+        // got skipped entirely for not being spelled like the two that existed.
+        if (poseSource is not ("sfm" or "dav3" or "dav3-chunked") || poses.Length == 0)
         {
             Console.WriteLine(
                 $"[Studio] pose source '{poseSource}' gives nothing to train against - the " +

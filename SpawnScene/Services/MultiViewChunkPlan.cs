@@ -230,10 +230,28 @@ public static class MultiViewChunkPlan
         IReadOnlyList<CameraParams?> chunkCameras,
         IReadOnlyDictionary<int, CameraParams> reference,
         out Similarity3 similarity, out float rms, out int anchorsUsed)
+        => TryFitChunkToReference(chunk, chunkCameras, reference,
+            out similarity, out rms, out anchorsUsed, out _);
+
+    /// <summary>
+    /// As above, also reporting the anchor SPREAD (mean distance from their centroid in the
+    /// reference frame). The residual only means anything against it, and a caller that logs
+    /// both turns <see cref="MaxAnchorRmsFraction"/> from a judgement call into an observation.
+    ///
+    /// Worth knowing when reading those numbers: at exactly <see cref="MinAnchors"/> anchors the
+    /// fit is over-determined by two, so a non-zero residual is not rounding - it says the model
+    /// reported a differently SHAPED anchor triangle in this pass than in the reference one.
+    /// </summary>
+    public static bool TryFitChunkToReference(
+        MultiViewChunk chunk,
+        IReadOnlyList<CameraParams?> chunkCameras,
+        IReadOnlyDictionary<int, CameraParams> reference,
+        out Similarity3 similarity, out float rms, out int anchorsUsed, out float anchorSpread)
     {
         similarity = Similarity3.Identity;
         rms = float.MaxValue;
         anchorsUsed = 0;
+        anchorSpread = 0f;
 
         var source = new List<Vector3>();
         var target = new List<Vector3>();
@@ -260,6 +278,7 @@ public static class MultiViewChunkPlan
         float spread = 0f;
         foreach (var t in target) spread += Vector3.Distance(t, centroid);
         spread /= target.Count;
+        anchorSpread = spread;
         if (!(spread > 1e-6f)) return false;
         if (rms > MaxAnchorRmsFraction * spread) return false;
 

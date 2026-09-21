@@ -505,6 +505,7 @@ public sealed class SplatTrainerGpu : IDisposable
         int[] counted = await _counter.CopyToHostAsync<int>(0, 1);
         int keyCount = counted[0];
         LastKeyDemand = keyCount;
+        PeakKeyDemand = Math.Max(PeakKeyDemand, keyCount);
         LastOverflowed = keyCount > _keyCapacity;
         LastKeyCount = Math.Min(keyCount, _keyCapacity);
         if (LastOverflowed)
@@ -594,20 +595,25 @@ public sealed class SplatTrainerGpu : IDisposable
     /// Point the loss at one image inside a GPU-resident stack of targets (view-major,
     /// width*height*3 floats each). Device-to-device, so a multi-view run pays the upload once.
     /// </summary>
-    public void SetTargetFrom(MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex)
+    public void SetTargetFrom(MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex)
     {
-        long len = (long)_width * _height * 3;
-        long off = (long)viewIndex * len;
-        if (off + len > stack.Length)
+        long pixels = (long)_width * _height;
+        long off = (long)viewIndex * pixels;
+        if (off + pixels > stack.Length)
             throw new ArgumentOutOfRangeException(nameof(viewIndex),
-                $"view {viewIndex} needs floats [{off},{off + len}) of a {stack.Length}-float stack");
-        // A kernel, not ArrayView.CopyTo: the WebGPU backend has no synchronous device-to-device
-        // copy ("Synchronous GPU to CPU copies are not supported"), and this stays on the GPU.
-        var accel = _gpu.WebGPUAccelerator;
-        _copyKernel ??= accel.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView1D<float, Stride1D.Dense>,
-            ArrayView1D<float, Stride1D.Dense>>(CopyKernel);
-        _copyKernel((int)len, stack.View.SubView(off, len), _target!.View);
+                $"view {viewIndex} needs pixels [{off},{off + pixels}) of a {stack.Length}-pixel stack");
+
+        // Unpack one frame out of the packed stack into the working float target.
+        //
+        // The stack holds RGBA8, four bytes a pixel, not three floats. That is a THIRD of the
+        // memory, and target memory is what caps how many views can supervise a run: 256 MiB
+        // held 62 views as floats and holds 187 packed. Views are the scarce resource here -
+        // the reference trains drjohnson on about 230 images and we were using 33.
+        WriteU32x4(_dimsBuf!, (uint)pixels, 0, (uint)off, 0);
+        Dispatch(_unpackTarget!, (int)((pixels + 63) / 64), 1, new[]
+        {
+            Buf(0, stack.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!), Buf(2, _dimsBuf!),
+        });
     }
 
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>? _copyKernel;
@@ -748,6 +754,17 @@ public sealed class SplatTrainerGpu : IDisposable
         _adamV!.CopyFromCPU(v);
         _adamStepCount = prior.StepCount;
     }
+
+    /// <summary>
+    /// Peak key demand seen since it was last cleared, so a caller can re-size on evidence.
+    ///
+    /// <see cref="LastOverflowed"/> is per-frame and a densification window spans hundreds of
+    /// frames, so a caller that only looked at the last one would miss every overflow but one.
+    /// </summary>
+    public int PeakKeyDemand { get; private set; }
+
+    /// <summary>Clear the peak, at the start of a new densification window.</summary>
+    public void ResetPeakKeyDemand() => PeakKeyDemand = 0;
 
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
     public void ResetDensifyStats() => _densifyStats!.MemSetToZero();
@@ -928,7 +945,7 @@ public sealed class SplatTrainerGpu : IDisposable
     /// the difference between about 650 MB of readback per evaluation pass and about 600 KB.
     /// </summary>
     public async Task<double> PsnrAgainstAsync(
-        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex)
+        MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex)
         => (await ScoreAgainstAsync(stack, viewIndex, withSsim: false)).Psnr;
 
     /// <summary>
@@ -947,11 +964,16 @@ public sealed class SplatTrainerGpu : IDisposable
     /// window positions and the metric is undefined, which the Python oracle signals by raising.
     /// </summary>
     public async Task<(double Psnr, double Ssim)> ScoreAgainstAsync(
-        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex, bool withSsim = true)
+        MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex, bool withSsim = true)
     {
         var accel = _gpu.WebGPUAccelerator;
-        long frameFloats = (long)_width * _height * 3;
-        uint targetOffset = (uint)(viewIndex * frameFloats);
+
+        // Unpack the view being scored into the working target, then compare against THAT.
+        // Scoring straight out of the stack would mean teaching eval_sse and ssim_rows to
+        // unpack as well, which is two more places for the pixel format to drift apart from
+        // its oracle. One unpack, one format, one gate.
+        SetTargetFrom(stack, viewIndex);
+        uint targetOffset = 0;
 
         WriteU32x2(_dimsBuf!, (uint)(_width * _height), targetOffset);
         Dispatch(_evalSse!, SseWorkgroups, 1, new[]
@@ -989,7 +1011,7 @@ public sealed class SplatTrainerGpu : IDisposable
         float[] partials = await _ssePartials!.CopyToHostAsync<float>(0, SseWorkgroups);
         double sse = 0;
         foreach (float v in partials) sse += v;
-        double mse = sse / frameFloats;
+        double mse = sse / ((long)_width * _height * 3);
         double psnr = mse <= 1e-12 ? 99.0 : 10.0 * Math.Log10(1.0 / mse);
 
         double ssim = double.NaN;
@@ -1012,20 +1034,18 @@ public sealed class SplatTrainerGpu : IDisposable
     /// managed allocation per view.
     /// </summary>
     public void UploadTargetFrom(
-        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex, Uint8Array rgba)
+        MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex, Uint8Array rgba)
     {
-        long frameFloats = (long)_width * _height * 3;
-        long off = (long)viewIndex * frameFloats;
-        if (off + frameFloats > stack.Length)
+        long pixels = (long)_width * _height;
+        long off = (long)viewIndex * pixels;
+        if (off + pixels > stack.Length)
             throw new ArgumentOutOfRangeException(nameof(viewIndex),
-                $"view {viewIndex} does not fit a {stack.Length}-float stack");
+                $"view {viewIndex} does not fit a {stack.Length}-pixel stack");
 
-        _queue!.WriteBuffer(_targetBytes!, 0, rgba);
-        WriteU32x2(_dimsBuf!, (uint)(_width * _height), (uint)off);
-        Dispatch(_unpackTarget!, (_width * _height + 63) / 64, 1, new[]
-        {
-            Buf(0, _targetBytes!), Buf(1, stack.GetGPUBuffer()!), Buf(2, _dimsBuf!),
-        });
+        // Straight into the stack. The bytes are already the format the stack stores, so there
+        // is nothing to expand at upload time - the unpack moved to SetTargetFrom, where it
+        // runs on one frame instead of all of them.
+        _queue!.WriteBuffer(stack.GetGPUBuffer()!, (ulong)(off * 4), rgba);
     }
 
     /// <summary>Seed opacity logits from the splats' current opacity. Call once before training.</summary>

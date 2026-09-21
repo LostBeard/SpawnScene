@@ -1220,15 +1220,15 @@ fn ssim_reduce(
     /// which is every machine that runs WebGPU.
     /// </summary>
     public const string UnpackTarget = @"
-@group(0) @binding(0) var<storage, read>       src  : array<u32>;   // one packed RGBA per pixel
-@group(0) @binding(1) var<storage, read_write> dst  : array<f32>;   // the whole target stack
-@group(0) @binding(2) var<uniform>             dims : vec4<u32>;    // x=pixels, y=dst float offset
+@group(0) @binding(0) var<storage, read>       src  : array<u32>;   // packed RGBA, one per pixel
+@group(0) @binding(1) var<storage, read_write> dst  : array<f32>;   // one frame of float RGB
+@group(0) @binding(2) var<uniform>             dims : vec4<u32>;    // x=pixels y=dstOff z=srcOff
 
 @compute @workgroup_size(64)
 fn unpack_target(@builtin(global_invocation_id) gid : vec3<u32>) {
     let p = gid.x;
     if (p >= dims.x) { return; }
-    let v = src[p];
+    let v = src[dims.z + p];
     let o = dims.y + p * 3u;
     dst[o + 0u] = f32(v & 255u) / 255.0;
     dst[o + 1u] = f32((v >> 8u) & 255u) / 255.0;

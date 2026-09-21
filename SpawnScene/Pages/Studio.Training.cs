@@ -184,7 +184,7 @@ public partial class Studio
             // The targets are float RGB and every supervised AND held-out view is resident, so
             // the bound is views x pixels x 3 x 4 bytes.
             var (tw, th) = views[0].Camera.FitWithin(maxTrainDimension);
-            long TargetBytes(int pw, int ph) => (long)views.Count * pw * ph * 3 * sizeof(float);
+            long TargetBytes(int pw, int ph) => (long)views.Count * pw * ph * sizeof(uint);
             if (TargetBytes(tw, th) > MaxTargetStackBytes)
             {
                 int shrunk = maxTrainDimension;
@@ -216,8 +216,11 @@ public partial class Studio
             // Per-iteration upload would be 3.7 MB of traffic per step and would dominate the
             // measurement. One scratch frame is reused on the host so the WASM heap never holds
             // more than a single image.
-            int frameFloats = w * h * 3;
-            using var targets = accel.Allocate1D<float>((long)views.Count * frameFloats);
+            // Targets are stored PACKED - one RGBA8 word per pixel, not three floats. Four
+            // bytes against twelve, so the same budget supervises three times as many views,
+            // and views are the scarce resource: the reference trains drjohnson on roughly 230
+            // images while we were using 33.
+            using var targets = accel.Allocate1D<uint>((long)views.Count * w * h);
 
             var loadStart = DateTime.UtcNow;
             for (int i = 0; i < views.Count; i++)
@@ -661,8 +664,29 @@ public partial class Studio
         // argument back in threw that away and every frame after the first densification
         // overflowed: "KEY OVERFLOW: 1,775,260 needed, capacity 641,256". A measurement the
         // system already made is not something a later caller gets to discard.
+        // Re-size on MEASURED demand, not on the last sizing decision.
+        //
+        // The loop measures peak demand once, early, and adds 25% headroom. Densification then
+        // adds splats for hundreds of frames and eats it: the log filled with overflows missing
+        // by half a percent - "4,622,178 needed, capacity 4,601,320" - each one a frame trained
+        // on an incomplete render. The peak over the whole window is the evidence; use it, with
+        // the same headroom, rather than carrying forward a number that was true of a smaller
+        // scene.
         var (w, h) = _trainer.Size;
-        _trainer.Resize(w, h, m, _trainer.KeysPerSplat);
+        int keys = _trainer.KeysPerSplat;
+        if (_trainer.PeakKeyDemand > 0)
+        {
+            int needed = (int)Math.Ceiling(_trainer.PeakKeyDemand * 1.25 / Math.Max(1, n));
+            if (needed > keys)
+            {
+                Console.WriteLine(
+                    $"[Densify] keysPerSplat {keys} -> {needed}: peak demand was " +
+                    $"{_trainer.PeakKeyDemand:N0} keys for {n:N0} splats over this window");
+                keys = needed;
+            }
+        }
+        _trainer.Resize(w, h, m, keys);
+        _trainer.ResetPeakKeyDemand();
 
         // Reseed the derived state - opacity logits and log scales come from the packed buffer,
         // which is correct for clones and split children alike - and then put the Adam moments
@@ -805,7 +829,7 @@ public partial class Studio
         SplatTrainerGpu trainer,
         MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
         IReadOnlyList<TrainingView> views,
-        MemoryBuffer1D<float, Stride1D.Dense> targets,
+        MemoryBuffer1D<uint, Stride1D.Dense> targets,
         SplatBounds.Aabb box)
     {
         var (w, h) = trainer.Size;
@@ -847,7 +871,7 @@ public partial class Studio
     /// </summary>
     private async Task<bool> LoadTargetAsync(
         string url, bool fromProjectStore, int quarterTurns, int w, int h,
-        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex)
+        MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex)
     {
         try
         {

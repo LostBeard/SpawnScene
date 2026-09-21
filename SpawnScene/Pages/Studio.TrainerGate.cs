@@ -605,6 +605,32 @@ public partial class Studio
     /// real render against a degraded copy of itself, placed at a NON-ZERO index in the target
     /// stack, does not.
     /// </summary>
+    /// <summary>Quantise float RGB into packed RGBA8, exactly as a canvas upload would.</summary>
+    static void PackRgba8(float[] rgb, uint[] dst, int dstPixelOffset, int pixels)
+    {
+        for (int p = 0; p < pixels; p++)
+        {
+            uint r = (uint)Math.Clamp((int)MathF.Round(rgb[p * 3] * 255f), 0, 255);
+            uint g = (uint)Math.Clamp((int)MathF.Round(rgb[p * 3 + 1] * 255f), 0, 255);
+            uint b = (uint)Math.Clamp((int)MathF.Round(rgb[p * 3 + 2] * 255f), 0, 255);
+            dst[dstPixelOffset + p] = r | (g << 8) | (b << 16) | (255u << 24);
+        }
+    }
+
+    /// <summary>The inverse the unpack shader performs, so the oracle sees the same numbers.</summary>
+    static float[] UnpackRgba8(uint[] src, int srcPixelOffset, int pixels)
+    {
+        var rgb = new float[pixels * 3];
+        for (int p = 0; p < pixels; p++)
+        {
+            uint v = src[srcPixelOffset + p];
+            rgb[p * 3] = (v & 255u) / 255f;
+            rgb[p * 3 + 1] = ((v >> 8) & 255u) / 255f;
+            rgb[p * 3 + 2] = ((v >> 16) & 255u) / 255f;
+        }
+        return rgb;
+    }
+
     async Task<bool> SsimGateAsync(
         SplatTrainerGpu trainer, SpawnDev.ILGPU.WebGPU.WebGPUAccelerator accel, float[] rendered)
     {
@@ -614,17 +640,25 @@ public partial class Studio
         // identical case is what proves the target offset is applied: a shader that ignored it
         // would score both entries against slot 0 and the identical case would fail.
         var degraded = Degrade(rendered, GateWidth, GateHeight);
-        var stack = new float[frameFloats * 2];
-        System.Array.Copy(degraded, 0, stack, 0, frameFloats);
-        System.Array.Copy(rendered, 0, stack, frameFloats, frameFloats);
 
-        using var stackBuf = accel.Allocate1D<float>(stack.Length);
-        stackBuf.CopyFromCPU(stack);
+        // The stack is RGBA8, which QUANTISES. Real targets always were 8-bit - they come off a
+        // canvas - so this changes nothing in the product, but the oracle has to see the same
+        // values or it disagrees for a reason that is not a bug. Quantise, then read back the
+        // quantised floats and score the CPU side on those.
+        int pixels = GateWidth * GateHeight;
+        var packed8 = new uint[pixels * 2];
+        PackRgba8(degraded, packed8, 0, pixels);
+        PackRgba8(rendered, packed8, pixels, pixels);
+        var degradedQ = UnpackRgba8(packed8, 0, pixels);
+        var renderedQ = UnpackRgba8(packed8, pixels, pixels);
+
+        using var stackBuf = accel.Allocate1D<uint>(packed8.Length);
+        stackBuf.CopyFromCPU(packed8);
         await accel.SynchronizeAsync();
 
         var (_, gpuDegraded) = await trainer.ScoreAgainstAsync(stackBuf, 0);
         var (_, gpuSelf) = await trainer.ScoreAgainstAsync(stackBuf, 1);
-        double cpuDegraded = ImageQuality.MeanSsim(rendered, degraded, GateWidth, GateHeight);
+        double cpuDegraded = ImageQuality.MeanSsim(rendered, degradedQ, GateWidth, GateHeight);
 
         Console.WriteLine(
             $"[TrainerGate] SSIM: degraded gpu {gpuDegraded:F6} cpu {cpuDegraded:F6} " +

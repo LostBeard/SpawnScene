@@ -788,9 +788,21 @@ public class MultiViewGenerationService
     public const int TrainableSplatBudget = (128 * 1024 * 1024) / 12 / 8;
 
     private int ChooseSubsample(int requested, IReadOnlyList<DepthResult> depths)
+        => ChooseSubsample(requested, depths.Select(d => (d.Width, d.Height)).ToList());
+
+    /// <summary>
+    /// Coarsen the per-view sampling until the whole set fits the budget.
+    ///
+    /// Every path that emits a splat per pixel per view needs this, not just the one it was
+    /// written for. MEASURED: the ground-truth path had no budget at all, so 88 views of
+    /// drjohnson at subsample 2 emitted 14,011,008 splats, and the merge - 784 MB in a single
+    /// buffer - lost the device outright with "A valid external Instance reference no longer
+    /// exists". A limit that exists in one code path is not a limit.
+    /// </summary>
+    private int ChooseSubsample(int requested, IReadOnlyList<(int Width, int Height)> views)
     {
         int sub = Math.Max(1, requested);
-        long PixelsAt(int s) => depths.Sum(d => (long)(d.Width / s) * (d.Height / s));
+        long PixelsAt(int s) => views.Sum(v => (long)(v.Width / s) * (v.Height / s));
 
         long at = PixelsAt(sub);
         if (at <= SplatBudget) return sub;
@@ -798,7 +810,7 @@ public class MultiViewGenerationService
         int chosen = sub;
         while (chosen < 16 && PixelsAt(chosen) > SplatBudget) chosen++;
         Console.WriteLine(
-            $"[MultiView] subsample {sub} -> {chosen}: {depths.Count} views would emit " +
+            $"[MultiView] subsample {sub} -> {chosen}: {views.Count} views would emit " +
             $"{at:N0} splats against a {SplatBudget:N0} budget, now {PixelsAt(chosen):N0}");
         return chosen;
     }
@@ -1920,7 +1932,8 @@ public class MultiViewGenerationService
 
         var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
         int totalSplats = 0;
-        int fuseSub = Math.Max(1, subsample);
+        int fuseSub = ChooseSubsample(
+            subsample, images.Select(im => (im.Width, im.Height)).ToList());
 
         // ── Pass A: materialise every view's metric depth ──
         // Done up front so pass B can screen ANY view against ANY other. Previously the depth
@@ -2068,6 +2081,10 @@ public class MultiViewGenerationService
         var lookAt = isTemple
             ? new Vector3(0.028f, 0.042f, -0.054f)
             : cameras.Aggregate(Vector3.Zero, (a, c) => a + c.Position) / cameras.Count;
+
+        // The budget applies here too. Without it 88 views of drjohnson emitted 14,011,008
+        // splats and the merge lost the device.
+        subsample = ChooseSubsample(subsample, images.Select(im => (im.Width, im.Height)).ToList());
 
         Console.WriteLine($"[MultiView-GT] lookAt=({lookAt.X:F4},{lookAt.Y:F4},{lookAt.Z:F4}) subsample={subsample} pose=gt (monocular fallback)");
 

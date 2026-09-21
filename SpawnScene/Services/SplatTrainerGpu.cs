@@ -104,20 +104,30 @@ public sealed class SplatTrainerGpu : IDisposable
     /// grows with a splat's pixel area and keeps 2^20 for the range. See the note in
     /// SplatTrainerShaders.UniformsBlock.
     /// </summary>
-    /// <summary>Fixed-point scale for gradient slots 0..5 (colour, opacity, screen centre).</summary>
-    public float FineScale { get; private set; } = DefaultFineScale;
+    /// <summary>Scale for slots 0..3 - colour and opacity. Bounded: colour gradients are &lt;= 1/3.</summary>
+    public float ColourScale { get; private set; } = DefaultColourScale;
 
-    /// <summary>Fixed-point scale for slots 6..8, the conic - the one that grows with AREA.</summary>
+    /// <summary>
+    /// Scale for slots 4..5, the screen centre.
+    ///
+    /// Separate from colour because it is orders of magnitude smaller. They shared a scale, and
+    /// fitting that shared scale to the centre put COLOUR past the i32 wrap - measured, by doing
+    /// exactly that: held-out PSNR fell 12.33 -> 9.95 dB on drjohnson in the run that tried it.
+    /// </summary>
+    public float CentreScale { get; private set; } = DefaultCentreScale;
+
+    /// <summary>Scale for slots 6..8, the conic - the one that grows with splat AREA.</summary>
     public float ConicScale { get; private set; } = DefaultConicScale;
 
-    public const float DefaultFineScale = 67108864f;   // 2^26
-    public const float DefaultConicScale = 1048576f;   // 2^20
+    public const float DefaultColourScale = 67108864f;   // 2^26
+    public const float DefaultCentreScale = 67108864f;   // 2^26
+    public const float DefaultConicScale = 1048576f;     // 2^20
 
     /// <summary>
     /// The scale a gradient slot is stored at. Was a static with two literals in it, which is
-    /// precisely why both ended up wrong for a scene nobody had tried yet.
+    /// precisely why it ended up wrong for a scene nobody had tried yet.
     /// </summary>
-    public float FixedScaleFor(int slot) => slot < 6 ? FineScale : ConicScale;
+    public float FixedScaleFor(int slot) => slot < 4 ? ColourScale : slot < 6 ? CentreScale : ConicScale;
 
     /// <summary>
     /// Re-scale the fixed-point gradients from what the last step actually produced.
@@ -154,19 +164,24 @@ public sealed class SplatTrainerGpu : IDisposable
             return (float)Math.Pow(2, Math.Clamp(exp, 4, 40));
         }
 
-        float fine = Retarget(FineScale, stats.MaxCentreQuanta, ceiling, FineScale);
+        float colour = Retarget(ColourScale, stats.MaxColourQuanta, ceiling, ColourScale);
+        float centre = Retarget(CentreScale, stats.MaxCentreQuanta, ceiling, CentreScale);
         float conic = Retarget(ConicScale, stats.MaxConicQuanta, ceiling, ConicScale);
 
-        if (Math.Abs(Math.Log2(fine / FineScale)) < 0.5 && Math.Abs(Math.Log2(conic / ConicScale)) < 0.5)
-            return false;
+        bool moved = Math.Abs(Math.Log2(colour / ColourScale)) >= 0.5
+                  || Math.Abs(Math.Log2(centre / CentreScale)) >= 0.5
+                  || Math.Abs(Math.Log2(conic / ConicScale)) >= 0.5;
+        if (!moved) return false;
 
         Console.WriteLine(
-            $"[Trainer] gradient scales: fine 2^{Math.Log2(FineScale):F0} -> 2^{Math.Log2(fine):F0}, " +
+            $"[Trainer] gradient scales: colour 2^{Math.Log2(ColourScale):F0} -> 2^{Math.Log2(colour):F0}, " +
+            $"centre 2^{Math.Log2(CentreScale):F0} -> 2^{Math.Log2(centre):F0}, " +
             $"conic 2^{Math.Log2(ConicScale):F0} -> 2^{Math.Log2(conic):F0} " +
-            $"(max centre {stats.MaxCentreQuanta:G3} quanta, max conic {stats.MaxConicQuanta:G3} quanta, " +
-            $"aiming at {TargetSaturation:P0} of the i32 ceiling)");
+            $"(max quanta: colour {stats.MaxColourQuanta:G3}, centre {stats.MaxCentreQuanta:G3}, " +
+            $"conic {stats.MaxConicQuanta:G3}; aiming at {TargetSaturation:P0} of the i32 ceiling)");
 
-        FineScale = fine;
+        ColourScale = colour;
+        CentreScale = centre;
         ConicScale = conic;
         return true;
     }
@@ -593,7 +608,8 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public readonly record struct GradientStats(
         long Splats, long ColourLive, long CentreLive, long ConicLive,
-        double MeanCentreQuanta, double MaxCentreQuanta, double MaxConicQuanta)
+        double MeanCentreQuanta, double MaxCentreQuanta, double MaxConicQuanta,
+        double MaxColourQuanta)
     {
         /// <summary>
         /// Splats that will take an Adam step on a gradient of exactly zero this iteration.
@@ -608,7 +624,7 @@ public sealed class SplatTrainerGpu : IDisposable
     }
 
     const int GradStatsWorkgroups = 256;
-    const int GradStatsSlots = 6;
+    const int GradStatsSlots = 7;
 
     /// <summary>
     /// Reduce the gradient accumulator on the GPU and bring back 6 KB.
@@ -633,7 +649,8 @@ public sealed class SplatTrainerGpu : IDisposable
         float[] p = await _gradStatsPartials!.CopyToHostAsync<float>(
             0, GradStatsWorkgroups * GradStatsSlots);
 
-        double colour = 0, centre = 0, conic = 0, sumCentre = 0, maxCentre = 0, maxConic = 0;
+        double colour = 0, centre = 0, conic = 0, sumCentre = 0;
+        double maxCentre = 0, maxConic = 0, maxColour = 0;
         for (int i = 0; i < GradStatsWorkgroups; i++)
         {
             int o = i * GradStatsSlots;
@@ -643,11 +660,12 @@ public sealed class SplatTrainerGpu : IDisposable
             sumCentre += p[o + 3];
             maxCentre = Math.Max(maxCentre, p[o + 4]);
             maxConic = Math.Max(maxConic, p[o + 5]);
+            maxColour = Math.Max(maxColour, p[o + 6]);
         }
 
         return new GradientStats(
             splatCount, (long)colour, (long)centre, (long)conic,
-            centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic);
+            centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic, maxColour);
     }
 
     /// <summary>
@@ -885,7 +903,7 @@ public sealed class SplatTrainerGpu : IDisposable
         WriteVec4(_adamFlagsBuf!, SkipZeroGradientSteps ? 1f : 0f, 0f, 0f, 0f);
         // One buffer for writer and readers, written before the scatter, so a step cannot
         // accumulate at one scale and divide by another.
-        WriteVec4(_gradScaleBuf!, FineScale, ConicScale, 0f, 0f);
+        WriteVec4(_gradScaleBuf!, ColourScale, CentreScale, ConicScale, 0f);
         Dispatch(_adamStep!, (splatCount + 63) / 64, 1, new[]
         {
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),

@@ -584,7 +584,7 @@ fn raster_backward(
 @group(0) @binding(3) var<storage, read>       values     : array<u32>;
 @group(0) @binding(4) var<storage, read_write> grad_fixed : array<atomic<i32>>;
 @group(0) @binding(5) var<uniform>             counts     : vec4<u32>;   // x = key count
-@group(0) @binding(6) var<uniform>             grad_scale : vec4<f32>;  // x=fine (slots 0..5), y=conic (6..8)
+@group(0) @binding(6) var<uniform>             grad_scale : vec4<f32>;  // x=colour/opacity 0..3, y=centre 4..5, z=conic 6..8
 
 // Gradients here are sums over a tile's pixels of quantities around 1e-4..1e-1. 2^20 keeps
 // ~6 decimal digits while leaving headroom before a 32-bit overflow.
@@ -611,10 +611,14 @@ fn scatter_gradients(
         if (va != 0.0) { atomicAdd(&grad_fixed[out + c], i32(round(va * grad_scale.x))); }
 
         let vb = grad_b[b3 + c];
-        if (vb != 0.0) { atomicAdd(&grad_fixed[out + 3u + c], i32(round(vb * grad_scale.x))); }
+        // Slot 3 is opacity and shares the colour scale; slots 4 and 5 are the screen centre and
+        // do not - the centre is orders of magnitude smaller, which is the whole reason these
+        // are separate now.
+        let sb = select(grad_scale.y, grad_scale.x, c == 0u);
+        if (vb != 0.0) { atomicAdd(&grad_fixed[out + 3u + c], i32(round(vb * sb))); }
 
         let vc = grad_c[b3 + c];
-        if (vc != 0.0) { atomicAdd(&grad_fixed[out + 6u + c], i32(round(vc * grad_scale.y))); }
+        if (vc != 0.0) { atomicAdd(&grad_fixed[out + 6u + c], i32(round(vc * grad_scale.z))); }
     }
 }
 ";
@@ -673,7 +677,7 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 14 per splat
 @group(0) @binding(5) var<uniform>             cfg        : vec4<f32>;        // x=colourLr y=opacityLr z=step w=splatCount
 @group(0) @binding(6) var<uniform>             flags      : vec4<f32>;        // x=skip zero-gradient splats
-@group(0) @binding(7) var<uniform>             grad_scale : vec4<f32>;        // x=fine (slots 0..5)
+@group(0) @binding(7) var<uniform>             grad_scale : vec4<f32>;        // x=colour/opacity 0..3
 
 const FLOATS_PER_SPLAT : u32 = 14u;
 const GRADS_PER_SPLAT : u32 = 9u;
@@ -811,14 +815,14 @@ fn eval_sse(
     /// </summary>
     public const string GradStats = @"
 @group(0) @binding(0) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
-@group(0) @binding(1) var<storage, read_write> partials   : array<f32>;   // 6 per workgroup
+@group(0) @binding(1) var<storage, read_write> partials   : array<f32>;   // 7 per workgroup
 @group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x = splat count
 
-const SLOTS : u32 = 6u;
+const SLOTS : u32 = 7u;
 const GRADS_PER_SPLAT : u32 = 9u;
 const THREADS : u32 = 65536u;   // 256 workgroups x 256
 
-var<workgroup> acc : array<f32, 1536>;   // 256 threads x 6 slots
+var<workgroup> acc : array<f32, 1792>;   // 256 threads x 7 slots
 
 @compute @workgroup_size(256)
 fn grad_stats(
@@ -832,13 +836,18 @@ fn grad_stats(
     var sumCentre = 0.0;
     var maxCentre = 0.0;
     var maxConic = 0.0;
+    var maxColour = 0.0;
 
     for (var i = gid.x; i < dims.x; i = i + THREADS) {
         let b = i * GRADS_PER_SPLAT;
 
-        if (grad_fixed[b] != 0 || grad_fixed[b + 1u] != 0 || grad_fixed[b + 2u] != 0) {
-            colourLive = colourLive + 1.0;
-        }
+        // Slots 0..3 are colour and opacity. Their magnitude matters as much as their presence:
+        // they share a scale with the screen centre, and fitting that scale to the CENTRE alone
+        // put colour past the i32 wrap - measured, by doing exactly that.
+        let col = f32(max(max(abs(grad_fixed[b]), abs(grad_fixed[b + 1u])),
+                      max(abs(grad_fixed[b + 2u]), abs(grad_fixed[b + 3u]))));
+        if (col > 0.0) { colourLive = colourLive + 1.0; }
+        maxColour = max(maxColour, col);
 
         let cen = f32(max(abs(grad_fixed[b + 4u]), abs(grad_fixed[b + 5u])));
         if (cen > 0.0) { centreLive = centreLive + 1.0; sumCentre = sumCentre + cen; }
@@ -853,6 +862,7 @@ fn grad_stats(
     let o = li * SLOTS;
     acc[o] = colourLive; acc[o + 1u] = centreLive; acc[o + 2u] = conicLive;
     acc[o + 3u] = sumCentre; acc[o + 4u] = maxCentre; acc[o + 5u] = maxConic;
+    acc[o + 6u] = maxColour;
     workgroupBarrier();
 
     var stride = 128u;
@@ -867,6 +877,7 @@ fn grad_stats(
             acc[a + 3u] = acc[a + 3u] + acc[b2 + 3u];
             acc[a + 4u] = max(acc[a + 4u], acc[b2 + 4u]);
             acc[a + 5u] = max(acc[a + 5u], acc[b2 + 5u]);
+            acc[a + 6u] = max(acc[a + 6u], acc[b2 + 6u]);
         }
         workgroupBarrier();
         stride = stride >> 1u;
@@ -876,6 +887,7 @@ fn grad_stats(
         let d = wg.x * SLOTS;
         partials[d] = acc[0]; partials[d + 1u] = acc[1]; partials[d + 2u] = acc[2];
         partials[d + 3u] = acc[3]; partials[d + 4u] = acc[4]; partials[d + 5u] = acc[5];
+        partials[d + 6u] = acc[6];
     }
 }
 ";
@@ -1137,7 +1149,7 @@ struct GeomCfg {
 // The GPU gate compares these against SplatGeometryGradients.Backward, and density control
 // will read the screen-space position gradient that feeds them.
 @group(0) @binding(7) var<storage, read_write> geom_out : array<f32>;
-@group(0) @binding(8) var<uniform> grad_scale : vec4<f32>;   // x=fine (slots 4,5), y=conic (6..8)
+@group(0) @binding(8) var<uniform> grad_scale : vec4<f32>;   // y=centre 4..5, z=conic 6..8
 
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
@@ -1158,11 +1170,11 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (i >= u32(g.limit.x)) { return; }
 
     let gb = i * GRADS_PER_SPLAT;
-    let up_cx = f32(grad_fixed[gb + 4u]) / grad_scale.x;
-    let up_cy = f32(grad_fixed[gb + 5u]) / grad_scale.x;
-    let up_ca = f32(grad_fixed[gb + 6u]) / grad_scale.y;
-    let up_cb = f32(grad_fixed[gb + 7u]) / grad_scale.y;
-    let up_cc = f32(grad_fixed[gb + 8u]) / grad_scale.y;
+    let up_cx = f32(grad_fixed[gb + 4u]) / grad_scale.y;
+    let up_cy = f32(grad_fixed[gb + 5u]) / grad_scale.y;
+    let up_ca = f32(grad_fixed[gb + 6u]) / grad_scale.z;
+    let up_cb = f32(grad_fixed[gb + 7u]) / grad_scale.z;
+    let up_cc = f32(grad_fixed[gb + 8u]) / grad_scale.z;
 
     // A splat this view never touched has no gradient. Taking a step anyway would let stale
     // momentum drag geometry that nothing is currently constraining - harmless for colour,

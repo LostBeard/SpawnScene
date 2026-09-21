@@ -43,6 +43,7 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _evalSse;
     GPUComputePipeline? _ssimRowsPipe;
     GPUComputePipeline? _ssimReducePipe;
+    GPUComputePipeline? _gradStats;
     GPUComputePipeline? _unpackTarget;
 
     GPUBuffer? _uniformBuf;     // TrainUniforms
@@ -74,6 +75,7 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _ssePartials; // 1 per 256-pixel workgroup
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimRows;    // 5 filtered channels per (window col, row)
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimPartials;// 1 per 256-window workgroup
+    MemoryBuffer1D<float, Stride1D.Dense>? _gradStatsPartials; // 6 per workgroup, 256 workgroups
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
     MemoryBuffer1D<int, Stride1D.Dense>? _lossFixed;
@@ -149,6 +151,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _evalSse = MakePipeline(SplatTrainerShaders.EvalSse, "eval_sse");
         _ssimRowsPipe = MakePipeline(SplatTrainerShaders.SsimRows, "ssim_rows");
         _ssimReducePipe = MakePipeline(SplatTrainerShaders.SsimReduce, "ssim_reduce");
+        _gradStats = MakePipeline(SplatTrainerShaders.GradStats, "grad_stats");
         _unpackTarget = MakePipeline(SplatTrainerShaders.UnpackTarget, "unpack_target");
 
         _uniformBuf = _device.CreateBuffer(new GPUBufferDescriptor
@@ -199,7 +202,7 @@ public sealed class SplatTrainerGpu : IDisposable
 
         Console.WriteLine("[Trainer] pipelines created: emit_keys, tile_ranges, raster_forward, " +
             "raster_backward, scatter_gradients, loss_l1, adam_step, init_logits, adam_geometry, " +
-            "eval_sse, unpack_target, ssim_rows, ssim_reduce");
+            "eval_sse, unpack_target, ssim_rows, ssim_reduce, grad_stats");
     }
 
     GPUComputePipeline MakePipeline(string wgsl, string entry)
@@ -303,6 +306,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _logScale = accel.Allocate1D<float>((long)splatCount * 3);
         _geomOut = accel.Allocate1D<float>((long)splatCount * GeomGradsPerSplat);
         _ssePartials = accel.Allocate1D<float>(SseWorkgroups);
+        _gradStatsPartials = accel.Allocate1D<float>(GradStatsWorkgroups * GradStatsSlots);
 
         // SSIM works on 'valid' windows, so a viewport smaller than the window has none and the
         // metric is genuinely undefined there - the Python oracle raises rather than inventing a
@@ -495,6 +499,72 @@ public sealed class SplatTrainerGpu : IDisposable
         int i = index;
         if (i >= dst.Length) return;
         dst[i] = src[i];
+    }
+
+    /// <summary>
+    /// Gradient coverage over every splat, in fixed-point QUANTA.
+    ///
+    /// Quanta rather than values because an i32 atomic WRAPS rather than clamping, so how close
+    /// a gradient sits to its ceiling is the question that matters, and the ceiling is an
+    /// integer one.
+    /// </summary>
+    public readonly record struct GradientStats(
+        long Splats, long ColourLive, long CentreLive, long ConicLive,
+        double MeanCentreQuanta, double MaxCentreQuanta, double MaxConicQuanta)
+    {
+        /// <summary>
+        /// Splats that will take an Adam step on a gradient of exactly zero this iteration.
+        ///
+        /// With batch size 1 and a round robin over the supervised views, a splat visible in one
+        /// view of 26 is invisible for the other 25 steps of the cycle. adam_geometry guards
+        /// against stepping those; adam_step does not, on the stated judgement that it is
+        /// "harmless for colour". This number is what makes that judgement checkable.
+        /// </summary>
+        public double StaleColourFraction =>
+            Splats > 0 ? 1.0 - (double)ColourLive / Splats : 0.0;
+    }
+
+    const int GradStatsWorkgroups = 256;
+    const int GradStatsSlots = 6;
+
+    /// <summary>
+    /// Reduce the gradient accumulator on the GPU and bring back 6 KB.
+    ///
+    /// Must be called AFTER TrainStepAsync returns and before the next one begins: the
+    /// accumulator is cleared mid-step (between raster_backward and scatter_gradients), so it
+    /// holds the completed step's totals until the following step reaches that point.
+    /// </summary>
+    public async Task<GradientStats> ReadGradientStatsAsync(int splatCount)
+    {
+        var accel = _gpu.WebGPUAccelerator;
+        WriteU32x4(_dimsBuf!, (uint)splatCount, 0, 0, 0);
+        Dispatch(_gradStats!, GradStatsWorkgroups, 1, new[]
+        {
+            Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _gradStatsPartials!.GetGPUBuffer()!),
+            Buf(2, _dimsBuf!),
+        });
+        await accel.SynchronizeAsync();
+
+        // CPU transfer: 6 floats per workgroup. Slots 0-3 are SUMS, slots 4-5 are MAXES - two
+        // reduction operators in one array, so they must be combined differently here too.
+        float[] p = await _gradStatsPartials!.CopyToHostAsync<float>(
+            0, GradStatsWorkgroups * GradStatsSlots);
+
+        double colour = 0, centre = 0, conic = 0, sumCentre = 0, maxCentre = 0, maxConic = 0;
+        for (int i = 0; i < GradStatsWorkgroups; i++)
+        {
+            int o = i * GradStatsSlots;
+            colour += p[o];
+            centre += p[o + 1];
+            conic += p[o + 2];
+            sumCentre += p[o + 3];
+            maxCentre = Math.Max(maxCentre, p[o + 4]);
+            maxConic = Math.Max(maxConic, p[o + 5]);
+        }
+
+        return new GradientStats(
+            splatCount, (long)colour, (long)centre, (long)conic,
+            centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic);
     }
 
     /// <summary>The viewport the trainer is currently sized for.</summary>
@@ -767,19 +837,17 @@ public sealed class SplatTrainerGpu : IDisposable
     /// Per-splat accumulated gradients, dequantised. Nine per splat, in the shader's order:
     /// colour RGB, opacity, screen centre x and y, conic a, b and c. For the GPU gate only.
     /// </summary>
-    public async Task<float[]> ReadGradientsAsync(int splatCount, int maxSplats = 0)
+    /// <remarks>
+    /// Reads the WHOLE accumulator, so this is for the gate's few-hundred-splat scene, not for a
+    /// real one. There used to be a maxSplats prefix option here for summary statistics; it is
+    /// gone because a prefix of a VIEW-MAJOR splat buffer is not a sample - it is the top of
+    /// view 0's depth map, which can be entirely zero while the buffer is full, and that is
+    /// exactly how the health probe went blind. Use <see cref="ReadGradientStatsAsync"/>.
+    /// </remarks>
+    public async Task<float[]> ReadGradientsAsync(int splatCount)
     {
-        // Read a PREFIX, not the whole buffer.
-        //
-        // This is a diagnostic, and it was pulling the entire accumulator across - 725k splats
-        // is 6.5M ints, 26 MB - for a statistic about what FRACTION of splats have a gradient. A
-        // fraction does not need every element, and the whole-buffer read is also what the
-        // health probe's own comment blames for "an empty accumulator on larger scenes while the
-        // loss was demonstrably falling". A bulk readback for a summary statistic is the copy
-        // Rule 4 is about, and it took the instrument out at exactly the scale it was needed.
-        int sample = maxSplats > 0 ? Math.Min(splatCount, maxSplats) : splatCount;
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
-        int[] raw = await _gradFixed!.CopyToHostAsync<int>(0, (long)sample * GradsPerSplat);
+        int[] raw = await _gradFixed!.CopyToHostAsync<int>(0, (long)splatCount * GradsPerSplat);
         var outp = new float[raw.Length];
         for (int i = 0; i < raw.Length; i++) outp[i] = raw[i] / FixedScaleFor(i % GradsPerSplat);
         return outp;
@@ -922,6 +990,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssePartials?.Dispose(); _ssePartials = null;
         _ssimRows?.Dispose(); _ssimRows = null;
         _ssimPartials?.Dispose(); _ssimPartials = null;
+        _gradStatsPartials?.Dispose(); _gradStatsPartials = null;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
         _lossFixed?.Dispose(); _lossFixed = null;

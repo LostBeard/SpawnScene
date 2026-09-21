@@ -384,6 +384,59 @@ public partial class Studio
             return false;
         }
 
+        // The gradient-health reduction, against a CPU pass over the SAME buffer. This is the
+        // strongest form available: gpu2d is already the full accumulator, so the two are not
+        // merely similar computations on similar data, they are the same numbers.
+        //
+        // It is here because the probe this replaces went blind for a whole session - it read a
+        // prefix of a view-major buffer, which is not a sample - and nothing caught it.
+        var stats = await trainer.ReadGradientStatsAsync(n);
+        long cColour = 0, cCentre = 0, cConic = 0;
+        double cSumCentre = 0, cMaxCentre = 0, cMaxConic = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int b = i * SplatTrainerGpu.GradsPerSplat;
+            if (gpu2d[b] != 0f || gpu2d[b + 1] != 0f || gpu2d[b + 2] != 0f) cColour++;
+
+            // gpu2d is already divided by the fixed-point scales; the reduction reports QUANTA,
+            // so scale back to compare like with like.
+            double cen = Math.Max(Math.Abs(gpu2d[b + 4]), Math.Abs(gpu2d[b + 5]))
+                         * SplatTrainerGpu.FixedScaleFor(4);
+            if (cen > 0) { cCentre++; cSumCentre += cen; }
+            cMaxCentre = Math.Max(cMaxCentre, cen);
+
+            double con = Math.Max(Math.Abs(gpu2d[b + 6]),
+                         Math.Max(Math.Abs(gpu2d[b + 7]), Math.Abs(gpu2d[b + 8])))
+                         * SplatTrainerGpu.FixedScaleFor(6);
+            if (con > 0) cConic++;
+            cMaxConic = Math.Max(cMaxConic, con);
+        }
+        double cMeanCentre = cCentre > 0 ? cSumCentre / cCentre : 0;
+
+        Console.WriteLine(
+            $"[TrainerGate] grad stats: colour {stats.ColourLive}/{cColour}, " +
+            $"centre {stats.CentreLive}/{cCentre}, conic {stats.ConicLive}/{cConic}, " +
+            $"meanCentre {stats.MeanCentreQuanta:F1}/{cMeanCentre:F1} quanta, " +
+            $"stale {stats.StaleColourFraction:P1}");
+
+        if (cColour == 0 && cCentre == 0)
+        {
+            Console.WriteLine("[TrainerGate] FAIL: no gradients at all - the stats check is vacuous");
+            return false;
+        }
+        if (stats.ColourLive != cColour || stats.CentreLive != cCentre || stats.ConicLive != cConic)
+        {
+            Console.WriteLine("[TrainerGate] FAIL: grad_stats counts disagree with the CPU pass");
+            return false;
+        }
+        if (cMeanCentre > 0 &&
+            Math.Abs(stats.MeanCentreQuanta - cMeanCentre) / cMeanCentre > 1e-3)
+        {
+            Console.WriteLine("[TrainerGate] FAIL: grad_stats mean magnitude disagrees");
+            return false;
+        }
+        Console.WriteLine("[TrainerGate] grad stats PASS");
+
         Console.WriteLine("[TrainerGate] gradients PASS");
         return true;
     }

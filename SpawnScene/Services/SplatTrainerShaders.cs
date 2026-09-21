@@ -767,6 +767,95 @@ fn eval_sse(
 ";
 
     /// <summary>
+    /// Gradient health over EVERY splat, reduced to a few KB.
+    ///
+    /// This replaces a readback. The probe used to copy the whole accumulator to the host -
+    /// 725k splats is 6.5M ints, 26 MB - to report what FRACTION of splats have a gradient, and
+    /// when that was cut to a 65,536-splat prefix it started reading zeros: the merged splat
+    /// buffer is VIEW-MAJOR, so a prefix is the top ~9% of view 0's depth map in raster order,
+    /// which can legitimately be all zero while the buffer is full. A prefix of a view-major
+    /// buffer is not a sample. A reduction needs the same amount of code, covers every splat,
+    /// and moves 6 KB instead of 26 MB.
+    ///
+    /// Fixed 256 workgroups with a grid-stride loop, so the readback size does not depend on the
+    /// scene. Values stay in QUANTA - the raw fixed-point integers - because the fixed-point
+    /// scales live in the host and this shader should not hold a second copy of them.
+    ///
+    /// ⚠ Slots 0-3 are SUMS and slots 4-5 are MAXES. Two reduction operators share one array,
+    /// which is a foot-gun; the read side says so too.
+    /// </summary>
+    public const string GradStats = @"
+@group(0) @binding(0) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(1) var<storage, read_write> partials   : array<f32>;   // 6 per workgroup
+@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x = splat count
+
+const SLOTS : u32 = 6u;
+const GRADS_PER_SPLAT : u32 = 9u;
+const THREADS : u32 = 65536u;   // 256 workgroups x 256
+
+var<workgroup> acc : array<f32, 1536>;   // 256 threads x 6 slots
+
+@compute @workgroup_size(256)
+fn grad_stats(
+    @builtin(global_invocation_id) gid : vec3<u32>,
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    var colourLive = 0.0;
+    var centreLive = 0.0;
+    var conicLive = 0.0;
+    var sumCentre = 0.0;
+    var maxCentre = 0.0;
+    var maxConic = 0.0;
+
+    for (var i = gid.x; i < dims.x; i = i + THREADS) {
+        let b = i * GRADS_PER_SPLAT;
+
+        if (grad_fixed[b] != 0 || grad_fixed[b + 1u] != 0 || grad_fixed[b + 2u] != 0) {
+            colourLive = colourLive + 1.0;
+        }
+
+        let cen = f32(max(abs(grad_fixed[b + 4u]), abs(grad_fixed[b + 5u])));
+        if (cen > 0.0) { centreLive = centreLive + 1.0; sumCentre = sumCentre + cen; }
+        maxCentre = max(maxCentre, cen);
+
+        let con = f32(max(abs(grad_fixed[b + 6u]),
+                      max(abs(grad_fixed[b + 7u]), abs(grad_fixed[b + 8u]))));
+        if (con > 0.0) { conicLive = conicLive + 1.0; }
+        maxConic = max(maxConic, con);
+    }
+
+    let o = li * SLOTS;
+    acc[o] = colourLive; acc[o + 1u] = centreLive; acc[o + 2u] = conicLive;
+    acc[o + 3u] = sumCentre; acc[o + 4u] = maxCentre; acc[o + 5u] = maxConic;
+    workgroupBarrier();
+
+    var stride = 128u;
+    loop {
+        if (stride == 0u) { break; }
+        if (li < stride) {
+            let a = li * SLOTS;
+            let b2 = (li + stride) * SLOTS;
+            acc[a] = acc[a] + acc[b2];
+            acc[a + 1u] = acc[a + 1u] + acc[b2 + 1u];
+            acc[a + 2u] = acc[a + 2u] + acc[b2 + 2u];
+            acc[a + 3u] = acc[a + 3u] + acc[b2 + 3u];
+            acc[a + 4u] = max(acc[a + 4u], acc[b2 + 4u]);
+            acc[a + 5u] = max(acc[a + 5u], acc[b2 + 5u]);
+        }
+        workgroupBarrier();
+        stride = stride >> 1u;
+    }
+
+    if (li == 0u) {
+        let d = wg.x * SLOTS;
+        partials[d] = acc[0]; partials[d + 1u] = acc[1]; partials[d + 2u] = acc[2];
+        partials[d + 3u] = acc[3]; partials[d + 4u] = acc[4]; partials[d + 5u] = acc[5];
+    }
+}
+";
+
+    /// <summary>
     /// SSIM, horizontal half. One thread per (window column, source row); writes the five
     /// filtered channels a window needs: a, b, a*a, b*b, a*b.
     ///

@@ -264,7 +264,10 @@ public partial class Studio
                 // 1/(3*W*H) - about 1e-6 at this resolution - so a small splat's position
                 // gradient can be only a few QUANTA. If most splats quantise to zero the
                 // geometry cannot move and the run would look like a bad learning rate.
-                if (geo != null && it == supervised.Count * 2) await ReportGradientHealthAsync(n);
+                // Not gated on geometry: the colour/opacity stale-step fraction matters
+                // either way, and at 6 KB a call this is affordable more than once.
+                if (it == 0 || it == supervised.Count * 2 || it == iterations - 1)
+                    await ReportGradientHealthAsync(n);
                 if (_trainer.LastOverflowed) overflowed++;
 
                 cycleSum += loss;
@@ -370,68 +373,59 @@ public partial class Studio
     }
 
     /// <summary>
-    /// How much of the gradient survives quantisation. Reported once per run, from one readback.
+    /// How much of the gradient survives quantisation, and how many splats have none at all.
+    ///
+    /// Over EVERY splat, via a GPU reduction. It used to copy the whole accumulator to the host
+    /// - 725k splats is 26 MB - and when that was cut to a 65,536-splat prefix it went blind:
+    /// the merged splat buffer is view-major, so a prefix is the top of view 0's depth map and
+    /// can legitimately be all zero. Every Bathroom run today printed "INCONCLUSIVE" because of
+    /// it. A prefix of a view-major buffer is not a sample.
     /// </summary>
     private async Task ReportGradientHealthAsync(int n)
     {
-        // A sample, because this reports a FRACTION. See ReadGradientsAsync: the whole-buffer
-        // read is what made this probe come back empty on exactly the large scenes it matters on.
-        const int SampleSplats = 65_536;
-        int sampled = Math.Min(n, SampleSplats);
-        float[] g = await _trainer!.ReadGradientsAsync(n, SampleSplats);
+        var st = await _trainer!.ReadGradientStatsAsync(n);
+
         float centreQuantum = 1f / SplatTrainerGpu.FixedScaleFor(4);
         float conicQuantum = 1f / SplatTrainerGpu.FixedScaleFor(6);
 
-        int stride = SplatTrainerGpu.GradsPerSplat;
-        int liveColour = 0, liveCentre = 0, liveConic = 0;
-        double sumCentre = 0;
-        float maxCentre = 0, maxConic = 0;
-        for (int i = 0; i < sampled; i++)
+        if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
         {
-            int o = i * stride;
-            if (g[o] != 0f || g[o + 1] != 0f || g[o + 2] != 0f) liveColour++;
-
-            float cx = MathF.Abs(g[o + 4]), cy = MathF.Abs(g[o + 5]);
-            float cen = MathF.Max(cx, cy);
-            if (cen > 0f) { liveCentre++; sumCentre += cen; }
-            if (cen > maxCentre) maxCentre = cen;
-
-            float con = MathF.Max(MathF.Abs(g[o + 6]), MathF.Max(MathF.Abs(g[o + 7]), MathF.Abs(g[o + 8])));
-            if (con > 0f) liveConic++;
-            if (con > maxConic) maxConic = con;
-        }
-        double meanCentre = liveCentre > 0 ? sumCentre / liveCentre : 0;
-
-        if (liveColour == 0 && liveCentre == 0 && liveConic == 0)
-        {
-            // Do not report this as "0% of splats have a gradient". The accumulator is cleared
-            // at the start of each step and read after it, and on larger scenes that readback
-            // has come back empty while the loss was demonstrably falling - so an all-zero
-            // result means the probe saw nothing, not that nothing has a gradient. Saying the
-            // latter would send the next reader after an optimiser bug that is not there.
+            // Every splat is counted now, so this is a measurement rather than a shrug. It used
+            // to be reported as INCONCLUSIVE because the probe could not tell "nothing has a
+            // gradient" from "I looked in the wrong place".
             Console.WriteLine(
-                "[Train] gradient health: readback saw an empty accumulator - INCONCLUSIVE, " +
-                "not a measurement of zero. Trust the loss curve instead for this run.");
+                "[Train] gradient health: NO splat received a gradient this step. The backward " +
+                "pass produced nothing - that is a defect, not a small number.");
             return;
         }
 
         Console.WriteLine(
-            $"[Train] gradient health (sample of {sampled:N0} of {n:N0} splats): " +
-            $"colour {liveColour * 100.0 / sampled:F1}% nonzero, " +
-            $"centre {liveCentre * 100.0 / sampled:F1}%, conic {liveConic * 100.0 / sampled:F1}%");
+            $"[Train] gradient health (all {n:N0} splats): " +
+            $"colour {st.ColourLive * 100.0 / n:F1}% nonzero, " +
+            $"centre {st.CentreLive * 100.0 / n:F1}%, conic {st.ConicLive * 100.0 / n:F1}%");
+
+        // The premise of the stale-momentum question, as a number rather than an inference from
+        // the round-robin structure. adam_geometry refuses to step a splat with no gradient;
+        // adam_step does not, on the stated judgement that it is "harmless for colour".
+        Console.WriteLine(
+            $"[Train] {st.StaleColourFraction:P1} of splats will take a colour/opacity Adam step " +
+            "on a gradient of exactly zero this iteration");
+
+        double meanCentre = st.MeanCentreQuanta * centreQuantum;
+        double maxConic = st.MaxConicQuanta * conicQuantum;
         double centreCeiling = int.MaxValue * (double)centreQuantum;
         double conicCeiling = int.MaxValue * (double)conicQuantum;
         Console.WriteLine(
-            $"[Train] centre |grad| mean {meanCentre:G3} ({meanCentre / centreQuantum:F0} quanta, " +
+            $"[Train] centre |grad| mean {meanCentre:G3} ({st.MeanCentreQuanta:F0} quanta, " +
             $"saturates at {centreCeiling:G3}); " +
-            $"conic max {maxConic:G3} ({maxConic / conicQuantum:G3} quanta, " +
+            $"conic max {maxConic:G3} ({st.MaxConicQuanta:G3} quanta, " +
             $"saturates at {conicCeiling:G3})");
 
         // The conic gradient grows with a splat's pixel AREA, so it is the one that can run out
         // of range rather than out of precision - and an i32 atomic wraps silently rather than
         // clamping, which would read as a wrong gradient, not as an error. Densification will
         // create larger splats than exist today, so this needs to be watched, not assumed.
-        if (maxConic > 0.1 * conicCeiling || maxCentre > 0.1 * centreCeiling)
+        if (st.MaxConicQuanta > 0.1 * int.MaxValue || st.MaxCentreQuanta > 0.1 * int.MaxValue)
             Console.WriteLine(
                 "[Train] WARNING: a fixed-point gradient is within 10% of saturating. The atomic " +
                 "WRAPS rather than clamping, so gradients past this point are wrong, not merely " +

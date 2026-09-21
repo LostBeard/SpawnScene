@@ -274,8 +274,12 @@ public class ImageImportService : IDisposable
                 await Task.Yield();
             }
 
-            if (_images.Count >= 2)
+            if (_images.Count >= 2 && !SkipPairMatching)
                 await MatchAllPairsAsync();
+            else if (SkipPairMatching)
+                Console.WriteLine(
+                    $"[Import] skipped {_images.Count * (_images.Count - 1) / 2:N0} pair matches " +
+                    "- this run uses ground-truth poses and never reads them");
 
             Progress = 1.0f;
         }
@@ -460,6 +464,16 @@ public class ImageImportService : IDisposable
     /// <summary>
     /// Load a sample dataset from wwwroot/datasets/ for testing.
     /// </summary>
+    /// <summary>
+    /// Skip pairwise feature matching on load.
+    ///
+    /// Matching is O(n^2) in images - 132 images is 8,646 pairs - and it exists to feed SfM
+    /// pose recovery. A run using ground-truth poses never looks at the result, so every one of
+    /// those pairs is wall clock spent on an answer nobody reads, and it grows quadratically
+    /// exactly as more views are added to improve quality.
+    /// </summary>
+    public bool SkipPairMatching { get; set; }
+
     public async Task LoadSampleDatasetAsync(string datasetName)
     {
         Clear();

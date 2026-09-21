@@ -76,6 +76,9 @@ public partial class Studio
 
             // -- 1. Load the photographs --
             var t0 = DateTime.UtcNow;
+            // Pairwise matching feeds SfM pose recovery. With ground-truth poses nothing reads
+            // it, and at 132 images it is 8,646 GPU matches of pure wall clock.
+            _importService.SkipPairMatching = useGroundTruthPoses;
             await _importService.LoadSampleDatasetAsync(datasetName);
             var images = _importService.Images.ToList();
             if (images.Count < 2)

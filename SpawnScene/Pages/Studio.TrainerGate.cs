@@ -437,6 +437,54 @@ public partial class Studio
         }
         Console.WriteLine("[TrainerGate] grad stats PASS");
 
+        // The view-support counter, against the same CPU pass. Its report is load-bearing - it
+        // is the line that says whether optimiser experiments are worth running at all - so it
+        // gets a CPU oracle like everything else here rather than being believed.
+        //
+        // Accumulated TWICE over the same gradients: once only proves the threshold, and would
+        // pass equally if the shader assigned 1 instead of incrementing. Twice proves the
+        // counting, which is the part the report depends on.
+        long cAny = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int b = i * SplatTrainerGpu.GradsPerSplat;
+            bool any = false;
+            for (int c = 0; c < SplatTrainerGpu.GradsPerSplat; c++)
+                if (gpu2d[b + c] != 0f) { any = true; break; }
+            if (any) cAny++;
+        }
+
+        trainer.ResetViewSupport(n);
+        trainer.AccumulateViewSupport(n);
+        trainer.AccumulateViewSupport(n);
+        var support = await trainer.ReadViewSupportAsync(n);
+
+        Console.WriteLine(
+            $"[TrainerGate] view support: 2-view {support.TwoViews}/{cAny}, " +
+            $"never {support.Unconstrained}/{n - cAny}, mean {support.MeanViews:F3}");
+
+        if (cAny == 0)
+        {
+            Console.WriteLine("[TrainerGate] FAIL: no splat has any gradient - support check is vacuous");
+            return false;
+        }
+        if (support.TwoViews != cAny || support.Unconstrained != n - cAny ||
+            support.OneView != 0 || support.ThreeViews != 0 || support.FourOrMore != 0)
+        {
+            Console.WriteLine(
+                "[TrainerGate] FAIL: view support buckets disagree with the CPU pass - " +
+                $"expected {cAny} at exactly 2 and {n - cAny} at 0, got " +
+                $"0:{support.Unconstrained} 1:{support.OneView} 2:{support.TwoViews} " +
+                $"3:{support.ThreeViews} 4+:{support.FourOrMore}");
+            return false;
+        }
+        if (Math.Abs(support.MeanViews - 2.0 * cAny / n) > 1e-4)
+        {
+            Console.WriteLine("[TrainerGate] FAIL: view support mean disagrees with its own buckets");
+            return false;
+        }
+        Console.WriteLine("[TrainerGate] view support PASS");
+
         Console.WriteLine("[TrainerGate] gradients PASS");
         return true;
     }

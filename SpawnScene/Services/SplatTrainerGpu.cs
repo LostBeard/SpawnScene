@@ -44,6 +44,8 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _ssimRowsPipe;
     GPUComputePipeline? _ssimReducePipe;
     GPUComputePipeline? _gradStats;
+    GPUComputePipeline? _accumulateSupport;
+    GPUComputePipeline? _supportHistogram;
     GPUComputePipeline? _unpackTarget;
 
     GPUBuffer? _uniformBuf;     // TrainUniforms
@@ -76,6 +78,8 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimRows;    // 5 filtered channels per (window col, row)
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimPartials;// 1 per 256-window workgroup
     MemoryBuffer1D<float, Stride1D.Dense>? _gradStatsPartials; // 6 per workgroup, 256 workgroups
+    MemoryBuffer1D<uint, Stride1D.Dense>? _viewSupport;        // views that ever moved each splat
+    MemoryBuffer1D<float, Stride1D.Dense>? _supportPartials;   // 6 per workgroup, 256 workgroups
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
     MemoryBuffer1D<int, Stride1D.Dense>? _lossFixed;
@@ -245,6 +249,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimRowsPipe = MakePipeline(SplatTrainerShaders.SsimRows, "ssim_rows");
         _ssimReducePipe = MakePipeline(SplatTrainerShaders.SsimReduce, "ssim_reduce");
         _gradStats = MakePipeline(SplatTrainerShaders.GradStats, "grad_stats");
+        _accumulateSupport = MakePipeline(SplatTrainerShaders.AccumulateSupport, "accumulate_support");
+        _supportHistogram = MakePipeline(SplatTrainerShaders.SupportHistogram, "support_histogram");
         _unpackTarget = MakePipeline(SplatTrainerShaders.UnpackTarget, "unpack_target");
 
         _uniformBuf = _device.CreateBuffer(new GPUBufferDescriptor
@@ -416,6 +422,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _geomOut = accel.Allocate1D<float>((long)splatCount * GeomGradsPerSplat);
         _ssePartials = accel.Allocate1D<float>(SseWorkgroups);
         _gradStatsPartials = accel.Allocate1D<float>(GradStatsWorkgroups * GradStatsSlots);
+        _viewSupport = accel.Allocate1D<uint>(splatCount);
+        _supportPartials = accel.Allocate1D<float>(SupportWorkgroups * SupportSlots);
 
         // SSIM works on 'valid' windows, so a viewport smaller than the window has none and the
         // metric is genuinely undefined there - the Python oracle raises rather than inventing a
@@ -677,6 +685,85 @@ public sealed class SplatTrainerGpu : IDisposable
         return new GradientStats(
             splatCount, (long)colour, (long)centre, (long)conic,
             centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic, maxColour);
+    }
+
+    const int SupportWorkgroups = 256;
+    const int SupportSlots = 6;
+
+    /// <summary>
+    /// How many distinct views constrain each splat, bucketed.
+    ///
+    /// <paramref name="Views"/> is how many views were accumulated, so the buckets can be read
+    /// against the maximum a splat could possibly have reached.
+    /// </summary>
+    public readonly record struct ViewSupport(
+        long Splats, int Views,
+        long Unconstrained, long OneView, long TwoViews, long ThreeViews, long FourOrMore,
+        double MeanViews)
+    {
+        /// <summary>
+        /// Splats that no two views agree on - the ones a second view could contradict but
+        /// never does. If this is most of the scene, the reconstruction is a stack of per-view
+        /// shells and cannot generalise to a view nobody trained on, whatever the optimiser does.
+        /// </summary>
+        public double SingleViewFraction =>
+            Splats > 0 ? (double)(Unconstrained + OneView) / Splats : 0.0;
+    }
+
+    /// <summary>Start a fresh support count. Call once, then accumulate over a full cycle.</summary>
+    public void ResetViewSupport(int splatCount)
+    {
+        _viewSupport!.MemSetToZero();
+        _supportViewsAccumulated = 0;
+    }
+
+    int _supportViewsAccumulated;
+
+    /// <summary>
+    /// Fold the step that just finished into the support count. One dispatch, no sync.
+    ///
+    /// Same timing constraint as <see cref="ReadGradientStatsAsync"/>: the accumulator is
+    /// cleared mid-step, so this must run after TrainStepAsync returns and before the next.
+    /// </summary>
+    public void AccumulateViewSupport(int splatCount)
+    {
+        WriteU32x4(_dimsBuf!, (uint)splatCount, 0, 0, 0);
+        Dispatch(_accumulateSupport!, (splatCount + 255) / 256, 1, new[]
+        {
+            Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _viewSupport!.GetGPUBuffer()!),
+            Buf(2, _dimsBuf!),
+        });
+        _supportViewsAccumulated++;
+    }
+
+    /// <summary>Reduce the support counts to buckets and bring back 6 KB.</summary>
+    public async Task<ViewSupport> ReadViewSupportAsync(int splatCount)
+    {
+        var accel = _gpu.WebGPUAccelerator;
+        WriteU32x4(_dimsBuf!, (uint)splatCount, 0, 0, 0);
+        Dispatch(_supportHistogram!, SupportWorkgroups, 1, new[]
+        {
+            Buf(0, _viewSupport!.GetGPUBuffer()!), Buf(1, _supportPartials!.GetGPUBuffer()!),
+            Buf(2, _dimsBuf!),
+        });
+        await accel.SynchronizeAsync();
+
+        // CPU transfer: 6 floats per workgroup. Every slot is a sum.
+        float[] p = await _supportPartials!.CopyToHostAsync<float>(
+            0, SupportWorkgroups * SupportSlots);
+
+        double c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0, total = 0;
+        for (int i = 0; i < SupportWorkgroups; i++)
+        {
+            int o = i * SupportSlots;
+            c0 += p[o]; c1 += p[o + 1]; c2 += p[o + 2];
+            c3 += p[o + 3]; c4 += p[o + 4]; total += p[o + 5];
+        }
+
+        return new ViewSupport(
+            splatCount, _supportViewsAccumulated,
+            (long)c0, (long)c1, (long)c2, (long)c3, (long)c4,
+            splatCount > 0 ? total / splatCount : 0.0);
     }
 
     /// <summary>
@@ -1117,6 +1204,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimRows?.Dispose(); _ssimRows = null;
         _ssimPartials?.Dispose(); _ssimPartials = null;
         _gradStatsPartials?.Dispose(); _gradStatsPartials = null;
+        _viewSupport?.Dispose(); _viewSupport = null;
+        _supportPartials?.Dispose(); _supportPartials = null;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
         _lossFixed?.Dispose(); _lossFixed = null;

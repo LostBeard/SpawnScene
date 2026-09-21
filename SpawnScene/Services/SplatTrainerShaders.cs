@@ -893,6 +893,107 @@ fn grad_stats(
 ";
 
     /// <summary>
+    /// Count, per splat, how many DISTINCT views have ever given it a gradient.
+    ///
+    /// This is the question underneath every optimiser experiment on this project. The
+    /// initialisation unprojects a monocular depth map PER VIEW, so 44 views give 44 private
+    /// depth shells stacked in one world. If a splat is only ever constrained by the single
+    /// view it came from, then training is not a reconstruction at all - it is 44 independent
+    /// per-view fits sharing a buffer, every one of which can lower its own view's loss while
+    /// explaining nothing about a view nobody trained on. Supervised PSNR would rise, held-out
+    /// PSNR would fall, and no learning rate, momentum guard or loss term could change that,
+    /// because the parameterisation itself is degenerate.
+    ///
+    /// One thread per splat, run after each step of a full cycle. A gradient of exactly zero
+    /// means the splat did not affect that view's render; anything else means it did.
+    /// </summary>
+    public const string AccumulateSupport = @"
+@group(0) @binding(0) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(1) var<storage, read_write> support    : array<u32>;   // 1 per splat
+@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x = splat count
+
+const GRADS_PER_SPLAT : u32 = 9u;
+
+@compute @workgroup_size(256)
+fn accumulate_support(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= dims.x) { return; }
+
+    let b = i * GRADS_PER_SPLAT;
+    var live = false;
+    for (var c = 0u; c < GRADS_PER_SPLAT; c = c + 1u) {
+        if (grad_fixed[b + c] != 0) { live = true; }
+    }
+
+    // One increment per CALL, and the caller calls once per view, so this counts views rather
+    // than steps. No atomic: one thread owns one splat.
+    if (live) { support[i] = support[i] + 1u; }
+}
+";
+
+    /// <summary>
+    /// Histogram the per-splat view-support counts into buckets the host can print.
+    ///
+    /// Every slot is a SUM - unlike grad_stats, which mixes sums and maxes - so the tree
+    /// reduction below has exactly one operator and needs no warning.
+    /// </summary>
+    public const string SupportHistogram = @"
+@group(0) @binding(0) var<storage, read>       support  : array<u32>;   // 1 per splat
+@group(0) @binding(1) var<storage, read_write> partials : array<f32>;   // 6 per workgroup
+@group(0) @binding(2) var<uniform>             dims     : vec4<u32>;    // x = splat count
+
+const SLOTS : u32 = 6u;
+const THREADS : u32 = 65536u;   // 256 workgroups x 256
+
+var<workgroup> acc : array<f32, 1536>;   // 256 threads x 6 slots
+
+@compute @workgroup_size(256)
+fn support_histogram(
+    @builtin(global_invocation_id) gid : vec3<u32>,
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    // Buckets: never constrained, one view only, two, three, four or more; plus the total so
+    // the host can report a mean without a second pass.
+    var c0 = 0.0; var c1 = 0.0; var c2 = 0.0; var c3 = 0.0; var c4 = 0.0; var total = 0.0;
+
+    for (var i = gid.x; i < dims.x; i = i + THREADS) {
+        let v = support[i];
+        total = total + f32(v);
+        if (v == 0u) { c0 = c0 + 1.0; }
+        else if (v == 1u) { c1 = c1 + 1.0; }
+        else if (v == 2u) { c2 = c2 + 1.0; }
+        else if (v == 3u) { c3 = c3 + 1.0; }
+        else { c4 = c4 + 1.0; }
+    }
+
+    let o = li * SLOTS;
+    acc[o] = c0; acc[o + 1u] = c1; acc[o + 2u] = c2;
+    acc[o + 3u] = c3; acc[o + 4u] = c4; acc[o + 5u] = total;
+    workgroupBarrier();
+
+    var stride = 128u;
+    loop {
+        if (stride == 0u) { break; }
+        if (li < stride) {
+            let a = li * SLOTS;
+            let b2 = (li + stride) * SLOTS;
+            for (var k = 0u; k < SLOTS; k = k + 1u) {
+                acc[a + k] = acc[a + k] + acc[b2 + k];
+            }
+        }
+        workgroupBarrier();
+        stride = stride >> 1u;
+    }
+
+    if (li == 0u) {
+        let d = wg.x * SLOTS;
+        for (var k = 0u; k < SLOTS; k = k + 1u) { partials[d + k] = acc[k]; }
+    }
+}
+";
+
+    /// <summary>
     /// SSIM, horizontal half. One thread per (window column, source row); writes the five
     /// filtered channels a window needs: a, b, a*a, b*b, a*b.
     ///

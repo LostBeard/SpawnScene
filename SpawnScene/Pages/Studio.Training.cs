@@ -302,6 +302,11 @@ public partial class Studio
             int cycleN = 0;
             var curve = new List<EvalScores>();
             var probeIterations = TrainingSchedule.ProbeIterations(iterations, supervised.Count);
+
+            // Count, over the FIRST full cycle, how many views ever move each splat. Measured at
+            // the start because it is a property of the INITIALISATION - a stack of per-view
+            // depth shells - not of anything the optimiser subsequently does.
+            _trainer.ResetViewSupport(n);
             double firstCycle = double.NaN, lastCycle = double.NaN;
             for (int it = 0; it < iterations; it++)
             {
@@ -318,6 +323,9 @@ public partial class Studio
                 // If most splats quantise to zero the geometry cannot move and the run would
                 // look like a bad learning rate. Not gated on geometry: the colour/opacity
                 // stale-step fraction matters either way, and at 6 KB a call this is cheap.
+                if (it < supervised.Count) _trainer.AccumulateViewSupport(n);
+                if (it == supervised.Count - 1) await ReportViewSupportAsync(n);
+
                 if (probeIterations.Contains(it))
                     await ReportGradientHealthAsync(n, vi);
                 if (_trainer.LastOverflowed) overflowed++;
@@ -451,6 +459,43 @@ public partial class Studio
     /// can legitimately be all zero. Every Bathroom run today printed "INCONCLUSIVE" because of
     /// it. A prefix of a view-major buffer is not a sample.
     /// </summary>
+    /// <summary>
+    /// How many views actually constrain each splat, after one full cycle.
+    ///
+    /// The number that decides whether any optimiser experiment on this project is worth
+    /// running. Initialisation unprojects a monocular depth map per view, so N views produce N
+    /// private shells; a splat that only ever receives a gradient from its own view is free to
+    /// explain that view and nothing else. Supervised loss falls, held-out loss rises, and the
+    /// cause is the parameterisation rather than the learning rate.
+    /// </summary>
+    private async Task ReportViewSupportAsync(int n)
+    {
+        var vs = await _trainer!.ReadViewSupportAsync(n);
+
+        Console.WriteLine(
+            $"[Train] view support over {vs.Views} views ({vs.Splats:N0} splats): " +
+            $"never {vs.Unconstrained * 100.0 / n:F1}%, " +
+            $"1 view {vs.OneView * 100.0 / n:F1}%, " +
+            $"2 {vs.TwoViews * 100.0 / n:F1}%, " +
+            $"3 {vs.ThreeViews * 100.0 / n:F1}%, " +
+            $"4+ {vs.FourOrMore * 100.0 / n:F1}%  (mean {vs.MeanViews:F2} views/splat)");
+
+        // Say what it MEANS, once, rather than leaving the reader to do the arithmetic at the
+        // bottom of a thousand-line log. The threshold is a reporting choice, not a gate - it
+        // decides which sentence prints, never what the run does.
+        if (vs.SingleViewFraction > 0.9)
+            Console.WriteLine(
+                $"[Train] ⚠ {vs.SingleViewFraction:P1} of splats are constrained by AT MOST ONE " +
+                "view. This reconstruction is a stack of per-view shells, not a shared scene: " +
+                "every splat can fit its own view without ever being contradicted. Expect " +
+                "supervised PSNR to rise and held-out PSNR to fall, and expect no optimiser " +
+                "setting to change that - the parameterisation is the problem, not the step.");
+        else
+            Console.WriteLine(
+                $"[Train] {1 - vs.SingleViewFraction:P1} of splats are seen by two or more views " +
+                "and can therefore be contradicted - that is what makes generalisation possible.");
+    }
+
     private async Task ReportGradientHealthAsync(int n, int viewIndex)
     {
         var st = await _trainer!.ReadGradientStatsAsync(n);

@@ -33,6 +33,24 @@ public sealed class SplatOptimizer
     public float ColourLr { get; set; } = DefaultColourLr;
     public float OpacityLr { get; set; } = DefaultOpacityLr;
 
+    /// <summary>
+    /// Skip splats whose gradient is exactly zero this step, instead of stepping them on stale
+    /// momentum.
+    ///
+    /// The geometry optimiser has always done this, and says why: "A splat this view never
+    /// touched has no gradient. Taking a step anyway would let stale momentum drag geometry that
+    /// nothing is currently constraining - harmless for colour, but for position it sends
+    /// invisible splats travelling." The colour path never got the same guard on the strength of
+    /// that "harmless for colour".
+    ///
+    /// That judgement is worth re-testing at batch size 1. A splat visible in one view of 26
+    /// takes about 25 steps per cycle on a gradient of exactly zero, and opacity is optimised in
+    /// LOGIT space, so stale momentum walks splats in and out of visibility. Whether that is
+    /// what makes held-out quality oscillate is a measurement, which is why this is a flag and
+    /// not a fix.
+    /// </summary>
+    public bool SkipZeroGradient { get; set; }
+
     public SplatOptimizer(int splatCount)
     {
         _n = splatCount;
@@ -78,6 +96,11 @@ public sealed class SplatOptimizer
         for (int i = 0; i < _n; i++)
         {
             var s = splats[i];
+
+            if (SkipZeroGradient
+                && dLdColour[i * 3 + 0] == 0f && dLdColour[i * 3 + 1] == 0f
+                && dLdColour[i * 3 + 2] == 0f && dLdOpacity[i] == 0f)
+                continue;
 
             s.R = AdamStep(s.R, dLdColour[i * 3 + 0], ColourLr, _step, ref _mColour[i * 3 + 0], ref _vColour[i * 3 + 0]);
             s.G = AdamStep(s.G, dLdColour[i * 3 + 1], ColourLr, _step, ref _mColour[i * 3 + 1], ref _vColour[i * 3 + 1]);

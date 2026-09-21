@@ -82,6 +82,7 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUBuffer? _dimsBuf;
     GPUBuffer? _ssimDimsBuf;
     GPUBuffer? _ssimCfgBuf;
+    GPUBuffer? _adamFlagsBuf;
     GPUBuffer? _adamCfgBuf;
     GPUBuffer? _geomCfgBuf;
     GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
@@ -177,6 +178,14 @@ public sealed class SplatTrainerGpu : IDisposable
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
         _adamCfgBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        // Separate from _adamCfgBuf rather than widening it: growing a uniform without updating
+        // its allocation gives the driver's unhelpful "[Invalid CommandBuffer] ... previous
+        // error", reported from whichever dispatch runs next rather than from the guilty one.
+        _adamFlagsBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
             Size = 16,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
@@ -567,6 +576,15 @@ public sealed class SplatTrainerGpu : IDisposable
             centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic);
     }
 
+    /// <summary>
+    /// Skip the colour/opacity Adam step for splats whose gradient is exactly zero.
+    ///
+    /// Off by default. adam_geometry has always done this for position; whether it helps colour
+    /// and opacity at batch size 1 is the measurement, and a default that changes quietly would
+    /// make every earlier run incomparable.
+    /// </summary>
+    public bool SkipZeroGradientSteps { get; set; }
+
     /// <summary>The viewport the trainer is currently sized for.</summary>
     public (int Width, int Height) Size => (_width, _height);
 
@@ -790,11 +808,12 @@ public sealed class SplatTrainerGpu : IDisposable
         // ── Adam ──
         _adamStepCount++;
         WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
+        WriteVec4(_adamFlagsBuf!, SkipZeroGradientSteps ? 1f : 0f, 0f, 0f, 0f);
         Dispatch(_adamStep!, (splatCount + 63) / 64, 1, new[]
         {
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),
             Buf(2, _opacityLogit!.GetGPUBuffer()!), Buf(3, _adamM!.GetGPUBuffer()!),
-            Buf(4, _adamV!.GetGPUBuffer()!), Buf(5, _adamCfgBuf!),
+            Buf(4, _adamV!.GetGPUBuffer()!), Buf(5, _adamCfgBuf!), Buf(6, _adamFlagsBuf!),
         });
 
         // -- Geometry: the 2D gradients chained back to position, scale and rotation --
@@ -1006,6 +1025,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _countBuf?.Destroy(); _countBuf?.Dispose();
         _dimsBuf?.Destroy(); _dimsBuf?.Dispose();
         _adamCfgBuf?.Destroy(); _adamCfgBuf?.Dispose();
+        _adamFlagsBuf?.Destroy(); _adamFlagsBuf?.Dispose();
         _ssimDimsBuf?.Destroy(); _ssimDimsBuf?.Dispose();
         _ssimCfgBuf?.Destroy(); _ssimCfgBuf?.Dispose();
         _scratch4?.Dispose();

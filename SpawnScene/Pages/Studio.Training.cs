@@ -44,6 +44,12 @@ public partial class Studio
     public static float PositionLrScale { get; set; } = 1f;
 
     /// <summary>
+    /// Skip the colour/opacity Adam step for splats with no gradient this iteration. Off by
+    /// default; see <c>SplatTrainerGpu.SkipZeroGradientSteps</c>.
+    /// </summary>
+    public static bool SkipZeroGradientSteps { get; set; }
+
+    /// <summary>
     /// Evaluate held-out PSNR every N cycles, 0 to disable. A full evaluation renders every
     /// view, so this trades run time for the shape of the curve - worth it whenever the two
     /// endpoints disagree about what is happening in between.
@@ -119,6 +125,7 @@ public partial class Studio
             w = tw; h = th;
 
             _trainer ??= new SplatTrainerGpu(_gpuService);
+            _trainer.SkipZeroGradientSteps = SkipZeroGradientSteps;
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
             _trainer.Resize(w, h, n, keysPerSplat);
 

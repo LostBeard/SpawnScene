@@ -157,4 +157,83 @@ public class SplatOptimizerTests
         Assert.That(history[^1], Is.LessThan(0.02f),
             $"a perfect scene should stay near-perfect, ended at {history[^1]:F6}");
     }
+
+    /// <summary>
+    /// A splat with no gradient must not move when the guard is on - and MUST move when it is
+    /// off, because that is the behaviour being questioned.
+    ///
+    /// Asserting both directions is the point. The geometry optimiser has always refused to step
+    /// a splat this view never touched; the colour path never did, on the stated judgement that
+    /// stale momentum is "harmless for colour". At batch size 1 over 26 views, a splat visible in
+    /// one of them takes about 25 zero-gradient steps per cycle, and opacity is optimised in
+    /// LOGIT space - so stale momentum walks splats in and out of visibility. Whether that is
+    /// what makes held-out quality oscillate by 2.74 dB within a run is a measurement; this test
+    /// only pins what the flag does.
+    /// </summary>
+    [Test]
+    public void ZeroGradientSplatMovesUnlessGuarded()
+    {
+        static (List<SplatRasterizer.Splat2D> Splats, float[] Logits) Fresh()
+        {
+            var splats = new List<SplatRasterizer.Splat2D>
+            {
+                new() { R = 0.30f, G = 0.40f, B = 0.50f, Opacity = 0.60f },
+                new() { R = 0.30f, G = 0.40f, B = 0.50f, Opacity = 0.60f },
+            };
+            return (splats, new[] { SplatOptimizer.Logit(0.60f), SplatOptimizer.Logit(0.60f) });
+        }
+
+        // Splat 0 carries a real gradient every step. Splat 1 is seen ONCE and then never again -
+        // which is the round robin, and is the only way stale momentum exists at all.
+        //
+        // An earlier version of this test gave splat 1 zeros from the start and found it did not
+        // move, which is correct and uninteresting: Adam's m and v both stay at zero, so the
+        // update is 0/(0+eps). The drag comes from momentum a splat ALREADY has, decaying at
+        // beta1 = 0.9 per step - about 7% of it still left 25 steps later, which is one cycle of
+        // 26 views.
+        var both = new float[6];
+        var bothOp = new float[2];
+        both[0] = 0.10f; both[1] = -0.05f; both[2] = 0.07f; bothOp[0] = 0.09f;
+        both[3] = 0.08f; both[4] = 0.06f; both[5] = -0.04f; bothOp[1] = 0.05f;
+
+        var onlyFirst = new float[6];
+        var onlyFirstOp = new float[2];
+        onlyFirst[0] = 0.10f; onlyFirst[1] = -0.05f; onlyFirst[2] = 0.07f; onlyFirstOp[0] = 0.09f;
+
+        (var guarded, var guardedLogits) = Fresh();
+        var withGuard = new SplatOptimizer(2) { SkipZeroGradient = true };
+        withGuard.Step(guarded, guardedLogits, both, bothOp);
+        var seenOnce = (guarded[1].R, guarded[1].G, guarded[1].B, guarded[1].Opacity);
+        for (int i = 0; i < 10; i++) withGuard.Step(guarded, guardedLogits, onlyFirst, onlyFirstOp);
+
+        (var plain, var plainLogits) = Fresh();
+        var without = new SplatOptimizer(2);
+        without.Step(plain, plainLogits, both, bothOp);
+        for (int i = 0; i < 10; i++) without.Step(plain, plainLogits, onlyFirst, onlyFirstOp);
+
+        // The gradient-bearing splat must move under BOTH, or the guard has broken the optimiser
+        // rather than narrowed it.
+        Assert.That(guarded[0].R, Is.Not.EqualTo(0.30f), "guarded run must still optimise splat 0");
+        Assert.That(plain[0].R, Is.Not.EqualTo(0.30f));
+
+        // Guarded: splat 1 took its one real step and then froze, exactly.
+        Assert.That(guarded[1].R, Is.EqualTo(seenOnce.R));
+        Assert.That(guarded[1].G, Is.EqualTo(seenOnce.G));
+        Assert.That(guarded[1].B, Is.EqualTo(seenOnce.B));
+        Assert.That(guarded[1].Opacity, Is.EqualTo(seenOnce.Opacity));
+
+        // Unguarded: it moves. This is the current shipped behaviour, asserted so the diff
+        // documents what is being questioned rather than silently changing it.
+        bool moved = plain[1].R != seenOnce.R || plain[1].G != seenOnce.G
+                     || plain[1].B != seenOnce.B || plain[1].Opacity != seenOnce.Opacity;
+        Assert.That(moved, Is.True,
+            "without the guard, a splat that was seen once keeps being dragged by the momentum " +
+            "it earned then - if this ever stops being true the guard has nothing left to do");
+
+        // And by how much, so the effect has a size rather than a direction. This is the drag a
+        // splat takes per cycle it is not seen.
+        double drift = Math.Abs(plain[1].R - seenOnce.R) + Math.Abs(plain[1].G - seenOnce.G)
+                     + Math.Abs(plain[1].B - seenOnce.B) + Math.Abs(plain[1].Opacity - seenOnce.Opacity);
+        TestContext.Out.WriteLine($"stale drift over 10 unseen steps: {drift:F6}");
+    }
 }

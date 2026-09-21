@@ -666,6 +666,7 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(3) var<storage, read_write> adam_m     : array<f32>;       // 14 per splat
 @group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 14 per splat
 @group(0) @binding(5) var<uniform>             cfg        : vec4<f32>;        // x=colourLr y=opacityLr z=step w=splatCount
+@group(0) @binding(6) var<uniform>             flags      : vec4<f32>;        // x=skip zero-gradient splats
 
 const FLOATS_PER_SPLAT : u32 = 14u;
 const GRADS_PER_SPLAT : u32 = 9u;
@@ -690,6 +691,24 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     let o = i * FLOATS_PER_SPLAT;
     let step = cfg.z;
+
+    // A splat this view never touched has no gradient. Stepping it anyway lets stale momentum
+    // drag a parameter that nothing is currently constraining - adam_geometry has always
+    // refused to do that for position, and this is the same argument for colour and opacity.
+    //
+    // It matters more at batch size 1 than the original 'harmless for colour' allowed: a splat
+    // visible in one view of 26 takes about 25 zero-gradient steps per cycle, and opacity is
+    // optimised in LOGIT space, so stale momentum walks splats in and out of visibility.
+    //
+    // Behind a flag because its effect on the held-out curve is a measurement, not an
+    // assumption. flags.x != 0 enables it.
+    if (flags.x != 0.0) {
+        let gz0 = grad_fixed[i * GRADS_PER_SPLAT];
+        let gz1 = grad_fixed[i * GRADS_PER_SPLAT + 1u];
+        let gz2 = grad_fixed[i * GRADS_PER_SPLAT + 2u];
+        let gz3 = grad_fixed[i * GRADS_PER_SPLAT + 3u];
+        if (gz0 == 0 && gz1 == 0 && gz2 == 0 && gz3 == 0) { return; }
+    }
 
     // Colour (SH degree 0 / DC term).
     for (var c = 0u; c < 3u; c = c + 1u) {

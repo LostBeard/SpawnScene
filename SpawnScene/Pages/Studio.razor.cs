@@ -265,6 +265,11 @@ public partial class Studio : IAsyncDisposable
             // ?heldevery=N evaluates held-out PSNR every N cycles (0 = only at the ends).
             if (query.TryGetValue("heldevery", out var he) && int.TryParse(he, out var hei))
                 HeldOutEveryCycles = hei;
+            // ?skipzerograd=1 stops colour/opacity Adam stepping splats with no gradient, the
+            // guard adam_geometry has always had for position. Off by default: its effect on the
+            // held-out curve is the measurement.
+            if (query.TryGetValue("skipzerograd", out var sz))
+                SkipZeroGradientSteps = sz is "1" or "true";
             await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }

@@ -117,7 +117,8 @@ hypothesis.
 | camera layer (`CameraController`) | unit-tested since 2026-09-21 (`CameraControllerTests`) - pose survives an input event, `FitToScene` aims at ray convergence. Still no end-to-end viewer check |
 | depth -> splats | partly - unit-tested unproject, but no end-to-end check against a reference reconstruction |
 | poses | measured on TempleRing (5% of camera spread) and on a posed ROOM (in progress) |
-| optimiser | 🔴 **tested against known-good poses and it FAILED** - drjohnson with COLMAP poses still overfits, so poses were never why training hurts |
+| optimiser | tested against known-good poses and it overfits - but 2026-09-21 showed the CAUSE is upstream: 91.9% of splats are constrained by at most one view, so there is nothing for an optimiser to generalise from |
+| initialisation | 🔴 **this is the broken link.** Per-view depth shells; mean 0.59 supervising views per splat |
 | splat sampling schedule | proven - `TrainingScheduleTests` asserts probes do not alias with the round robin |
 | view support counter | proven - CPU-gated in `Studio.TrainerGate.cs` |
 
@@ -148,9 +149,49 @@ the overfitting has an ordinary cause, and the optimiser experiments are worth f
 a CPU pass in `Studio.TrainerGate.cs`, accumulated twice over the same gradients so the check
 covers the counting and not just the threshold.
 
-**Either way it is decisive**, which is why it is worth measuring before spending more runs: if
-the shells never overlap, the next work is fusing them (`MvsGeometricFusion` already exists),
-not tuning Adam.
+### Measured, 2026-09-21, drjohnson with COLMAP ground-truth poses
+
+```
+[Train] view support over 33 views (1,115,136 splats):
+        never 49.5%, 1 view 42.4%, 2 7.4%, 3 0.7%, 4+ 0.0%  (mean 0.59 views/splat)
+```
+
+**91.9% of splats are constrained by at most one view.** The prediction was confirmed, by a
+margin no noise floor on this project comes close to.
+
+Read as geometry, with 25,344 splats per view and 44 views:
+
+| | splats | what it is |
+|---|---|---|
+| never constrained | 551,992 (49.5%) | invisible from every supervised view |
+| exactly 1 view | 472,818 (42.4%) | fits its own photo, nothing can contradict it |
+| 2 or more | 90,326 (**8.1%**) | the only part actually being reconstructed |
+
+The 11 held-out shells account for only 278,784 of the never-constrained splats. The other
+**273,208 come from supervised views and are occluded even in their own view** - 32.7% of every
+supervised shell is buried inside some other shell. The shells do not merely fail to reinforce
+each other, they bury each other.
+
+That is the whole result. In the same run supervised PSNR rose 13.21 -> 16.10 dB, the largest
+supervised gain this project has recorded, while held-out fell 12.58 -> 11.39. The optimiser is
+working exactly as designed: it is efficiently fitting 42% of the parameters to one photo each.
+
+**What it rules out.** The zero-gradient Adam guard, shuffled view order and an SSIM loss term
+were all queued on the premise that training *could* generalise. None of them can change a
+parameterisation in which 92% of the parameters are unconstrained or single-constrained. The
+A/B on the guard had already come back inside the noise; this says why, and says not to run the
+other two.
+
+**What it points at**, in order of cost:
+
+1. **Prune the never-constrained half.** 551,992 splats receive no gradient from any supervised
+   view over a full cycle. They cost memory and raster time, they cannot improve, and they are
+   free to be wrong in exactly the held-out views we score on. `SplatDensityControl` exists and
+   needs GPU compaction.
+2. **Fuse the shells**, so a surface three views can see is one set of splats rather than three
+   stacked at slightly different depths. `MvsGeometricFusion` exists. This is what would move
+   the 8.1% upward, and it is the only thing that can.
+3. Only then revisit the optimiser.
 
 ## Where to look first
 

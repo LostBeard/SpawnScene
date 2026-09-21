@@ -664,6 +664,19 @@ public partial class Studio
             $"[TrainerGate] SSIM: degraded gpu {gpuDegraded:F6} cpu {cpuDegraded:F6} " +
             $"(d {Math.Abs(gpuDegraded - cpuDegraded):E2}); self {gpuSelf:F6}");
 
+        // NaN FIRST. Every comparison below is a `> tolerance` test, and in C# any comparison
+        // against NaN is FALSE - so a NaN from the GPU sails through all of them and the gate
+        // reports PASS. It did exactly that: "degraded gpu NaN cpu 0.556997 ... SSIM PASS",
+        // while the shader was reading a packed u32 buffer as floats. A gate that cannot fail
+        // is worse than no gate, because it is trusted.
+        if (double.IsNaN(gpuDegraded) || double.IsNaN(gpuSelf) || double.IsNaN(cpuDegraded))
+        {
+            Console.WriteLine(
+                $"[TrainerGate] FAIL: SSIM returned NaN (degraded {gpuDegraded}, self {gpuSelf}, " +
+                $"cpu {cpuDegraded}) - no comparison below can catch this, so it is checked first");
+            return false;
+        }
+
         // Two near-identical images agree trivially, so a match only means something when the
         // score sits away from both ends.
         if (!(cpuDegraded > 0.05 && cpuDegraded < 0.98))
@@ -678,11 +691,25 @@ public partial class Studio
             Console.WriteLine("[TrainerGate] FAIL: GPU and CPU SSIM disagree");
             return false;
         }
-        if (Math.Abs(gpuSelf - 1.0) > 1e-5)
+        // The "identical" case is a float render against an 8-BIT copy of itself, because the
+        // target stack stores RGBA8 - so the answer is not exactly 1.0 and must not be asserted
+        // as 1.0. It is not loosened to a tolerance that happens to pass either: the expected
+        // value is computed by the same CPU oracle, and separately required to stay near 1, so
+        // the check still fails hard if the target offset is ignored (slot 1 would then score
+        // against slot 0's degraded image, around 0.557).
+        double cpuSelf = ImageQuality.MeanSsim(rendered, renderedQ, GateWidth, GateHeight);
+        if (Math.Abs(gpuSelf - cpuSelf) > 1e-4)
         {
             Console.WriteLine(
-                $"[TrainerGate] FAIL: SSIM of an image against itself is {gpuSelf:F6}, not 1.0 " +
-                "- the target offset is likely being ignored");
+                $"[TrainerGate] FAIL: SSIM against a quantised copy of itself is {gpuSelf:F6}, " +
+                $"oracle says {cpuSelf:F6}");
+            return false;
+        }
+        if (gpuSelf < 0.99)
+        {
+            Console.WriteLine(
+                $"[TrainerGate] FAIL: SSIM against a copy of itself is only {gpuSelf:F6} - " +
+                "the target offset is likely being ignored");
             return false;
         }
 

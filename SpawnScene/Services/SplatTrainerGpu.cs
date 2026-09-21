@@ -978,7 +978,7 @@ public sealed class SplatTrainerGpu : IDisposable
         WriteU32x2(_dimsBuf!, (uint)(_width * _height), targetOffset);
         Dispatch(_evalSse!, SseWorkgroups, 1, new[]
         {
-            Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, stack.GetGPUBuffer()!),
+            Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
             Buf(2, _ssePartials!.GetGPUBuffer()!), Buf(3, _dimsBuf!),
         });
 
@@ -994,7 +994,7 @@ public sealed class SplatTrainerGpu : IDisposable
             int rowThreads = SsimWindowsX * _height;
             Dispatch(_ssimRowsPipe!, (rowThreads + 63) / 64, 1, new[]
             {
-                Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, stack.GetGPUBuffer()!),
+                Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
                 Buf(2, _ssimRows!.GetGPUBuffer()!), Buf(3, _ssimDimsBuf!), Buf(4, _ssimCfgBuf!),
             });
             Dispatch(_ssimReducePipe!, SsimWorkgroups, 1, new[]

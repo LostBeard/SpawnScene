@@ -193,6 +193,41 @@ other two.
    the 8.1% upward, and it is the only thing that can.
 3. Only then revisit the optimiser.
 
+### And: 132 views instead of 33
+
+Target memory was capping supervision. Targets were three floats a pixel, so 256 MiB held 62
+views; they arrive as RGBA8 off a canvas, so storing them PACKED holds 187. That is what made
+this measurable at full training resolution - 132 views at 720x474 is 172 MiB packed and would
+have been 516 MiB as floats.
+
+```
+132 views: never 0.0%, 1 view 0.1%, 2 0.2%, 3 0.9%, 4+ 98.8%   mean 8.64 views/splat
+ 33 views: never 7.4%, 1 view 19.0%, 2 24.7%, 3 26.3%, 4+ 22.6%  mean 2.52
+```
+
+**98.8% of splats are constrained by four or more views, and none by zero.** The structural
+defect found this morning - 0.59 views per splat - is closed.
+
+Training result, with density control, pruning and opacity reset:
+
+```
+supervised  PSNR 13.18 -> 17.48 dB,  SSIM 0.5019 -> 0.5898
+HELD OUT    PSNR 12.46 -> 14.53 dB,  SSIM 0.4748 -> 0.5429
+held-out MEAN 14.39 dB / 0.5391 against a 12.46 / 0.4748 baseline
+```
+
+**+1.9 dB and +0.064 SSIM held out, by the mean.** The largest training gain this project has
+produced, and the first where endpoint, mean and both metrics agree.
+
+⚠️ Absolute numbers are NOT comparable across the two datasets: the held-out views differ, so
+the baselines differ (12.46 against 14.38). The DELTA is the comparable quantity.
+
+The render is finally free of the needle streaks and colour speckle - a wall plate is legible -
+but it is still blurry and washed out, and the reference reaches ~29 dB on this scene against
+our ~14.5. Remaining known gaps, in order: only ~96k splats survive pruning where the reference
+finishes in the millions; no spherical harmonics at all (degree 0, flat RGB, against the
+reference's degree 3); 8,000 iterations against 30,000.
+
 ### Fixed, same day: initialise from the sparse SfM cloud
 
 Done, and it is the reference algorithm rather than anything invented here -

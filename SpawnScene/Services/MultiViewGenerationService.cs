@@ -743,13 +743,32 @@ public class MultiViewGenerationService
     }
 
     /// <summary>
-    /// Target splats for one initialisation. A 3DGS optimiser densifies from an initialisation;
-    /// emitting a splat per pixel per view is not a better start, it is a bigger one, and the
-    /// key-indexed training buffers are bounded by a single storage binding rather than by VRAM
-    /// (see <c>SplatTrainerGpu</c>). Coarser sampling across MORE views beats dense sampling of
-    /// a few, because the extra views are the new information.
+    /// Target splats for one initialisation, derived from what the TRAINER can actually train
+    /// rather than picked by eye.
+    ///
+    /// The binding limit is the real constraint. Key-indexed training buffers are bounded by
+    /// <c>maxStorageBufferBindingSize</c> - a guaranteed 128 MiB - not by VRAM, and the widest
+    /// key-indexed binding is 12 bytes, so there are about 11.2M keys to go round. Ask for more
+    /// splats than that supports and <c>SplatTrainerGpu</c> clamps keysPerSplat, and then frames
+    /// silently come out INCOMPLETE.
+    ///
+    /// MEASURED on Bathroom at a 3M budget: 2,015,285 splats, keysPerSplat clamped 8 -> 5, and
+    /// frames needing 12.9M keys against a 10.1M capacity - "KEY OVERFLOW ... this frame is
+    /// incomplete" on nearly every iteration, ending with the device lost outright ("A valid
+    /// external Instance reference no longer exists").
+    ///
+    /// So the default is the count that lets keysPerSplat stay at its own default of 8 without
+    /// clamping. Emitting a splat per pixel per view is not a better start, it is a bigger one;
+    /// a 3DGS optimiser densifies from an initialisation, and coarser sampling across MORE views
+    /// beats dense sampling of a few, because the extra views are the new information.
     /// </summary>
-    public int SplatBudget { get; set; } = 1_500_000;
+    public int SplatBudget { get; set; } = TrainableSplatBudget;
+
+    /// <summary>
+    /// Splats the trainer can carry at its default keysPerSplat without clamping.
+    /// 128 MiB guaranteed binding / 12 bytes per key / 8 keys per splat.
+    /// </summary>
+    public const int TrainableSplatBudget = (128 * 1024 * 1024) / 12 / 8;
 
     private int ChooseSubsample(int requested, IReadOnlyList<DepthResult> depths)
     {

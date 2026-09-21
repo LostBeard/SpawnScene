@@ -144,22 +144,64 @@ public static class WorldSpaceGeometry
         -(R[0, 2] * t[0] + R[1, 2] * t[1] + R[2, 2] * t[2]));
 
     /// <summary>
+    /// Why a splat was dropped by the consistency screen, so a caller can tell "the reference
+    /// disagreed" from "the reference could not see it". The two want opposite treatment and the
+    /// screen used to give them the same one.
+    /// </summary>
+    public enum FuseOutcome
+    {
+        Kept,
+        BehindReference,
+        OutsideReferenceView,
+        ReferenceHasNoDepth,
+        DepthsDisagree,
+    }
+
+    /// <summary>
     /// CPU-oracle twin of the GPU consistency fuse.
-    /// Keep only when the splat projects into the ref view AND depths agree.
-    /// Out-of-frustum / behind / missing ref depth → drop (avoids relative-MDE floaters).
+    ///
+    /// <paramref name="keepOutsideView"/> decides what happens to a splat the reference camera
+    /// cannot see, and it is a POLICY, not a detail:
+    ///
+    /// - Dropping it is right for an object on a turntable. Every view sees the temple, so
+    ///   out-of-frustum means the far side, which a camera that cannot see it has no business
+    ///   asserting - it ghosts under relative monocular depth. That is why this was written.
+    /// - Dropping it is wrong for a ROOM, which is what this project is for. Views point at
+    ///   different walls, so out-of-frustum is most of the scene, and it is exactly the new
+    ///   coverage that makes a capture a room rather than an object. MEASURED on Bathroom with
+    ///   34 views posed: the screen kept 3% of the non-reference splats and the reconstruction
+    ///   was, in effect, the ten views that skip the screen.
+    ///
+    /// A splat the reference cannot see is UNVERIFIED, not WRONG. Depth disagreement is a
+    /// separate question and is still rejected either way.
     /// Gate: <c>TempleRingWorldSpaceTests.ConsistencyFuse_*</c>.
+    /// </summary>
+    public static FuseOutcome ClassifySplatVsRef(
+        float zCam, float refDepthRaw, float depthScale, float relThresh,
+        bool inBounds, bool keepOutsideView)
+    {
+        if (zCam <= 1e-6f) return FuseOutcome.BehindReference;
+        if (!inBounds)
+            return keepOutsideView ? FuseOutcome.Kept : FuseOutcome.OutsideReferenceView;
+
+        float refZ = refDepthRaw * depthScale;
+        if (!(refZ > 1e-4f)) return FuseOutcome.ReferenceHasNoDepth;
+
+        float denom = MathF.Max(refZ, zCam);
+        float rel = MathF.Abs(zCam - refZ) / denom;
+        return rel <= relThresh ? FuseOutcome.Kept : FuseOutcome.DepthsDisagree;
+    }
+
+    /// <summary>
+    /// Keep/drop decision. Preserved for callers that only want the boolean; the default keeps
+    /// the original object-centric policy so nothing changes without asking.
     /// </summary>
     public static bool ShouldKeepSplatVsRef(
         float zCam, float refDepthRaw, float splatConf, float refConf,
-        float depthScale, float relThresh, bool inBounds, bool hasConf)
-    {
-        if (!inBounds || zCam <= 1e-6f) return false;
-        float refZ = refDepthRaw * depthScale;
-        if (!(refZ > 1e-4f)) return false;
-        float denom = MathF.Max(refZ, zCam);
-        float rel = MathF.Abs(zCam - refZ) / denom;
-        return rel <= relThresh;
-    }
+        float depthScale, float relThresh, bool inBounds, bool hasConf,
+        bool keepOutsideView = false)
+        => ClassifySplatVsRef(zCam, refDepthRaw, depthScale, relThresh, inBounds, keepOutsideView)
+           == FuseOutcome.Kept;
 
     /// <summary>
     /// Farthest-point sampling on camera positions — avoids near-duplicate views

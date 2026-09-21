@@ -246,6 +246,12 @@ public partial class Studio : IAsyncDisposable
             // limit; the first pass proves whatever is asked for on this device and backs off.
             if (query.TryGetValue("n", out var nn) && int.TryParse(nn, out var nni))
                 DepthEstimationService.MaxMultiViewImages = nni;
+            // ?outside=1 keeps splats the screening reference cannot see - the other walls of a
+            // room. ?relthresh=N is how closely depths must agree to survive the screen.
+            if (query.TryGetValue("outside", out var ov2))
+                _multiViewService.KeepOutsideReferenceView = ov2 is "1" or "true";
+            if (query.TryGetValue("relthresh", out var rt) && float.TryParse(rt, out var rtf))
+                _multiViewService.ConsistencyRelThreshold = rtf;
             await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }

@@ -505,6 +505,8 @@ public class DepthToGaussianKernel
         public float RelThresh;
         public int SplatCount;
         public int HasConf;
+        /// <summary>1 keeps splats the reference camera cannot see. See the oracle for why.</summary>
+        public int KeepOutsideView;
     }
 
     /// <summary>
@@ -544,10 +546,14 @@ public class DepthToGaussianKernel
         float yc = p.Dx * dx + p.Dy * dy + p.Dz * dz;
         float zCam = p.Fx * dx + p.Fy * dy + p.Fz * dz;
 
+        // Counters are the only way to see why a screen rejected something: it kept 3% on
+        // Bathroom and nothing said whether the reference DISAGREED or simply could not see it.
+        // Slots: 1 behind, 2 outside the reference view, 3 reference had no depth, 4 disagreed.
         bool keep;
         if (zCam <= 1e-6f)
         {
             keep = false; // behind ref camera — not visible overlap
+            Atomic.Add(ref counter[1], 1);
         }
         else
         {
@@ -558,9 +564,11 @@ public class DepthToGaussianKernel
             bool inBounds = iu >= 0 && iu < p.Width && iv >= 0 && iv < p.Height;
             if (!inBounds)
             {
-                // Out of ref frustum: drop. Novel side faces ghost under relative MDE;
-                // densify only the overlapping surface that agrees with the reference.
-                keep = false;
+                // A splat the reference cannot see is UNVERIFIED, not wrong. Dropping it suits an
+                // object every view looks at; for a room it discards the other walls, which are
+                // the whole point of the extra views. Policy, measured per dataset.
+                keep = p.KeepOutsideView != 0;
+                if (!keep) Atomic.Add(ref counter[2], 1);
             }
             else
             {
@@ -570,12 +578,14 @@ public class DepthToGaussianKernel
                 if (!(refZ > 1e-4f))
                 {
                     keep = false;
+                    Atomic.Add(ref counter[3], 1);
                 }
                 else
                 {
                     float denom = MathF.Max(refZ, zCam);
                     float rel = MathF.Abs(zCam - refZ) / denom;
                     keep = rel <= p.RelThresh;
+                    if (!keep) Atomic.Add(ref counter[4], 1);
                 }
             }
         }
@@ -903,12 +913,16 @@ public class DepthToGaussianKernel
     /// <summary>
     /// Depth-consistency fuse vs a reference view: keep agreeing / novel / higher-conf challengers.
     /// Disposes <paramref name="packedIn"/>. Returns compacted survivors.
+    ///
+    /// <paramref name="keepOutsideView"/> keeps splats the reference camera cannot see. Dropping
+    /// them suits an object every camera looks at; for a room it throws away the other walls.
+    /// See <see cref="WorldSpaceGeometry.ClassifySplatVsRef"/> for the measurement behind that.
     /// </summary>
     public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int count)>
         FuseConsistencyVsRefAsync(
             MemoryBuffer1D<float, Stride1D.Dense> packedIn, int splatCount,
             DepthResult refDepth, CameraParams refCam, float depthScale,
-            float relThresh = 0.12f)
+            float relThresh = 0.12f, bool keepOutsideView = false)
     {
         if (splatCount <= 0) { packedIn.Dispose(); return (packedIn, 0); }
         if (refDepth.RawDepthGpu == null)
@@ -918,8 +932,11 @@ public class DepthToGaussianKernel
         EnsureKernelLoaded(accelerator);
 
         WorldSpaceGeometry.GetOpenCvAxes(refCam, out var right, out var down, out var fwd);
-        using var counterBuf = accelerator.Allocate1D<int>(1);
-        counterBuf.CopyFromCPU(new int[] { 0 });
+        // Slot 0 is the compaction cursor; 1-4 count WHY a splat was rejected. Without them a
+        // 3% keep rate says nothing about whether the reference disagreed or simply could not
+        // see it, and those two want opposite treatment.
+        using var counterBuf = accelerator.Allocate1D<int>(5);
+        counterBuf.CopyFromCPU(new int[] { 0, 0, 0, 0, 0 });
         var packedOut = accelerator.Allocate1D<float>(splatCount * SplatFormat.Floats);
 
         using var dummyConf = refDepth.ConfidenceGpu == null ? accelerator.Allocate1D<float>(1) : null;
@@ -938,17 +955,22 @@ public class DepthToGaussianKernel
             RelThresh = relThresh,
             SplatCount = splatCount,
             HasConf = refDepth.ConfidenceGpu != null ? 1 : 0,
+            KeepOutsideView = keepOutsideView ? 1 : 0,
         };
 
         _consistencyFuseKernel!(splatCount,
             packedIn.View, refDepth.RawDepthGpu.View, confView,
             packedOut.View, counterBuf.View, fp);
         await accelerator.SynchronizeAsync();
-        int[] c = await counterBuf.CopyToHostAsync<int>(0, 1);
+        int[] c = await counterBuf.CopyToHostAsync<int>(0, 5);
         int kept = Math.Clamp(c[0], 0, splatCount);
         packedIn.Dispose();
         float frac = splatCount > 0 ? (float)kept / splatCount : 0f;
-        Console.WriteLine($"[DepthGPU] Consistency fuse: {kept:N0} / {splatCount:N0} kept ({frac:P0}, thresh={relThresh:F2}, conf={fp.HasConf})");
+        Console.WriteLine(
+            $"[DepthGPU] Consistency fuse: {kept:N0} / {splatCount:N0} kept ({frac:P0}, " +
+            $"thresh={relThresh:F2}, conf={fp.HasConf}, outsideKept={keepOutsideView}) " +
+            $"- rejected: {c[1]:N0} behind, {c[2]:N0} outside the reference view, " +
+            $"{c[3]:N0} no reference depth, {c[4]:N0} depths disagree");
         return (packedOut, kept);
     }
 

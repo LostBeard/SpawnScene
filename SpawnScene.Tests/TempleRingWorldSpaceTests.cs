@@ -337,6 +337,60 @@ public class TempleRingWorldSpaceTests
         Assert.That(t.Length(), Is.LessThan(1e-3f));
     }
 
+    /// <summary>
+    /// A splat the reference camera cannot see is UNVERIFIED, not wrong, and the screen has to
+    /// be able to say which. Dropping it suits an object every camera looks at; for a room it
+    /// discards the other walls, which is most of the scene and all of the new coverage.
+    ///
+    /// MEASURED on Bathroom with 34 views posed: the screen kept 3% of non-reference splats and
+    /// the reconstruction was effectively the ten views that skip the screen.
+    /// </summary>
+    [Test]
+    public void ConsistencyFuse_OutsideTheReferenceView_IsAPolicyNotAVerdict()
+    {
+        const float scale = 2f, thresh = 0.06f;
+
+        // Same splat, same depths, only the frustum test differs.
+        var dropped = WorldSpaceGeometry.ClassifySplatVsRef(
+            zCam: 2.0f, refDepthRaw: 1.0f, scale, thresh, inBounds: false, keepOutsideView: false);
+        var kept = WorldSpaceGeometry.ClassifySplatVsRef(
+            zCam: 2.0f, refDepthRaw: 1.0f, scale, thresh, inBounds: false, keepOutsideView: true);
+
+        Assert.That(dropped, Is.EqualTo(WorldSpaceGeometry.FuseOutcome.OutsideReferenceView),
+            "the reason must be distinguishable from a depth disagreement");
+        Assert.That(kept, Is.EqualTo(WorldSpaceGeometry.FuseOutcome.Kept));
+    }
+
+    /// <summary>
+    /// Keeping the unseen must NOT become keeping the wrong. A splat the reference can see and
+    /// disagrees with is still rejected under either policy.
+    /// </summary>
+    [Test]
+    public void ConsistencyFuse_KeepingTheUnseenDoesNotExcuseDisagreement()
+    {
+        const float scale = 2f, thresh = 0.06f;
+        // refZ = 2.0, splat at 4.0: 50% disagreement, far outside the threshold.
+        foreach (bool policy in new[] { false, true })
+            Assert.That(
+                WorldSpaceGeometry.ClassifySplatVsRef(
+                    zCam: 4.0f, refDepthRaw: 1.0f, scale, thresh,
+                    inBounds: true, keepOutsideView: policy),
+                Is.EqualTo(WorldSpaceGeometry.FuseOutcome.DepthsDisagree),
+                $"keepOutsideView={policy} must not weaken the depth test");
+    }
+
+    [Test]
+    public void ConsistencyFuse_BehindTheReference_IsNeverKept()
+    {
+        foreach (bool policy in new[] { false, true })
+            Assert.That(
+                WorldSpaceGeometry.ClassifySplatVsRef(
+                    zCam: -1f, refDepthRaw: 1.0f, 2f, 0.06f,
+                    inBounds: false, keepOutsideView: policy),
+                Is.EqualTo(WorldSpaceGeometry.FuseOutcome.BehindReference),
+                "behind the camera is not the same as out of frame, and is never coverage");
+    }
+
     [Test]
     public void ConsistencyFuse_AgreeingDepth_IsKept()
     {

@@ -82,6 +82,21 @@ public class MultiViewGenerationService
     /// <summary>Anchor views the last chunked run used, and why they were picked.</summary>
     public string LastAnchorSource { get; private set; } = "none";
 
+    /// <summary>
+    /// Keep splats the screening reference camera cannot see.
+    ///
+    /// Default false preserves the object-centric behaviour that shipped. For a ROOM it is
+    /// almost certainly wrong - see <see cref="WorldSpaceGeometry.ClassifySplatVsRef"/> - but
+    /// that is a measurement to make, not a default to change quietly.
+    /// </summary>
+    public bool KeepOutsideReferenceView { get; set; }
+
+    /// <summary>
+    /// Relative depth agreement the screen demands. 0.06 is what the object path uses; an
+    /// indoor handheld capture may not deserve that precision, so it is a knob to measure.
+    /// </summary>
+    public float ConsistencyRelThreshold { get; set; } = 0.06f;
+
     public MultiViewGenerationService(
         SpawnJSRuntime js,
         GpuService gpu,
@@ -672,7 +687,8 @@ public class MultiViewGenerationService
                 nonRefIn += count;
                 (buf, count) = await _gaussianKernel.FuseConsistencyVsRefAsync(
                     buf, count, poses.Depths[refView]!, poses.Cameras[refView]!,
-                    scales[refView], relThresh: 0.06f);
+                    scales[refView], relThresh: ConsistencyRelThreshold,
+                    keepOutsideView: KeepOutsideReferenceView);
                 nonRefKept += count;
             }
 

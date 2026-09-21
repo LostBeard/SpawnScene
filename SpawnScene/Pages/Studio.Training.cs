@@ -575,7 +575,8 @@ public partial class Studio
             return null;
         }
 
-        var grown = SplatDensityControl.Apply(splats, plan);
+        var priorAdam = await _trainer.ReadAdamStateAsync(n);
+        var grown = SplatDensityControl.Apply(splats, plan, out var survivors);
         int m = grown.Count;
         if (m <= 0)
         {
@@ -612,15 +613,21 @@ public partial class Studio
         }
         if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = m;
 
+        // Re-size with the trainer's CURRENT key budget, not the caller's original guess.
+        //
+        // The loop measures peak key demand after the first cycle and re-sizes with headroom -
+        // drjohnson settles around 22 keys per splat, not the default 8. Passing the original
+        // argument back in threw that away and every frame after the first densification
+        // overflowed: "KEY OVERFLOW: 1,775,260 needed, capacity 641,256". A measurement the
+        // system already made is not something a later caller gets to discard.
         var (w, h) = _trainer.Size;
-        _trainer.Resize(w, h, m, keysPerSplat);
+        _trainer.Resize(w, h, m, _trainer.KeysPerSplat);
 
-        // Adam state is rebuilt from scratch. The reference appends zeroed moments for new
-        // Gaussians and keeps the existing ones; resizing every buffer here resets all of them,
-        // which costs the survivors their momentum. Worth naming rather than hiding: it is a
-        // simplification, and if densification helps but the curve dips after each step, this
-        // is the first thing to look at.
+        // Reseed the derived state - opacity logits and log scales come from the packed buffer,
+        // which is correct for clones and split children alike - and then put the Adam moments
+        // back where they belong. InitOptimizerState zeroes them, so the order matters.
         _trainer.InitOptimizerState(live, m);
+        _trainer.RestoreAdamState(priorAdam, survivors);
         _trainer.ResetDensifyStats();
 
         Console.WriteLine($"[Densify] {n:N0} -> {m:N0} splats: {plan}");

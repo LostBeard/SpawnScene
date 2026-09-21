@@ -258,4 +258,89 @@ public class SplatDensityControlTests
             new[] { Acc(BigGrad) },
             Extent, false, Deviates(0f)));
     }
+
+    /// <summary>
+    /// The survivor map is what lets Adam momentum cross a densification. Getting it wrong is
+    /// silent - every splat keeps training, just with someone else's momentum, or none.
+    /// </summary>
+    [Test]
+    public void ApplyReportsWhereEverySurvivorCameFrom()
+    {
+        var splats = new SplatDensityControl.Splat[6];
+        for (int i = 0; i < 6; i++)
+            splats[i] = new SplatDensityControl.Splat
+            {
+                PosX = i, ScaleX = 0.01f, ScaleY = 0.01f, ScaleZ = 0.01f,
+                QuatW = 1f, Opacity = 0.5f, ColR = i / 10f,
+            };
+
+        var plan = new SplatDensityControl.Plan();
+        plan.Remove.Add(1);
+        plan.Remove.Add(4);
+        plan.Add.Add(splats[0]);   // a clone
+        plan.Add.Add(splats[3]);   // another
+
+        var grown = SplatDensityControl.Apply(splats, plan, out var survivors);
+
+        Assert.That(grown, Has.Count.EqualTo(6));
+        Assert.That(survivors, Has.Length.EqualTo(grown.Count),
+            "one entry per NEW index, or the Adam copy walks off the end");
+
+        // Survivors keep their old index, in order, with the removed ones gone.
+        Assert.That(survivors[..4], Is.EqualTo(new[] { 0, 2, 3, 5 }));
+        // Added splats have no prior state.
+        Assert.That(survivors[4], Is.EqualTo(-1));
+        Assert.That(survivors[5], Is.EqualTo(-1));
+
+        // And the mapping actually identifies the right splat, not just a plausible index.
+        for (int i = 0; i < 4; i++)
+            Assert.That(grown[i].PosX, Is.EqualTo((float)survivors[i]),
+                $"new splat {i} maps to old index {survivors[i]} but is not that splat");
+    }
+
+    [Test]
+    public void ApplyWithoutASurvivorMapStillWorks()
+    {
+        // The two-argument overload is used where the mapping is not needed; it must not
+        // diverge from the three-argument one.
+        var splats = new SplatDensityControl.Splat[3];
+        for (int i = 0; i < 3; i++) splats[i] = new SplatDensityControl.Splat { PosX = i, QuatW = 1f };
+        var plan = new SplatDensityControl.Plan();
+        plan.Remove.Add(0);
+        plan.Add.Add(splats[2]);
+
+        var a = SplatDensityControl.Apply(splats, plan);
+        var b = SplatDensityControl.Apply(splats, plan, out _);
+        Assert.That(a.Select(x => x.PosX), Is.EqualTo(b.Select(x => x.PosX)));
+    }
+
+    [Test]
+    public void ClonesAndSplitChildrenCarryTheParentColour()
+    {
+        // Colour lives in the Splat struct precisely so `var child = parent` propagates it.
+        // Without it every new Gaussian is born black, which reads as the render darkening.
+        var splats = new[]
+        {
+            new SplatDensityControl.Splat
+            {
+                PosX = 0, ScaleX = 0.001f, ScaleY = 0.001f, ScaleZ = 0.001f,
+                QuatW = 1f, Opacity = 0.9f, ColR = 0.25f, ColG = 0.5f, ColB = 0.75f,
+            },
+        };
+        var stats = new[]
+        {
+            new SplatDensityControl.Accumulator { GradientSum = 1f, VisibleCount = 1 },
+        };
+
+        var plan = SplatDensityControl.Decide(
+            splats, stats, sceneExtent: 1f, afterFirstOpacityReset: false, () => 0.5f);
+
+        Assert.That(plan.Add, Is.Not.Empty, "a high-gradient small splat should densify");
+        foreach (var child in plan.Add)
+        {
+            Assert.That(child.ColR, Is.EqualTo(0.25f));
+            Assert.That(child.ColG, Is.EqualTo(0.5f));
+            Assert.That(child.ColB, Is.EqualTo(0.75f));
+        }
+    }
 }

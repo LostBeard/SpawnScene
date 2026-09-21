@@ -248,12 +248,28 @@ public static class SplatDensityControl
     /// and additions appended, so a plan is never invalidated by its own earlier entries.
     /// </summary>
     public static List<Splat> Apply(IReadOnlyList<Splat> splats, Plan plan)
+        => Apply(splats, plan, out _);
+
+    /// <summary>
+    /// Apply a plan, and report where each surviving Gaussian came from.
+    ///
+    /// <paramref name="survivors"/> maps each NEW index to the OLD index it kept its identity
+    /// from, or -1 for a clone or split child. Optimiser state is per-Gaussian and the buffers
+    /// are reallocated by the resize, so without this mapping every survivor silently loses its
+    /// Adam momentum - which shows up as a kick in the loss after each densification, not as an
+    /// error.
+    /// </summary>
+    public static List<Splat> Apply(
+        IReadOnlyList<Splat> splats, Plan plan, out int[] survivors)
     {
         var drop = new HashSet<int>(plan.Remove);
         var result = new List<Splat>(splats.Count - drop.Count + plan.Add.Count);
+        var map = new List<int>(result.Capacity);
         for (int i = 0; i < splats.Count; i++)
-            if (!drop.Contains(i)) result.Add(splats[i]);
+            if (!drop.Contains(i)) { result.Add(splats[i]); map.Add(i); }
         result.AddRange(plan.Add);
+        for (int i = 0; i < plan.Add.Count; i++) map.Add(-1);
+        survivors = map.ToArray();
         return result;
     }
 

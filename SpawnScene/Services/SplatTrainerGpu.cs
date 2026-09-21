@@ -691,6 +691,59 @@ public sealed class SplatTrainerGpu : IDisposable
             centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic, maxColour);
     }
 
+    /// <summary>Adam moments and the global step count, as one movable blob.</summary>
+    public readonly record struct AdamState(float[] M, float[] V, int StepCount);
+
+    /// <summary>
+    /// Read the Adam moments so densification can carry them across a resize.
+    ///
+    /// CPU transfer: 14 moments x 2 per splat. Densification changes the splat count, which
+    /// reallocates these buffers regardless, so the choice is between moving the state and
+    /// throwing it away - not between moving it and leaving it alone.
+    /// </summary>
+    public async Task<AdamState> ReadAdamStateAsync(int splatCount)
+    {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        long len = (long)splatCount * AdamSlots;
+        return new AdamState(
+            await _adamM!.CopyToHostAsync<float>(0, len),
+            await _adamV!.CopyToHostAsync<float>(0, len),
+            _adamStepCount);
+    }
+
+    /// <summary>
+    /// Restore Adam moments after a resize, keeping the survivors' momentum.
+    ///
+    /// <paramref name="survivors"/> maps each NEW splat index to the OLD index it came from, or
+    /// -1 for a splat that did not exist before. A clone and a split child both inherit their
+    /// parent's momentum in the reference implementation only in the sense that they start at
+    /// zero and the parent keeps its own; so new splats get zeros here, which is what the
+    /// reference does when it concatenates zeroed rows.
+    ///
+    /// The step count is carried too. Bias correction divides by 1 - beta^t, and restarting t
+    /// at zero makes the first step after every densification about ten times larger than it
+    /// should be - a visible kick, nine times in a run.
+    /// </summary>
+    public void RestoreAdamState(AdamState prior, int[] survivors)
+    {
+        int n = survivors.Length;
+        var m = new float[(long)n * AdamSlots];
+        var v = new float[(long)n * AdamSlots];
+        int oldCount = prior.M.Length / AdamSlots;
+
+        for (int i = 0; i < n; i++)
+        {
+            int src = survivors[i];
+            if (src < 0 || src >= oldCount) continue;   // new splat: zeros, as allocated
+            System.Array.Copy(prior.M, (long)src * AdamSlots, m, (long)i * AdamSlots, AdamSlots);
+            System.Array.Copy(prior.V, (long)src * AdamSlots, v, (long)i * AdamSlots, AdamSlots);
+        }
+
+        _adamM!.CopyFromCPU(m);
+        _adamV!.CopyFromCPU(v);
+        _adamStepCount = prior.StepCount;
+    }
+
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
     public void ResetDensifyStats() => _densifyStats!.MemSetToZero();
 

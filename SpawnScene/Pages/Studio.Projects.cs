@@ -356,10 +356,11 @@ public partial class Studio
                 cam.Height = h;
 
                 // Stand the photograph up before the depth model sees it. Every TempleRing image
-                // is a quarter turn off level (world-up projects to image-right in all 47
-                // calibration entries), and monocular depth networks are trained on upright
-                // photographs. The camera is turned with the pixels, so nothing downstream
-                // changes meaning - see ImageOrientation.
+                // is a quarter turn off level, and monocular depth networks are trained on
+                // upright photographs. The direction is NOT uniform across the ring - 31 of the
+                // 47 entries need one turn and 16 need three - so it is decided per camera. The
+                // camera is turned with the pixels, so nothing downstream changes meaning.
+                // See ImageOrientation.
                 int turns = upright ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
                 if (turns != 0)
                 {

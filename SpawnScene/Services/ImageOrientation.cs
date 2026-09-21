@@ -8,11 +8,16 @@ namespace SpawnScene.Services;
 ///
 /// Monocular depth networks carry a strong gravity prior - they are trained almost entirely on
 /// upright photographs, and a scene lying on its side is out of distribution. TempleRing is the
-/// case that forced this: in all 47 of its calibration entries world-up projects to within about
-/// two degrees of image-RIGHT, so every one of those photos shows the temple on its side. The
-/// calibration is perfectly self-consistent with the rotated pixels, so nothing downstream is
-/// wrong - the projection, the sort and the score all agree - but the depth that everything is
-/// initialised from was estimated from a sideways picture.
+/// case that forced this: every one of its photos shows the temple on its side. The calibration
+/// is perfectly self-consistent with the rotated pixels, so nothing downstream is wrong - the
+/// projection, the sort and the score all agree - but the depth that everything is initialised
+/// from was estimated from a sideways picture.
+///
+/// AND THE DATASET IS NOT UNIFORM. Of its 47 calibration entries, 31 need one counter-clockwise
+/// quarter turn (world-up points image-RIGHT) and 16 need three (world-up points image-LEFT) -
+/// the camera ring flips orientation partway round. On disk that is templeR0001-0031 against
+/// templeR0034-0046. Anything that assumes a single dataset-wide rotation turns a third of the
+/// set upside down, which is why the turn is decided PER CAMERA and stored PER VIEW.
 ///
 /// The correction is a quarter turn of the pixels plus the matching change of camera
 /// parameterisation, so the rotated image and the rotated camera describe the same rays. A world

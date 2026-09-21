@@ -33,7 +33,7 @@ public class ImageOrientationTests
     }
 
     /// <summary>
-    /// The actual TempleRing case, built exactly the way
+    /// One of the two TempleRing orientations, built exactly the way
     /// <c>WorldSpaceGeometry.ParseMiddleburyParams</c> builds it from templeR0001's entry.
     ///
     /// Middlebury stores OpenCV rows [right; DOWN; forward], so the parser NEGATES row 1 to get
@@ -148,6 +148,80 @@ public class ImageOrientationTests
             checkedCount++;
         }
         Assert.That(checkedCount, Is.GreaterThan(40));
+    }
+
+    /// <summary>
+    /// EVERY turn count, not just one.
+    ///
+    /// TempleRing needs 1 quarter turn for templeR0001-0031 and 3 for templeR0034-0046 - the
+    /// camera ring flips orientation partway round - so the 3-turn path is not hypothetical,
+    /// it is a third of the dataset. And FourTurns_AreTheIdentity cannot cover it: a pixel map
+    /// that is consistently wrong in the SAME direction as the camera still composes to the
+    /// identity after four, so that test passes for a rotation that turns the picture the
+    /// wrong way.
+    /// </summary>
+    [TestCase(1)]
+    [TestCase(2)]
+    [TestCase(3)]
+    public void EveryTurnCount_MovesPixelsTheSameWayItMovesTheCamera(int turns)
+    {
+        var cam = TempleLike();
+        var rot = ImageOrientation.Rotate(cam, turns);
+
+        Assert.That(rot.Width, Is.EqualTo(turns % 2 == 0 ? cam.Width : cam.Height));
+        Assert.That(rot.Height, Is.EqualTo(turns % 2 == 0 ? cam.Height : cam.Width));
+
+        int checkedCount = 0;
+        foreach (var p in Probes(cam))
+        {
+            var (u, v, ok) = Project(cam, p);
+            Assert.That(ok, Is.True);
+
+            // Apply the pixel map one turn at a time, exactly as RotateRgba does.
+            float pu = u, pv = v;
+            int w = cam.Width;
+            for (int t = 0; t < turns; t++)
+            {
+                (pu, pv, w) = (pv, w - 1 - pu, (t % 2 == 0) ? cam.Height : cam.Width);
+            }
+
+            var (u2, v2, ok2) = Project(rot, p);
+            Assert.That(ok2, Is.True, "the rotated camera must still see the point");
+            Assert.That(u2, Is.EqualTo(pu).Within(1e-2f), $"{turns} turn(s), u for {p}");
+            Assert.That(v2, Is.EqualTo(pv).Within(1e-2f), $"{turns} turn(s), v for {p}");
+            checkedCount++;
+        }
+        Assert.That(checkedCount, Is.GreaterThan(40));
+    }
+
+    /// <summary>
+    /// The second orientation in the dataset. templeR0034 onward have world-up pointing image
+    /// LEFT, not right, so they need three quarter turns and not one. An implementation that
+    /// assumed a single dataset-wide rotation would turn a third of TempleRing upside down.
+    /// </summary>
+    [Test]
+    public void TheOtherHalfOfTheRingNeedsThreeTurns()
+    {
+        // templeR0040: R[0,:] = (-0.047, -0.997, 0.061), R[1,:] = (-0.992, 0.040, -0.116),
+        // R[2,:] = (0.114, -0.066, -0.991). Up is -R[1,:] as the parser builds it.
+        var cam = new CameraParams
+        {
+            Width = 640, Height = 480,
+            FocalX = 1520.4f, FocalY = 1525.9f,
+            CenterX = 302.32f, CenterY = 246.87f,
+            Near = 0.01f, Far = 100f,
+            Position = new Vector3(0.24f, 0.10f, -0.56f),
+            Forward = Vector3.Normalize(new Vector3(0.114f, -0.066f, -0.991f)),
+            Up = Vector3.Normalize(new Vector3(0.992f, -0.040f, 0.116f)),
+        };
+
+        WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var right, out _, out _, out _);
+        Assert.That(Vector3.Dot(right, Vector3.UnitY), Is.LessThan(-0.95f),
+            "this half of the ring has image-right pointing world-DOWN");
+
+        Assert.That(ImageOrientation.QuarterTurnsToUpright(cam), Is.EqualTo(3));
+        Assert.That(ImageOrientation.QuarterTurnsToUpright(ImageOrientation.Rotate(cam, 3)),
+            Is.EqualTo(0), "and three turns must leave it upright");
     }
 
     [Test]

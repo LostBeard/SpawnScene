@@ -235,12 +235,18 @@ views; 27-29 dB needs 100-300 views. TempleRing gives us 16.
 
 ### Things this project measured that the papers do not discuss
 
-- **Feed a monocular depth model an upright picture.** All 47 TempleRing calibration entries put
-  world-up within ~2 degrees of image-RIGHT. Correcting it was worth +2.23 dB and nearly tripled
-  the fraction of pixels where independent per-view depths agree in 3D. Nothing in the pipeline
-  was wrong - the calibration is self-consistent with the rotated pixels - so it produced no
-  error, only worse depth. Any capture pipeline taking video from a handheld device has this
-  problem and will not be told about it.
+- **Feed a monocular depth model an upright picture.** Every TempleRing photo is a quarter turn
+  off level. Correcting it nearly tripled the fraction of pixels where independent per-view
+  depths agree in 3D (0.8% -> 2.2%). Nothing in the pipeline was wrong - the calibration is
+  self-consistent with the rotated pixels - so it produced no error, only worse depth. Any
+  capture pipeline taking video from a handheld device has this problem and will not be told
+  about it.
+
+- **Check the orientation PER VIEW, and do not generalise from a sample.** TempleRing is not
+  uniformly rotated: 31 of its 47 entries need one counter-clockwise quarter turn and 16 need
+  three, because the camera ring flips partway round. Sampling seven entries and concluding
+  "all 47" was wrong, and an implementation built on that conclusion would turn a third of the
+  dataset upside down.
 
 - **Fixed-point quantisation is a real constraint on gradient precision, not just on range.**
   WebGPU has no float atomics, so per-splat gradients cross an i32 atomic scaled by 2^20. With

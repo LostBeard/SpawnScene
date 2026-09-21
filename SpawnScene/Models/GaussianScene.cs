@@ -102,8 +102,11 @@ public sealed class TrainingView
 
     /// <summary>
     /// Counter-clockwise quarter turns already applied to <see cref="Camera"/>, which the
-    /// target image must be given too. Storing it on the view rather than as a global setting
-    /// is what keeps a mixed-orientation capture (a phone turned mid-video) coherent.
+    /// target image must be given too.
+    ///
+    /// Per VIEW, not one global setting. That is not hypothetical future-proofing: TempleRing
+    /// itself needs one turn for templeR0001-0031 and three for templeR0034-0046, because the
+    /// camera ring flips orientation partway round.
     /// </summary>
     public int QuarterTurns { get; init; }
 

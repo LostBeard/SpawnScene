@@ -50,6 +50,16 @@ public partial class Studio
     public static bool SkipZeroGradientSteps { get; set; }
 
     /// <summary>
+    /// Ceiling on the resident target stack, which holds every view as float RGB.
+    ///
+    /// 256 MiB leaves room for the splats, the Adam moments, the key-indexed gradient buffers
+    /// and the render targets alongside it. It is a budget rather than a guess at what a card
+    /// has, for the same reason the splat budget is derived from the binding limit: the failure
+    /// is not a clean out-of-memory, it is the device disappearing mid-sort.
+    /// </summary>
+    public static long MaxTargetStackBytes { get; set; } = 256L * 1024 * 1024;
+
+    /// <summary>
     /// Evaluate held-out PSNR every N cycles, 0 to disable. A full evaluation renders every
     /// view, so this trades run time for the shape of the curve - worth it whenever the two
     /// endpoints disagree about what is happening in between.
@@ -117,11 +127,40 @@ public partial class Studio
                     $"skipping {allViews.Count - views.Count} of another shape [{others}]");
             }
 
+            // Bound the TOTAL target memory, not the per-view resolution.
+            //
+            // maxTrainDimension caps one view and says nothing about how many there are, which
+            // is fine until the view count grows. MEASURED: 88 views of drjohnson came down to
+            // 720x474 by that rule and still needed 88 x 720 x 474 x 3 floats = 360 MB for the
+            // target stack alone, before a single trainer buffer existed, and the device was
+            // lost during the first sort. That is the third limit today that watched one
+            // dimension while the scaling one was somewhere else - the splat budget lived in a
+            // single code path, keysPerSplat was a caller default, and now this.
+            //
+            // The targets are float RGB and every supervised AND held-out view is resident, so
+            // the bound is views x pixels x 3 x 4 bytes.
             var (tw, th) = views[0].Camera.FitWithin(maxTrainDimension);
-            if (tw != w || th != h)
+            long TargetBytes(int pw, int ph) => (long)views.Count * pw * ph * 3 * sizeof(float);
+            if (TargetBytes(tw, th) > MaxTargetStackBytes)
+            {
+                int shrunk = maxTrainDimension;
+                while (shrunk > 128 && TargetBytes(tw, th) > MaxTargetStackBytes)
+                {
+                    shrunk = shrunk * 3 / 4;
+                    (tw, th) = views[0].Camera.FitWithin(shrunk);
+                }
+                Console.WriteLine(
+                    $"[Train] {views.Count} views would need " +
+                    $"{TargetBytes(views[0].Camera.FitWithin(maxTrainDimension).Width, views[0].Camera.FitWithin(maxTrainDimension).Height) / (1024 * 1024)} MiB " +
+                    $"of target stack at {maxTrainDimension}px; training at {tw}x{th} to fit " +
+                    $"{MaxTargetStackBytes / (1024 * 1024)} MiB");
+            }
+            else if (tw != w || th != h)
+            {
                 Console.WriteLine(
                     $"[Train] training at {tw}x{th} instead of {w}x{h} " +
                     $"({(long)w * h / 1_000_000.0:F1} MP per view is too much target memory)");
+            }
             w = tw; h = th;
 
             _trainer ??= new SplatTrainerGpu(_gpuService);

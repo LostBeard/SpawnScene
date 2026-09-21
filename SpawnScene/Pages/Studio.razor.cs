@@ -269,6 +269,10 @@ public partial class Studio : IAsyncDisposable
             // geometry rather than redistributing it.
             if (query.TryGetValue("densify", out var dnq) && int.TryParse(dnq, out var dni))
                 DensifyEveryCycles = dni;
+            // ?opacityreset=N caps every opacity every N cycles, which also unlocks the
+            // size prunes - without it nothing removes an over-elongated splat.
+            if (query.TryGetValue("opacityreset", out var orq) && int.TryParse(orq, out var ori))
+                OpacityResetEveryCycles = ori;
             // ?skipzerograd=1 stops colour/opacity Adam stepping splats with no gradient, the
             // guard adam_geometry has always had for position. Off by default: its effect on the
             // held-out curve is the measurement.

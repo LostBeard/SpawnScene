@@ -724,7 +724,7 @@ public sealed class SplatTrainerGpu : IDisposable
     /// at zero makes the first step after every densification about ten times larger than it
     /// should be - a visible kick, nine times in a run.
     /// </summary>
-    public void RestoreAdamState(AdamState prior, int[] survivors)
+    public void RestoreAdamState(AdamState prior, int[] survivors, int zeroSlot = -1)
     {
         int n = survivors.Length;
         var m = new float[(long)n * AdamSlots];
@@ -738,6 +738,11 @@ public sealed class SplatTrainerGpu : IDisposable
             System.Array.Copy(prior.M, (long)src * AdamSlots, m, (long)i * AdamSlots, AdamSlots);
             System.Array.Copy(prior.V, (long)src * AdamSlots, v, (long)i * AdamSlots, AdamSlots);
         }
+
+        // One parameter's momentum can be dropped while the rest is kept - used by the
+        // opacity reset, which momentum would otherwise undo within a few steps.
+        if (zeroSlot >= 0 && zeroSlot < AdamSlots)
+            for (long i = 0; i < n; i++) { m[i * AdamSlots + zeroSlot] = 0f; v[i * AdamSlots + zeroSlot] = 0f; }
 
         _adamM!.CopyFromCPU(m);
         _adamV!.CopyFromCPU(v);

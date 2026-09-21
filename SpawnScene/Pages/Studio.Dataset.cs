@@ -282,6 +282,26 @@ public partial class Studio
             if (spread > 1e-3f) span = spread * 0.35f;
         }
 
+        // Park at real CAPTURE poses first, so the display path gets scored the same way the
+        // trainer is.
+        //
+        // Every PSNR and SSIM number on this project comes from SplatTrainerGpu's rasteriser.
+        // What a person actually looks at comes from GpuGaussianRenderer, through stochastic
+        // sampling, temporal accumulation and CAS sharpening. Those are two renderers of one
+        // buffer, and only the first has ever been measured - so "the number went up" and "it
+        // still looks like a mess" can both be true and neither tells you which renderer to
+        // fix. A screenshot from a pose with a real photograph behind it settles it: score this
+        // against the photo and compare to what the trainer reported for the same view.
+        var gtViews = scene.TrainingCameras.Count;
+        for (int i = 0; i < gtViews; i += Math.Max(1, gtViews / 3))
+        {
+            var cam = scene.TrainingCameras[i];
+            _cameraController.SetPose(cam.Position, cam.Forward, cam.Up);
+            await Task.Delay(1200);
+            Console.WriteLine($"[Dataset] READY-FOR-CAPTURE gtpose-{i}");
+            await Task.Delay(1800);
+        }
+
         var moves = new (string Name, Vector3 Offset, float Yaw)[]
         {
             ("left",  -right * span, 0f),

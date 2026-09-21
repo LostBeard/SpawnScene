@@ -90,6 +90,26 @@ public partial class Studio
     /// </summary>
     public static int MaxDensifiedSplats { get; set; } = 1_200_000;
 
+    /// <summary>
+    /// Cap every opacity every N cycles, 0 to disable. The reference does this every 3,000
+    /// iterations.
+    ///
+    /// It forces the optimiser to re-earn every Gaussian: the ones that matter recover within a
+    /// few hundred iterations and the ones that were only filling space stay faint and are
+    /// pruned. It is also what UNLOCKS the size prunes - the reference holds those back until
+    /// the first reset, because a large Gaussian may simply not have had the chance to shrink.
+    /// Without it nothing removes an over-elongated splat, and the render fills with needles.
+    /// </summary>
+    public static int OpacityResetEveryCycles { get; set; }
+
+    /// <summary>
+    /// Stop densifying after this fraction of the run, as the reference does at 15,000 of
+    /// 30,000. Splats added at the very end never get trained; they only add cost and noise.
+    /// </summary>
+    public const float DensifyUntilFraction = 0.5f;
+
+    bool _hadOpacityReset;
+
     private async Task TrainOnTrainingViewsAsync(
         int iterations, int keysPerSplat = 8, bool optimiseGeometry = false,
         int maxTrainDimension = 720)
@@ -381,10 +401,15 @@ public partial class Studio
                     // wrong one.
                     // Densify BEFORE evaluating, so the reported number is of the scene that
                     // will keep training rather than the one that just stopped existing.
-                    if (DensifyEveryCycles > 0 && cycle % DensifyEveryCycles == 0
-                        && cycle < totalCycles)
+                    bool resetOpacity = OpacityResetEveryCycles > 0
+                        && cycle % OpacityResetEveryCycles == 0;
+                    bool densifying = DensifyEveryCycles > 0 && cycle % DensifyEveryCycles == 0
+                        && cycle < totalCycles * DensifyUntilFraction;
+
+                    if (densifying || resetOpacity)
                     {
-                        var grown = await DensifyAsync(packed, n, rigRadius, keysPerSplat);
+                        var grown = await DensifyAsync(
+                            packed, n, rigRadius, densifying, resetOpacity);
                         if (grown != null)
                         {
                             (packed, n) = grown.Value;
@@ -510,7 +535,8 @@ public partial class Studio
     /// worth writing when the splat count makes it worth writing, not before it works at all.
     /// </summary>
     private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> DensifyAsync(
-        MemoryBuffer1D<float, Stride1D.Dense> packed, int n, float sceneExtent, int keysPerSplat)
+        MemoryBuffer1D<float, Stride1D.Dense> packed, int n, float sceneExtent,
+        bool densify, bool resetOpacity)
     {
         var accel = _gpuService.WebGPUAccelerator;
         var stats = await _trainer!.ReadDensifyStatsAsync(n);
@@ -541,9 +567,13 @@ public partial class Studio
             return (float)(Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2));
         }
 
-        var plan = SplatDensityControl.Decide(
-            splats, stats, sceneExtent,
-            afterFirstOpacityReset: false, NextNormal, MaxDensifiedSplats);
+        // The size prunes are unlocked by the first opacity reset, exactly as in the reference.
+        // Before it, a large Gaussian may simply not have been given the chance to shrink; after
+        // it, one that is still large and still faint is not going to earn its place.
+        var plan = densify
+            ? SplatDensityControl.Decide(
+                splats, stats, sceneExtent, _hadOpacityReset, NextNormal, MaxDensifiedSplats)
+            : new SplatDensityControl.Plan();
 
         // Always report, including - especially including - when the answer is "nothing".
         //
@@ -569,7 +599,7 @@ public partial class Studio
             $"vs threshold {SplatDensityControl.GradientThresholdNdc:G3}; " +
             $"{big:N0} splats above the {sizeSplit:G3} split size; plan: {plan}");
 
-        if (plan.Add.Count == 0 && plan.Remove.Count == 0)
+        if (plan.Add.Count == 0 && plan.Remove.Count == 0 && !resetOpacity)
         {
             _trainer.ResetDensifyStats();
             return null;
@@ -577,6 +607,17 @@ public partial class Studio
 
         var priorAdam = await _trainer.ReadAdamStateAsync(n);
         var grown = SplatDensityControl.Apply(splats, plan, out var survivors);
+
+        if (resetOpacity)
+        {
+            var arr = grown.ToArray();
+            SplatDensityControl.ResetOpacity(arr);
+            grown = arr.ToList();
+            _hadOpacityReset = true;
+            Console.WriteLine(
+                $"[Densify] opacity reset to at most {SplatDensityControl.OpacityResetTo} " +
+                "- every Gaussian now has to re-earn its place, and the size prunes are live");
+        }
         int m = grown.Count;
         if (m <= 0)
         {
@@ -627,7 +668,12 @@ public partial class Studio
         // which is correct for clones and split children alike - and then put the Adam moments
         // back where they belong. InitOptimizerState zeroes them, so the order matters.
         _trainer.InitOptimizerState(live, m);
-        _trainer.RestoreAdamState(priorAdam, survivors);
+
+        // Carrying opacity momentum through a reset would simply undo it within a few steps,
+        // which is why the reference zeroes it alongside. Slot 9 is opacity in the packed
+        // layout, and the Adam moments follow that layout one for one.
+        _trainer.RestoreAdamState(priorAdam, survivors,
+            zeroSlot: resetOpacity ? SplatFormat.OffOpacity : -1);
         _trainer.ResetDensifyStats();
 
         Console.WriteLine($"[Densify] {n:N0} -> {m:N0} splats: {plan}");

@@ -265,14 +265,13 @@ public partial class Studio : IAsyncDisposable
             // ?heldevery=N evaluates held-out PSNR every N cycles (0 = only at the ends).
             if (query.TryGetValue("heldevery", out var he) && int.TryParse(he, out var hei))
                 HeldOutEveryCycles = hei;
-            // ?densify=N runs adaptive density control every N cycles - the step that creates
-            // geometry rather than redistributing it.
+            // ?densify=N runs adaptive density control every N ITERATIONS (reference: 100).
             if (query.TryGetValue("densify", out var dnq) && int.TryParse(dnq, out var dni))
-                DensifyEveryCycles = dni;
-            // ?opacityreset=N caps every opacity every N cycles, which also unlocks the
-            // size prunes - without it nothing removes an over-elongated splat.
+                DensifyEveryIters = dni;
+            // ?opacityreset=N caps every opacity every N ITERATIONS (reference: 3000), which
+            // also unlocks the size prunes - without it nothing removes a bloated splat.
             if (query.TryGetValue("opacityreset", out var orq) && int.TryParse(orq, out var ori))
-                OpacityResetEveryCycles = ori;
+                OpacityResetEveryIters = ori;
             // ?skipzerograd=1 stops colour/opacity Adam stepping splats with no gradient, the
             // guard adam_geometry has always had for position. Off by default: its effect on the
             // held-out curve is the measurement.

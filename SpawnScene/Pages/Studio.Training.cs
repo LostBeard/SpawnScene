@@ -80,7 +80,21 @@ public partial class Studio
     /// - 79,922 points for a room the reference would finish with one to three million. The
     /// blur in an under-densified render is not a tuning problem, it is missing Gaussians.
     /// </summary>
-    public static int DensifyEveryCycles { get; set; }
+    /// <summary>
+    /// Run adaptive density control every N ITERATIONS, 0 to disable. The reference uses 100.
+    ///
+    /// Iterations, not cycles. A cycle is one pass over the supervised views, so on a 99-view
+    /// capture "every 5 cycles" is every 495 iterations - and with densification stopping
+    /// halfway that gave EIGHT densification steps against the reference's 145. The growth this
+    /// step exists to produce simply never had the chances to happen.
+    /// </summary>
+    public static int DensifyEveryIters { get; set; }
+
+    /// <summary>
+    /// Warm-up before densifying, in iterations. The reference waits 500: the screen-space
+    /// gradient is the signal, and it means nothing until the splats have been fitted at all.
+    /// </summary>
+    public static int DensifyFromIter { get; set; } = 500;
 
     /// <summary>
     /// Ceiling on the splat count during densification.
@@ -100,7 +114,7 @@ public partial class Studio
     /// the first reset, because a large Gaussian may simply not have had the chance to shrink.
     /// Without it nothing removes an over-elongated splat, and the render fills with needles.
     /// </summary>
-    public static int OpacityResetEveryCycles { get; set; }
+    public static int OpacityResetEveryIters { get; set; }
 
     /// <summary>
     /// Stop densifying after this fraction of the run, as the reference does at 15,000 of
@@ -371,7 +385,32 @@ public partial class Studio
                 // stale-step fraction matters either way, and at 6 KB a call this is cheap.
                 if (it < supervised.Count) _trainer.AccumulateViewSupport(n);
                 if (it == supervised.Count - 1) await ReportViewSupportAsync(n);
-                if (DensifyEveryCycles > 0) _trainer.AccumulateDensifyStats(n);
+                if (DensifyEveryIters > 0) _trainer.AccumulateDensifyStats(n);
+
+                // Density control on an ITERATION schedule, like the reference: every 100
+                // iterations from 500 until half way, then the model is left to settle.
+                if (it >= DensifyFromIter)
+                {
+                    bool stillGrowing = it < iterations * DensifyUntilFraction;
+                    // Each schedule is checked on its OWN period. Nesting the reset inside the
+                    // densify period would silently disable it whenever the two are not
+                    // multiples of one another - a whitelist of one, in arithmetic form.
+                    bool densifying = DensifyEveryIters > 0 && stillGrowing
+                        && (it + 1) % DensifyEveryIters == 0;
+                    bool resetOpacity = OpacityResetEveryIters > 0 && stillGrowing
+                        && (it + 1) % OpacityResetEveryIters == 0;
+                    if (densifying || resetOpacity)
+                    {
+                        var grown = await DensifyAsync(
+                            packed, n, rigRadius, densifying, resetOpacity);
+                        if (grown != null)
+                        {
+                            (packed, n) = grown.Value;
+                            var refreshed = await SplatBounds.ComputeAsync(accel, packed, n);
+                            if (refreshed != null) box = refreshed.Value;
+                        }
+                    }
+                }
 
                 if (probeIterations.Contains(it))
                     await ReportGradientHealthAsync(n, vi);
@@ -404,32 +443,6 @@ public partial class Studio
                     // wrong one.
                     // Densify BEFORE evaluating, so the reported number is of the scene that
                     // will keep training rather than the one that just stopped existing.
-                    // Both densification AND opacity reset stop at the same point, as they do
-                    // in the reference: it resets every 3,000 iterations but only while
-                    // iteration < densify_until_iter.
-                    //
-                    // Carrying resets past that knocks every opacity down with no densification
-                    // left to compensate, and nothing recovers. MEASURED here: held out peaked
-                    // at 16.99 dB around cycle 40 and fell to 11.09 by cycle 80 with resets
-                    // running the whole way. The model has to be allowed to settle.
-                    bool stillGrowing = cycle < totalCycles * DensifyUntilFraction;
-                    bool resetOpacity = OpacityResetEveryCycles > 0 && stillGrowing
-                        && cycle % OpacityResetEveryCycles == 0;
-                    bool densifying = DensifyEveryCycles > 0 && stillGrowing
-                        && cycle % DensifyEveryCycles == 0;
-
-                    if (densifying || resetOpacity)
-                    {
-                        var grown = await DensifyAsync(
-                            packed, n, rigRadius, densifying, resetOpacity);
-                        if (grown != null)
-                        {
-                            (packed, n) = grown.Value;
-                            var refreshed = await SplatBounds.ComputeAsync(accel, packed, n);
-                            if (refreshed != null) box = refreshed.Value;
-                        }
-                    }
-
                     if (HeldOutEveryCycles > 0 && cycle % HeldOutEveryCycles == 0)
                     {
                         var sample = await EvaluateAsync(_trainer, packed, n, views, targets, box);

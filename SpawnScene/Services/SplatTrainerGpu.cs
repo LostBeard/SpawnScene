@@ -41,6 +41,8 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _initLogits;
     GPUComputePipeline? _adamGeometry;
     GPUComputePipeline? _evalSse;
+    GPUComputePipeline? _ssimRowsPipe;
+    GPUComputePipeline? _ssimReducePipe;
     GPUComputePipeline? _unpackTarget;
 
     GPUBuffer? _uniformBuf;     // TrainUniforms
@@ -70,10 +72,14 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _logScale;    // 3 per splat
     MemoryBuffer1D<float, Stride1D.Dense>? _geomOut;     // 10 per splat, diagnostics + gate
     MemoryBuffer1D<float, Stride1D.Dense>? _ssePartials; // 1 per 256-pixel workgroup
+    MemoryBuffer1D<float, Stride1D.Dense>? _ssimRows;    // 5 filtered channels per (window col, row)
+    MemoryBuffer1D<float, Stride1D.Dense>? _ssimPartials;// 1 per 256-window workgroup
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
     MemoryBuffer1D<int, Stride1D.Dense>? _lossFixed;
     GPUBuffer? _dimsBuf;
+    GPUBuffer? _ssimDimsBuf;
+    GPUBuffer? _ssimCfgBuf;
     GPUBuffer? _adamCfgBuf;
     GPUBuffer? _geomCfgBuf;
     GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
@@ -141,6 +147,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
         _adamGeometry = MakePipeline(SplatTrainerShaders.GeometryAdam, "adam_geometry");
         _evalSse = MakePipeline(SplatTrainerShaders.EvalSse, "eval_sse");
+        _ssimRowsPipe = MakePipeline(SplatTrainerShaders.SsimRows, "ssim_rows");
+        _ssimReducePipe = MakePipeline(SplatTrainerShaders.SsimReduce, "ssim_reduce");
         _unpackTarget = MakePipeline(SplatTrainerShaders.UnpackTarget, "unpack_target");
 
         _uniformBuf = _device.CreateBuffer(new GPUBufferDescriptor
@@ -177,9 +185,21 @@ public sealed class SplatTrainerGpu : IDisposable
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
 
+        _ssimDimsBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        // SsimCfg: vec4 luma + vec4 consts + array<vec4,3> weights = 80 bytes.
+        _ssimCfgBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 80,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+
         Console.WriteLine("[Trainer] pipelines created: emit_keys, tile_ranges, raster_forward, " +
             "raster_backward, scatter_gradients, loss_l1, adam_step, init_logits, adam_geometry, " +
-            "eval_sse, unpack_target");
+            "eval_sse, unpack_target, ssim_rows, ssim_reduce");
     }
 
     GPUComputePipeline MakePipeline(string wgsl, string entry)
@@ -283,6 +303,16 @@ public sealed class SplatTrainerGpu : IDisposable
         _logScale = accel.Allocate1D<float>((long)splatCount * 3);
         _geomOut = accel.Allocate1D<float>((long)splatCount * GeomGradsPerSplat);
         _ssePartials = accel.Allocate1D<float>(SseWorkgroups);
+
+        // SSIM works on 'valid' windows, so a viewport smaller than the window has none and the
+        // metric is genuinely undefined there - the Python oracle raises rather than inventing a
+        // number, and ScoreAgainstAsync reports NaN for the same reason.
+        if (HasSsimWindows)
+        {
+            _ssimRows = accel.Allocate1D<float>((long)SsimWindowsX * _height * 5);
+            _ssimPartials = accel.Allocate1D<float>(SsimWorkgroups);
+            WriteSsimCfg();
+        }
         _adamM = accel.Allocate1D<float>((long)splatCount * AdamSlots);
         _adamV = accel.Allocate1D<float>((long)splatCount * AdamSlots);
         _lossFixed = accel.Allocate1D<int>(1);
@@ -472,6 +502,42 @@ public sealed class SplatTrainerGpu : IDisposable
 
     int SseWorkgroups => (_width * _height + 255) / 256;
 
+    /// <summary>Count of 'valid' SSIM window positions across and down.</summary>
+    int SsimWindowsX => _width - ImageQuality.WindowSize + 1;
+    int SsimWindowsY => _height - ImageQuality.WindowSize + 1;
+    bool HasSsimWindows => _width >= ImageQuality.WindowSize && _height >= ImageQuality.WindowSize;
+    int SsimWorkgroups => (SsimWindowsX * SsimWindowsY + 255) / 256;
+
+    /// <summary>
+    /// Upload every SSIM constant from <see cref="ImageQuality"/>, so the shader holds none.
+    ///
+    /// The one value WGSL must duplicate is the window size, because it sizes a loop and a
+    /// shader cannot read a C# constant. Asserting it here rather than trusting it: if the
+    /// oracle's window ever changes, this throws with the file to edit instead of silently
+    /// scoring two different metrics.
+    /// </summary>
+    void WriteSsimCfg()
+    {
+        if (ImageQuality.WindowSize != 11)
+            throw new InvalidOperationException(
+                $"ImageQuality.WindowSize is {ImageQuality.WindowSize} but the WGSL in " +
+                "SplatTrainerShaders.SsimRows/SsimReduce declares 'const WINDOW : u32 = 11u'. " +
+                "Change both or they measure different things.");
+
+        var k = ImageQuality.GaussianKernel1D();
+        var f = new float[20];                       // 80 bytes: luma, consts, 3 x vec4 of taps
+        f[0] = (float)ImageQuality.LumaR;
+        f[1] = (float)ImageQuality.LumaG;
+        f[2] = (float)ImageQuality.LumaB;
+        f[4] = (float)ImageQuality.C1;
+        f[5] = (float)ImageQuality.C2;
+        for (int i = 0; i < k.Length; i++) f[8 + i] = (float)k[i];
+
+        var bytes = new byte[80];
+        Buffer.BlockCopy(f, 0, bytes, 0, 80);
+        _queue!.WriteBuffer(_ssimCfgBuf!, 0, bytes);
+    }
+
     /// <summary>
     /// PSNR of the current render against one image in a GPU-resident target stack.
     ///
@@ -481,26 +547,78 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public async Task<double> PsnrAgainstAsync(
         MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex)
+        => (await ScoreAgainstAsync(stack, viewIndex, withSsim: false)).Psnr;
+
+    /// <summary>
+    /// PSNR and SSIM of the current render against one image in the target stack.
+    ///
+    /// Both in one call because they share the render and can share the sync: three dispatches
+    /// are queued, then ONE SynchronizeAsync, then both partial buffers come back. Scoring them
+    /// separately would double the round trips per view for no benefit.
+    ///
+    /// SSIM matters because PSNR does not see the failure this trainer currently has. MEASURED
+    /// on Bathroom: held out went 12.50 -> 12.21 dB across a run, essentially flat, while the
+    /// render melted from a recognisable room into fog. PSNR on a sparse reconstruction is
+    /// dominated by large smooth regions, so smoothing structure away barely moves it.
+    ///
+    /// Returns NaN for SSIM when the viewport is smaller than the window - there are no valid
+    /// window positions and the metric is undefined, which the Python oracle signals by raising.
+    /// </summary>
+    public async Task<(double Psnr, double Ssim)> ScoreAgainstAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex, bool withSsim = true)
     {
         var accel = _gpu.WebGPUAccelerator;
         long frameFloats = (long)_width * _height * 3;
+        uint targetOffset = (uint)(viewIndex * frameFloats);
 
-        WriteU32x2(_dimsBuf!, (uint)(_width * _height), (uint)(viewIndex * frameFloats));
+        WriteU32x2(_dimsBuf!, (uint)(_width * _height), targetOffset);
         Dispatch(_evalSse!, SseWorkgroups, 1, new[]
         {
             Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, stack.GetGPUBuffer()!),
             Buf(2, _ssePartials!.GetGPUBuffer()!), Buf(3, _dimsBuf!),
         });
+
+        bool doSsim = withSsim && HasSsimWindows && _ssimRows != null;
+        if (doSsim)
+        {
+            WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY,
+                (uint)_width, targetOffset);
+
+            // Horizontal pass over every source ROW (not just window rows): the vertical pass
+            // reads eleven rows above each window, so the rows above the last window position
+            // are still needed.
+            int rowThreads = SsimWindowsX * _height;
+            Dispatch(_ssimRowsPipe!, (rowThreads + 63) / 64, 1, new[]
+            {
+                Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, stack.GetGPUBuffer()!),
+                Buf(2, _ssimRows!.GetGPUBuffer()!), Buf(3, _ssimDimsBuf!), Buf(4, _ssimCfgBuf!),
+            });
+            Dispatch(_ssimReducePipe!, SsimWorkgroups, 1, new[]
+            {
+                Buf(0, _ssimRows!.GetGPUBuffer()!), Buf(1, _ssimPartials!.GetGPUBuffer()!),
+                Buf(2, _ssimDimsBuf!), Buf(3, _ssimCfgBuf!),
+            });
+        }
+
         await accel.SynchronizeAsync();
 
-        // CPU transfer: one float per 256 pixels, summed in double because a million f32 adds
-        // in sequence loses the tail.
+        // CPU transfer: one float per 256 pixels / per 256 windows, summed in double because a
+        // million f32 adds in sequence loses the tail.
         float[] partials = await _ssePartials!.CopyToHostAsync<float>(0, SseWorkgroups);
         double sse = 0;
         foreach (float v in partials) sse += v;
-
         double mse = sse / frameFloats;
-        return mse <= 1e-12 ? 99.0 : 10.0 * Math.Log10(1.0 / mse);
+        double psnr = mse <= 1e-12 ? 99.0 : 10.0 * Math.Log10(1.0 / mse);
+
+        double ssim = double.NaN;
+        if (doSsim)
+        {
+            float[] sp = await _ssimPartials!.CopyToHostAsync<float>(0, SsimWorkgroups);
+            double total = 0;
+            foreach (float v in sp) total += v;
+            ssim = total / ((double)SsimWindowsX * SsimWindowsY);
+        }
+        return (psnr, ssim);
     }
 
     /// <summary>
@@ -718,6 +836,14 @@ public sealed class SplatTrainerGpu : IDisposable
         _queue!.Submit(new[] { cmd });
     }
 
+    void WriteU32x4(GPUBuffer buf, uint x, uint y, uint z, uint w)
+    {
+        var v = new uint[] { x, y, z, w };
+        var bytes = new byte[16];
+        Buffer.BlockCopy(v, 0, bytes, 0, 16);
+        _queue!.WriteBuffer(buf, 0, bytes);
+    }
+
     void WriteVec4(GPUBuffer buf, float x, float y, float z, float w)
     {
         var f = new[] { x, y, z, w };
@@ -794,6 +920,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _logScale?.Dispose(); _logScale = null;
         _geomOut?.Dispose(); _geomOut = null;
         _ssePartials?.Dispose(); _ssePartials = null;
+        _ssimRows?.Dispose(); _ssimRows = null;
+        _ssimPartials?.Dispose(); _ssimPartials = null;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
         _lossFixed?.Dispose(); _lossFixed = null;
@@ -809,6 +937,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _countBuf?.Destroy(); _countBuf?.Dispose();
         _dimsBuf?.Destroy(); _dimsBuf?.Dispose();
         _adamCfgBuf?.Destroy(); _adamCfgBuf?.Dispose();
+        _ssimDimsBuf?.Destroy(); _ssimDimsBuf?.Dispose();
+        _ssimCfgBuf?.Destroy(); _ssimCfgBuf?.Dispose();
         _scratch4?.Dispose();
         _emitKeys?.Dispose();
         _tileRanges?.Dispose();

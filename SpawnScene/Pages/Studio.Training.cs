@@ -203,11 +203,17 @@ public partial class Studio
             // 3, a room wants about 13. Probe one view, then resize once if the budget was
             // short. This must happen before InitOptimizerState, because Resize reallocates.
             {
-                // EVERY supervised view, not one. Demand varies a lot between views - on
-                // Bathroom the first view fits and 6% of the rest do not, so a single probe
-                // reports success and the run then loses gradients on 94 frames.
+                // EVERY view, not one, and not only the supervised ones. Demand varies a lot
+                // between views - on Bathroom the first view fits and 6% of the rest do not, so
+                // a single probe reports success and the run then loses gradients on 94 frames.
+                //
+                // Held-out views are included because they are RENDERED during evaluation. One
+                // that overflows loses splats and scores an incomplete image, which reads as
+                // "that pose is bad" rather than "that frame was truncated" - and with geometry
+                // enabled a view can cross the threshold part-way through a run, so the same
+                // view scores differently for a reason that has nothing to do with quality.
                 int peak = 0;
-                foreach (int si in supervised)
+                foreach (int si in Enumerable.Range(0, views.Count))
                 {
                     var probeCam = views[si].Camera.ScaledTo(w, h);
                     var (pn, pf) = SplatBounds.DepthRangeFor(box, probeCam);
@@ -219,7 +225,8 @@ public partial class Studio
                     int want = (int)Math.Ceiling(peak * 1.25 / n);
                     Console.WriteLine(
                         $"[Train] peak demand {peak:N0} keys for {n:N0} splats " +
-                        $"({peak / (double)n:F1} per splat) across {supervised.Count} views; " +
+                        $"({peak / (double)n:F1} per splat) across {views.Count} views " +
+                        $"({supervised.Count} supervised, {views.Count - supervised.Count} held out); " +
                         $"re-sizing to {want} per splat with 25% headroom");
                     // The target STACK is a separate allocation and stays filled; Resize only
                     // reallocates the trainer's own per-frame buffers.
@@ -228,7 +235,8 @@ public partial class Studio
             }
 
             // -- Baseline: how well does the untrained scene already explain each photo? --
-            var (baseInit, baseHeld) = await EvaluateAsync(_trainer, packed, n, views, targets, box);
+            var baseline = await EvaluateAsync(_trainer, packed, n, views, targets, box);
+            WarnOnEvalOverflow(baseline, views.Count);
 
             _trainer.InitOptimizerState(packed, n);
 
@@ -240,6 +248,7 @@ public partial class Studio
             // over a full cycle of views instead - that is the only comparable quantity here.
             double cycleSum = 0;
             int cycleN = 0;
+            var curve = new List<EvalScores>();
             double firstCycle = double.NaN, lastCycle = double.NaN;
             for (int it = 0; it < iterations; it++)
             {
@@ -285,10 +294,9 @@ public partial class Studio
                     // wrong one.
                     if (HeldOutEveryCycles > 0 && cycle % HeldOutEveryCycles == 0)
                     {
-                        var (sup, held) = await EvaluateAsync(
-                            _trainer, packed, n, views, targets, box);
-                        Console.WriteLine(
-                            $"[Train] cycle {cycle,4} PSNR supervised {sup:F2} dB, held out {held:F2} dB");
+                        var sample = await EvaluateAsync(_trainer, packed, n, views, targets, box);
+                        curve.Add(sample);
+                        Console.WriteLine($"[Train] cycle {cycle,4} {sample.Describe()}");
                     }
                     cycleSum = 0; cycleN = 0;
                 }
@@ -306,9 +314,17 @@ public partial class Studio
                     $"[Train] WARNING: {overflowed}/{iterations} iterations overflowed the key " +
                     $"buffer (keysPerSplat={_trainer.KeysPerSplat}) - those gradients are incomplete");
 
-            var (fitInit, fitHeld) = await EvaluateAsync(_trainer, packed, n, views, targets, box);
-            Console.WriteLine($"[Train] trainer PSNR supervised {baseInit:F2} -> {fitInit:F2} dB");
-            Console.WriteLine($"[Train] trainer PSNR HELD OUT   {baseHeld:F2} -> {fitHeld:F2} dB");
+            var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box);
+            WarnOnEvalOverflow(fitted, views.Count);
+
+            Console.WriteLine(
+                $"[Train] trainer supervised PSNR {baseline.SupPsnr:F2} -> {fitted.SupPsnr:F2} dB, " +
+                $"SSIM {baseline.SupSsim:F4} -> {fitted.SupSsim:F4}");
+            Console.WriteLine(
+                $"[Train] trainer HELD OUT   PSNR {baseline.HeldPsnr:F2} -> {fitted.HeldPsnr:F2} dB, " +
+                $"SSIM {baseline.HeldSsim:F4} -> {fitted.HeldSsim:F4}");
+
+            ReportCurve(curve);
 
             // The display renderer reads a packed vertex buffer built at upload time; training
             // wrote straight through to the splat data behind it.
@@ -319,6 +335,38 @@ public partial class Studio
         {
             Console.WriteLine($"[Train] FAIL: {ex}");
         }
+    }
+
+    /// <summary>
+    /// The oscillation is the point of the curve, so report its SPREAD rather than leaving six
+    /// log lines to be compared by eye. MEASURED on Bathroom: held-out PSNR swings 2.74 dB
+    /// within a run and 1.40 dB between two runs of the SAME configuration, which is larger
+    /// than most of the differences anyone would want to read off the endpoints.
+    /// </summary>
+    private static void ReportCurve(IReadOnlyList<EvalScores> curve)
+    {
+        if (curve.Count < 2) return;
+
+        static string Line(string metric, IReadOnlyList<float> v) =>
+            $"{metric} min {v.Min():F4} max {v.Max():F4} spread {v.Max() - v.Min():F4} last {v[^1]:F4}";
+
+        var psnr = curve.Select(c => c.HeldPsnr).ToList();
+        var ssim = curve.Select(c => c.HeldSsim).ToList();
+        Console.WriteLine($"[Train] held-out curve over {curve.Count} samples: {Line("PSNR", psnr)}");
+        Console.WriteLine($"[Train] held-out curve over {curve.Count} samples: {Line("SSIM", ssim)}");
+    }
+
+    /// <summary>
+    /// A view that overflowed the key buffer during EVALUATION scored an incomplete render. The
+    /// run summary only counts overflow during training iterations, so without this the two
+    /// cases are indistinguishable in the log.
+    /// </summary>
+    private static void WarnOnEvalOverflow(EvalScores scores, int viewCount)
+    {
+        if (scores.Overflowed == 0) return;
+        Console.WriteLine(
+            $"[Train] WARNING: {scores.Overflowed} of {viewCount} views overflowed the key buffer " +
+            "during evaluation - those scores are of an incomplete render, not of the scene");
     }
 
     /// <summary>
@@ -396,7 +444,19 @@ public partial class Studio
     /// supervised set is the control - if THAT does not improve, no gradient is reaching the
     /// parameters at all, and any held-out movement is noise.
     /// </summary>
-    static async Task<(float Init, float Held)> EvaluateAsync(
+    /// <summary>
+    /// One evaluation pass: mean PSNR and mean SSIM, split by whether the optimiser was allowed
+    /// to fit the view, plus how many views rendered incomplete.
+    /// </summary>
+    internal readonly record struct EvalScores(
+        float SupPsnr, float SupSsim, float HeldPsnr, float HeldSsim, int Overflowed)
+    {
+        public string Describe() =>
+            $"held out PSNR {HeldPsnr:F2} dB SSIM {HeldSsim:F4} | " +
+            $"supervised PSNR {SupPsnr:F2} dB SSIM {SupSsim:F4}";
+    }
+
+    static async Task<EvalScores> EvaluateAsync(
         SplatTrainerGpu trainer,
         MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
         IReadOnlyList<TrainingView> views,
@@ -404,8 +464,8 @@ public partial class Studio
         SplatBounds.Aabb box)
     {
         var (w, h) = trainer.Size;
-        double sumInit = 0, sumHeld = 0;
-        int nInit = 0, nHeld = 0;
+        double supPsnr = 0, supSsim = 0, heldPsnr = 0, heldSsim = 0;
+        int nSup = 0, nHeld = 0, overflowed = 0;
 
         for (int i = 0; i < views.Count; i++)
         {
@@ -416,14 +476,23 @@ public partial class Studio
             // target back to difference them in a loop was about 650 MB per pass on a 35-view
             // capture, to produce one number per view.
             await trainer.RenderForwardAsync(packed, n, cam, near, far, readback: false);
-            double psnr = await trainer.PsnrAgainstAsync(targets, i);
+            var (psnr, ssim) = await trainer.ScoreAgainstAsync(targets, i);
 
-            if (views[i].UsedForSupervision) { sumInit += psnr; nInit++; }
-            else { sumHeld += psnr; nHeld++; }
+            // A view that overflowed the key buffer rendered with splats missing, so its score
+            // is of an incomplete image. Counting it here is what stops that reading as "that
+            // pose is bad" rather than "that frame was truncated".
+            if (trainer.LastOverflowed) overflowed++;
+
+            if (views[i].UsedForSupervision) { supPsnr += psnr; supSsim += ssim; nSup++; }
+            else { heldPsnr += psnr; heldSsim += ssim; nHeld++; }
         }
-        return (
-            nInit > 0 ? (float)(sumInit / nInit) : 0f,
-            nHeld > 0 ? (float)(sumHeld / nHeld) : 0f);
+
+        return new EvalScores(
+            nSup > 0 ? (float)(supPsnr / nSup) : 0f,
+            nSup > 0 ? (float)(supSsim / nSup) : 0f,
+            nHeld > 0 ? (float)(heldPsnr / nHeld) : 0f,
+            nHeld > 0 ? (float)(heldSsim / nHeld) : 0f,
+            overflowed);
     }
 
     /// <summary>

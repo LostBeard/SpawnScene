@@ -140,6 +140,8 @@ public partial class Studio
 
             if (!hasContent || !close) return;
 
+            if (!await SsimGateAsync(trainer, accel, gpuColour)) return;
+
             // ── Training: fit colour+opacity back to a target rendered from KNOWN parameters ──
             // The target is this same scene; the splats are then perturbed. So the optimiser
             // has a reachable answer and we can check it walks toward it, rather than only
@@ -483,5 +485,108 @@ public partial class Studio
             });
         }
         return list;
+    }
+
+    /// <summary>
+    /// Does the GPU SSIM compute the same thing as <see cref="ImageQuality"/>?
+    ///
+    /// That matters because SSIM is about to become the number the optimiser work is judged by:
+    /// PSNR reported a Bathroom run as flat (12.50 -> 12.21 dB) while the render melted from a
+    /// recognisable room into fog.
+    ///
+    /// The chain this closes is three-deep. ImageQualityTests pins the C# oracle against
+    /// tools/score_novel_view.py, the scorer that produces the TempleRing numbers; this gate
+    /// pins the WGSL against that same C#. So a disagreement anywhere shows up, without the
+    /// shader needing to score the Python's own fixture.
+    ///
+    /// Scored on a REAL render rather than an analytic fixture on purpose. A smooth symmetric
+    /// fixture survives a transposed row stride, a wrong target offset and a flipped axis; a
+    /// real render against a degraded copy of itself, placed at a NON-ZERO index in the target
+    /// stack, does not.
+    /// </summary>
+    async Task<bool> SsimGateAsync(
+        SplatTrainerGpu trainer, SpawnDev.ILGPU.WebGPU.WebGPUAccelerator accel, float[] rendered)
+    {
+        int frameFloats = GateWidth * GateHeight * 3;
+
+        // Index 0 is a degraded copy, index 1 is the render itself. Using index 1 for the
+        // identical case is what proves the target offset is applied: a shader that ignored it
+        // would score both entries against slot 0 and the identical case would fail.
+        var degraded = Degrade(rendered, GateWidth, GateHeight);
+        var stack = new float[frameFloats * 2];
+        System.Array.Copy(degraded, 0, stack, 0, frameFloats);
+        System.Array.Copy(rendered, 0, stack, frameFloats, frameFloats);
+
+        using var stackBuf = accel.Allocate1D<float>(stack.Length);
+        stackBuf.CopyFromCPU(stack);
+        await accel.SynchronizeAsync();
+
+        var (_, gpuDegraded) = await trainer.ScoreAgainstAsync(stackBuf, 0);
+        var (_, gpuSelf) = await trainer.ScoreAgainstAsync(stackBuf, 1);
+        double cpuDegraded = ImageQuality.MeanSsim(rendered, degraded, GateWidth, GateHeight);
+
+        Console.WriteLine(
+            $"[TrainerGate] SSIM: degraded gpu {gpuDegraded:F6} cpu {cpuDegraded:F6} " +
+            $"(d {Math.Abs(gpuDegraded - cpuDegraded):E2}); self {gpuSelf:F6}");
+
+        // Two near-identical images agree trivially, so a match only means something when the
+        // score sits away from both ends.
+        if (!(cpuDegraded > 0.05 && cpuDegraded < 0.98))
+        {
+            Console.WriteLine(
+                $"[TrainerGate] FAIL: SSIM fixture is vacuous at {cpuDegraded:F4} - the degraded " +
+                "image is too close to the render, or too far, for agreement to prove anything");
+            return false;
+        }
+        if (Math.Abs(gpuDegraded - cpuDegraded) > 1e-4)
+        {
+            Console.WriteLine("[TrainerGate] FAIL: GPU and CPU SSIM disagree");
+            return false;
+        }
+        if (Math.Abs(gpuSelf - 1.0) > 1e-5)
+        {
+            Console.WriteLine(
+                $"[TrainerGate] FAIL: SSIM of an image against itself is {gpuSelf:F6}, not 1.0 " +
+                "- the target offset is likely being ignored");
+            return false;
+        }
+
+        Console.WriteLine("[TrainerGate] SSIM PASS");
+        return true;
+    }
+
+    /// <summary>
+    /// A blurred, dimmed copy: structurally similar but not identical, which is what puts SSIM
+    /// in the middle of its range where a comparison is informative.
+    /// </summary>
+    static float[] Degrade(float[] rgb, int width, int height)
+    {
+        var outp = new float[rgb.Length];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                for (int c = 0; c < 3; c++)
+                {
+                    float sum = 0;
+                    int taps = 0;
+                    for (int dy = -1; dy <= 1; dy++)
+                    {
+                        int sy = y + dy;
+                        if (sy < 0 || sy >= height) continue;
+                        for (int dx = -1; dx <= 1; dx++)
+                        {
+                            int sx = x + dx;
+                            if (sx < 0 || sx >= width) continue;
+                            sum += rgb[(sy * width + sx) * 3 + c];
+                            taps++;
+                        }
+                    }
+                    outp[(y * width + x) * 3 + c] =
+                        Math.Clamp(0.9f * (sum / taps) + 0.03f, 0f, 1f);
+                }
+            }
+        }
+        return outp;
     }
 }

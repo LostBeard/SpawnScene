@@ -767,6 +767,176 @@ fn eval_sse(
 ";
 
     /// <summary>
+    /// SSIM, horizontal half. One thread per (window column, source row); writes the five
+    /// filtered channels a window needs: a, b, a*a, b*b, a*b.
+    ///
+    /// Separable because the 2-D window is an outer product of a NORMALISED 1-D Gaussian
+    /// (see <c>ImageQuality.GaussianKernel1D</c>). Fusing it into one 121-tap pass would read
+    /// about 1.1 GB per view at 720x540 against roughly 100 MB this way.
+    ///
+    /// ⭐ This shader contains no SSIM CONSTANTS. The luma coefficients, the stabilisers and all
+    /// eleven Gaussian taps arrive in <c>cfg</c>, written by the host from
+    /// <c>ImageQuality</c>. The one duplicated value is WINDOW, which sizes the loop, and the
+    /// host asserts it against <c>ImageQuality.WindowSize</c>. A GPU kernel that keeps its own
+    /// copy of a rule its CPU oracle also implements WILL drift - that already happened once in
+    /// this codebase, to the consistency screen.
+    /// </summary>
+    public const string SsimRows = @"
+struct SsimCfg {
+    luma   : vec4<f32>,            // Rec.601 R, G, B, unused
+    consts : vec4<f32>,            // C1, C2, unused, unused
+    w      : array<vec4<f32>, 3>,  // 11 Gaussian taps, padded to 12
+};
+
+@group(0) @binding(0) var<storage, read>       rendered  : array<f32>;   // 3 per pixel
+@group(0) @binding(1) var<storage, read>       ref_image : array<f32>;   // the whole target stack
+@group(0) @binding(2) var<storage, read_write> rows      : array<f32>;   // 5 per (x, y)
+@group(0) @binding(3) var<uniform>             dims      : vec4<u32>;    // wx, wy, srcW, target float offset
+@group(0) @binding(4) var<uniform>             cfg       : SsimCfg;
+
+const WINDOW : u32 = 11u;
+
+// Explicit rather than cfg.w[t/4u][t%4u]: dynamic indexing INTO a vector is the part of WGSL
+// most likely to be refused by a driver, and this loop is eleven iterations.
+fn weight(t : u32) -> f32 {
+    let v = cfg.w[t / 4u];
+    let m = t % 4u;
+    if (m == 0u) { return v.x; }
+    if (m == 1u) { return v.y; }
+    if (m == 2u) { return v.z; }
+    return v.w;
+}
+
+fn luma_at(base : u32) -> f32 {
+    return rendered[base] * cfg.luma.x
+         + rendered[base + 1u] * cfg.luma.y
+         + rendered[base + 2u] * cfg.luma.z;
+}
+
+fn luma_ref(base : u32) -> f32 {
+    return ref_image[base] * cfg.luma.x
+         + ref_image[base + 1u] * cfg.luma.y
+         + ref_image[base + 2u] * cfg.luma.z;
+}
+
+@compute @workgroup_size(64)
+fn ssim_rows(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let wx = dims.x;
+    let srcH = dims.y + WINDOW - 1u;
+    let i = gid.x;
+    if (i >= wx * srcH) { return; }
+
+    let y = i / wx;
+    let x = i - y * wx;
+
+    var sa = 0.0; var sb = 0.0; var saa = 0.0; var sbb = 0.0; var sab = 0.0;
+    for (var t = 0u; t < WINDOW; t = t + 1u) {
+        let wt = weight(t);
+        let p = (y * dims.z + x + t) * 3u;
+        let va = luma_at(p);
+        let vb = luma_ref(dims.w + p);
+        sa = sa + wt * va;
+        sb = sb + wt * vb;
+        saa = saa + wt * va * va;
+        sbb = sbb + wt * vb * vb;
+        sab = sab + wt * va * vb;
+    }
+
+    let o = i * 5u;
+    rows[o] = sa; rows[o + 1u] = sb; rows[o + 2u] = saa;
+    rows[o + 3u] = sbb; rows[o + 4u] = sab;
+}
+";
+
+    /// <summary>
+    /// SSIM, vertical half plus the formula, reduced per workgroup exactly as <c>eval_sse</c>
+    /// does so the host reads a few KB rather than a per-window image.
+    ///
+    /// The variances here are the BIASED ones, <c>E[a^2] - E[a]^2</c>, and on a flat window that
+    /// can come out very slightly negative through cancellation. The reference implementation in
+    /// <c>tools/score_novel_view.py</c> does not clamp it, so this must not either: a
+    /// <c>max(sa, 0)</c> would be a silent disagreement with the definition rather than a
+    /// safety measure.
+    /// </summary>
+    public const string SsimReduce = @"
+struct SsimCfg {
+    luma   : vec4<f32>,
+    consts : vec4<f32>,
+    w      : array<vec4<f32>, 3>,
+};
+
+@group(0) @binding(0) var<storage, read>       rows     : array<f32>;   // 5 per (x, y)
+@group(0) @binding(1) var<storage, read_write> partials : array<f32>;   // 1 per workgroup
+@group(0) @binding(2) var<uniform>             dims     : vec4<u32>;    // wx, wy, srcW, target float offset
+@group(0) @binding(3) var<uniform>             cfg      : SsimCfg;
+
+const WINDOW : u32 = 11u;
+
+var<workgroup> acc : array<f32, 256>;
+
+fn weight(t : u32) -> f32 {
+    let v = cfg.w[t / 4u];
+    let m = t % 4u;
+    if (m == 0u) { return v.x; }
+    if (m == 1u) { return v.y; }
+    if (m == 2u) { return v.z; }
+    return v.w;
+}
+
+@compute @workgroup_size(256)
+fn ssim_reduce(
+    @builtin(global_invocation_id) gid : vec3<u32>,
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    let wx = dims.x;
+    let wy = dims.y;
+    let j = gid.x;
+
+    var v = 0.0;
+    if (j < wx * wy) {
+        let y = j / wx;
+        let x = j - y * wx;
+
+        var m0 = 0.0; var m1 = 0.0; var m2 = 0.0; var m3 = 0.0; var m4 = 0.0;
+        for (var t = 0u; t < WINDOW; t = t + 1u) {
+            let wt = weight(t);
+            let o = ((y + t) * wx + x) * 5u;
+            m0 = m0 + wt * rows[o];
+            m1 = m1 + wt * rows[o + 1u];
+            m2 = m2 + wt * rows[o + 2u];
+            m3 = m3 + wt * rows[o + 3u];
+            m4 = m4 + wt * rows[o + 4u];
+        }
+
+        let mu_a = m0;
+        let mu_b = m1;
+        let sa = m2 - mu_a * mu_a;
+        let sb = m3 - mu_b * mu_b;
+        let sab = m4 - mu_a * mu_b;
+
+        let c1 = cfg.consts.x;
+        let c2 = cfg.consts.y;
+        let num = (2.0 * mu_a * mu_b + c1) * (2.0 * sab + c2);
+        let den = (mu_a * mu_a + mu_b * mu_b + c1) * (sa + sb + c2);
+        v = num / den;
+    }
+
+    acc[li] = v;
+    workgroupBarrier();
+
+    var stride = 128u;
+    loop {
+        if (stride == 0u) { break; }
+        if (li < stride) { acc[li] = acc[li] + acc[li + stride]; }
+        workgroupBarrier();
+        stride = stride >> 1u;
+    }
+    if (li == 0u) { partials[wg.x] = acc[0]; }
+}
+";
+
+    /// <summary>
     /// Expand one target photograph from packed RGBA bytes into the float stack.
     ///
     /// The pixels arrive from the canvas as a JS typed array and are written straight to the

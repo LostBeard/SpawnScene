@@ -893,6 +893,51 @@ fn grad_stats(
 ";
 
     /// <summary>
+    /// Accumulate the per-splat screen-position gradient that adaptive density control needs.
+    ///
+    /// The signal Kerbl et al. densify on: a Gaussian the loss keeps trying to drag across the
+    /// image is being asked to explain more than one thing, and the answer is to clone or split
+    /// it rather than keep moving it. Averaged over the iterations the splat was VISIBLE, not
+    /// over all iterations - otherwise a splat seen in one view of thirty looks thirty times
+    /// less urgent than an identical one seen in all of them, purely because of camera placement.
+    ///
+    /// Converted to NDC here, where the frame size is known, because the published threshold of
+    /// 2e-4 is in NDC and a pixel-space gradient is about 320x smaller at 640 wide.
+    /// </summary>
+    public const string DensifyAccum = @"
+@group(0) @binding(0) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(1) var<storage, read_write> accum      : array<f32>;   // 2 per splat
+@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count y=w z=h
+@group(0) @binding(3) var<uniform>             grad_scale : vec4<f32>;    // y = centre scale
+
+const GRADS_PER_SPLAT : u32 = 9u;
+
+@compute @workgroup_size(256)
+fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= dims.x) { return; }
+
+    let b = i * GRADS_PER_SPLAT;
+
+    var live = false;
+    for (var c = 0u; c < GRADS_PER_SPLAT; c = c + 1u) {
+        if (grad_fixed[b + c] != 0) { live = true; }
+    }
+    if (!live) { return; }
+
+    // Slots 4 and 5 are the screen centre, in PIXELS, stored at the centre scale.
+    let gx = f32(grad_fixed[b + 4u]) / grad_scale.y;
+    let gy = f32(grad_fixed[b + 5u]) / grad_scale.y;
+
+    let nx = gx * f32(dims.y) * 0.5;
+    let ny = gy * f32(dims.z) * 0.5;
+
+    accum[i * 2u] = accum[i * 2u] + sqrt(nx * nx + ny * ny);
+    accum[i * 2u + 1u] = accum[i * 2u + 1u] + 1.0;
+}
+";
+
+    /// <summary>
     /// Count, per splat, how many DISTINCT views have ever given it a gradient.
     ///
     /// This is the question underneath every optimiser experiment on this project. The

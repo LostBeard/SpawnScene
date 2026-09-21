@@ -72,6 +72,24 @@ public partial class Studio
     /// </summary>
     public static int HeldOutEveryCycles { get; set; } = 10;
 
+    /// <summary>
+    /// Run adaptive density control every N cycles, 0 to disable.
+    ///
+    /// This is the step that CREATES geometry. Optimising a fixed set of Gaussians can only
+    /// redistribute what the initialisation put there, and an SfM cloud is deliberately sparse
+    /// - 79,922 points for a room the reference would finish with one to three million. The
+    /// blur in an under-densified render is not a tuning problem, it is missing Gaussians.
+    /// </summary>
+    public static int DensifyEveryCycles { get; set; }
+
+    /// <summary>
+    /// Ceiling on the splat count during densification.
+    ///
+    /// Growth is unbounded by nature and a browser tab is not. Derived from the trainer key
+    /// binding limit the same way the generator budget is, rather than picked.
+    /// </summary>
+    public static int MaxDensifiedSplats { get; set; } = 1_200_000;
+
     private async Task TrainOnTrainingViewsAsync(
         int iterations, int keysPerSplat = 8, bool optimiseGeometry = false,
         int maxTrainDimension = 720)
@@ -104,7 +122,7 @@ public partial class Studio
                 Console.WriteLine("[Train] FAIL: scene has no splats with opacity");
                 return;
             }
-            var box = aabb.Value;
+            var box = aabb.Value;   // reassigned after densification changes the scene
             Console.WriteLine(
                 $"[Train] scene aabb ({box.MinX:F3},{box.MinY:F3},{box.MinZ:F3})-" +
                 $"({box.MaxX:F3},{box.MaxY:F3},{box.MaxZ:F3}) diag={box.Diagonal:F3}");
@@ -203,16 +221,20 @@ public partial class Studio
             // it means is the camera rig, not the object: a rate in world units is meaningless
             // without it. Scale and rotation are scale-free parameterisations (log and unit
             // quaternion), so their published rates are absolute.
+            // The camera-rig radius, the scene extent the reference scales both the position
+            // learning rate and the clone/split size threshold by. Needed whether or not
+            // geometry is being optimised, because density control uses it too.
+            var rigCentroid = Vector3.Zero;
+            foreach (var v in views) rigCentroid += v.Camera.Position;
+            rigCentroid /= views.Count;
+            float rigRadius = 0f;
+            foreach (var v in views)
+                rigRadius = MathF.Max(rigRadius, Vector3.Distance(v.Camera.Position, rigCentroid));
+            if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
+
             SplatTrainerGpu.GeometryStep? geo = null;
             if (optimiseGeometry)
             {
-                var centroid = Vector3.Zero;
-                foreach (var v in views) centroid += v.Camera.Position;
-                centroid /= views.Count;
-                float rigRadius = 0f;
-                foreach (var v in views)
-                    rigRadius = MathF.Max(rigRadius, Vector3.Distance(v.Camera.Position, centroid));
-                if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
 
                 geo = new SplatTrainerGpu.GeometryStep(
                     PositionLr: PositionLrScale * 1.6e-4f * rigRadius,
@@ -302,6 +324,7 @@ public partial class Studio
             int cycleN = 0;
             var curve = new List<EvalScores>();
             var probeIterations = TrainingSchedule.ProbeIterations(iterations, supervised.Count);
+            int totalCycles = iterations / Math.Max(1, supervised.Count);
 
             // Count, over the FIRST full cycle, how many views ever move each splat. Measured at
             // the start because it is a property of the INITIALISATION - a stack of per-view
@@ -325,6 +348,7 @@ public partial class Studio
                 // stale-step fraction matters either way, and at 6 KB a call this is cheap.
                 if (it < supervised.Count) _trainer.AccumulateViewSupport(n);
                 if (it == supervised.Count - 1) await ReportViewSupportAsync(n);
+                if (DensifyEveryCycles > 0) _trainer.AccumulateDensifyStats(n);
 
                 if (probeIterations.Contains(it))
                     await ReportGradientHealthAsync(n, vi);
@@ -355,6 +379,20 @@ public partial class Studio
                     // is a learning rate or a regulariser - so the curve is the measurement,
                     // and guessing between them without it is how a day gets spent on the
                     // wrong one.
+                    // Densify BEFORE evaluating, so the reported number is of the scene that
+                    // will keep training rather than the one that just stopped existing.
+                    if (DensifyEveryCycles > 0 && cycle % DensifyEveryCycles == 0
+                        && cycle < totalCycles)
+                    {
+                        var grown = await DensifyAsync(packed, n, rigRadius, keysPerSplat);
+                        if (grown != null)
+                        {
+                            (packed, n) = grown.Value;
+                            var refreshed = await SplatBounds.ComputeAsync(accel, packed, n);
+                            if (refreshed != null) box = refreshed.Value;
+                        }
+                    }
+
                     if (HeldOutEveryCycles > 0 && cycle % HeldOutEveryCycles == 0)
                     {
                         var sample = await EvaluateAsync(_trainer, packed, n, views, targets, box);
@@ -459,6 +497,112 @@ public partial class Studio
     /// can legitimately be all zero. Every Bathroom run today printed "INCONCLUSIVE" because of
     /// it. A prefix of a view-major buffer is not a sample.
     /// </summary>
+    /// <summary>
+    /// One adaptive density control step: clone, split, prune, and rebuild the splat buffer.
+    ///
+    /// Returns the new buffer and count, or null when nothing changed.
+    ///
+    /// CPU transfer: the whole splat buffer, both ways. It is deliberate rather than a lapse.
+    /// The decision changes the splat COUNT, so every trainer buffer has to be reallocated and
+    /// the optimiser state reseeded regardless; at 80k splats the round trip is 4.5 MB against
+    /// a step that already reallocates tens of megabytes, and it runs once every hundred
+    /// iterations. A GPU clone/split needs a prefix sum and a compaction pass, and that is
+    /// worth writing when the splat count makes it worth writing, not before it works at all.
+    /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> DensifyAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> packed, int n, float sceneExtent, int keysPerSplat)
+    {
+        var accel = _gpuService.WebGPUAccelerator;
+        var stats = await _trainer!.ReadDensifyStatsAsync(n);
+        float[] raw = await packed.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
+
+        var splats = new SplatDensityControl.Splat[n];
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * SplatFormat.Floats;
+            splats[i] = new SplatDensityControl.Splat
+            {
+                PosX = raw[o], PosY = raw[o + 1], PosZ = raw[o + 2],
+                ColR = raw[o + 3], ColG = raw[o + 4], ColB = raw[o + 5],
+                ScaleX = raw[o + 6], ScaleY = raw[o + 7], ScaleZ = raw[o + 8],
+                Opacity = raw[o + 9],
+                QuatX = raw[o + 10], QuatY = raw[o + 11], QuatZ = raw[o + 12], QuatW = raw[o + 13],
+            };
+        }
+
+        // Split children are drawn from their parent's own ellipsoid, so this needs normal
+        // deviates. Seeded per step so a run reproduces; Box-Muller because there is no
+        // Gaussian in the BCL and an approximation here biases where geometry appears.
+        var rng = new Random(1234 + n);
+        float NextNormal()
+        {
+            double u1 = 1.0 - rng.NextDouble();
+            double u2 = rng.NextDouble();
+            return (float)(Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2));
+        }
+
+        var plan = SplatDensityControl.Decide(
+            splats, stats, sceneExtent,
+            afterFirstOpacityReset: false, NextNormal, MaxDensifiedSplats);
+
+        if (plan.Add.Count == 0 && plan.Remove.Count == 0)
+        {
+            _trainer.ResetDensifyStats();
+            return null;
+        }
+
+        var grown = SplatDensityControl.Apply(splats, plan);
+        int m = grown.Count;
+        if (m <= 0)
+        {
+            Console.WriteLine("[Densify] plan would remove every splat - ignored");
+            _trainer.ResetDensifyStats();
+            return null;
+        }
+
+        var outRaw = new float[(long)m * SplatFormat.Floats];
+        for (int i = 0; i < m; i++)
+        {
+            var g = grown[i];
+            int o = i * SplatFormat.Floats;
+            outRaw[o] = g.PosX; outRaw[o + 1] = g.PosY; outRaw[o + 2] = g.PosZ;
+            outRaw[o + 3] = g.ColR; outRaw[o + 4] = g.ColG; outRaw[o + 5] = g.ColB;
+            outRaw[o + 6] = g.ScaleX; outRaw[o + 7] = g.ScaleY; outRaw[o + 8] = g.ScaleZ;
+            outRaw[o + 9] = g.Opacity;
+            outRaw[o + 10] = g.QuatX; outRaw[o + 11] = g.QuatY;
+            outRaw[o + 12] = g.QuatZ; outRaw[o + 13] = g.QuatW;
+        }
+
+        var next = accel.Allocate1D<float>((long)m * SplatFormat.Floats);
+        next.CopyFromCPU(outRaw);
+        await accel.SynchronizeAsync();
+
+        // Through the renderer, so the displayed scene and the trained scene stay the same
+        // object. Reading the buffer back out of it afterwards is what keeps that true.
+        await _gpuRenderer.UploadSceneFromGpuBuffer(next, m);
+        var live = _gpuRenderer.PackedSplatBuffer;
+        if (live == null)
+        {
+            Console.WriteLine("[Densify] FAIL: renderer did not take the grown buffer");
+            return null;
+        }
+        if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = m;
+
+        var (w, h) = _trainer.Size;
+        _trainer.Resize(w, h, m, keysPerSplat);
+
+        // Adam state is rebuilt from scratch. The reference appends zeroed moments for new
+        // Gaussians and keeps the existing ones; resizing every buffer here resets all of them,
+        // which costs the survivors their momentum. Worth naming rather than hiding: it is a
+        // simplification, and if densification helps but the curve dips after each step, this
+        // is the first thing to look at.
+        _trainer.InitOptimizerState(live, m);
+        _trainer.ResetDensifyStats();
+
+        Console.WriteLine($"[Densify] {n:N0} -> {m:N0} splats: {plan}");
+        return (live, m);
+    }
+
     /// <summary>
     /// How many views actually constrain each splat, after one full cycle.
     ///

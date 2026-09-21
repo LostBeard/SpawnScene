@@ -95,6 +95,13 @@ public static class SplatDensityControl
         public float QuatX, QuatY, QuatZ, QuatW;
         public float Opacity;
 
+        /// <summary>
+        /// Linear RGB. Carried, never decided on: a clone is <c>var child = parent</c> and a
+        /// split child starts from the parent too, so colour propagates for free - but only if
+        /// it lives in this struct. Left out, every new Gaussian would be born black.
+        /// </summary>
+        public float ColR, ColG, ColB;
+
         public readonly float MaxScale => MathF.Max(ScaleX, MathF.Max(ScaleY, ScaleZ));
     }
 

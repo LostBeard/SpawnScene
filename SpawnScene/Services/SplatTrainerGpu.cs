@@ -44,6 +44,7 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _ssimRowsPipe;
     GPUComputePipeline? _ssimReducePipe;
     GPUComputePipeline? _gradStats;
+    GPUComputePipeline? _densifyAccum;
     GPUComputePipeline? _accumulateSupport;
     GPUComputePipeline? _supportHistogram;
     GPUComputePipeline? _unpackTarget;
@@ -78,6 +79,7 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimRows;    // 5 filtered channels per (window col, row)
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimPartials;// 1 per 256-window workgroup
     MemoryBuffer1D<float, Stride1D.Dense>? _gradStatsPartials; // 6 per workgroup, 256 workgroups
+    MemoryBuffer1D<float, Stride1D.Dense>? _densifyStats;   // 2 per splat: NDC grad sum, visible count
     MemoryBuffer1D<uint, Stride1D.Dense>? _viewSupport;        // views that ever moved each splat
     MemoryBuffer1D<float, Stride1D.Dense>? _supportPartials;   // 6 per workgroup, 256 workgroups
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
@@ -249,6 +251,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimRowsPipe = MakePipeline(SplatTrainerShaders.SsimRows, "ssim_rows");
         _ssimReducePipe = MakePipeline(SplatTrainerShaders.SsimReduce, "ssim_reduce");
         _gradStats = MakePipeline(SplatTrainerShaders.GradStats, "grad_stats");
+        _densifyAccum = MakePipeline(SplatTrainerShaders.DensifyAccum, "densify_accum");
         _accumulateSupport = MakePipeline(SplatTrainerShaders.AccumulateSupport, "accumulate_support");
         _supportHistogram = MakePipeline(SplatTrainerShaders.SupportHistogram, "support_histogram");
         _unpackTarget = MakePipeline(SplatTrainerShaders.UnpackTarget, "unpack_target");
@@ -422,6 +425,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _geomOut = accel.Allocate1D<float>((long)splatCount * GeomGradsPerSplat);
         _ssePartials = accel.Allocate1D<float>(SseWorkgroups);
         _gradStatsPartials = accel.Allocate1D<float>(GradStatsWorkgroups * GradStatsSlots);
+        _densifyStats = accel.Allocate1D<float>((long)splatCount * 2);
         _viewSupport = accel.Allocate1D<uint>(splatCount);
         _supportPartials = accel.Allocate1D<float>(SupportWorkgroups * SupportSlots);
 
@@ -685,6 +689,48 @@ public sealed class SplatTrainerGpu : IDisposable
         return new GradientStats(
             splatCount, (long)colour, (long)centre, (long)conic,
             centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic, maxColour);
+    }
+
+    /// <summary>Start a fresh densification window. Call after each densify step.</summary>
+    public void ResetDensifyStats() => _densifyStats!.MemSetToZero();
+
+    /// <summary>
+    /// Fold the step that just finished into the densification statistics. One dispatch, no sync.
+    ///
+    /// Same timing constraint as <see cref="ReadGradientStatsAsync"/>: the accumulator is cleared
+    /// mid-step, so this must run after TrainStepAsync returns and before the next one begins.
+    /// </summary>
+    public void AccumulateDensifyStats(int splatCount)
+    {
+        WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height, 0);
+        Dispatch(_densifyAccum!, (splatCount + 255) / 256, 1, new[]
+        {
+            Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
+            Buf(2, _dimsBuf!), Buf(3, _gradScaleBuf!),
+        });
+    }
+
+    /// <summary>
+    /// Read the accumulated densification statistics.
+    ///
+    /// CPU transfer: 8 bytes per splat, and the decision it feeds changes the splat COUNT, which
+    /// means reallocating every buffer anyway. At 80k splats this is 640 KB every hundred
+    /// iterations. Doing the clone/split decision on the GPU would need a compaction pass and a
+    /// prefix sum; that is worth writing when the count makes it worth writing.
+    /// </summary>
+    public async Task<SplatDensityControl.Accumulator[]> ReadDensifyStatsAsync(int splatCount)
+    {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        float[] raw = await _densifyStats!.CopyToHostAsync<float>(0, (long)splatCount * 2);
+
+        var stats = new SplatDensityControl.Accumulator[splatCount];
+        for (int i = 0; i < splatCount; i++)
+            stats[i] = new SplatDensityControl.Accumulator
+            {
+                GradientSum = raw[i * 2],
+                VisibleCount = (int)raw[i * 2 + 1],
+            };
+        return stats;
     }
 
     const int SupportWorkgroups = 256;
@@ -1204,6 +1250,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimRows?.Dispose(); _ssimRows = null;
         _ssimPartials?.Dispose(); _ssimPartials = null;
         _gradStatsPartials?.Dispose(); _gradStatsPartials = null;
+        _densifyStats?.Dispose(); _densifyStats = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
         _adamM?.Dispose(); _adamM = null;

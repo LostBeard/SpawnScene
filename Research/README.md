@@ -9,6 +9,13 @@ the per-scene optimiser. No surveyed method reports competitive quality without 
 
 ---
 
+## 0. Other documents here
+
+- **`validation-strategy.md`** — how to measure anything when no link in the chain is proven yet.
+  Read this before trusting a number: two wrong components can agree with each other, and on
+  2026-09-21 they did, for a whole session.
+- **`datasets.md`** — what data we have, and what question each one can actually answer.
+
 ## 1. Canonical 3DGS — the method we are implementing
 
 - **Paper** — Kerbl, Kopanas, Leimkühler, Drettakis, *3D Gaussian Splatting for Real-Time
@@ -233,6 +240,40 @@ Reference points for what to expect, from section 2: vanilla 3DGS **with full tr
 ~16.9 dB at 3 views and ~17.7 at 6; depth-regularised sparse-view methods reach ~20 dB at 3
 views; 27-29 dB needs 100-300 views. TempleRing gives us 16.
 
+### Bathroom — an unposed room, 2026-09-21
+
+Held-out PSNR **at initialisation**, before any optimisation. Init is quoted rather than the final
+number because it reproduces to 0.09 dB between runs while the final number varies by 1.40 dB.
+
+| change | held-out init, dB |
+|---|---|
+| SfM poses, 22 of 35 views posed | 6.54 |
+| chunked DAv3 poses, spread anchors, 14 posed | 7.28 |
+| + anchors chosen by measured view OVERLAP, 34 posed | 8.11 |
+| + keep splats the screening reference cannot SEE | **12.41** |
+
+12.41 dB before any optimisation is higher than any FINISHED reconstruction this capture had
+produced (previous best 9.70). The remaining problem moved from the geometry to the optimiser.
+
+⚠ Bathroom has no ground-truth poses, so none of these numbers attribute to poses or optimiser
+separately. See `datasets.md`.
+
+### DAv3 multi-view poses, measured against ground truth
+
+`?autotest=dav3-pose` fits recovered cameras to TempleRing's calibration. On an RTX 40-series:
+
+| views per forward | poses returned | error vs ground truth | same cameras across two batches |
+|---|---|---|---|
+| 6 | 6/6 | 5.4% / 4.5% of camera spread | **0.4%** |
+| 8 | 8/8 | 5.2% / 9.6% | 0.9% |
+| 10 | none — GPU memory | — | — |
+
+So the poses are good and **not batch-dependent**, which is what makes chunked inference viable:
+run the model repeatedly with shared anchor views and fold each pass into the first one's frame.
+
+The cap was a `const 6` with no measurement behind it. The ceiling is device-dependent, so the
+answer is to PROVE it on the device at run time and back off, not to pick a better constant.
+
 ### Things this project measured that the papers do not discuss
 
 - **Feed a monocular depth model an upright picture.** Every TempleRing photo is a quarter turn
@@ -258,3 +299,37 @@ views; 27-29 dB needs 100-300 views. TempleRing gives us 16.
 - **The depth sort key needs the scene's actual depth range.** Quantising `depth * 1024` into an
   18-bit field spent ~400 of 262143 levels on a scene 0.4 deep, so distinct splats collapsed onto
   one key and composited in whatever order the atomic allocator handed out.
+
+- **PSNR does not see a sparse reconstruction melting.** Across one training run held-out PSNR
+  moved 12.50 -> 12.21 dB, essentially flat, while the render went from a recognisable room to
+  fog. PSNR over a sparse scene is dominated by large smooth regions, so smoothing structure away
+  barely moves it; SSIM fell 0.6264 -> 0.5782 over the same run. Any sparse-view work reporting
+  PSNR alone can be improving the number while destroying the reconstruction.
+
+- **A consistency screen written for an object throws away a room.** Screening each view's splats
+  against a reference view's depth and dropping whatever falls outside that view's frustum is
+  correct for a turntable capture, where out-of-frustum means the far side of the object. For a
+  room, out-of-frustum IS the other walls - the entire reason the extra views were added. Keeping
+  them took the kept fraction from 3% to 62% and the held-out initialisation from 8.11 to 12.41 dB.
+  A splat the reference cannot see is UNVERIFIED, not wrong.
+
+- **Anchor views for multi-pass inference should be chosen by OVERLAP, not by spread.** Spreading
+  anchors evenly across a capture is right for an orbit, where every frame sees the subject, and
+  close to the worst possible choice for someone walking through a room, where the frames furthest
+  apart in time are the least likely to have seen the same wall. Spread anchors: 0 of 10 passes
+  could be folded into a common frame. Overlap-chosen anchors: 10 of 10, at 1.5-3.4% residual.
+
+- **A reconstruction has no gravity in it, and every viewer assumes one.** DAv3 and COLMAP both
+  recover geometry up to an arbitrary rotation. Bathroom's reconstruction came out with its up
+  vector at essentially -Y, and the display camera controller rebuilds its up as world +Y on every
+  frame - so the room rendered on its side and tumbled when the camera moved, while every number
+  stayed good, because the TRAINER renders from the real camera basis. Estimating up as the mean of
+  the cameras' own up vectors works for anything a person carries (Bathroom agreement 0.913) and
+  must be refused for a rig that rolls the camera (TempleRing 0.491, 90 degrees off).
+
+- **Adam steps splats that have no gradient.** With batch size 1 over a round robin of views, a
+  splat visible in one view of 26 takes ~25 steps per cycle on a gradient of exactly zero, dragged
+  by momentum decaying at 0.9. Measured: **89.8%** of splats take such a step each iteration, and a
+  splat seen once drifts 0.046 in summed colour+opacity over the next 10. The geometry Adam pass in
+  this codebase guards against it; the colour/opacity one did not, on the stated grounds that it is
+  "harmless for colour". Whether that is true at batch size 1 is being measured, not assumed.

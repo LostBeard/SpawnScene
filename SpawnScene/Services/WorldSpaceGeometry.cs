@@ -323,6 +323,79 @@ public static class WorldSpaceGeometry
         return true;
     }
 
+    /// <summary>
+    /// Which way is up in a reconstruction that has no gravity in it.
+    ///
+    /// DAv3 and SfM both recover geometry up to an ARBITRARY rotation - their world +Y is
+    /// whatever the solver happened to land on, and for a handheld capture there is nothing to
+    /// tie it to the room. Everything downstream assumes +Y is up: the viewer's camera
+    /// controller rebuilds its up vector as <c>Vector3.UnitY</c> on every frame, the yaw/pitch
+    /// model is defined about world +Y, and VR needs a real horizon. So an unaligned
+    /// reconstruction renders correctly only from the exact pose it was seated at, and tips over
+    /// the moment anyone moves - MEASURED on Bathroom, where the room appeared rotated about 90
+    /// degrees with the floor up the side of the screen.
+    ///
+    /// The estimate is the mean of the cameras' own up vectors. A person walking through a room
+    /// holds the phone roughly upright, so across enough frames the average points at gravity;
+    /// it needs no calibration file, no EXIF and no floor detection. It fails honestly when the
+    /// cameras disagree - a capture that rolled all the way round has no consistent up, and
+    /// <paramref name="confidence"/> (the mean vector's length before normalising, 1 for
+    /// perfect agreement) says so rather than returning a confident average of nothing.
+    /// </summary>
+    public static bool TryEstimateSceneUp(
+        IEnumerable<CameraParams> cameras, out Vector3 up, out float confidence)
+    {
+        up = Vector3.UnitY;
+        confidence = 0f;
+
+        var sum = Vector3.Zero;
+        int n = 0;
+        foreach (var cam in cameras)
+        {
+            var u = cam.Up;
+            if (!(u.LengthSquared() > 1e-12f)) continue;
+            sum += Vector3.Normalize(u);
+            n++;
+        }
+        if (n == 0) return false;
+
+        var mean = sum / n;
+        confidence = mean.Length();
+        if (!(confidence > 1e-3f)) return false;   // the ups cancel: no consistent up exists
+
+        up = Vector3.Normalize(mean);
+        return true;
+    }
+
+    /// <summary>
+    /// Shortest-arc rotation taking <paramref name="from"/> onto world +Y, packed for the
+    /// row-vector convention so <c>Vector3.Transform(v, M)</c> applies it - the same packing
+    /// <see cref="TryUmeyamaSimilarity"/> produces, so the two compose.
+    /// </summary>
+    public static Matrix4x4 RotationBringingUpToY(Vector3 from)
+    {
+        var a = Vector3.Normalize(from);
+        var b = Vector3.UnitY;
+
+        float dot = Math.Clamp(Vector3.Dot(a, b), -1f, 1f);
+        if (dot > 0.999999f) return Matrix4x4.Identity;
+
+        if (dot < -0.999999f)
+        {
+            // Exactly upside down: the shortest arc is undefined, so any perpendicular axis will
+            // do. Picking one deterministically matters - a run that reproduces is worth more
+            // than a marginally prettier choice of axis.
+            var axis180 = Vector3.Cross(a, Vector3.UnitX);
+            if (axis180.LengthSquared() < 1e-8f) axis180 = Vector3.Cross(a, Vector3.UnitZ);
+            return Matrix4x4.CreateFromQuaternion(
+                Quaternion.CreateFromAxisAngle(Vector3.Normalize(axis180), MathF.PI));
+        }
+
+        var axis = Vector3.Normalize(Vector3.Cross(a, b));
+        return Matrix4x4.CreateFromQuaternion(
+            Quaternion.CreateFromAxisAngle(axis, MathF.Acos(dot)));
+    }
+
     public static Vector3 ApplySimilarity(Vector3 p, float scale, Matrix4x4 rotation, Vector3 translation)
         => scale * Vector3.Transform(p, rotation) + translation;
 

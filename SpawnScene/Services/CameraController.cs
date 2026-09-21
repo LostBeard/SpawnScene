@@ -83,22 +83,27 @@ public class CameraController : IDisposable
                 maxDist = MathF.Max(maxDist, Vector3.Distance(cam.Position, camCenter));
             _moveSpeed = MathF.Max(maxDist * 0.5f, 0.05f);
 
-            // Aim at what the cameras were looking at, never at a hardcoded point.
+            // Aim where the cameras' rays CONVERGE, which is what they were looking at.
             //
-            // This used to try a literal TempleRing bounding-box midpoint first -
-            // (0.028, 0.042, -0.054) - and fall back to the camera centroid only if that
-            // happened to be in front of the camera. For any scene that is not TempleRing that
-            // test is a coin toss on a meaningless coordinate, and when it won the viewer aimed
-            // at a point in the middle of nothing. MEASURED: a drjohnson run produced 1,129,128
-            // splats and a completely black frame this way.
-            //
-            // The camera-ring centroid is the general answer - it is where the photographer was
-            // pointing, by construction - and the camera's own forward is the fallback when the
-            // rig is degenerate, e.g. every camera at one spot.
+            // This used to try a literal TempleRing bounding-box midpoint first and fall back to
+            // the camera CENTROID. Both are wrong. The hardcoded point is a coin toss on a
+            // meaningless coordinate for any other scene - on drjohnson it won and produced
+            // 1,129,128 splats and a black frame. The centroid is where the cameras are STANDING,
+            // so on a row of cameras the viewer looks along the row: measured at dot 0.56 with
+            // the direction to the subject, on a rig built to check exactly that.
             Vector3 dir = firstCam.Forward;
-            var toCenter = camCenter - _position;
-            if (toCenter.LengthSquared() > 1e-6f)
-                dir = toCenter;
+            if (WorldSpaceGeometry.TryConvergencePoint(scene.TrainingCameras, out var lookAt))
+            {
+                var toLookAt = lookAt - _position;
+                if (toLookAt.LengthSquared() > 1e-6f) dir = toLookAt;
+            }
+            else
+            {
+                // Parallel rays - no convergence point exists, so keep the camera's own heading
+                // rather than inventing one.
+                var toCenter = camCenter - _position;
+                if (toCenter.LengthSquared() > 1e-6f) dir = toCenter;
+            }
             dir = Vector3.Normalize(dir);
             _yaw = MathF.Atan2(dir.X, -dir.Z);
             _pitch = MathF.Asin(Math.Clamp(dir.Y, -1f, 1f));
@@ -287,10 +292,27 @@ public class CameraController : IDisposable
         _yaw = yaw;
         _pitch = Math.Clamp(pitch, MinPitch, MaxPitch);
 
+        // Apply the pose this controller can actually HOLD, not the one it was handed.
+        //
+        // It used to assign the requested basis including its roll, and then the first input
+        // event called UpdateCamera and replaced the up with WorldUp - so the view jumped the
+        // instant anyone touched it. Measured on a rolled capture pose: the up flipped to dot
+        // -0.97, a room on its side. Even an upright pose tilted, to 0.983, because the
+        // orthogonalised up is not world up when the forward is pitched.
+        //
+        // A yaw/pitch camera cannot represent roll (ForwardFromYawPitch is defined about
+        // WorldUp), so promising to keep it is a lie with a one-frame delay. Say so instead.
+        float roll = Vector3.Dot(u, WorldUp);
+        if (roll < 0.98f)
+            Console.WriteLine(
+                $"[Camera] the pose has roll this controller cannot hold (up . worldUp = {roll:F3}). " +
+                "Using world up. If the scene looks tilted, it needs gravity alignment - see " +
+                "MultiViewGenerationService.AlignToGravityAsync.");
+
         var camera = _sceneManager.Camera;
         camera.Position = position;
-        camera.Forward = f;
-        camera.Up = u;
+        camera.Forward = Forward;     // from the yaw/pitch just derived, so it is reproducible
+        camera.Up = WorldUp;
         _sceneManager.Camera = camera;
     }
 

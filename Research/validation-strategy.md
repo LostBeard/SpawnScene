@@ -25,10 +25,23 @@ other.
 
 **Concrete instance, 2026-09-21.** Bathroom scored 12.41 dB held out, the best the capture had ever
 produced, while the room rendered rotated 90 degrees and tumbled when the camera moved. Both were
-true. There are TWO renderers in this codebase - `SplatTrainerGpu`'s rasteriser, which every PSNR
-and SSIM number comes from, and `GpuGaussianRenderer`, which is what a person looks at. The bug was
-in the second one only (`CameraController.UpdateCamera` forces `Vector3.UnitY` every frame). No
-amount of work on the metric could have found it, and I spent that session improving the metric.
+true. There are TWO rendering paths - `SplatTrainerGpu`'s rasteriser, which every PSNR and SSIM
+number comes from, and the display path, which is what a person looks at - and only the first one
+was ever scored. No amount of work on the metric could have found it, and I spent that session
+improving the metric.
+
+⚠ **Be precise about WHICH component.** The bug was in `CameraController.UpdateCamera`, which
+replaces the camera basis with world +Y on every frame. The same day, a blank frame came from
+`CameraController.FitToScene` aiming at a hardcoded TempleRing point. Both are the CAMERA layer.
+`GpuGaussianRenderer` was handed a wrong camera on both occasions and drew exactly what it was
+asked to. It has rendered a 14,000,000-splat scene and the DAv2-generated scenes correctly, which
+is real evidence that the rasterisation, sorting and blending work.
+
+The first draft of this document labelled the renderer "unproven" and let that read as "suspect",
+which is wrong twice over: it conflated two components, and it discarded the positive evidence
+that already existed. **Unproven means "not gated by an automated check", not "probably broken".**
+Those need different words, because the second one sends the next person hunting in the wrong
+file.
 
 ## The technique: isolate one link by making every other link known-good
 
@@ -93,11 +106,17 @@ hypothesis.
 | metric (PSNR, SSIM) | **proven** - CPU oracle pinned to the Python scorer at 1e-6; GPU agrees to 2.7e-8 |
 | trainer rasteriser | **proven** - `Studio.TrainerGate.cs` compares forward, gradients and the geometry chain against CPU oracles |
 | gradient accumulation | **proven** - reduction gated against a CPU pass over the same buffer |
-| display renderer | 🔴 **UNPROVEN** - had the up-vector bug; never checked against a known-good splat |
+| display renderer | ungated, but substantial positive evidence: 14M splats and DAv2 scenes render correctly |
+| camera layer (`CameraController`) | 🔴 **ungated AND implicated** - both viewer failures on 2026-09-21 were here |
 | depth -> splats | partly - unit-tested unproject, but no end-to-end check against a reference reconstruction |
 | poses | measured on TempleRing (5% of camera spread) and on a posed ROOM (in progress) |
 | optimiser | 🔴 unproven against known-good poses - that is what Deep Blending is for |
 
-The display renderer is the gap that matters most, because it is what anyone judging this project
-looks at, and it is the one that produced a wrong conclusion. Loading a reference `.ply` through it
-is the cheapest decisive test available.
+The gap that matters most is the CAMERA layer: it is ungated, and it is where both wrong
+conclusions actually came from. It is also the cheaper thing to gate - a unit test that sets a
+pose and asserts the camera basis survives an input event needs no GPU at all, and would have
+caught the up-vector bug outright.
+
+Loading a reference `.ply` through the display path is still worth doing, but as confirmation
+rather than suspicion: it would turn the existing informal evidence - 14M splats, DAv2 scenes -
+into something automated.

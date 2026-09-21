@@ -413,6 +413,69 @@ public static class WorldSpaceGeometry
             Quaternion.CreateFromAxisAngle(axis, MathF.Acos(dot)));
     }
 
+    /// <summary>
+    /// The point a set of cameras is looking AT: the least-squares closest point to all their
+    /// forward rays.
+    ///
+    /// Not the camera centroid, which is where they are STANDING. A viewer aimed at the centroid
+    /// of a row of cameras looks along the row rather than at the subject - measured on a
+    /// synthetic rig, dot 0.56 with the direction to the subject - and on drjohnson that meant
+    /// 1,129,128 splats and a completely black frame.
+    ///
+    /// Minimising the distance to each ray gives sum(I - d d^T) p = sum(I - d d^T) o, a 3x3
+    /// solve. Returns false when the rays are parallel, which is a rig with no convergence point
+    /// and wants the fallback rather than a wrong answer.
+    /// </summary>
+    public static bool TryConvergencePoint(IReadOnlyList<CameraParams> cameras, out Vector3 point)
+    {
+        point = Vector3.Zero;
+        if (cameras.Count == 0) return false;
+
+        var a = new double[9];
+        var b = new double[3];
+
+        foreach (var cam in cameras)
+        {
+            var d = cam.Forward;
+            if (!(d.LengthSquared() > 1e-12f)) continue;
+            d = Vector3.Normalize(d);
+            var o = cam.Position;
+
+            // I - d d^T, accumulated, and the same applied to the ray origin.
+            double[] m =
+            {
+                1 - d.X * d.X,    -d.X * d.Y,    -d.X * d.Z,
+                   -d.Y * d.X, 1 - d.Y * d.Y,    -d.Y * d.Z,
+                   -d.Z * d.X,    -d.Z * d.Y, 1 - d.Z * d.Z,
+            };
+            for (int i = 0; i < 9; i++) a[i] += m[i];
+            for (int r = 0; r < 3; r++)
+                b[r] += m[r * 3 + 0] * o.X + m[r * 3 + 1] * o.Y + m[r * 3 + 2] * o.Z;
+        }
+
+        double det =
+            a[0] * (a[4] * a[8] - a[5] * a[7])
+          - a[1] * (a[3] * a[8] - a[5] * a[6])
+          + a[2] * (a[3] * a[7] - a[4] * a[6]);
+
+        // Parallel rays leave the system rank-deficient. Scale-free test, because the matrix
+        // grows with the camera count.
+        if (Math.Abs(det) < 1e-9 * Math.Max(1.0, cameras.Count * cameras.Count * cameras.Count))
+            return false;
+
+        double Cof(int r0, int c0, int r1, int c1) => a[r0 * 3 + c0] * a[r1 * 3 + c1]
+                                                    - a[r0 * 3 + c1] * a[r1 * 3 + c0];
+        double i00 = Cof(1, 1, 2, 2), i01 = -Cof(0, 1, 2, 2), i02 = Cof(0, 1, 1, 2);
+        double i10 = -Cof(1, 0, 2, 2), i11 = Cof(0, 0, 2, 2), i12 = -Cof(0, 0, 1, 2);
+        double i20 = Cof(1, 0, 2, 1), i21 = -Cof(0, 0, 2, 1), i22 = Cof(0, 0, 1, 1);
+
+        point = new Vector3(
+            (float)((i00 * b[0] + i01 * b[1] + i02 * b[2]) / det),
+            (float)((i10 * b[0] + i11 * b[1] + i12 * b[2]) / det),
+            (float)((i20 * b[0] + i21 * b[1] + i22 * b[2]) / det));
+        return true;
+    }
+
     public static Vector3 ApplySimilarity(Vector3 p, float scale, Matrix4x4 rotation, Vector3 translation)
         => scale * Vector3.Transform(p, rotation) + translation;
 

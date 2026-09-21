@@ -294,6 +294,14 @@ public partial class Studio
     private void RecordTrainingViews(
         GaussianScene scene, IReadOnlyList<ImportedImage> images, bool fromProjectStore)
     {
+        // Orientation correction needs a gravity-aligned world frame, and only a calibration
+        // file gives one. SfM recovers geometry up to an arbitrary rotation and DAv3 extrinsics
+        // are relative, so "which way is up" in either frame is noise - on Bathroom it asked
+        // for four different quarter turns across six cameras of the same room, and the
+        // resulting mix of portrait and landscape cameras cannot share a trainer viewport.
+        //
+        // It is also unnecessary here: a phone writes its frames the right way up.
+        const bool poseFrameHasGravity = false;
         var poses = _multiViewService.LastCameras;
         string poseSource = _multiViewService.LastPoseSource;
 
@@ -314,7 +322,7 @@ public partial class Studio
             string name = fromProjectStore ? images[i].FileName : images[i].SourceUrl;
             if (string.IsNullOrEmpty(name)) { unposed++; continue; }
 
-            int turns = ImageOrientation.QuarterTurnsToUpright(cam);
+            int turns = poseFrameHasGravity ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
 
             // Hold every fourth posed view out, so the run reports a novel-view number rather
             // than a reconstruction of its own input.

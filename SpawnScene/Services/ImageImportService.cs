@@ -296,6 +296,20 @@ public class ImageImportService : IDisposable
     /// Decode image bytes into RGBA pixel data using a temporary canvas.
     /// Uses SpawnDev.SpawnJS's Blob and OffscreenCanvas for efficient interop.
     /// </summary>
+    /// <summary>
+    /// Longest edge, in pixels, that an imported photograph is decoded at.
+    ///
+    /// A modern phone frame is 13 megapixels; 35 of them as RGBA in the managed heap is 1.8 GB
+    /// against a 2 GB WASM ceiling, and Bathroom died exactly there with an
+    /// OutOfMemoryException. Nothing downstream wants that resolution: the depth model resizes
+    /// to 518x518, feature detection already downsamples to 1024, and the unprojection makes
+    /// one splat per pixel, so full resolution would be 13 million splats per view.
+    ///
+    /// The resize happens in the CANVAS during decode, so the full-size bitmap never becomes a
+    /// managed array at all - it is not read and then shrunk.
+    /// </summary>
+    public static int MaxImportDimension { get; set; } = 1024;
+
     private async Task<(byte[] rgba, int width, int height)?> DecodeImageAsync(byte[] bytes, string mimeType)
     {
         try
@@ -306,13 +320,24 @@ public class ImageImportService : IDisposable
             // Decode via createImageBitmap (async, off main thread in the browser)
             using var imageBitmap = await SpawnJSRuntime.Instance.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
 
-            int width = (int)imageBitmap.Width;
-            int height = (int)imageBitmap.Height;
+            int srcW = (int)imageBitmap.Width;
+            int srcH = (int)imageBitmap.Height;
+
+            // Cap the decode size. Aspect is preserved, and an image already small enough is
+            // left exactly alone rather than resampled for nothing.
+            int width = srcW, height = srcH;
+            int longest = Math.Max(srcW, srcH);
+            if (MaxImportDimension > 0 && longest > MaxImportDimension)
+            {
+                float s = (float)MaxImportDimension / longest;
+                width = Math.Max(1, (int)MathF.Round(srcW * s));
+                height = Math.Max(1, (int)MathF.Round(srcH * s));
+            }
 
             // Draw to an OffscreenCanvas to extract pixel data
             using var canvas = new OffscreenCanvas(width, height);
             using var ctx = canvas.Get2DContext();
-            ctx.JSRef!.CallVoid("drawImage", imageBitmap, 0, 0);
+            ctx.JSRef!.CallVoid("drawImage", imageBitmap, 0, 0, width, height);
 
             // Get the pixel data
             using var imageData = ctx.GetImageData(0, 0, width, height);

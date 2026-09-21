@@ -35,10 +35,16 @@ namespace SpawnScene.Services;
 /// <c>ImageOrientationTests</c> checks by projecting world points through both and comparing.
 ///
 /// <para>
-/// "Upright" here means world +Y. That is this application's convention everywhere else, and for
-/// a dataset it comes from the calibration. For a scene whose poses were recovered from video the
-/// pose source defines up, so the same assumption holds - but if a pose source ever emits a
-/// different gravity axis this is the one place that has to learn about it.
+/// 🔴 "Upright" here means world +Y, so this is ONLY meaningful when the pose frame is
+/// gravity-aligned. A calibration file usually is. <b>Structure-from-motion is not</b>: SfM
+/// recovers geometry up to an arbitrary rotation, so its +Y is whatever the solver happened to
+/// land on, and asking which way is up in that frame returns noise. Measured on Bathroom, six
+/// cameras of the same room came back wanting four different quarter turns - and the resulting
+/// mix of portrait and landscape cameras cannot even share one trainer viewport.
+/// </para>
+/// <para>
+/// So a caller must only apply this when it knows the frame has gravity in it. There is no way
+/// for this class to tell, which is why it does not try.
 /// </para>
 /// </summary>
 public static class ImageOrientation

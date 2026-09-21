@@ -45,4 +45,29 @@ public static class TrainingSchedule
         if (probes.Count == 0) probes.Add(0);
         return probes;
     }
+
+    /// <summary>
+    /// Exponential learning-rate decay, the reference's <c>get_expon_lr_func</c>.
+    ///
+    /// 3DGS decays the POSITION rate by 100x across training - 1.6e-4 to 1.6e-6 - and holds the
+    /// others fixed, because position is the only parameter whose units are world-scale and the
+    /// only one that can keep jittering geometry that should be settling. A constant rate means
+    /// the last iteration moves a splat as far as the first one did.
+    ///
+    /// The interpolation is LOGARITHMIC, not linear: a rate is a multiplier, so the meaningful
+    /// midpoint of 1.6e-4 and 1.6e-6 is 1.6e-5, not 8.1e-5.
+    /// </summary>
+    public static float ExponentialLr(float lrInit, float lrFinal, int step, int maxSteps)
+    {
+        if (lrInit <= 0f || lrFinal <= 0f) return 0f;
+        if (maxSteps <= 0) return lrInit;
+
+        float t = Math.Clamp(step / (float)maxSteps, 0f, 1f);
+        float lr = MathF.Exp(MathF.Log(lrInit) * (1f - t) + MathF.Log(lrFinal) * t);
+
+        // exp(log(x)) does not round-trip exactly in f32: at t=0 this returns 1.60000005e-4 for
+        // an init of 1.6e-4. Tiny, but a rate that can exceed its own declared start is a
+        // property nobody should have to reason about.
+        return Math.Clamp(lr, MathF.Min(lrInit, lrFinal), MathF.Max(lrInit, lrFinal));
+    }
 }

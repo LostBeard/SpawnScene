@@ -97,6 +97,12 @@ public partial class Studio
     public static int DensifyFromIter { get; set; } = 500;
 
     /// <summary>
+    /// How far the position learning rate falls across a run. The reference goes from 1.6e-4 to
+    /// 1.6e-6, a factor of 100.
+    /// </summary>
+    public static float PositionLrDecay { get; set; } = 0.01f;
+
+    /// <summary>
     /// Ceiling on the splat count during densification.
     ///
     /// Growth is unbounded by nature and a browser tab is not. Derived from the trainer key
@@ -270,11 +276,13 @@ public partial class Studio
             if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
 
             SplatTrainerGpu.GeometryStep? geo = null;
+            float positionLrInit = 0f;
             if (optimiseGeometry)
             {
 
+                positionLrInit = PositionLrScale * 1.6e-4f * rigRadius;
                 geo = new SplatTrainerGpu.GeometryStep(
-                    PositionLr: PositionLrScale * 1.6e-4f * rigRadius,
+                    PositionLr: positionLrInit,
                     LogScaleLr: 0.005f,
                     RotationLr: 0.001f,
                     // Without density control nothing prunes, so a splat that stops being
@@ -370,6 +378,16 @@ public partial class Studio
             double firstCycle = double.NaN, lastCycle = double.NaN;
             for (int it = 0; it < iterations; it++)
             {
+                // Decay the position rate as the reference does, 100x across the run. Rebuilt
+                // per iteration because it is the only rate that changes; the others are
+                // scale-free parameterisations (log scale, unit quaternion) and stay put.
+                if (geo is { } g0)
+                    geo = g0 with
+                    {
+                        PositionLr = TrainingSchedule.ExponentialLr(
+                            positionLrInit, positionLrInit * PositionLrDecay, it, iterations),
+                    };
+
                 int vi = supervised[it % supervised.Count];
                 var cam = views[vi].Camera.ScaledTo(w, h);
                 var (near, far) = SplatBounds.DepthRangeFor(box, cam);

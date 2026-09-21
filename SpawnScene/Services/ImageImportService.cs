@@ -179,7 +179,7 @@ public class ImageImportService : IDisposable
             // --- Step 4: Match features across pairs (yield between pairs) ---
             if (_images.Count >= 2)
             {
-                await MatchAllPairsAsync();
+                if (!SkipPairMatching) await MatchAllPairsAsync();
             }
 
             Progress = 1.0f;
@@ -659,7 +659,7 @@ public class ImageImportService : IDisposable
                 await Task.Yield();
             }
 
-            if (_images.Count >= 2)
+            if (_images.Count >= 2 && !SkipPairMatching)
                 await MatchAllPairsAsync();
 
             Progress = 1.0f;

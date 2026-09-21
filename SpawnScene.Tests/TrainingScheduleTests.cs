@@ -63,4 +63,47 @@ public class TrainingScheduleTests
                     $"{iterations} iterations over {views} views: no probe at all");
         }
     }
+
+    [Test]
+    public void ExponentialLrHitsBothEndpoints()
+    {
+        const float init = 1.6e-4f, final = 1.6e-6f;
+        Assert.That(TrainingSchedule.ExponentialLr(init, final, 0, 30000),
+            Is.EqualTo(init).Within(1e-9f));
+        Assert.That(TrainingSchedule.ExponentialLr(init, final, 30000, 30000),
+            Is.EqualTo(final).Within(1e-9f));
+    }
+
+    [Test]
+    public void ExponentialLrIsLogarithmicNotLinear()
+    {
+        // A rate is a multiplier, so the meaningful midpoint of 1.6e-4 and 1.6e-6 is 1.6e-5.
+        // Linear interpolation would give 8.08e-5 - five times too high half way through the
+        // run, which is exactly the geometry jitter this decay exists to remove.
+        const float init = 1.6e-4f, final = 1.6e-6f;
+        float mid = TrainingSchedule.ExponentialLr(init, final, 15000, 30000);
+        Assert.That(mid, Is.EqualTo(1.6e-5f).Within(1e-9f));
+        Assert.That(mid, Is.LessThan((init + final) * 0.5f * 0.5f), "this looks linear");
+    }
+
+    [Test]
+    public void ExponentialLrIsMonotonicAndClamped()
+    {
+        const float init = 1.6e-4f, final = 1.6e-6f;
+        float prev = float.MaxValue;
+        for (int step = 0; step <= 40000; step += 500)
+        {
+            float lr = TrainingSchedule.ExponentialLr(init, final, step, 30000);
+            Assert.That(lr, Is.LessThanOrEqualTo(prev + 1e-12f), $"rose at step {step}");
+            Assert.That(lr, Is.InRange(final, init), $"out of range at step {step}");
+            prev = lr;
+        }
+    }
+
+    [Test]
+    public void ExponentialLrHandlesDegenerateInputs()
+    {
+        Assert.That(TrainingSchedule.ExponentialLr(0f, 0f, 5, 100), Is.EqualTo(0f));
+        Assert.That(TrainingSchedule.ExponentialLr(1e-4f, 1e-6f, 5, 0), Is.EqualTo(1e-4f));
+    }
 }

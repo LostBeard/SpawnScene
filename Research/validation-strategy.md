@@ -220,10 +220,37 @@ Percentile bounds fixed it - 18 ms for 20,012 points with outliers, and the real
 the same median scale to four decimals. A spatial index sized from extremes is sized by its
 outliers.
 
-The render is still blurry, and that is expected: 79,922 splats is where the reference STARTS,
-and it finishes between one and three million through adaptive density control. That step is
-now wired (`densify_accum` plus `DensifyAsync`); the decision layer had been sitting there
-tested and unused for want of a GPU signal.
+### Then: adaptive density control, and the first run where training HELPS
+
+79,922 splats is where the reference starts; it finishes between one and three million. With
+density control wired (`densify_accum` plus `DensifyAsync`), over nine steps in 1,600 iterations:
+
+```
+79,922 -> 80,155 -> 82,319 -> 86,575 -> 92,360 -> 98,416 -> 105,105 -> 113,010 -> 121,081 -> 128,723
+```
+
+| | depth shells | cloud, no densify | cloud + densify |
+|---|---|---|---|
+| held-out PSNR init -> final | 12.58 -> 11.84 | 14.38 -> 14.23 | 14.38 -> **15.79** |
+| held-out SSIM init -> final | 0.5057 -> 0.4456 | 0.5226 -> 0.5105 | 0.5226 -> **0.5333** |
+
+**The first configuration where held-out PSNR and SSIM both end ABOVE their initialisation.**
+Every earlier one finished below on at least one, and usually both.
+
+⚠️ **The picture disagreed, and the picture is the one to believe.** The free-view render is
+MUSHIER after densification, not sharper, while the capture-pose metrics improved. Both are
+honest: the metrics are scored from poses the cameras stood at, the screenshot is not. Two known
+causes, in order: 1,600 iterations for 128,723 splats against the reference's 30,000, and Adam
+state rebuilt at every densification, which costs surviving splats their momentum (the reference
+appends zeroed moments for the new splats only). Neither is a mystery, and the first is a knob.
+
+🔴 **The harness was discarding the evidence.** `tools/_cdp_dataset.js` forwarded console lines
+only when they matched `/Dataset|Train|MultiView|SfM|Studio|Depth|FAIL|Error/`, and `[Densify]`
+matched none of them. Nine densification steps printed nothing, and I reported that the step
+"decided nothing" - a claim built entirely on output the harness threw away. It cost two runs
+and the conclusion was wrong. See [[fb-never-filter-a-background-runs-output]]; an allowlist of
+message prefixes drops exactly the diagnostic you just added, because you added it when
+something was unclear and its prefix is new by definition.
 
 ## Where to look first
 

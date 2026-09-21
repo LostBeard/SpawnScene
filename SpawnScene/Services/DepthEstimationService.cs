@@ -59,6 +59,35 @@ public class DepthEstimationService : IAsyncDisposable
     /// via <see cref="IModelSource"/> and streams its weights straight to the GPU — the weights
     /// never enter .NET.
     /// </summary>
+    /// <summary>Vision-transformer patch size. Every input dimension must be a multiple.</summary>
+    public const int PatchSize = 14;
+
+    /// <summary>
+    /// Input width and height bound at load, both multiples of <see cref="PatchSize"/>.
+    /// Defaults to the familiar 518x518. Set <see cref="MatchAspect"/> before loading to have
+    /// this follow the source images instead.
+    /// </summary>
+    public static (int Width, int Height) InputShape { get; private set; } = (518, 518);
+
+    /// <summary>
+    /// Choose an input shape with the same aspect as <paramref name="srcW"/> x
+    /// <paramref name="srcH"/> and about the same number of patches as the square default, so
+    /// the cost is unchanged and no budget is spent on padding. Rounds to
+    /// <see cref="PatchSize"/> and clamps to at least 4 patches a side.
+    ///
+    /// Has no effect on an already-loaded model - the shape is bound at session creation.
+    /// </summary>
+    public static void MatchAspect(int srcW, int srcH, int patchBudget = 37 * 37)
+    {
+        if (srcW <= 0 || srcH <= 0) { InputShape = (518, 518); return; }
+
+        double aspect = (double)srcW / srcH;
+        // pw * ph ~= budget with pw/ph == aspect
+        int ph = Math.Max(4, (int)Math.Round(Math.Sqrt(patchBudget / aspect)));
+        int pw = Math.Max(4, (int)Math.Round(patchBudget / (double)ph));
+        InputShape = (pw * PatchSize, ph * PatchSize);
+    }
+
     public async Task LoadModelAsync(string modelId)
     {
         var model = AvailableModels.FirstOrDefault(m => m.Id == modelId);
@@ -91,9 +120,17 @@ public class DepthEstimationService : IAsyncDisposable
 
             // Native DAv3 shape: 5-D [batch, num_images, 3, H, W]. External weights via default
             // onnx/model.onnx_data (do NOT pass externalDataFile: "" — that is the DAv2 single-file path).
+            //
+            // 518x518 is not a model limit, it is a shape WE bind at load. DA3 pads to the ViT
+            // patch size and crops back, so any multiple of 14 is valid - and a SQUARE input
+            // spends its token budget on letterbox padding. An aspect-matched shape costs the
+            // same and carries more picture: 448x602 is 1,376 patches against 518x518's 1,369.
+            var (inW, inH) = InputShape;
+            Console.WriteLine($"[Depth] binding pixel_values to [1,1,3,{inH},{inW}] " +
+                $"({inW / PatchSize}x{inH / PatchSize} patches)");
             _pipe = await DepthEstimationPipeline.CreateFromHubAsync(
                 accelerator, _modelSource, RepoId,
-                inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, 518, 518 } });
+                inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, inH, inW } });
             // One-shot photo path: capture/replay warmup is for video.
             _pipe.EnableGraphCapture = false;
 

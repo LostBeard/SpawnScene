@@ -21,6 +21,8 @@ const GEOM = process.env.GEOM ? `&geom=${process.env.GEOM}` : '';
 const MAXDIM = process.env.MAXDIM ? `&maxdim=${process.env.MAXDIM}` : '';
 // POSES=dav3 keeps depth and cameras in one frame by skipping SfM entirely.
 const POSES = process.env.POSES ? `&poses=${process.env.POSES}` : '';
+// PATCHES=N sets the depth ViT patch budget. 1369 (=37*37) matches the old 518 square.
+const PATCHES = process.env.PATCHES ? `&patches=${process.env.PATCHES}` : '';
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -60,7 +62,7 @@ const closeTab = (id) => new Promise(res =>
       if (m.id && pend.has(m.id)) pend.get(m.id)(m);
       if (m.method === 'Runtime.consoleAPICalled') {
         const s = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
-        if (/Dataset|Train|MultiView|SfM|Studio|DepthGPU|FAIL|Error/i.test(s)) console.log(s.slice(0, 240));
+        if (/Dataset|Train|MultiView|SfM|Studio|Depth|FAIL|Error/i.test(s)) console.log(s.slice(0, 240));
         if (/\[Dataset\] READY-FOR-CAPTURE/.test(s)) ready = true;
         if (/\[Dataset\] DONE/.test(s)) done = true;
         if (/\[Dataset\] FAIL/.test(s)) failed = s;
@@ -75,7 +77,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

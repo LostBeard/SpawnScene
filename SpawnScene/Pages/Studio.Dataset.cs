@@ -23,11 +23,11 @@ public partial class Studio
 {
     private async Task RunDatasetAutotestAsync(
         string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension,
-        string posePreference = "auto")
+        string posePreference = "auto", int depthPatchBudget = 37 * 37)
     {
         Console.WriteLine(
             $"[Dataset] starting name={datasetName} train={trainIters} geom={optimiseGeometry} " +
-            $"maxDim={maxTrainDimension} poses={posePreference}");
+            $"maxDim={maxTrainDimension} poses={posePreference} patches={depthPatchBudget}");
         try
         {
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
@@ -44,6 +44,21 @@ public partial class Studio
             Console.WriteLine(
                 $"[Dataset] {images.Count} images in {(DateTime.UtcNow - t0).TotalSeconds:F1}s, " +
                 $"first {images[0].Width}x{images[0].Height} ({images[0].SourceUrl})");
+
+            // MEASURED WORSE - left off by default.
+            //
+            // An aspect-matched input looked like a free win: a square spends part of its patch
+            // budget on letterbox padding, and 32x43 patches costs the same as 37x37. On
+            // Bathroom it cost 4 dB (held out 8.57 -> 4.34) and changed which views survived
+            // the consistency screen.
+            //
+            // The likely reason is that this ONNX export's position embeddings are tuned for
+            // the 37x37 grid it was exported at. DA3 itself interpolates them for other sizes;
+            // an export pinned to one grid need not. So the patch budget is only worth raising
+            // in SQUARE steps until that is confirmed, and the letterbox - which measured
+            // BETTER - is what handles aspect.
+            if (depthPatchBudget != 37 * 37)
+                DepthEstimationService.MatchAspect(images[0].Width, images[0].Height, depthPatchBudget);
 
             // -- 2. Poses + depth init, through the ordinary cascade --
             void OnStatus() => Console.WriteLine($"[Dataset] {_multiViewService.Status}");

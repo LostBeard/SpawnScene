@@ -210,7 +210,10 @@ public partial class Studio : IAsyncDisposable
             int maxDim = query.TryGetValue("maxdim", out var md) && int.TryParse(md, out var mdi) ? mdi : 720;
             // ?poses=dav3 keeps depth and cameras in one frame by skipping SfM.
             string poses = query.TryGetValue("poses", out var pp) ? pp : "auto";
-            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses);
+            // ?patches=N sets the depth model's ViT patch budget (37*37 = the old 518 square).
+            int patches = query.TryGetValue("patches", out var pb) && int.TryParse(pb, out var pbi)
+                ? pbi : 37 * 37;
+            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }
 

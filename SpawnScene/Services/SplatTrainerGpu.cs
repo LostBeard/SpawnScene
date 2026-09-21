@@ -164,7 +164,18 @@ public sealed class SplatTrainerGpu : IDisposable
             return (float)Math.Pow(2, Math.Clamp(exp, 4, 40));
         }
 
-        float colour = Retarget(ColourScale, stats.MaxColourQuanta, ceiling, ColourScale);
+        // Colour has an ANALYTIC bound the measurement cannot see: with an L1 loss averaged over
+        // the image, |dL/dcolour| <= 1/3. Fitting purely to the largest value observed SO FAR
+        // would pick a scale that wraps the moment a gradient grows - and drjohnson's first
+        // reading, 8.55e3 quanta at 2^26, is 1.3e-4, which is 2600x below that bound. A scale
+        // chosen from it alone leaves no room for the run to change.
+        //
+        // So the measurement sets the scale and the bound caps it: never finer than the point
+        // where the largest gradient the loss can produce still fits.
+        const float ColourGradientBound = 1f / 3f;
+        float colourCap = (float)Math.Pow(2, Math.Floor(Math.Log2(int.MaxValue / ColourGradientBound)));
+        float colour = Math.Min(
+            Retarget(ColourScale, stats.MaxColourQuanta, ceiling, ColourScale), colourCap);
         float centre = Retarget(CentreScale, stats.MaxCentreQuanta, ceiling, CentreScale);
         float conic = Retarget(ConicScale, stats.MaxConicQuanta, ceiling, ConicScale);
 

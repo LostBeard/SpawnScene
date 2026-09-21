@@ -100,6 +100,84 @@ public class MultiViewChunkPlanTests
         Assert.Throws<ArgumentOutOfRangeException>(() => MultiViewChunkPlan.Plan(35, 3, 3));
     }
 
+    // ---- Anchor choice ----
+
+    /// <summary>
+    /// A walk-through capture: frame i sees frame j only when they are close in time. Spread
+    /// anchors are then the WORST choice, because the ends of the sequence never saw the same
+    /// wall - which is Bathroom, where anchor 17 swung between ratios of 0.43 and 3.46 while the
+    /// pair the model could actually relate held at 1.00.
+    /// </summary>
+    [Test]
+    public void PickAnchorsByOverlap_PrefersViewsThatSawEachOther()
+    {
+        const int Views = 35;
+        int Overlap(int a, int b)
+        {
+            int gap = Math.Abs(a - b);
+            return gap <= 6 ? 400 - gap * 60 : 0;      // nothing in common beyond six frames
+        }
+
+        var spread = MultiViewChunkPlan.SpreadPick(Views, 3);
+        Assert.That(Overlap(spread[0], spread[2]), Is.Zero,
+            "the spread pick's own endpoints share nothing - the case being fixed");
+
+        var picked = MultiViewChunkPlan.PickAnchorsByOverlap(Views, Overlap, 3);
+        Assert.That(picked, Has.Length.EqualTo(3));
+        Assert.That(picked, Is.Unique);
+        for (int i = 0; i < picked.Length; i++)
+            for (int j = i + 1; j < picked.Length; j++)
+                Assert.That(Overlap(picked[i], picked[j]), Is.GreaterThan(0),
+                    $"anchors {picked[i]} and {picked[j]} must have seen each other");
+    }
+
+    /// <summary>
+    /// Maximising the MINIMUM overlap, not the total. A view can be the most connected in the
+    /// whole capture and still be useless as an anchor if it is blind to the others it would
+    /// serve alongside; popularity alone would take it.
+    ///
+    /// Note the first draft of this test asserted the wrong answer. It named view 3 a "bridge to
+    /// nowhere" for being blind to view 2, when {0,1,3} was in fact mutually connected AND had
+    /// the better bottleneck - blindness to a view you do not pick costs nothing. The property
+    /// worth asserting is the invariant, not a triple I picked by eye.
+    /// </summary>
+    [Test]
+    public void PickAnchorsByOverlap_RequiresOverlapWithEveryAnchorNotJustMost()
+    {
+        // View 3 is hugely tied to view 0 and blind to everything else, so no valid anchor set
+        // of three can contain it. It still has the highest TOTAL overlap by a wide margin.
+        int Overlap(int a, int b)
+        {
+            if (a > b) (a, b) = (b, a);
+            return (a, b) switch
+            {
+                (0, 3) => 9000,
+                (1, 3) => 0, (2, 3) => 0, (3, 4) => 0,
+                _ => 300 - Math.Abs(a - b) * 10,
+            };
+        }
+
+        var picked = MultiViewChunkPlan.PickAnchorsByOverlap(5, Overlap, 3);
+
+        Assert.That(picked, Does.Not.Contain(3),
+            "view 3 has by far the most total overlap and must still lose: it cannot be tied to " +
+            "two other anchors at once");
+        for (int i = 0; i < picked.Length; i++)
+            for (int j = i + 1; j < picked.Length; j++)
+                Assert.That(Overlap(picked[i], picked[j]), Is.GreaterThan(0),
+                    $"anchors {picked[i]} and {picked[j]} must have seen each other");
+    }
+
+    [Test]
+    public void PickAnchorsByOverlap_IsDeterministicAndSorted()
+    {
+        int Overlap(int a, int b) => 100 - Math.Abs(a - b);
+        var a = MultiViewChunkPlan.PickAnchorsByOverlap(20, Overlap, 4);
+        var b = MultiViewChunkPlan.PickAnchorsByOverlap(20, Overlap, 4);
+        Assert.That(a, Is.EqualTo(b), "a diagnostic that moves between runs cannot be read");
+        Assert.That(a, Is.Ordered);
+    }
+
     // ---- The fold ----
 
     [Test]

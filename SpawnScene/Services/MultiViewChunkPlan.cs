@@ -209,6 +209,90 @@ public static class MultiViewChunkPlan
     }
 
     /// <summary>
+    /// Anchors chosen for mutual OVERLAP rather than for maximal spread.
+    ///
+    /// <see cref="SpreadPick"/> takes the first, middle and last frame, which is right for a
+    /// turntable - the object is in every shot, so spreading maximises baseline at no cost. It is
+    /// close to the worst possible choice for someone WALKING through a room, because the frames
+    /// furthest apart in time are the ones least likely to have seen the same wall, and a
+    /// multi-view model cannot place a camera whose view it cannot tie to the others.
+    ///
+    /// That is what Bathroom shows. With anchors 0, 17 and 34, the 0-34 distance ratio held at
+    /// 1.00 across all ten passes (1.057, 1.018, 0.908, 1.031, 0.984) while every pair involving
+    /// 17 swung between 0.43 and 3.46: two anchors the model could relate, and one it could only
+    /// guess at. TempleRing, where every frame sees the temple, folds to 0.4% with spread anchors.
+    ///
+    /// <paramref name="overlap"/> scores a pair - geometrically verified feature matches
+    /// (<c>ImagePair.InlierCount</c>) are the natural measure. The first anchor is the view with
+    /// the most overlap overall, and each next one MAXIMISES THE MINIMUM overlap with the anchors
+    /// already chosen, so the set is mutually connected rather than merely popular. That is
+    /// farthest-point sampling run backwards, which is the point.
+    /// </summary>
+    public static int[] PickAnchorsByOverlap(int viewCount, Func<int, int, int> overlap, int count)
+    {
+        if (count >= viewCount) return Enumerable.Range(0, viewCount).ToArray();
+        if (count <= 0) return Array.Empty<int>();
+
+        var totals = new long[viewCount];
+        for (int i = 0; i < viewCount; i++)
+            for (int j = 0; j < viewCount; j++)
+                if (i != j) totals[i] += Math.Max(0, overlap(i, j));
+
+        // Greedy from ONE seed is not enough, and the test that found this is worth keeping in
+        // mind: seeded at the most-connected view, greedy took the 9000-weight edge first and was
+        // then cornered into a third anchor with ZERO overlap, because its own second choice had
+        // eliminated every connected candidate. A locally best first step can leave no valid
+        // second one. So run it from every seed and keep the set with the best BOTTLENECK - the
+        // weakest link in an anchor set is the whole strength of it.
+        int[]? bestSet = null;
+        long bestBottleneck = -1, bestTotal = -1;
+
+        for (int seed = 0; seed < viewCount; seed++)
+        {
+            var picked = new List<int> { seed };
+            while (picked.Count < count)
+            {
+                int best = -1, bestMin = -1;
+                for (int i = 0; i < viewCount; i++)
+                {
+                    if (picked.Contains(i)) continue;
+                    int worst = int.MaxValue;
+                    foreach (int p in picked) worst = Math.Min(worst, Math.Max(0, overlap(i, p)));
+                    // Ties broken by total overlap, then by index, so this is deterministic.
+                    if (worst > bestMin || (worst == bestMin && best >= 0 && totals[i] > totals[best]))
+                    {
+                        bestMin = worst;
+                        best = i;
+                    }
+                }
+                if (best < 0) break;
+                picked.Add(best);
+            }
+            if (picked.Count < count) continue;
+
+            long bottleneck = long.MaxValue, total = 0;
+            for (int i = 0; i < picked.Count; i++)
+                for (int j = i + 1; j < picked.Count; j++)
+                {
+                    int w = Math.Max(0, overlap(picked[i], picked[j]));
+                    bottleneck = Math.Min(bottleneck, w);
+                    total += w;
+                }
+
+            if (bottleneck > bestBottleneck
+                || (bottleneck == bestBottleneck && total > bestTotal))
+            {
+                bestBottleneck = bottleneck;
+                bestTotal = total;
+                picked.Sort();
+                bestSet = picked.ToArray();
+            }
+        }
+
+        return bestSet ?? SpreadPick(viewCount, count);
+    }
+
+    /// <summary>
     /// <paramref name="count"/> indices spread evenly over <c>[0, total)</c>, endpoints included.
     /// </summary>
     public static int[] SpreadPick(int total, int count)

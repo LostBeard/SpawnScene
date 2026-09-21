@@ -785,9 +785,26 @@ public class MultiViewGenerationService
             groups = MultiViewChunkPlan.PlanByShape(shapes, chunkSize, anchors);
             SetStatus($"Joint depth pass 1 of {groups[0].Chunks.Count} (N={chunkSize})...");
             firstRun = await TryRunChunkAsync(images, groups[0].Chunks[0], chunkSize);
+
+            // Depths without EXTRINSICS is also a failure of this N, not a chunk to reject. The
+            // whole point of the joint pass is the shared frame, and nothing can be folded
+            // without cameras - so it backs off rather than limping on with one posed chunk.
+            if (firstRun != null && firstRun.Extrinsics == null)
+            {
+                Console.WriteLine(
+                    $"[MultiView] N={chunkSize} returned depth but no extrinsics - no shared frame " +
+                    "to fold into.");
+                firstRun.Dispose();
+                firstRun = null;
+            }
             if (firstRun != null) break;
 
-            int next = chunkSize - 1;
+            // Multiplicative, not one at a time. MEASURED on an RTX 40-series: N=8 runs and N=10
+            // dies inside the graph executor on GPU memory ("A valid external Instance reference
+            // no longer exists"), so the ceiling is real and a failed forward is expensive.
+            // Walking 10,9,8 would buy the same answer for two extra full passes.
+            int next = Math.Max(anchors + 1, chunkSize * 3 / 4);
+            if (next >= chunkSize) next = chunkSize - 1;
             Console.WriteLine(
                 $"[MultiView] the joint forward did not run at N={chunkSize}; retrying at N={next}. " +
                 "That cap is a starting point, not a measured limit - every view still gets " +

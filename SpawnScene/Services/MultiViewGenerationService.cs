@@ -642,7 +642,21 @@ public class MultiViewGenerationService
         // Bathroom's 35 views of 768x1024 would emit 6.9M splats where 6 views emitted 1.2M.
         int effectiveSub = ChooseSubsample(subsample, posed.Select(i => poses.Depths[i]!).ToList());
 
-        int refView = posed[0];
+        // The consistency screen compares a view's splats against a REFERENCE view's depth, and
+        // that only means anything inside one joint pass, where the views genuinely share a
+        // frame. Screening across passes measures the FOLD, not the geometry: a fold that lands
+        // at 10% of the camera spread cannot pass a 6% screen, so those views lose everything
+        // they have regardless of how good their depth is.
+        //
+        // MEASURED before this change, Bathroom at 14 posed views: 9 of 13 non-reference views
+        // kept 0%, and the whole scene was one view's cloud with fragments attached.
+        //
+        // So each pass screens against its own first view, exactly as the single-pass path
+        // screens against view 0, and that view goes in unscreened.
+        var refOfChunk = new Dictionary<int, int>();
+        foreach (int i in posed)
+            if (!refOfChunk.ContainsKey(poses.ChunkOf[i])) refOfChunk[poses.ChunkOf[i]] = i;
+
         var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
         int totalSplats = 0, nonRefIn = 0, nonRefKept = 0;
 
@@ -652,6 +666,7 @@ public class MultiViewGenerationService
             var (buf, count) = await _gaussianKernel.GeneratePackedGpuBufferWorldSpaceAsync(
                 poses.Depths[i]!, images[i], poses.Cameras[i]!, effectiveSub, edgeSharpness, scales[i]);
 
+            int refView = refOfChunk[poses.ChunkOf[i]];
             if (i != refView && count > 0)
             {
                 nonRefIn += count;
@@ -664,6 +679,10 @@ public class MultiViewGenerationService
             viewResults.Add((buf, count));
             totalSplats += count;
         }
+
+        Console.WriteLine(
+            $"[MultiView] screened within {refOfChunk.Count} pass(es); each pass's first view is " +
+            "its own reference and goes in unscreened");
 
         if (nonRefIn > 0)
             Console.WriteLine(
@@ -744,6 +763,16 @@ public class MultiViewGenerationService
         /// <summary>Factor carrying this view's raw depth into the reference frame.</summary>
         public required float[] FrameScales { get; init; }
 
+        /// <summary>
+        /// Which joint pass each view's depth came out of, or -1 if unposed.
+        ///
+        /// Needed because the cross-view consistency screen is only meaningful WITHIN a pass.
+        /// Two views from one forward genuinely share a frame; two views from different passes
+        /// share it only as well as the fold between them, and a fold that lands at 10% of the
+        /// camera spread cannot pass a screen calibrated at 6%.
+        /// </summary>
+        public required int[] ChunkOf { get; init; }
+
         /// <summary>Views per forward pass this device actually sustained.</summary>
         public int ChunkSize { get; set; }
         public int ChunkCount { get; set; }
@@ -785,10 +814,15 @@ public class MultiViewGenerationService
             Cameras = new CameraParams?[images.Count],
             Depths = new DepthResult?[images.Count],
             FrameScales = Enumerable.Repeat(1f, images.Count).ToArray(),
+            ChunkOf = Enumerable.Repeat(-1, images.Count).ToArray(),
         };
 
         IReadOnlyList<MultiViewChunkPlan.MultiViewShapeGroup>? groups = null;
         DepthEstimationService.MultiViewDepthResult? firstRun = null;
+
+        // One GPU upload per image for the whole run. Anchors are in EVERY chunk, so without
+        // this each of them is re-copied on the managed heap and re-uploaded once per chunk.
+        using var uploads = new DepthEstimationService.MultiViewUploadCache(_gpu);
 
         // Anchor choice is independent of N, so it is decided once, before any backoff.
         Func<IReadOnlyList<int>, int, int[]>? pickAnchors = null;
@@ -812,7 +846,7 @@ public class MultiViewGenerationService
         {
             groups = MultiViewChunkPlan.PlanByShape(shapes, chunkSize, anchors, pickAnchors);
             SetStatus($"Joint depth pass 1 of {groups[0].Chunks.Count} (N={chunkSize})...");
-            firstRun = await TryRunChunkAsync(images, groups[0].Chunks[0], chunkSize);
+            firstRun = await TryRunChunkAsync(images, groups[0].Chunks[0], chunkSize, uploads);
 
             // Depths without EXTRINSICS is also a failure of this N, not a chunk to reject. The
             // whole point of the joint pass is the shared frame, and nothing can be folded
@@ -877,7 +911,7 @@ public class MultiViewGenerationService
             var chunk = reference.Chunks[ci];
             SetStatus($"Joint depth pass {ci + 1} of {reference.Chunks.Count} (N={chunkSize})...");
 
-            var run = await TryRunChunkAsync(images, chunk, chunkSize);
+            var run = await TryRunChunkAsync(images, chunk, chunkSize, uploads);
             if (run == null)
             {
                 // One failed pass costs its own new views, not the run. Every other chunk holds
@@ -924,7 +958,7 @@ public class MultiViewGenerationService
             Console.WriteLine(
                 $"[MultiView] chunk {ci} folded: {fitLine}, depth scale {sim.Scale:F4}, " +
                 $"{chunk.NewViews.Length} new view(s)");
-            AdoptChunk(result, chunk, cams, run, sim, adoptAnchors: false);
+            AdoptChunk(result, chunk, cams, run, sim, adoptAnchors: false, chunkIndex: ci);
             run.Dispose();
         }
 
@@ -936,6 +970,9 @@ public class MultiViewGenerationService
                 "cannot be folded in either. Skipped rather than placed.");
 
         LastChunkSize = chunkSize;
+        Console.WriteLine(
+            $"[MultiView] frame uploads: {uploads.Uploads} new, {uploads.Reuses} reused " +
+            "(an anchor is in every chunk; each upload is a full RGBA frame)");
         Console.WriteLine(
             $"[MultiView] chunked poses done: {result.PosedCount}/{images.Count} views posed in one " +
             $"frame, {result.ChunksRejected} chunk(s) rejected");
@@ -999,12 +1036,14 @@ public class MultiViewGenerationService
 
     /// <summary>One joint forward, returning null rather than throwing when the device refuses it.</summary>
     private async Task<DepthEstimationService.MultiViewDepthResult?> TryRunChunkAsync(
-        IReadOnlyList<ImportedImage> images, MultiViewChunk chunk, int chunkSize)
+        IReadOnlyList<ImportedImage> images, MultiViewChunk chunk, int chunkSize,
+        DepthEstimationService.MultiViewUploadCache? uploads = null)
     {
         var views = chunk.Views.Select(v => images[v]).ToList();
         try
         {
-            var run = await _depthService.EstimateDepthMultiViewAsync(views, maxViews: chunkSize);
+            var run = await _depthService.EstimateDepthMultiViewAsync(
+                views, maxViews: chunkSize, uploads: uploads);
             if (run == null || run.DepthResults.Count < views.Count)
             {
                 Console.WriteLine(
@@ -1068,7 +1107,8 @@ public class MultiViewGenerationService
     /// </summary>
     private static void AdoptChunk(
         ChunkedPoseResult into, MultiViewChunk chunk, CameraParams?[] cams,
-        DepthEstimationService.MultiViewDepthResult run, Similarity3 sim, bool adoptAnchors)
+        DepthEstimationService.MultiViewDepthResult run, Similarity3 sim, bool adoptAnchors,
+        int chunkIndex = 0)
     {
         int from = adoptAnchors ? 0 : chunk.AnchorCount;
         for (int slot = from; slot < chunk.Views.Length; slot++)
@@ -1079,6 +1119,7 @@ public class MultiViewGenerationService
             sim.ApplyToCamera(cams[slot]!);
             into.Cameras[g] = cams[slot];
             into.FrameScales[g] = sim.Scale;
+            into.ChunkOf[g] = chunkIndex;
 
             if (slot < run.DepthResults.Count)
             {

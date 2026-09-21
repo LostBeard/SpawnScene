@@ -299,6 +299,70 @@ public class DepthEstimationService : IAsyncDisposable
     }
 
     /// <summary>
+    /// GPU-resident RGBA uploads, reused across joint passes.
+    ///
+    /// The chunked pose pass runs the same ANCHOR images in every chunk, so without this each of
+    /// them is re-copied and re-uploaded once per chunk. Owned and disposed by the caller, since
+    /// only the caller knows when the run is over.
+    /// </summary>
+    public sealed class MultiViewUploadCache : IDisposable
+    {
+        private readonly GpuService _gpu;
+        private readonly Dictionary<ImportedImage, MemoryBuffer1D<int, Stride1D.Dense>> _cache = new();
+
+        public MultiViewUploadCache(GpuService gpu) => _gpu = gpu;
+
+        public int Uploads { get; private set; }
+        public int Reuses { get; private set; }
+
+        public async Task<IReadOnlyList<ArrayView1D<int, Stride1D.Dense>>> ViewsForAsync(
+            IReadOnlyList<ImportedImage> images, int count)
+        {
+            if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+            var accelerator = _gpu.WebGPUAccelerator;
+
+            var views = new ArrayView1D<int, Stride1D.Dense>[count];
+            for (int i = 0; i < count; i++)
+            {
+                var image = images[i];
+                if (_cache.TryGetValue(image, out var existing))
+                {
+                    Reuses++;
+                    views[i] = existing.View;
+                    continue;
+                }
+
+                // One managed span -> one GPU buffer. The span is a VIEW of the existing pixels,
+                // so nothing is copied on the .NET heap on the way.
+                var pixels = System.Runtime.InteropServices.MemoryMarshal
+                    .Cast<byte, int>(image.RgbaPixels.AsSpan());
+                var buffer = accelerator.Allocate1D<int>(pixels.Length);
+                buffer.View.BaseView.CopyFromCPU(pixels);
+                _cache[image] = buffer;
+                Uploads++;
+                views[i] = buffer.View;
+            }
+            await accelerator.SynchronizeAsync();
+            return views;
+        }
+
+        public void Dispose()
+        {
+            foreach (var b in _cache.Values) b.Dispose();
+            _cache.Clear();
+        }
+    }
+
+    private static int[][] BuildManagedFrames(IReadOnlyList<ImportedImage> images, int n)
+    {
+        var frames = new int[n][];
+        for (int i = 0; i < n; i++)
+            frames[i] = System.Runtime.InteropServices.MemoryMarshal
+                .Cast<byte, int>(images[i].RgbaPixels.AsSpan()).ToArray();
+        return frames;
+    }
+
+    /// <summary>
     /// Views per joint DAv3 forward. A STARTING POINT, not a measured limit.
     ///
     /// This was a <c>const 6</c> introduced with the comment "(WebGPU memory / compile cost)" and
@@ -327,7 +391,7 @@ public class DepthEstimationService : IAsyncDisposable
     /// or less means use the default.
     /// </summary>
     public async Task<MultiViewDepthResult?> EstimateDepthMultiViewAsync(
-        IReadOnlyList<ImportedImage> images, int maxViews = 0)
+        IReadOnlyList<ImportedImage> images, int maxViews = 0, MultiViewUploadCache? uploads = null)
     {
         if (_pipe == null)
         {
@@ -347,21 +411,32 @@ public class DepthEstimationService : IAsyncDisposable
 
         try
         {
-            var rgbaFrames = new int[n][];
             var widths = new int[n];
             var heights = new int[n];
             for (int i = 0; i < n; i++)
             {
-                rgbaFrames[i] = System.Runtime.InteropServices.MemoryMarshal
-                    .Cast<byte, int>(images[i].RgbaPixels.AsSpan()).ToArray();
                 widths[i] = images[i].Width;
                 heights[i] = images[i].Height;
             }
 
             // Output at first image resolution (splat unproject expects matching WxH).
             int outW = widths[0], outH = heights[0];
-            using var mv = await _pipe.EstimateMultiViewGpuAsync(
-                rgbaFrames, widths, heights, outputWidth: outW, outputHeight: outH).ConfigureAwait(false);
+
+            // Upload once, through a cache the caller owns.
+            //
+            // This used to be MemoryMarshal.Cast(...).ToArray() per view per call - a full RGBA
+            // copy on the managed heap every time, and the chunked pose pass multiplied that by
+            // the number of chunks because the ANCHOR views are in every single one. 35 frames at
+            // 768x1024 is 105 MB resident before any copy, in a 2 GB WASM heap that has already
+            // thrown an OutOfMemoryException on this exact class of thing. Uploading each frame
+            // once and reusing the GPU buffer removes both the copies and the repeat uploads.
+            using var mv = uploads != null
+                ? await _pipe.EstimateMultiViewGpuAsync(
+                    await uploads.ViewsForAsync(images, n), widths, heights,
+                    outputWidth: outW, outputHeight: outH).ConfigureAwait(false)
+                : await _pipe.EstimateMultiViewGpuAsync(
+                    BuildManagedFrames(images, n), widths, heights,
+                    outputWidth: outW, outputHeight: outH).ConfigureAwait(false);
 
             var result = new MultiViewDepthResult
             {

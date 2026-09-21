@@ -252,6 +252,11 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.KeepOutsideReferenceView = ov2 is "1" or "true";
             if (query.TryGetValue("relthresh", out var rt) && float.TryParse(rt, out var rtf))
                 _multiViewService.ConsistencyRelThreshold = rtf;
+            // ?budget=N splats for the initialisation. More views at a FIXED budget is sparser
+            // coverage per view, not richer coverage - 34 views at 1.5M chose subsample 5 and
+            // gave each view ~31k splats where a 6-view run gave ~40k each.
+            if (query.TryGetValue("budget", out var bg) && int.TryParse(bg, out var bgi))
+                _multiViewService.SplatBudget = bgi;
             await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }

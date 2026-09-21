@@ -28,6 +28,8 @@ const ANCHORS = process.env.ANCHORS ? `&anchors=${process.env.ANCHORS}` : '';
 const NVIEWS = process.env.N ? `&n=${process.env.N}` : '';
 // EXTRA passes anything else straight through, so a new knob does not need a new harness.
 const EXTRA = process.env.EXTRA || '';
+// BUDGET=N splats for the initialisation.
+const BUDGET = process.env.BUDGET ? `&budget=${process.env.BUDGET}` : '';
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -82,7 +84,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${EXTRA}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

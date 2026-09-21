@@ -275,6 +275,10 @@ public partial class Studio : IAsyncDisposable
             // ?poslrdecay=N is how far the position rate falls over PositionLrMaxSteps; 1 = off.
             if (query.TryGetValue("poslrdecay", out var pdq) && float.TryParse(pdq, out var pdf))
                 PositionLrDecay = pdf;
+            // ?fitone=N trains against view N alone - a ceiling on what the rasteriser and its
+            // gradients can express, independent of supervision or scheduling.
+            if (query.TryGetValue("fitone", out var foq) && int.TryParse(foq, out var foi))
+                FitSingleViewIndex = foi;
             // ?skipzerograd=1 stops colour/opacity Adam stepping splats with no gradient, the
             // guard adam_geometry has always had for position. Off by default: its effect on the
             // held-out curve is the measurement.

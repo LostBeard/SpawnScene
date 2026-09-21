@@ -43,6 +43,8 @@ const GTPOSES = process.env.GTPOSES ? `&gtposes=${process.env.GTPOSES}` : '';
 const DENSIFY = process.env.DENSIFY ? `&densify=${process.env.DENSIFY}` : '';
 // OPACITYRESET=N caps every opacity every N cycles and unlocks the size prunes.
 const OPACITYRESET = process.env.OPACITYRESET ? `&opacityreset=${process.env.OPACITYRESET}` : '';
+// FITONE=N trains against view N alone: a capacity ceiling for the rasteriser.
+const FITONE = process.env.FITONE ? `&fitone=${process.env.FITONE}` : '';
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -108,7 +110,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${OPACITYRESET}${EXTRA}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${OPACITYRESET}${FITONE}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

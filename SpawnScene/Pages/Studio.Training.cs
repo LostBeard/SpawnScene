@@ -115,6 +115,12 @@ public partial class Studio
     public static int PositionLrMaxSteps { get; set; } = 30_000;
 
     /// <summary>
+    /// Train against ONE view only, -1 to disable. A capacity probe, not a reconstruction:
+    /// see the comment at its use site.
+    /// </summary>
+    public static int FitSingleViewIndex { get; set; } = -1;
+
+    /// <summary>
     /// Ceiling on the splat count during densification.
     ///
     /// Growth is unbounded by nature and a browser tab is not. Derived from the trainer key
@@ -320,6 +326,25 @@ public partial class Studio
             var supervised = new List<int>();
             for (int i = 0; i < views.Count; i++)
                 if (views[i].UsedForSupervision) supervised.Add(i);
+
+            // Fit ONE view, as a capacity test.
+            //
+            // Supervised PSNR sits at 15-18 dB on views the model trains on directly, where a
+            // working 3DGS reaches 30+. That is not a generalisation failure, it is a failure
+            // to fit data we are handing it - and the two want completely different fixes. With
+            // a single view and enough iterations the model can simply memorise the image, so
+            // whatever PSNR it plateaus at is the CEILING of the forward and backward passes.
+            // If that ceiling is ~18 dB the defect is in the renderer or the gradients, and no
+            // amount of supervision, density or scheduling will move it.
+            if (FitSingleViewIndex >= 0 && FitSingleViewIndex < views.Count)
+            {
+                supervised = new List<int> { FitSingleViewIndex };
+                Console.WriteLine(
+                    $"[Train] CAPACITY TEST: fitting view {FitSingleViewIndex} " +
+                    $"({views[FitSingleViewIndex].ImageName}) ALONE. Supervised PSNR is now a " +
+                    "ceiling on what this rasteriser and its gradients can express, not a " +
+                    "reconstruction quality. Held-out numbers are meaningless here.");
+            }
             if (supervised.Count == 0)
             {
                 Console.WriteLine("[Train] FAIL: every view is held out - nothing to fit to");

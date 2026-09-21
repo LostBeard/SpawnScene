@@ -193,6 +193,38 @@ other two.
    the 8.1% upward, and it is the only thing that can.
 3. Only then revisit the optimiser.
 
+### Fixed, same day: initialise from the sparse SfM cloud
+
+Done, and it is the reference algorithm rather than anything invented here -
+`GaussianModel.create_from_pcd` in Kerbl et al. Isotropic scale from the RMS distance to the
+three nearest neighbours, opacity 0.1, identity rotation, colour from the point. The COLMAP
+cloud was already being read by `tools/colmap_to_dataset.py` and used only for a reprojection
+check.
+
+| | depth shells | sparse cloud |
+|---|---|---|
+| splats | 1,115,136 | 79,922 |
+| mean views per splat | 0.59 | **2.52** |
+| constrained by 2+ views | 8.1% | **73.6%** |
+| never constrained | 49.5% | **7.4%** |
+| held-out init PSNR | 12.58 | **14.38** |
+| held-out final SSIM | 0.4456 | **0.5360** |
+
+Held-out SSIM ended **above** where it started, which no configuration had managed before.
+
+⚠️ **One perf trap worth remembering.** The nearest-neighbour grid sized its cells from the
+bounding box, and an SfM cloud has a handful of points triangulated out into the sky. The box
+was enormous, the cell was enormous, every real point landed in one cell, and the grid
+degenerated into the all-pairs search it exists to avoid: **349 seconds for 79,922 points**.
+Percentile bounds fixed it - 18 ms for 20,012 points with outliers, and the real cloud gives
+the same median scale to four decimals. A spatial index sized from extremes is sized by its
+outliers.
+
+The render is still blurry, and that is expected: 79,922 splats is where the reference STARTS,
+and it finishes between one and three million through adaptive density control. That step is
+now wired (`densify_accum` plus `DensifyAsync`); the decision layer had been sitting there
+tested and unused for want of a GPU signal.
+
 ## Where to look first
 
 The gap that matters most is the CAMERA layer: it is ungated, and it is where both wrong

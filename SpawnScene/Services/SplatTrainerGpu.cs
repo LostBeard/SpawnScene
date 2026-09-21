@@ -227,33 +227,27 @@ public sealed class SplatTrainerGpu : IDisposable
         const long bytesPerKey = 3 * sizeof(float);   // the widest single key-indexed binding
         long maxKeys = MaxBindingBytes / bytesPerKey;
 
-        // Fit the key budget to the scene, in BOTH directions.
+        // Clamp DOWN to what the binding allows, and no further.
         //
-        // This only ever clamped DOWN, and left the caller's default of 8 alone whenever it
-        // happened to fit - so a scene with 725k splats sat at 8 keys each, a capacity of 5.80M,
-        // while 11.18M keys were available and going unused. MEASURED on Bathroom: frames needed
-        // 5.99M and overflowed, which does not fail the run, it trains that iteration on an
-        // INCOMPLETE frame. Silently wrong gradients are worse than a refusal, and the run that
-        // did it gave back 1.6 dB of held-out quality while its supervised number climbed.
+        // I changed this to also grow keysPerSplat up to the affordable maximum, on the theory
+        // that leaving capacity unused was causing the overflow I saw. That was WRONG twice over.
+        // The overflow self-corrects: the caller measures actual peak demand after the first
+        // cycle and re-sizes with headroom ("peak demand 5,991,085 keys for 725,452 splats
+        // (8.3 per splat); re-sizing to 11 per splat with 25% headroom"), so exactly one frame
+        // is incomplete, not the run. And taking the maximum instead allocated 10.9M keys and
+        // lost the device outright.
         //
-        // How many tiles a splat covers is a property of the scene, so the right budget is
-        // "everything the binding allows", capped only to keep the buffer from being absurd for
-        // a tiny scene.
-        const int MaxKeysPerSplat = 32;
+        // Measured demand plus headroom is the right rule. "Use everything available" is not a
+        // budget either - it is the same mistake as a fixed default, pointing the other way.
         int requested = keysPerSplat;
-        int affordable = splatCount > 0
-            ? (int)Math.Min(MaxKeysPerSplat, Math.Max(1, maxKeys / splatCount))
-            : keysPerSplat;
-
-        if (affordable != keysPerSplat)
+        if ((long)splatCount * keysPerSplat > maxKeys)
         {
-            keysPerSplat = affordable;
-            string direction = affordable < requested ? "down to fit the binding" : "up to use it";
+            keysPerSplat = Math.Max(1, (int)(maxKeys / Math.Max(1, splatCount)));
             Console.WriteLine(
-                $"[Trainer] keysPerSplat {requested} -> {keysPerSplat} ({direction}): " +
-                $"{splatCount:N0} splats against {maxKeys:N0} keys in a " +
-                $"{MaxBindingBytes / (1024 * 1024)} MiB binding. Overflow is reported per frame " +
-                "and means that frame trained on incomplete gradients.");
+                $"[Trainer] keysPerSplat {requested} -> {keysPerSplat}: {splatCount:N0} splats " +
+                $"would need {(long)splatCount * requested * bytesPerKey / (1024 * 1024)} MiB for " +
+                $"one binding, over the {MaxBindingBytes / (1024 * 1024)} MiB guarantee. " +
+                "A tighter budget can overflow, which is reported per frame, not hidden.");
         }
 
         KeysPerSplat = keysPerSplat;

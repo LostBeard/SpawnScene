@@ -406,6 +406,8 @@ public partial class Studio
             int cycleN = 0;
             var curve = new List<EvalScores>();
             var probeIterations = TrainingSchedule.ProbeIterations(iterations, supervised.Count);
+            var deadViews = new List<int>();
+            var liveFraction = new float[supervised.Count];
             int totalCycles = iterations / Math.Max(1, supervised.Count);
 
             // Count, over the FIRST full cycle, how many views ever move each splat. Measured at
@@ -440,7 +442,26 @@ public partial class Studio
                 // look like a bad learning rate. Not gated on geometry: the colour/opacity
                 // stale-step fraction matters either way, and at 6 KB a call this is cheap.
                 if (it < supervised.Count) _trainer.AccumulateViewSupport(n);
-                if (it == supervised.Count - 1) await ReportViewSupportAsync(n);
+
+                // Census: does every supervised view actually produce gradients?
+                //
+                // View 0 produces NONE - measured, 0.0% of 79,922 splats, and 3,000 iterations
+                // fitting it alone moved the loss 1.4% and made PSNR worse. A view that
+                // contributes no gradient is a photograph being paid for and ignored, and
+                // nothing downstream can tell: the loss it reports is real, it just never
+                // reaches a parameter. One sync per view, once, over the first cycle.
+                if (it < supervised.Count)
+                {
+                    var st = await _trainer.ReadGradientStatsAsync(n);
+                    if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
+                        deadViews.Add(vi);
+                    liveFraction[it] = (float)(st.ColourLive / (double)Math.Max(1, n));
+                }
+                if (it == supervised.Count - 1)
+                {
+                    await ReportViewSupportAsync(n);
+                    ReportViewCensus(views, supervised, deadViews, liveFraction);
+                }
                 if (DensifyEveryIters > 0) _trainer.AccumulateDensifyStats(n);
 
                 // Density control on an ITERATION schedule, like the reference: every 100
@@ -785,6 +806,37 @@ public partial class Studio
 
         Console.WriteLine($"[Densify] {n:N0} -> {m:N0} splats: {plan}");
         return (live, m);
+    }
+
+    /// <summary>
+    /// Which supervised views produced no gradient at all, and how much of the scene each one
+    /// moves. A dead view is a photograph being paid for and ignored.
+    /// </summary>
+    static void ReportViewCensus(
+        IReadOnlyList<TrainingView> views, IReadOnlyList<int> supervised,
+        IReadOnlyList<int> dead, IReadOnlyList<float> liveFraction)
+    {
+        var sorted = liveFraction.Order().ToArray();
+        Console.WriteLine(
+            $"[Train] view census over {supervised.Count} supervised views: " +
+            $"{dead.Count} produced NO gradient; live fraction per view " +
+            $"min {sorted[0]:P2} median {sorted[sorted.Length / 2]:P2} max {sorted[^1]:P2}");
+
+        if (dead.Count == 0) return;
+
+        // Name them. "Some views are dead" is not actionable; a list of filenames is, because
+        // the next question is always what those particular cameras have in common.
+        var names = dead.Take(8).Select(v => $"{v}:{ShortName(views[v].ImageName)}");
+        Console.WriteLine(
+            $"[Train] ⚠ dead views ({dead.Count} of {supervised.Count}): {string.Join(", ", names)}" +
+            (dead.Count > 8 ? ", ..." : "") +
+            " - these contribute loss but no gradient, so they are supervision in name only");
+    }
+
+    static string ShortName(string path)
+    {
+        int i = path.LastIndexOf('/');
+        return i >= 0 ? path[(i + 1)..] : path;
     }
 
     /// <summary>

@@ -37,6 +37,8 @@ const POSLR = process.env.POSLR ? `&poslr=${process.env.POSLR}` : '';
 const HELDEVERY = process.env.HELDEVERY ? `&heldevery=${process.env.HELDEVERY}` : '';
 // SKIPZEROGRAD=1 guards the colour/opacity Adam step against zero-gradient splats.
 const SKIPZEROGRAD = process.env.SKIPZEROGRAD ? `&skipzerograd=${process.env.SKIPZEROGRAD}` : '';
+// GTPOSES=1 uses a dataset's own COLMAP poses instead of recovering them.
+const GTPOSES = process.env.GTPOSES ? `&gtposes=${process.env.GTPOSES}` : '';
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -94,7 +96,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${EXTRA}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

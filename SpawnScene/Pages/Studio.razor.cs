@@ -270,7 +270,10 @@ public partial class Studio : IAsyncDisposable
             // held-out curve is the measurement.
             if (query.TryGetValue("skipzerograd", out var sz))
                 SkipZeroGradientSteps = sz is "1" or "true";
-            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
+            // ?gtposes=1 uses the dataset's own COLMAP poses and skips pose recovery, so the
+            // optimiser can be measured without the pose error folded in.
+            bool gtPoses = query.TryGetValue("gtposes", out var gp) && gp is "1" or "true";
+            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches, gtPoses);
             return;
         }
 

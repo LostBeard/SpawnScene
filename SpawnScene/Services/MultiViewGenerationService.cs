@@ -36,8 +36,23 @@ public class MultiViewGenerationService
     /// </summary>
     public CameraParams?[] LastCameras { get; private set; } = [];
 
-    /// <summary>Where <see cref="LastCameras"/> came from: sfm, dav3 or fallback.</summary>
+    /// <summary>Where <see cref="LastCameras"/> came from: sfm, dav3, dav3-chunked or fallback.</summary>
     public string LastPoseSource { get; private set; } = "none";
+
+    /// <summary>
+    /// Publish cameras that came from outside the pose cascade, so everything downstream sees
+    /// them the same way it sees recovered ones.
+    ///
+    /// The point of this is measurement. Every Bathroom number conflates two error sources -
+    /// the poses being wrong and the optimiser being wrong - because Bathroom has no ground
+    /// truth. Deep Blending's drjohnson and playroom are real rooms WITH COLMAP poses, so
+    /// feeding those in measures the optimiser on its own.
+    /// </summary>
+    public void UseExternalCameras(CameraParams?[] cameras, string source)
+    {
+        LastCameras = cameras;
+        LastPoseSource = source;
+    }
 
     /// <summary>
     /// Which pose source to try first.

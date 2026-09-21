@@ -482,7 +482,24 @@ public class ImageImportService : IDisposable
             var imageNames = new List<string>();
             string basePath;
 
-            if (datasetName == "Skull")
+            // A manifest, if the dataset has one, so adding a dataset costs no code.
+            //
+            // Everything below this is an if-else chain with filenames pasted into C#, which
+            // means a new capture cannot be tried without editing and rebuilding the app. The
+            // COLMAP converter (tools/colmap_to_dataset.py) writes a manifest instead, and the
+            // static server reads the same file to mount the images from wherever they actually
+            // live rather than copying 168 MB into wwwroot.
+            var manifest = await TryLoadManifestAsync(datasetName);
+            if (manifest != null)
+            {
+                basePath = $"datasets/{datasetName}/{manifest.ImageDir}/";
+                imageNames.AddRange(manifest.Images);
+                Console.WriteLine(
+                    $"[Import] {datasetName}: manifest lists {imageNames.Count} images " +
+                    $"at {manifest.Width}x{manifest.Height}" +
+                    (string.IsNullOrEmpty(manifest.Poses) ? "" : $", poses in {manifest.Poses}"));
+            }
+            else if (datasetName == "Skull")
             {
                 // Skull: 01.JPG - 75.JPG directly in datasets/Skull/
                 // Every 3rd for ~25 images — good overlap for matching
@@ -650,5 +667,42 @@ public class ImageImportService : IDisposable
     {
         Clear();
         GC.SuppressFinalize(this);
+    }
+
+    /// <summary>A dataset described by a file rather than by a branch in this method.</summary>
+    public sealed class DatasetManifest
+    {
+        public string Name { get; set; } = "";
+        public string ImageDir { get; set; } = "images";
+        public List<string> Images { get; set; } = new();
+        public int Width { get; set; }
+        public int Height { get; set; }
+        /// <summary>Middlebury-format camera parameters, or empty when the capture is unposed.</summary>
+        public string Poses { get; set; } = "";
+    }
+
+    /// <summary>
+    /// Read <c>datasets/&lt;name&gt;/manifest.json</c> if it exists. A missing manifest is the
+    /// normal case for the datasets that predate it, not an error.
+    /// </summary>
+    public async Task<DatasetManifest?> TryLoadManifestAsync(string datasetName)
+    {
+        try
+        {
+            using var resp = await _http.GetAsync($"datasets/{datasetName}/manifest.json");
+            if (!resp.IsSuccessStatusCode) return null;
+            var json = await resp.Content.ReadAsStringAsync();
+            var m = System.Text.Json.JsonSerializer.Deserialize<DatasetManifest>(json,
+                new System.Text.Json.JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true,
+                });
+            return m is { Images.Count: > 0 } ? m : null;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Import] manifest for {datasetName} not usable: {ex.Message}");
+            return null;
+        }
     }
 }

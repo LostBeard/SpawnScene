@@ -24,7 +24,8 @@ public partial class Studio
 {
     private async Task RunDatasetAutotestAsync(
         string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension,
-        string posePreference = "auto", int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches)
+        string posePreference = "auto", int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches,
+        bool useGroundTruthPoses = false)
     {
         Console.WriteLine(
             $"[Dataset] starting name={datasetName} train={trainIters} geom={optimiseGeometry} " +
@@ -70,7 +71,32 @@ public partial class Studio
             {
                 t0 = DateTime.UtcNow;
                 _multiViewService.PosePreference = posePreference;
-                result = await _multiViewService.GenerateAsync(images, subsample: 2, edgeSharpness: 0.3f);
+
+                // Ground-truth poses, when the dataset ships them.
+                //
+                // This is the measurement Bathroom cannot give. Bathroom has no poses, so every
+                // number it produces mixes "our poses are wrong" with "our optimiser is wrong"
+                // and there is no way to tell them apart. A COLMAP-posed room lets the optimiser
+                // be measured on its own, against a scene of the kind this project is FOR rather
+                // than against an object on a turntable.
+                var gtCameras = useGroundTruthPoses
+                    ? await LoadGroundTruthCamerasAsync(datasetName, images)
+                    : null;
+
+                if (gtCameras != null)
+                {
+                    Console.WriteLine(
+                        $"[Dataset] using ground-truth poses for all {gtCameras.Count} views " +
+                        "- the pose cascade is skipped entirely");
+                    _multiViewService.UseExternalCameras(
+                        gtCameras.Select(c => (CameraParams?)c).ToArray(), "colmap");
+                    result = await _multiViewService.GenerateWithGroundTruthAsync(
+                        images, gtCameras, subsample: 2, edgeSharpness: 0.3f);
+                }
+                else
+                {
+                    result = await _multiViewService.GenerateAsync(images, subsample: 2, edgeSharpness: 0.3f);
+                }
             }
             finally
             {
@@ -222,6 +248,63 @@ public partial class Studio
             await Task.Delay(1200);
             Console.WriteLine($"[Dataset] READY-FOR-CAPTURE free-{name}");
             await Task.Delay(1800);
+        }
+    }
+
+    /// <summary>
+    /// Cameras from the dataset's own <c>poses.par</c>, ordered to match the loaded images.
+    ///
+    /// Reuses <see cref="WorldSpaceGeometry.ParseMiddleburyParams"/> rather than adding a second
+    /// pose parser: COLMAP stores the same quantities in the same convention (world-to-camera R
+    /// and t, OpenCV axes), so tools/colmap_to_dataset.py writes that format and this reads it.
+    /// That converter proves its own conversion by reprojection - 0.586 px mean over 7,896
+    /// observations on drjohnson - rather than trusting a quaternion ordering.
+    ///
+    /// Returns null when the dataset has no poses, which is the normal case for a handheld
+    /// capture and not an error.
+    /// </summary>
+    private async Task<List<CameraParams>?> LoadGroundTruthCamerasAsync(
+        string datasetName, IReadOnlyList<ImportedImage> images)
+    {
+        var manifest = await _importService.TryLoadManifestAsync(datasetName);
+        if (manifest == null || string.IsNullOrEmpty(manifest.Poses))
+        {
+            Console.WriteLine($"[Dataset] {datasetName} ships no poses; recovering them instead.");
+            return null;
+        }
+
+        try
+        {
+            var text = await _http.GetStringAsync($"datasets/{datasetName}/{manifest.Poses}");
+            var parsed = WorldSpaceGeometry.ParseMiddleburyParams(
+                text, manifest.Width, manifest.Height);
+            var byName = parsed.ToDictionary(
+                e => e.filename, e => e.camera, StringComparer.OrdinalIgnoreCase);
+
+            var ordered = new List<CameraParams>(images.Count);
+            foreach (var im in images)
+            {
+                if (!byName.TryGetValue(im.FileName, out var cam))
+                {
+                    Console.WriteLine(
+                        $"[Dataset] {im.FileName} has no pose in {manifest.Poses} - falling back " +
+                        "to the pose cascade rather than posing part of the capture.");
+                    return null;
+                }
+
+                // The images are decoded at a capped size; the intrinsics must come with them or
+                // every splat projects to the wrong place. ScaledTo carries the principal point
+                // as well as the focal length, which is the classic half of this to get wrong.
+                ordered.Add(cam.Width == im.Width && cam.Height == im.Height
+                    ? cam
+                    : cam.ScaledTo(im.Width, im.Height));
+            }
+            return ordered;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Dataset] could not read {manifest.Poses}: {ex.Message}");
+            return null;
         }
     }
 }

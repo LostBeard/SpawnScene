@@ -302,7 +302,11 @@ public partial class Studio
     /// </summary>
     private async Task ReportGradientHealthAsync(int n)
     {
-        float[] g = await _trainer!.ReadGradientsAsync(n);
+        // A sample, because this reports a FRACTION. See ReadGradientsAsync: the whole-buffer
+        // read is what made this probe come back empty on exactly the large scenes it matters on.
+        const int SampleSplats = 65_536;
+        int sampled = Math.Min(n, SampleSplats);
+        float[] g = await _trainer!.ReadGradientsAsync(n, SampleSplats);
         float centreQuantum = 1f / SplatTrainerGpu.FixedScaleFor(4);
         float conicQuantum = 1f / SplatTrainerGpu.FixedScaleFor(6);
 
@@ -310,7 +314,7 @@ public partial class Studio
         int liveColour = 0, liveCentre = 0, liveConic = 0;
         double sumCentre = 0;
         float maxCentre = 0, maxConic = 0;
-        for (int i = 0; i < n; i++)
+        for (int i = 0; i < sampled; i++)
         {
             int o = i * stride;
             if (g[o] != 0f || g[o + 1] != 0f || g[o + 2] != 0f) liveColour++;
@@ -340,8 +344,9 @@ public partial class Studio
         }
 
         Console.WriteLine(
-            $"[Train] gradient health: colour {liveColour * 100.0 / n:F1}% nonzero, " +
-            $"centre {liveCentre * 100.0 / n:F1}%, conic {liveConic * 100.0 / n:F1}%");
+            $"[Train] gradient health (sample of {sampled:N0} of {n:N0} splats): " +
+            $"colour {liveColour * 100.0 / sampled:F1}% nonzero, " +
+            $"centre {liveCentre * 100.0 / sampled:F1}%, conic {liveConic * 100.0 / sampled:F1}%");
         double centreCeiling = int.MaxValue * (double)centreQuantum;
         double conicCeiling = int.MaxValue * (double)conicQuantum;
         Console.WriteLine(

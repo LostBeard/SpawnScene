@@ -655,10 +655,19 @@ public sealed class SplatTrainerGpu : IDisposable
     /// Per-splat accumulated gradients, dequantised. Nine per splat, in the shader's order:
     /// colour RGB, opacity, screen centre x and y, conic a, b and c. For the GPU gate only.
     /// </summary>
-    public async Task<float[]> ReadGradientsAsync(int splatCount)
+    public async Task<float[]> ReadGradientsAsync(int splatCount, int maxSplats = 0)
     {
+        // Read a PREFIX, not the whole buffer.
+        //
+        // This is a diagnostic, and it was pulling the entire accumulator across - 725k splats
+        // is 6.5M ints, 26 MB - for a statistic about what FRACTION of splats have a gradient. A
+        // fraction does not need every element, and the whole-buffer read is also what the
+        // health probe's own comment blames for "an empty accumulator on larger scenes while the
+        // loss was demonstrably falling". A bulk readback for a summary statistic is the copy
+        // Rule 4 is about, and it took the instrument out at exactly the scale it was needed.
+        int sample = maxSplats > 0 ? Math.Min(splatCount, maxSplats) : splatCount;
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
-        int[] raw = await _gradFixed!.CopyToHostAsync<int>(0, (long)splatCount * GradsPerSplat);
+        int[] raw = await _gradFixed!.CopyToHostAsync<int>(0, (long)sample * GradsPerSplat);
         var outp = new float[raw.Length];
         for (int i = 0; i < raw.Length; i++) outp[i] = raw[i] / FixedScaleFor(i % GradsPerSplat);
         return outp;

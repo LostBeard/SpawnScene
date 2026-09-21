@@ -74,17 +74,24 @@ public partial class Studio
             // The cameras carry capture resolution, which for a phone is 13 megapixels; 35 of
             // those as float RGB targets is 5.5 GB. Training runs on a downscaled copy and the
             // intrinsics come with it (CameraParams.ScaledTo).
-            var views = scene.TrainingViews;
+            // One trainer viewport serves one shape, so take the majority shape and drop the
+            // odd ones rather than refusing the run. Real captures are not uniform: Bathroom is
+            // 34 portrait frames and one landscape, and losing that single view is obviously
+            // better than losing the other 21.
+            var allViews = scene.TrainingViews;
+            var byShape = allViews
+                .GroupBy(v => (v.Camera.Width, v.Camera.Height))
+                .OrderByDescending(g => g.Count())
+                .ToList();
+            var views = byShape[0].ToList();
             int w = views[0].Camera.Width, h = views[0].Camera.Height;
-            foreach (var v in views)
+            if (byShape.Count > 1)
             {
-                if (v.Camera.Width != w || v.Camera.Height != h)
-                {
-                    Console.WriteLine(
-                        $"[Train] FAIL: mixed resolutions ({w}x{h} vs " +
-                        $"{v.Camera.Width}x{v.Camera.Height}); one trainer viewport cannot serve both");
-                    return;
-                }
+                string others = string.Join(", ",
+                    byShape.Skip(1).Select(g => $"{g.Count()}x({g.Key.Width}x{g.Key.Height})"));
+                Console.WriteLine(
+                    $"[Train] training on the {views.Count} views that are {w}x{h}; " +
+                    $"skipping {allViews.Count - views.Count} of another shape [{others}]");
             }
 
             var (tw, th) = views[0].Camera.FitWithin(maxTrainDimension);
@@ -229,7 +236,7 @@ public partial class Studio
             if (overflowed > 0)
                 Console.WriteLine(
                     $"[Train] WARNING: {overflowed}/{iterations} iterations overflowed the key " +
-                    $"buffer (keysPerSplat={keysPerSplat}) - those gradients are incomplete");
+                    $"buffer (keysPerSplat={_trainer.KeysPerSplat}) - those gradients are incomplete");
 
             var (fitInit, fitHeld) = await EvaluateAsync(_trainer, packed, n, views, targets, box);
             Console.WriteLine($"[Train] trainer PSNR supervised {baseInit:F2} -> {fitInit:F2} dB");

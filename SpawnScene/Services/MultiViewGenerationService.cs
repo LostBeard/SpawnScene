@@ -255,7 +255,15 @@ public class MultiViewGenerationService
         }
 
         int n = Math.Min(images.Count, DepthEstimationService.MaxMultiViewImages);
-        var viewImages = images.Take(n).ToList();
+
+        // Spread the depth views across the sequence instead of taking the first n. Consecutive
+        // handheld frames are near-parallel, which is the worst case for both the joint depth
+        // model and for SfM - the TempleRing path learned this already ("first 4 consecutive
+        // frames are near-identical viewpoints -> floating near-duplicates").
+        var viewIdx = new int[n];
+        for (int i = 0; i < n; i++)
+            viewIdx[i] = n == 1 ? 0 : (int)Math.Round(i * (images.Count - 1) / (double)(n - 1));
+        var viewImages = viewIdx.Select(i => images[i]).ToList();
 
         SetStatus($"Running joint DAv3 multi-view ({n} images)...");
         var mvResult = await _depthService.EstimateDepthMultiViewAsync(viewImages);
@@ -267,41 +275,56 @@ public class MultiViewGenerationService
 
         // ── Pose selection: SfM → DAv3 extrinsics → fallback ──
         string poseSource = "fallback";
-        var cameras = new CameraParams?[n];
+        var cameras = new CameraParams?[n];           // the depth subset
+        var allPoses = new CameraParams?[images.Count];  // every image SfM could register
 
         // Try SfM on feature matches (often fails on near-parallel phone snaps — that is expected).
         try
         {
-            SetStatus("Trying SfM poses...");
+            SetStatus($"Trying SfM poses ({images.Count} images)...");
             _importService.Clear();
-            await _importService.ImportFromImagesAsync(viewImages);
+
+            // EVERY image, not just the depth subset. Depth initialisation and photometric
+            // supervision are different budgets: the depth model takes 6 views, but every view
+            // SfM can register is another photograph the optimiser can be held to. Running SfM
+            // on the subset threw away 29 of Bathroom's 35 frames and left 5 supervision views
+            // against 197k Gaussians, which is why held-out quality went backwards.
+            await _importService.ImportFromImagesAsync(images);
             if (_importService.MatchedPairs.Count > 0)
             {
                 await _sfm.ReconstructAsync();
-                int posed = 0;
-                for (int i = 0; i < n && i < _sfm.CameraPoses.Length; i++)
+                for (int i = 0; i < images.Count && i < _sfm.CameraPoses.Length; i++)
+                    allPoses[i] = _sfm.CameraPoses[i];
+
+                int posed = allPoses.Count(c => c != null);
+                int posedInSubset = 0;
+                for (int i = 0; i < n; i++)
                 {
-                    if (_sfm.CameraPoses[i] != null)
-                    {
-                        cameras[i] = _sfm.CameraPoses[i];
-                        posed++;
-                    }
+                    cameras[i] = allPoses[viewIdx[i]];
+                    if (cameras[i] != null) posedInSubset++;
                 }
-                if (posed >= 2 && _sfm.Points3D.Count >= 10)
+
+                // The depth subset still has to be posed - it is what the geometry is built
+                // from. Extra posed views only add supervision.
+                if (posedInSubset >= 2 && _sfm.Points3D.Count >= 10)
                 {
                     poseSource = "sfm";
-                    Console.WriteLine($"[MultiView] Pose source=sfm cameras={posed} pts={_sfm.Points3D.Count}");
+                    Console.WriteLine(
+                        $"[MultiView] Pose source=sfm cameras={posed}/{images.Count} " +
+                        $"({posedInSubset}/{n} of the depth views) pts={_sfm.Points3D.Count}");
                 }
                 else
                 {
                     System.Array.Clear(cameras);
-                    Console.WriteLine($"[MultiView] SfM weak (cams={posed}, pts={_sfm.Points3D.Count}) — trying DAv3 extrinsics");
+                    System.Array.Clear(allPoses);
+                    Console.WriteLine($"[MultiView] SfM weak (cams={posedInSubset}/{n} of the depth views, pts={_sfm.Points3D.Count}) — trying DAv3 extrinsics");
                 }
             }
         }
         catch (Exception ex)
         {
             System.Array.Clear(cameras);
+            System.Array.Clear(allPoses);
             Console.WriteLine($"[MultiView] SfM failed: {ex.Message} — trying DAv3 extrinsics");
         }
 
@@ -333,7 +356,9 @@ public class MultiViewGenerationService
                     cameras[i] = cam;
                 }
                 poseSource = "dav3";
-                Console.WriteLine("[MultiView] Pose source=dav3 extrinsics");
+                // DAv3 only sees the depth subset, so only those views get poses.
+                for (int i = 0; i < n; i++) allPoses[viewIdx[i]] = cameras[i];
+                Console.WriteLine($"[MultiView] Pose source=dav3 extrinsics ({n} views)");
             }
         }
 
@@ -375,7 +400,7 @@ public class MultiViewGenerationService
 
         var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
         int totalSplats = 0;
-        LastCameras = cameras;
+        LastCameras = allPoses;
         LastPoseSource = poseSource;
 
         bool useWorld = poseSource != "fallback";

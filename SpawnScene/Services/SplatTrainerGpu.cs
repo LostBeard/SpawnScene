@@ -96,6 +96,13 @@ public sealed class SplatTrainerGpu : IDisposable
 
     int _width, _height, _tilesX, _tilesY, _keyCapacity;
 
+    /// <summary>
+    /// Keys per splat actually budgeted, which may be lower than requested: the ceiling is the
+    /// storage BINDING size limit, not free memory. Reported so a log line cannot claim a
+    /// budget that was not used.
+    /// </summary>
+    public int KeysPerSplat { get; private set; }
+
     /// <summary>Keys emitted by the last render. Exceeding capacity is reported, never silent.</summary>
     public int LastKeyCount { get; private set; }
 
@@ -196,7 +203,36 @@ public sealed class SplatTrainerGpu : IDisposable
                 $"{tileCount} tiles exceeds the {1 << 14} the 18-bit depth key leaves room for " +
                 $"({width}x{height}). Reduce the training resolution or widen the key.");
 
+        // The key budget is bounded by what a single storage BINDING may be, not by free VRAM.
+        // grad_per_key is the widest thing indexed by key - 9 floats, 36 bytes - so it hits the
+        // ceiling first: 580k splats at 8 keys each is 159 MiB against a guaranteed 128 MiB,
+        // and the driver rejects the bind group with "[Invalid CommandBuffer] is invalid due to
+        // a previous error", which says nothing about which limit was exceeded.
+        //
+        // 128 MiB is the WebGPU guaranteed minimum for maxStorageBufferBindingSize. Sizing to
+        // the guarantee rather than querying means this behaves the same on every device.
+        const long MaxBindingBytes = 128L * 1024 * 1024;
+        long bytesPerKey = GradsPerSplat * sizeof(float);
+        long maxKeys = MaxBindingBytes / bytesPerKey;
+
+        int requested = keysPerSplat;
+        if ((long)splatCount * keysPerSplat > maxKeys)
+        {
+            keysPerSplat = Math.Max(1, (int)(maxKeys / Math.Max(1, splatCount)));
+            Console.WriteLine(
+                $"[Trainer] keysPerSplat {requested} -> {keysPerSplat}: {splatCount:N0} splats " +
+                $"would need {(long)splatCount * requested * bytesPerKey / (1024 * 1024)} MiB for " +
+                $"one binding, over the {MaxBindingBytes / (1024 * 1024)} MiB guarantee. " +
+                "A tighter budget can overflow, which is reported per frame, not hidden.");
+        }
+
+        KeysPerSplat = keysPerSplat;
         _keyCapacity = Math.Max(1024, splatCount * keysPerSplat);
+        if (_keyCapacity > maxKeys)
+            throw new InvalidOperationException(
+                $"{splatCount:N0} splats cannot be trained: even one key each needs " +
+                $"{_keyCapacity * bytesPerKey / (1024 * 1024)} MiB for a single binding. " +
+                "Reduce the splat count or the training resolution.");
 
         DisposeBuffers();
         _keys = accel.Allocate1D<uint>(_keyCapacity);

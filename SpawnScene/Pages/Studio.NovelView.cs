@@ -36,9 +36,13 @@ public partial class Studio
     private const string NovelViewUprightProjectName = "NovelView TempleRing (upright)";
 
     private async Task RunNovelViewAutotestAsync(string viewName, int onlyView = -1, bool globalScale = false,
-        int trainIters = 0, bool upright = false, bool optimiseGeometry = false)
+        int trainIters = 0, bool upright = false, bool optimiseGeometry = false,
+        int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches)
     {
-        Console.WriteLine($"[NovelView] starting view={viewName} train={trainIters} upright={upright} geom={optimiseGeometry}");
+        DepthEstimationService.SetSquareInput(depthPatchesPerSide);
+        Console.WriteLine(
+            $"[NovelView] starting view={viewName} train={trainIters} upright={upright} " +
+            $"geom={optimiseGeometry} patches={depthPatchesPerSide}x{depthPatchesPerSide}");
         try
         {
             // ── 0. Resolve the pose FIRST ──

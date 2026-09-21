@@ -43,6 +43,8 @@ if (process.env.UPRIGHT) EXTRA += `&upright=${process.env.UPRIGHT}`;
 // GEOM=1 also optimises position, scale and rotation. Off by default so a run can attribute a
 // change to the colours or to the geometry, never to both at once.
 if (process.env.GEOM) EXTRA += `&geom=${process.env.GEOM}`;
+// PATCHES=N binds a square NxN ViT patch grid for depth. 37 = the 518 default.
+if (process.env.PATCHES) EXTRA += `&patches=${process.env.PATCHES}`;
 const OUT = path.join(ROOT, '_shots/novelview', RUN_TAG);
 
 // GT render size. Must match the dataset images or the comparison resamples.
@@ -119,7 +121,7 @@ const imagesOnDisk = () =>
         // Wide on purpose: pipeline diagnostics ([MultiView-GT] keepRatio, per-view counts,
         // confidence retained) were being filtered out, so I was reading a metric without
         // being able to confirm the code that produced it had run.
-        if (/NovelView|MultiView|DepthGPU|Train|Trainer|farthest picks|heldout|FAIL|Error/i.test(s)) console.log('  CON', s.slice(0, 200));
+        if (/NovelView|MultiView|Depth|Train|Trainer|farthest picks|heldout|FAIL|Error/i.test(s)) console.log('  CON', s.slice(0, 200));
       }
     });
     const send = (method, params = {}) => new Promise((res, rej) => {

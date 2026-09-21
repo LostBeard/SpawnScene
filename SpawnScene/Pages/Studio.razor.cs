@@ -198,8 +198,20 @@ public partial class Studio : IAsyncDisposable
             bool upright = query.TryGetValue("upright", out var ur) && ur is "1" or "true";
             // ?geom=1 also optimises position, scale and rotation, not just colour and opacity.
             bool geom = query.TryGetValue("geom", out var gm) && gm is "1" or "true";
+            // ?patches=N binds a square NxN ViT patch grid for depth. 37 = the familiar 518.
+            int nvPatches = query.TryGetValue("patches", out var np) && int.TryParse(np, out var npi)
+                ? npi : DepthEstimationService.SafeMultiViewPatches;
             await RunNovelViewAutotestAsync(
-                viewName ?? "templeR0016", onlyView, globalScale, trainIters, upright, geom);
+                viewName ?? "templeR0016", onlyView, globalScale, trainIters, upright, geom, nvPatches);
+        }
+        else if (mode == "depthmap")
+        {
+            // Dump one depth map for visual comparison at a chosen patch budget.
+            string img = query.TryGetValue("img", out var im) ? im : "samples/living-room-hd-2.jpg";
+            int dmPatches = query.TryGetValue("patches", out var dp) && int.TryParse(dp, out var dpi)
+                ? dpi : 37;
+            bool disp = query.TryGetValue("disparity", out var ds) && ds is "1" or "true";
+            await RunDepthMapAutotestAsync(img, dmPatches, disp);
         }
         else if (mode == "dataset")
         {
@@ -210,9 +222,11 @@ public partial class Studio : IAsyncDisposable
             int maxDim = query.TryGetValue("maxdim", out var md) && int.TryParse(md, out var mdi) ? mdi : 720;
             // ?poses=dav3 keeps depth and cameras in one frame by skipping SfM.
             string poses = query.TryGetValue("poses", out var pp) ? pp : "auto";
-            // ?patches=N sets the depth model's ViT patch budget (37*37 = the old 518 square).
+            // ?patches=N binds a square NxN ViT patch grid. 37 = the familiar 518. Same
+            // meaning as the novel-view harness; it used to mean a TOTAL here, which made
+            // PATCHES=64 bind a 7x9 grid.
             int patches = query.TryGetValue("patches", out var pb) && int.TryParse(pb, out var pbi)
-                ? pbi : 37 * 37;
+                ? pbi : DepthEstimationService.SafeMultiViewPatches;
             await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }

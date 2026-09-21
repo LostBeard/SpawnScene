@@ -67,7 +67,29 @@ public class DepthEstimationService : IAsyncDisposable
     /// Defaults to the familiar 518x518. Set <see cref="MatchAspect"/> before loading to have
     /// this follow the source images instead.
     /// </summary>
-    public static (int Width, int Height) InputShape { get; private set; } = (518, 518);
+    public static (int Width, int Height) InputShape { get; private set; } = (48 * PatchSize, 48 * PatchSize);
+
+    /// <summary>
+    /// Patch grid that joint multi-view inference has been shown to survive.
+    ///
+    /// Measured on the 5K living room, single image, same code, only this changed:
+    ///   37x37 (518px) - the recessed room is one smooth blob. No pendant lamps, no stool,
+    ///                   armchairs and sofa merged. This is what "DAv3 looks worse than DAv2"
+    ///                   was: 518 simply is not enough for a room.
+    ///   64x64 (896px) - three pendant lamps resolved as separate spheres, armchairs and sofa
+    ///                   separated, the stool by the doorway appears. Detail comparable to the
+    ///                   DAv2 reference and better in places.
+    ///
+    /// 64 is NOT safe for the 6-view joint path: it loses the WebGPU device outright
+    /// ("A valid external Instance reference no longer exists") at 896x896 x 6. 48 runs on both
+    /// paths, so it is the default. Raise it for single-image work.
+    ///
+    /// TempleRing shows no reconstruction change between 37 and 48 (21.11 vs 21.00 dB held
+    /// out), which is expected - at 480x640 it only upsamples 1.2x, so it was never
+    /// resolution-limited. Absence of a gain there is not evidence against; it is the wrong
+    /// test for this.
+    /// </summary>
+    public const int SafeMultiViewPatches = 48;
 
     /// <summary>
     /// Choose an input shape with the same aspect as <paramref name="srcW"/> x
@@ -86,6 +108,21 @@ public class DepthEstimationService : IAsyncDisposable
         int ph = Math.Max(4, (int)Math.Round(Math.Sqrt(patchBudget / aspect)));
         int pw = Math.Max(4, (int)Math.Round(patchBudget / (double)ph));
         InputShape = (pw * PatchSize, ph * PatchSize);
+    }
+
+    /// <summary>
+    /// Bind a SQUARE input of <paramref name="patchesPerSide"/> x <paramref name="patchesPerSide"/>
+    /// ViT patches. 37 is the familiar 518.
+    ///
+    /// This is the safe axis to push for detail. Changing the grid's ASPECT measured 4 dB worse,
+    /// most likely because this export's position embeddings are tuned for the square grid it
+    /// was exported at; keeping it square and only scaling should interpolate far more gracefully.
+    /// Cost grows with the square of this, and attention with its fourth power.
+    /// </summary>
+    public static void SetSquareInput(int patchesPerSide)
+    {
+        int n = Math.Max(4, patchesPerSide);
+        InputShape = (n * PatchSize, n * PatchSize);
     }
 
     public async Task LoadModelAsync(string modelId)

@@ -23,11 +23,11 @@ public partial class Studio
 {
     private async Task RunDatasetAutotestAsync(
         string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension,
-        string posePreference = "auto", int depthPatchBudget = 37 * 37)
+        string posePreference = "auto", int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches)
     {
         Console.WriteLine(
             $"[Dataset] starting name={datasetName} train={trainIters} geom={optimiseGeometry} " +
-            $"maxDim={maxTrainDimension} poses={posePreference} patches={depthPatchBudget}");
+            $"maxDim={maxTrainDimension} poses={posePreference} patches={depthPatchesPerSide}");
         try
         {
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
@@ -57,8 +57,9 @@ public partial class Studio
             // an export pinned to one grid need not. So the patch budget is only worth raising
             // in SQUARE steps until that is confirmed, and the letterbox - which measured
             // BETTER - is what handles aspect.
-            if (depthPatchBudget != 37 * 37)
-                DepthEstimationService.MatchAspect(images[0].Width, images[0].Height, depthPatchBudget);
+            // Square, always: the grid ASPECT is the variable that measured 4 dB worse, while
+            // scaling a square grid is what recovered the detail in the living-room maps.
+            DepthEstimationService.SetSquareInput(depthPatchesPerSide);
 
             // -- 2. Poses + depth init, through the ordinary cascade --
             void OnStatus() => Console.WriteLine($"[Dataset] {_multiViewService.Status}");

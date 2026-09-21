@@ -39,6 +39,21 @@ public class MultiViewGenerationService
     /// <summary>Where <see cref="LastCameras"/> came from: sfm, dav3 or fallback.</summary>
     public string LastPoseSource { get; private set; } = "none";
 
+    /// <summary>
+    /// Which pose source to try first.
+    ///
+    /// The cascade preferred SfM, and that is arguably backwards when the depth comes from a
+    /// JOINT multi-view model. DAv3's joint inference puts every view's depth in ONE shared
+    /// frame - that is the whole point of it - and it reports the extrinsics for that frame.
+    /// Taking the depths from DAv3 and the cameras from SfM means the geometry and the
+    /// cameras live in different coordinate systems at different scales, reconciled by a
+    /// median depth ratio. On Bathroom that produced a cloud that rendered as soup.
+    ///
+    /// "dav3" keeps depth and poses in the same frame. "sfm" is the old behaviour. "auto"
+    /// prefers SfM and falls back, which is what shipped.
+    /// </summary>
+    public string PosePreference { get; set; } = "auto";
+
     public MultiViewGenerationService(
         SpawnJSRuntime js,
         GpuService gpu,
@@ -278,9 +293,17 @@ public class MultiViewGenerationService
         var cameras = new CameraParams?[n];           // the depth subset
         var allPoses = new CameraParams?[images.Count];  // every image SfM could register
 
+        bool preferDav3 = string.Equals(PosePreference, "dav3", StringComparison.OrdinalIgnoreCase);
+        if (preferDav3)
+            Console.WriteLine(
+                "[MultiView] Pose preference=dav3: skipping SfM so the depths and the cameras " +
+                "stay in the SAME frame (joint DAv3 inference already shares one).");
+
         // Try SfM on feature matches (often fails on near-parallel phone snaps — that is expected).
         try
         {
+            if (preferDav3) throw new OperationCanceledException("dav3 preferred");
+
             SetStatus($"Trying SfM poses ({images.Count} images)...");
             _importService.Clear();
 
@@ -320,6 +343,10 @@ public class MultiViewGenerationService
                     Console.WriteLine($"[MultiView] SfM weak (cams={posedInSubset}/{n} of the depth views, pts={_sfm.Points3D.Count}) — trying DAv3 extrinsics");
                 }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Preference, not a failure.
         }
         catch (Exception ex)
         {
@@ -371,18 +398,31 @@ public class MultiViewGenerationService
         {
             depthScales = ComputeHybridDepthScales(cameras, mvResult.DepthResults, viewImages);
 
+            // Only when SfM supplied the poses. If DAv3 did, its depths are already in that
+            // same frame and rescaling them to a sparse SfM cloud would reintroduce exactly the
+            // frame mismatch this is meant to avoid.
             if (poseSource == "sfm" && _sfm.Points3D.Count >= 10)
             {
                 try
                 {
-                    float sfmScale = await FitSfmSparseDepthScaleAsync(
+                    var (perView, global, support) = await FitSfmDepthScalesAsync(
                         cameras, mvResult.DepthResults, _sfm.Points3D);
-                    if (sfmScale > 0.05f && sfmScale < 50f)
+
+                    int fitted = 0;
+                    for (int i = 0; i < n; i++)
                     {
-                        for (int i = 0; i < n; i++)
-                            depthScales[i] *= sfmScale;
-                        Console.WriteLine($"[MultiView] SfM sparse depth scale={sfmScale:F4} (pts={_sfm.Points3D.Count})");
+                        float sc = perView[i];
+                        if (!(sc > 0.05f && sc < 50f)) sc = global;
+                        if (!(sc > 0.05f && sc < 50f)) continue;
+                        depthScales[i] *= sc;
+                        if (support[i] >= 12) fitted++;
                     }
+                    Console.WriteLine(
+                        $"[MultiView] SfM depth scale: {fitted}/{n} views fitted individually, " +
+                        $"global={global:F4}, per-view=[" +
+                        string.Join(", ", Enumerable.Range(0, n)
+                            .Select(i => $"{perView[i]:F3}({support[i]})")) + "] (pts=" +
+                        $"{_sfm.Points3D.Count})");
                 }
                 catch (Exception ex)
                 {
@@ -406,8 +446,29 @@ public class MultiViewGenerationService
         bool useWorld = poseSource != "fallback";
         int nonRefIn = 0, nonRefKept = 0;
 
+
+        int unposedSkipped = 0;
         for (int i = 0; i < mvResult.DepthResults.Count && i < n; i++)
         {
+            // A view with no recovered pose must not contribute to a WORLD-SPACE merge.
+            //
+            // The fallback here was viewImages[i].EstimatedCamera - a default camera invented
+            // from the image dimensions - which is fine when every view is camera-local and
+            // catastrophic when the others are in a shared world frame: the cloud is placed
+            // by guesswork and merged in as though it were measured. On Bathroom, SfM posed
+            // only 4 of the 6 depth views and the other two contributed 393,216 splats, 67% of
+            // the scene, from fabricated poses. That is most of why it rendered as soup.
+            //
+            // Dropping them loses coverage. Inventing them loses the reconstruction.
+            if (useWorld && cameras[i] == null)
+            {
+                unposedSkipped++;
+                Console.WriteLine(
+                    $"[MultiView] View {i} ({viewImages[i].FileName}) has no pose - skipped. " +
+                    "Unprojecting it would place a full cloud from a camera that was guessed.");
+                continue;
+            }
+
             SetStatus($"Generating splats: {viewImages[i].FileName} ({i + 1}/{n}, pose={poseSource})...");
             var depth = mvResult.DepthResults[i];
             var cam = cameras[i] ?? viewImages[i].EstimatedCamera;
@@ -527,11 +588,30 @@ public class MultiViewGenerationService
     /// <summary>
     /// Fit global MDE→metric scale from SfM sparse points: median(Z_cam / inv(normalized MDE)).
     /// </summary>
-    private static async Task<float> FitSfmSparseDepthScaleAsync(
+    /// <summary>
+    /// Metric scale for each view's monocular depth, from the SfM points it can see.
+    ///
+    /// Monocular depth is only defined up to scale, and that scale is NOT shared between views -
+    /// the network sees each photograph independently. Pooling every camera's ratios into one
+    /// median, which is what this used to return, forces one number onto views that genuinely
+    /// disagree, and the result is a union of shells that do not line up. On Bathroom the
+    /// cross-view consistency screen then threw two of six views away entirely and kept 2% of a
+    /// third, and what survived rendered as soup.
+    ///
+    /// Each view is now fitted against the SfM points IT can see. Views with too few points
+    /// fall back to the pooled median, which is still better than nothing and is reported as a
+    /// fallback rather than passed off as a fit.
+    ///
+    /// Returns one scale per camera; 1.0 where nothing could be fitted.
+    /// </summary>
+    private static async Task<(float[] PerView, float Global, int[] Support)> FitSfmDepthScalesAsync(
         CameraParams?[] cameras, List<DepthResult> depths, List<ReconstructedPoint> points)
     {
+        var perViewRatios = new List<float>[cameras.Length];
+        for (int i = 0; i < cameras.Length; i++) perViewRatios[i] = new List<float>();
+
         var ratios = new List<float>();
-        int maxPts = Math.Min(points.Count, 400);
+        int maxPts = Math.Min(points.Count, 4000);
 
         for (int ci = 0; ci < cameras.Length && ci < depths.Count; ci++)
         {
@@ -565,13 +645,37 @@ public class MultiViewGenerationService
 
                 float raw = host[iy * w + ix];
                 if (raw < 1e-4f) continue;
-                ratios.Add(zCam / raw);
+                float r = zCam / raw;
+                ratios.Add(r);
+                perViewRatios[ci].Add(r);
             }
         }
 
-        if (ratios.Count < 8) return 1.0f;
-        ratios.Sort();
-        return ratios[ratios.Count / 2];
+        float global = 1.0f;
+        if (ratios.Count >= 8)
+        {
+            ratios.Sort();
+            global = ratios[ratios.Count / 2];
+        }
+
+        // A median needs enough samples to beat the outliers that a sparse cloud is full of.
+        const int MinSupport = 12;
+        var scales = new float[cameras.Length];
+        var support = new int[cameras.Length];
+        for (int i = 0; i < cameras.Length; i++)
+        {
+            support[i] = perViewRatios[i].Count;
+            if (perViewRatios[i].Count >= MinSupport)
+            {
+                perViewRatios[i].Sort();
+                scales[i] = perViewRatios[i][perViewRatios[i].Count / 2];
+            }
+            else
+            {
+                scales[i] = global;
+            }
+        }
+        return (scales, global, support);
     }
 
     /// <summary>

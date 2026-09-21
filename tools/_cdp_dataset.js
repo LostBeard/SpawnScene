@@ -19,6 +19,8 @@ const NAME = process.argv[2] || 'Bathroom';
 const TRAIN = parseInt(process.argv[3] || '1600', 10);
 const GEOM = process.env.GEOM ? `&geom=${process.env.GEOM}` : '';
 const MAXDIM = process.env.MAXDIM ? `&maxdim=${process.env.MAXDIM}` : '';
+// POSES=dav3 keeps depth and cameras in one frame by skipping SfM entirely.
+const POSES = process.env.POSES ? `&poses=${process.env.POSES}` : '';
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -73,7 +75,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

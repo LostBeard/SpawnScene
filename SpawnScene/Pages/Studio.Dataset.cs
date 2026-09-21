@@ -22,11 +22,12 @@ namespace SpawnScene.Pages;
 public partial class Studio
 {
     private async Task RunDatasetAutotestAsync(
-        string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension)
+        string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension,
+        string posePreference = "auto")
     {
         Console.WriteLine(
             $"[Dataset] starting name={datasetName} train={trainIters} geom={optimiseGeometry} " +
-            $"maxDim={maxTrainDimension}");
+            $"maxDim={maxTrainDimension} poses={posePreference}");
         try
         {
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
@@ -51,6 +52,7 @@ public partial class Studio
             try
             {
                 t0 = DateTime.UtcNow;
+                _multiViewService.PosePreference = posePreference;
                 result = await _multiViewService.GenerateAsync(images, subsample: 2, edgeSharpness: 0.3f);
             }
             finally

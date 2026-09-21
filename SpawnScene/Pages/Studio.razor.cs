@@ -208,7 +208,9 @@ public partial class Studio : IAsyncDisposable
             int iters = query.TryGetValue("train", out var dt) && int.TryParse(dt, out var dti) ? dti : 0;
             bool dgeom = query.TryGetValue("geom", out var dg) && dg is "1" or "true";
             int maxDim = query.TryGetValue("maxdim", out var md) && int.TryParse(md, out var mdi) ? mdi : 720;
-            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim);
+            // ?poses=dav3 keeps depth and cameras in one frame by skipping SfM.
+            string poses = query.TryGetValue("poses", out var pp) ? pp : "auto";
+            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses);
             return;
         }
 

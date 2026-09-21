@@ -510,6 +510,10 @@ public class DepthToGaussianKernel
     /// <summary>
     /// CPU-oracle twin of the GPU consistency fuse — delegates to
     /// <see cref="WorldSpaceGeometry.ShouldKeepSplatVsRef"/>.
+    ///
+    /// 🔴 <b>The GPU kernel below does NOT call this.</b> It reimplements the same rule inline,
+    /// so the two can drift and the tests only cover this one. Changing the keep/reject policy
+    /// here alone is a no-op on every real scene - verified the hard way.
     /// </summary>
     public static bool ShouldKeepSplatVsRef(
         float zCam, float refDepthRaw, float splatConf, float refConf,

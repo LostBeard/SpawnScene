@@ -294,12 +294,32 @@ public class CameraController : IDisposable
         _sceneManager.Camera = camera;
     }
 
+    /// <summary>
+    /// Which way is up for this controller. +Y, because the yaw/pitch model is defined about it
+    /// (<see cref="WorldSpaceGeometry.ForwardFromYawPitch"/>) - this is not a free parameter yet,
+    /// it is a named assumption.
+    ///
+    /// It used to be a bare Vector3.UnitY literal inside UpdateCamera, and that cost a session.
+    /// SetPose carefully computes a capture camera's true up INCLUDING its roll, and then the
+    /// first mouse move or WASD step called UpdateCamera and replaced it with world +Y. A
+    /// reconstruction has no gravity in it - DAv3 and COLMAP both recover geometry up to an
+    /// arbitrary rotation - so Bathroom came out with its up at essentially -Y and the room
+    /// rendered on its side and tumbled when the camera moved, while every number stayed good,
+    /// because the TRAINER renders from the real camera basis and only the viewer forces this.
+    ///
+    /// The fix is upstream: MultiViewGenerationService.AlignToGravityAsync stands the
+    /// reconstruction up so +Y is true. This name exists so the assumption is visible at the
+    /// point it is made, and so the day this controller needs to support a scene that cannot be
+    /// aligned, there is one place to change rather than a literal to go hunting for.
+    /// </summary>
+    public Vector3 WorldUp { get; } = Vector3.UnitY;
+
     private void UpdateCamera()
     {
         var camera = _sceneManager.Camera;
         camera.Position = _position;
         camera.Forward = Forward;
-        camera.Up = Vector3.UnitY;
+        camera.Up = WorldUp;
         _sceneManager.Camera = camera;
     }
 

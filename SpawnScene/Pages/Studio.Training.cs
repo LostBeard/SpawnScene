@@ -592,12 +592,17 @@ public partial class Studio
             return (float)(Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2));
         }
 
+        // Never grow past what the trainer can actually hold. Resize clamps keysPerSplat down
+        // to fit the binding, and a clamped budget overflows - so splats beyond this point do
+        // not buy detail, they buy frames rendered from an incomplete key list.
+        int budget = Math.Min(MaxDensifiedSplats, _trainer.MaxTrainableSplats(_trainer.KeysPerSplat));
+
         // The size prunes are unlocked by the first opacity reset, exactly as in the reference.
         // Before it, a large Gaussian may simply not have been given the chance to shrink; after
         // it, one that is still large and still faint is not going to earn its place.
         var plan = densify
             ? SplatDensityControl.Decide(
-                splats, stats, sceneExtent, _hadOpacityReset, NextNormal, MaxDensifiedSplats)
+                splats, stats, sceneExtent, _hadOpacityReset, NextNormal, budget)
             : new SplatDensityControl.Plan();
 
         // Always report, including - especially including - when the answer is "nothing".

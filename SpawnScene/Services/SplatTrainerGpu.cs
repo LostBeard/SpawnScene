@@ -339,6 +339,62 @@ public sealed class SplatTrainerGpu : IDisposable
     /// refuses to write past capacity and the host reports the overflow rather than rendering
     /// a silently truncated scene.
     /// </summary>
+    /// <summary>
+    /// The most splats this trainer can hold at a given key budget.
+    ///
+    /// Densification must not grow past it. Resize clamps keysPerSplat downwards to fit, and a
+    /// clamped budget overflows - so growing beyond this does not buy splats, it buys frames
+    /// trained on incomplete renders.
+    /// </summary>
+    public int MaxTrainableSplats(int keysPerSplat) =>
+        (int)Math.Max(1, MaxStorageBindingBytes() / (3 * sizeof(float)) / Math.Max(1, keysPerSplat));
+
+    long _maxBindingBytes;
+
+    /// <summary>
+    /// The device's real <c>maxStorageBufferBindingSize</c>, not the spec minimum.
+    ///
+    /// 128 MiB is what WebGPU GUARANTEES; it is not what hardware provides. Sizing to the
+    /// guarantee is the right default for a shader that must behave identically everywhere, but
+    /// here it is a hard ceiling on the splat count: at the ~50 keys per splat this scene
+    /// actually demands, 128 MiB stops the reconstruction near 220,000 splats while the
+    /// reference finishes a room in the millions. That is the guarantee deciding the quality.
+    ///
+    /// So ask. The guarantee stays the floor, so a device that reports something smaller or
+    /// nothing at all behaves exactly as before.
+    /// </summary>
+    long MaxStorageBindingBytes()
+    {
+        const long Guaranteed = 128L * 1024 * 1024;
+        if (_maxBindingBytes > 0) return _maxBindingBytes;
+        _maxBindingBytes = Guaranteed;
+        try
+        {
+            using var limits = _device?.JSRef?.Get<SpawnDev.SpawnJS.SpawnJSObject>("limits");
+            double? reported = limits?.JSRef?.Get<double?>("maxStorageBufferBindingSize");
+            if (reported is > 0)
+            {
+                long bytes = (long)reported.Value;
+                if (bytes > _maxBindingBytes)
+                {
+                    _maxBindingBytes = bytes;
+                    Console.WriteLine(
+                        $"[Trainer] device maxStorageBufferBindingSize is " +
+                        $"{bytes / (1024 * 1024)} MiB, not the {Guaranteed / (1024 * 1024)} MiB " +
+                        $"guarantee - key capacity scales with it");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // A device that will not answer keeps the guarantee. Never fatal: this is an
+            // optimisation over a value that is already correct.
+            Console.WriteLine($"[Trainer] could not read device limits ({ex.Message}); " +
+                              "using the 128 MiB guarantee");
+        }
+        return _maxBindingBytes;
+    }
+
     public void Resize(int width, int height, int splatCount, int keysPerSplat = 8)
     {
         var accel = _gpu.WebGPUAccelerator;
@@ -364,7 +420,7 @@ public sealed class SplatTrainerGpu : IDisposable
         //
         // 128 MiB is the WebGPU guaranteed minimum for maxStorageBufferBindingSize. Sizing to
         // the guarantee rather than querying means this behaves the same on every device.
-        const long MaxBindingBytes = 128L * 1024 * 1024;
+        long MaxBindingBytes = MaxStorageBindingBytes();
         const long bytesPerKey = 3 * sizeof(float);   // the widest single key-indexed binding
         long maxKeys = MaxBindingBytes / bytesPerKey;
 
@@ -387,7 +443,7 @@ public sealed class SplatTrainerGpu : IDisposable
             Console.WriteLine(
                 $"[Trainer] keysPerSplat {requested} -> {keysPerSplat}: {splatCount:N0} splats " +
                 $"would need {(long)splatCount * requested * bytesPerKey / (1024 * 1024)} MiB for " +
-                $"one binding, over the {MaxBindingBytes / (1024 * 1024)} MiB guarantee. " +
+                $"one binding, over the {MaxBindingBytes / (1024 * 1024)} MiB this device allows. " +
                 "A tighter budget can overflow, which is reported per frame, not hidden.");
         }
 

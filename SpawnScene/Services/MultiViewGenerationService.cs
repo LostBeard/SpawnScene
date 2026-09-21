@@ -2164,6 +2164,11 @@ public class MultiViewGenerationService
         }
         await accelerator.SynchronizeAsync();
 
+        // The monocular fallback is an EARLY RETURN out of GenerateWithGroundTruthAsync, so the
+        // alignment further down that method never runs for it. Same treatment here or a posed
+        // room still arrives on its side.
+        await AlignToGravityAsync(merged, actualTotal, cameras);
+
         SetStatus($"GT complete: {actualTotal:N0} splats pose=gt");
         Console.WriteLine($"[MultiView-GT] Total: {actualTotal:N0} pose=gt (monocular)");
         return (merged, actualTotal);

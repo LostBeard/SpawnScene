@@ -305,10 +305,20 @@ public partial class Studio
         var poses = _multiViewService.LastCameras;
         string poseSource = _multiViewService.LastPoseSource;
 
-        // A whitelist of source STRINGS silently drops any new one: "dav3-chunked" is the same
-        // DAv3 extrinsics in the same world frame, from several passes instead of one, and it
-        // got skipped entirely for not being spelled like the two that existed.
-        if (poseSource is not ("sfm" or "dav3" or "dav3-chunked") || poses.Length == 0)
+        // Reject the known-bad source, do not whitelist the known-good ones.
+        //
+        // This WAS a whitelist, and it silently dropped "dav3-chunked" - the same DAv3
+        // extrinsics in the same world frame, from several passes instead of one - because it
+        // was not spelled like the two entries that already existed. I added that string to the
+        // list and wrote a comment here saying a whitelist drops any new one. Then I added
+        // "colmap" and it happened again, same place, same day, and a 397-second run produced no
+        // training at all. Adding an entry was never the fix.
+        //
+        // The semantics are a rejection, not an admission: a FALLBACK pose is a placeholder
+        // invented from image dimensions and nothing else is. Any source that recovered real
+        // poses or was handed them is trainable, including sources that do not exist yet.
+        bool posesArePlaceholders = poseSource is "fallback" or "none" or "";
+        if (posesArePlaceholders || poses.Length == 0)
         {
             Console.WriteLine(
                 $"[Studio] pose source '{poseSource}' gives nothing to train against - the " +

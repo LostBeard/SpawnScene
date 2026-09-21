@@ -344,6 +344,103 @@ public class MultiViewChunkPlanTests
             "and the camera is aimed somewhere else entirely");
     }
 
+    /// <summary>
+    /// One anchor placed somewhere else entirely must not move the other five.
+    ///
+    /// This is not hypothetical. MEASURED on Bathroom: across ten passes the distance ratio
+    /// between anchors 0 and 34 held at 1.00 (1.057, 1.018, 0.908, 1.031, 0.984) while every
+    /// pair involving anchor 17 swung between 0.43 and 3.46 - the model put ONE camera somewhere
+    /// different each time it saw it in different company. Least squares answers that by
+    /// spreading the bad anchor's error evenly over the good ones.
+    /// </summary>
+    [Test]
+    public void RobustFit_IgnoresTheOneAnchorThatDisagrees()
+    {
+        var truth = new Similarity3(
+            1.8f, Matrix4x4.CreateFromYawPitchRoll(0.4f, 0.9f, -0.7f), new Vector3(2f, -3f, 5f));
+
+        var reference = new Dictionary<int, CameraParams>();
+        var world = new[]
+        {
+            new Vector3(0, 0, 0), new Vector3(1, 0, 0), new Vector3(0, 1, 0),
+            new Vector3(0, 0, 1), new Vector3(1, 1, 0), new Vector3(0.4f, -0.7f, 0.9f),
+        };
+        for (int i = 0; i < world.Length; i++) reference[i] = CamAt(world[i]);
+
+        var chunk = new MultiViewChunk(new[] { 0, 1, 2, 3, 4, 5 }, AnchorCount: 6);
+        var inverse = InverseSimilarity(truth);
+        var cams = world.Select(w => (CameraParams?)CamAt(inverse.Apply(w))).ToArray();
+
+        // Anchor 3 comes back somewhere else entirely, as view 17 did.
+        cams[3] = CamAt(inverse.Apply(world[3]) + new Vector3(4.2f, -3.1f, 2.7f));
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+                chunk, cams, reference,
+                out var sim, out float rms, out int used, out float spread, out int inliers),
+            Is.True, "five agreeing anchors are a clear majority");
+
+        Assert.That(used, Is.EqualTo(6), "all six were available");
+        Assert.That(inliers, Is.EqualTo(5), "exactly one anchor disagrees and must be dropped");
+        Assert.That(sim.Scale, Is.EqualTo(truth.Scale).Within(1e-3f));
+
+        var probe = new Vector3(0.8f, 0.2f, -0.5f);
+        Assert.That(Vector3.Distance(sim.Apply(probe), truth.Apply(probe)), Is.LessThan(1e-3f),
+            "the recovered transform must be the one the five good anchors describe");
+        Assert.That(rms, Is.LessThan(0.02f * spread));
+    }
+
+    /// <summary>
+    /// Red check for the test above: the plain least-squares fit on the SAME data is wrong.
+    /// Without this, the robust fit could be doing nothing and the test would still pass.
+    /// </summary>
+    [Test]
+    public void RedCheck_LeastSquaresOnTheSameDataIsDraggedOff()
+    {
+        var truth = new Similarity3(
+            1.8f, Matrix4x4.CreateFromYawPitchRoll(0.4f, 0.9f, -0.7f), new Vector3(2f, -3f, 5f));
+        var world = new[]
+        {
+            new Vector3(0, 0, 0), new Vector3(1, 0, 0), new Vector3(0, 1, 0),
+            new Vector3(0, 0, 1), new Vector3(1, 1, 0), new Vector3(0.4f, -0.7f, 0.9f),
+        };
+        var inverse = InverseSimilarity(truth);
+        var src = world.Select(w => inverse.Apply(w)).ToList();
+        src[3] = inverse.Apply(world[3]) + new Vector3(4.2f, -3.1f, 2.7f);
+
+        Assert.That(WorldSpaceGeometry.TryUmeyamaSimilarity(
+            src, world.ToList(), out float s, out _, out _, out float rms), Is.True);
+
+        Assert.That(MathF.Abs(s - truth.Scale), Is.GreaterThan(0.05f),
+            "one bad anchor in six visibly corrupts the least-squares scale");
+        Assert.That(rms, Is.GreaterThan(0.1f),
+            "and leaves a residual the robust fit does not have");
+    }
+
+    [Test]
+    public void RobustFit_RefusesWhenNoThreeAnchorsAgreeWithTheRest()
+    {
+        var reference = new Dictionary<int, CameraParams>
+        {
+            [0] = CamAt(new Vector3(0, 0, 0)),
+            [1] = CamAt(new Vector3(1, 0, 0)),
+            [2] = CamAt(new Vector3(0, 1, 0)),
+            [3] = CamAt(new Vector3(0, 0, 1)),
+        };
+        var chunk = new MultiViewChunk(new[] { 0, 1, 2, 3 }, AnchorCount: 4);
+
+        // Scattered with no consistent similarity anywhere in them.
+        var cams = new CameraParams?[]
+        {
+            CamAt(new Vector3(0, 0, 0)), CamAt(new Vector3(9f, 0.2f, -4f)),
+            CamAt(new Vector3(-6f, 3f, 8f)), CamAt(new Vector3(0.1f, -11f, 2f)),
+        };
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+                chunk, cams, reference, out _, out _, out _, out _, out int inliers),
+            Is.False, "no majority agrees, so there is nothing to trust");
+        Assert.That(inliers, Is.LessThan(MultiViewChunkPlan.MinAnchors + 1));
+    }
+
     [Test]
     public void FitChunkToReference_RefusesTooFewSurvivingAnchors()
     {

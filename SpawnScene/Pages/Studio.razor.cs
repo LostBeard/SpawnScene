@@ -237,6 +237,15 @@ public partial class Studio : IAsyncDisposable
             // PATCHES=64 bind a 7x9 grid.
             int patches = query.TryGetValue("patches", out var pb) && int.TryParse(pb, out var pbi)
                 ? pbi : DepthEstimationService.SafeMultiViewPatches;
+            // ?anchors=N views shared by every chunked pass. Three is the minimum that determines
+            // a similarity, but a minimal sample always fits itself, so four is the fewest that
+            // can DETECT a bad anchor and five the fewest that can identify which.
+            if (query.TryGetValue("anchors", out var an) && int.TryParse(an, out var ani))
+                _multiViewService.ChunkAnchorCount = ani;
+            // ?n=N views per joint forward. The default is a starting point, not a measured
+            // limit; the first pass proves whatever is asked for on this device and backs off.
+            if (query.TryGetValue("n", out var nn) && int.TryParse(nn, out var nni))
+                DepthEstimationService.MaxMultiViewImages = nni;
             await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }

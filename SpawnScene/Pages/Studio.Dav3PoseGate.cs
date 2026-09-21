@@ -228,14 +228,23 @@ public partial class Studio
             }
         if (ratios.Count < 2) return;
 
-        float mean = ratios.Average();
-        float disagree = (ratios.Max() - ratios.Min()) / mean;
+        // Summarise ROBUSTLY. (max-min)/mean is decided entirely by the single worst pair, which
+        // on six views means one pair out of fifteen: it called TempleRing's ratios - clustered
+        // between 1.59 and 1.74 - a 25.7% disagreement, and "no similarity can absorb this",
+        // when the batch-to-batch fold on the same data was in fact exact to 0.4%. A statistic
+        // that a lone outlier can swing is not one to put a verdict on.
+        var sorted = ratios.OrderBy(r => r).ToList();
+        float median = sorted[sorted.Count / 2];
+        var deviations = sorted.Select(r => Math.Abs(r - median)).OrderBy(d => d).ToList();
+        float mad = deviations[deviations.Count / 2];          // median absolute deviation
+        float relMad = median > 1e-6f ? mad / median : float.NaN;
+        float worst = Math.Max(
+            Math.Abs(sorted[^1] - median), Math.Abs(sorted[0] - median)) / Math.Max(median, 1e-6f);
+
         Console.WriteLine(
             $"[Dav3Pose] {label} distance ratios: {string.Join(" ", parts)} " +
-            $"(mean {mean:F3}, spread {disagree:P1}) -> " +
-            (disagree < 0.02f
-                ? "a pure rescale; a similarity absorbs this"
-                : "a SHAPE difference; no similarity can absorb this"));
+            $"({ratios.Count} pairs; median {median:F3}, typical deviation {relMad:P1}, " +
+            $"worst pair {worst:P1})");
     }
 
     private static float MeanSpread(IReadOnlyList<Vector3> pts)

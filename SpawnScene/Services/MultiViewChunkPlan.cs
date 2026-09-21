@@ -91,6 +91,14 @@ public static class MultiViewChunkPlan
     public const float MaxAnchorRmsFraction = 0.15f;
 
     /// <summary>
+    /// How far one anchor may sit from where a candidate transform puts it, as a fraction of the
+    /// anchor spread, and still count as agreeing with it. Same units and same reasoning as
+    /// <see cref="MaxAnchorRmsFraction"/>; separate because one is a per-anchor test during the
+    /// search and the other is the whole fit's acceptance afterwards.
+    /// </summary>
+    public const float InlierAnchorFraction = 0.15f;
+
+    /// <summary>
     /// Split <paramref name="viewCount"/> images into chunks of at most <paramref name="chunkSize"/>,
     /// each carrying the same <paramref name="anchorCount"/> anchor views.
     ///
@@ -247,11 +255,41 @@ public static class MultiViewChunkPlan
         IReadOnlyList<CameraParams?> chunkCameras,
         IReadOnlyDictionary<int, CameraParams> reference,
         out Similarity3 similarity, out float rms, out int anchorsUsed, out float anchorSpread)
+        => TryFitChunkToReference(chunk, chunkCameras, reference,
+            out similarity, out rms, out anchorsUsed, out anchorSpread, out _);
+
+    /// <summary>
+    /// As above, fitted ROBUSTLY, and reporting how many anchors the transform actually agrees
+    /// with (<paramref name="inlierCount"/>).
+    ///
+    /// Least squares assumes every anchor is equally trustworthy. MEASURED on Bathroom, they are
+    /// not: across ten passes the distance ratio between anchors 0 and 34 stayed at 1.00 (1.057,
+    /// 1.018, 0.908, 1.031, 0.984) while every pair involving anchor 17 swung between 0.43 and
+    /// 3.46. One camera was being placed somewhere different each time the model saw it in
+    /// different company, and least squares answers that by spreading its error evenly over the
+    /// anchors that were RIGHT - which is how one bad view drags a whole chunk out of position
+    /// while the residual still looks survivable.
+    ///
+    /// So: fit on every three-anchor subset, score each candidate by how many of ALL the anchors
+    /// it agrees with, and refit on the winner's inliers. The search is exhaustive rather than
+    /// randomised - C(8,3) is 56 - so it is deterministic, which a diagnostic has to be.
+    ///
+    /// At exactly <see cref="MinAnchors"/> anchors this degrades to the plain fit, and that is
+    /// not a limitation of the method: three points have no majority to disagree with. Detecting
+    /// a bad anchor needs four, and identifying WHICH one needs five.
+    /// </summary>
+    public static bool TryFitChunkToReference(
+        MultiViewChunk chunk,
+        IReadOnlyList<CameraParams?> chunkCameras,
+        IReadOnlyDictionary<int, CameraParams> reference,
+        out Similarity3 similarity, out float rms, out int anchorsUsed, out float anchorSpread,
+        out int inlierCount)
     {
         similarity = Similarity3.Identity;
         rms = float.MaxValue;
         anchorsUsed = 0;
         anchorSpread = 0f;
+        inlierCount = 0;
 
         var source = new List<Vector3>();
         var target = new List<Vector3>();
@@ -267,10 +305,6 @@ public static class MultiViewChunkPlan
         anchorsUsed = source.Count;
         if (anchorsUsed < MinAnchors) return false;
 
-        if (!WorldSpaceGeometry.TryUmeyamaSimilarity(
-                source, target, out var scale, out var rotation, out var translation, out rms))
-            return false;
-
         // Residual is only meaningful against how far apart the anchors are.
         var centroid = Vector3.Zero;
         foreach (var t in target) centroid += t;
@@ -280,6 +314,63 @@ public static class MultiViewChunkPlan
         spread /= target.Count;
         anchorSpread = spread;
         if (!(spread > 1e-6f)) return false;
+
+        float tolerance = InlierAnchorFraction * spread;
+        List<int>? bestInliers = null;
+
+        if (anchorsUsed == MinAnchors)
+        {
+            bestInliers = Enumerable.Range(0, anchorsUsed).ToList();
+        }
+        else
+        {
+            float bestError = float.MaxValue;
+            for (int a = 0; a < anchorsUsed; a++)
+                for (int b = a + 1; b < anchorsUsed; b++)
+                    for (int c = b + 1; c < anchorsUsed; c++)
+                    {
+                        var subS = new[] { source[a], source[b], source[c] };
+                        var subT = new[] { target[a], target[b], target[c] };
+                        if (!WorldSpaceGeometry.TryUmeyamaSimilarity(
+                                subS, subT, out float cs, out var cr, out var ct, out _))
+                            continue;
+
+                        var inliers = new List<int>();
+                        float error = 0f;
+                        for (int i = 0; i < anchorsUsed; i++)
+                        {
+                            float d = Vector3.Distance(
+                                WorldSpaceGeometry.ApplySimilarity(source[i], cs, cr, ct), target[i]);
+                            if (d <= tolerance) { inliers.Add(i); error += d; }
+                        }
+
+                        if (inliers.Count > (bestInliers?.Count ?? 0)
+                            || (inliers.Count == (bestInliers?.Count ?? 0) && error < bestError))
+                        {
+                            bestInliers = inliers;
+                            bestError = error;
+                        }
+                    }
+        }
+
+        // A MINIMAL subset always fits itself, so three inliers from a three-point sample is not
+        // evidence of anything - it is the sample agreeing with itself. Real support means at
+        // least one anchor from OUTSIDE the sample agrees too. With exactly MinAnchors available
+        // there is no outside, so that case keeps the plain fit and leans on the residual
+        // threshold instead, which is meaningful because three points over-determine a
+        // similarity by two.
+        int required = anchorsUsed <= MinAnchors ? MinAnchors : MinAnchors + 1;
+        if (bestInliers == null || bestInliers.Count < required) return false;
+        inlierCount = bestInliers.Count;
+
+        // Refit on the agreeing set: the subset that won is only three points, and the other
+        // inliers carry information the final transform should use.
+        var fitS = bestInliers.Select(i => source[i]).ToList();
+        var fitT = bestInliers.Select(i => target[i]).ToList();
+        if (!WorldSpaceGeometry.TryUmeyamaSimilarity(
+                fitS, fitT, out var scale, out var rotation, out var translation, out rms))
+            return false;
+
         if (rms > MaxAnchorRmsFraction * spread) return false;
 
         similarity = new Similarity3(scale, rotation, translation);

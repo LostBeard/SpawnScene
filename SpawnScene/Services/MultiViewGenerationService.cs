@@ -845,14 +845,16 @@ public class MultiViewGenerationService
 
             var cams = CamerasFromRun(images, chunk, run);
             bool fitted = MultiViewChunkPlan.TryFitChunkToReference(
-                chunk, cams, placed, out var sim, out float rms, out int used, out float spread);
+                chunk, cams, placed, out var sim, out float rms, out int used, out float spread,
+                out int inliers);
 
             // Always report residual AGAINST the spread. The threshold is otherwise a judgement
             // call nobody can check, and at MinAnchors the fit is over-determined by only two -
             // so a non-zero residual is not rounding, it says the model gave a differently SHAPED
             // anchor triangle in this pass than in the reference one.
             string fitLine =
-                $"anchors {used}/{chunk.AnchorCount}, residual {rms:F4} on a spread of {spread:F4} " +
+                $"anchors {used}/{chunk.AnchorCount} recovered, {inliers} agreeing, residual " +
+                $"{rms:F4} on a spread of {spread:F4} " +
                 $"({(spread > 0 ? rms / spread : float.NaN):P1} of it, limit " +
                 $"{MultiViewChunkPlan.MaxAnchorRmsFraction:P0})";
 
@@ -1015,13 +1017,20 @@ public class MultiViewGenerationService
             }
 
         if (ratios.Count < 2) return;
-        float spreadPct = (ratios.Max() - ratios.Min()) / ratios.Average();
+
+        // Median and median-absolute-deviation, not (max-min)/mean: that statistic is decided by
+        // the single worst pair and labelled TempleRing's tightly clustered ratios a 25.7%
+        // "shape difference" on data whose fold was exact to 0.4%. Report the spread and let the
+        // numbers speak; the verdict was a guess wearing a measurement's clothes.
+        var sorted = ratios.OrderBy(r => r).ToList();
+        float median = sorted[sorted.Count / 2];
+        var dev = sorted.Select(r => MathF.Abs(r - median)).OrderBy(d => d).ToList();
+        float relMad = median > 1e-6f ? dev[dev.Count / 2] / median : float.NaN;
+        float worst = MathF.Max(MathF.Abs(sorted[^1] - median), MathF.Abs(sorted[0] - median))
+                      / MathF.Max(median, 1e-6f);
         Console.WriteLine(
             $"[MultiView]   chunk {chunkIndex} anchor triangle: {string.Join("  ", parts)} " +
-            $"-> ratios disagree by {spreadPct:P1} " +
-            (spreadPct < 0.02f
-                ? "(a pure rescale; a similarity absorbs this)"
-                : "(a SHAPE difference; no similarity can absorb this)"));
+            $"-> median {median:F3}, typical deviation {relMad:P1}, worst pair {worst:P1}");
     }
 
     private static Dictionary<int, CameraParams> BuildPlacedLookup(ChunkedPoseResult result)

@@ -125,4 +125,54 @@ public class SceneUpTests
         Assert.That(Vector3.Distance(before, after), Is.LessThan(1e-4f),
             "rotating the scene and its cameras together must be invisible to the renderer");
     }
+
+    /// <summary>
+    /// A rig that ROLLS the camera must not be aligned, and TempleRing is exactly that.
+    ///
+    /// Its 47 cameras are rolled a quarter turn and spread around a ring, so their mean up sits
+    /// 90 degrees from world +Y with an agreement of 0.491 - measured from its own par file.
+    /// Rotating the scene onto that would tip the temple on its side, and TempleRing is the
+    /// regression fixture the whole project checks itself against.
+    ///
+    /// The separation is measured rather than assumed: a handheld capture (Bathroom, 34
+    /// cameras) agrees at 0.913. The threshold sits between them.
+    /// </summary>
+    [Test]
+    public void RefusesARigThatRollsTheCamera()
+    {
+        // TempleRing's shape: cameras on a ring, each rolled a quarter turn so "up" in the image
+        // is horizontal in the world.
+        var cams = new List<CameraParams>();
+        for (int i = 0; i < 47; i++)
+        {
+            float a = i * MathF.PI * 2f / 47f;
+            var pos = new Vector3(MathF.Cos(a), 0.1f, MathF.Sin(a));
+            var fwd = Vector3.Normalize(-pos);
+            // Rolled: up lies in the horizontal plane rather than near +Y.
+            var up = Vector3.Normalize(Vector3.Cross(fwd, Vector3.UnitY));
+            var c = Cam(fwd, up);
+            c.Position = pos;
+            cams.Add(c);
+        }
+
+        Assert.That(WorldSpaceGeometry.TryEstimateSceneUp(cams, out _, out float conf), Is.False,
+            "a rolled ring has no meaningful up, and aligning on it would tip the scene over");
+        Assert.That(conf, Is.LessThan(WorldSpaceGeometry.MinUpAgreement));
+    }
+
+    [Test]
+    public void AcceptsAHandheldCaptureAtTheMeasuredAgreement()
+    {
+        // Bathroom's shape: held upright with wobble. Measured agreement there was 0.913.
+        var cams = new List<CameraParams>();
+        var rng = new Random(3);
+        for (int i = 0; i < 34; i++)
+        {
+            float J() => (float)(rng.NextDouble() - 0.5) * 0.5f;
+            cams.Add(Cam(new Vector3(J(), J(), 1f), Vector3.Normalize(Vector3.UnitY + new Vector3(J(), 0, J()))));
+        }
+
+        Assert.That(WorldSpaceGeometry.TryEstimateSceneUp(cams, out _, out float conf), Is.True);
+        Assert.That(conf, Is.GreaterThan(WorldSpaceGeometry.MinUpAgreement));
+    }
 }

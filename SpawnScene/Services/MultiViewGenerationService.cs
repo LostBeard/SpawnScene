@@ -747,38 +747,7 @@ public class MultiViewGenerationService
         }
         await accelerator.SynchronizeAsync();
 
-        // Stand the reconstruction up before anyone looks at it.
-        //
-        // DAv3 recovers geometry up to an ARBITRARY rotation, so its world +Y is whatever the
-        // solver landed on. Everything downstream assumes +Y is up - CameraController.UpdateCamera
-        // rebuilds the camera's up as Vector3.UnitY on EVERY frame, so a capture pose's roll is
-        // discarded the moment anyone moves, and the yaw/pitch model is defined about world +Y
-        // as well. MEASURED on Bathroom: the room rendered rotated about 90 degrees, floor up the
-        // side of the screen, and tumbled when the camera moved.
-        //
-        // This is a RIGID rotation of the splats and their cameras together, so it changes
-        // nothing about what any camera sees - gated by
-        // SceneUpTests.AligningChangesNothingAboutWhatACameraSees - and every score measured
-        // before it still means the same thing.
-        if (WorldSpaceGeometry.TryEstimateSceneUp(
-                posed.Select(i => poses.Cameras[i]!), out var sceneUp, out float upConfidence))
-        {
-            var align = new Similarity3(
-                1f, WorldSpaceGeometry.RotationBringingUpToY(sceneUp), Vector3.Zero);
-            await _gaussianKernel.ApplySimilarityTransformAsync(
-                merged, actualTotal, align.Scale, align.Rotation, align.Translation);
-            foreach (int i in posed) align.ApplyToCamera(poses.Cameras[i]!);
-
-            Console.WriteLine(
-                $"[MultiView] gravity: scene up was ({sceneUp.X:F3},{sceneUp.Y:F3},{sceneUp.Z:F3}), " +
-                $"agreement {upConfidence:P1} across {posed.Count} cameras - rotated onto +Y");
-        }
-        else
-        {
-            Console.WriteLine(
-                "[MultiView] gravity: the cameras have no consistent up, so the scene is left in " +
-                "the solver's frame. It will render correctly only from a capture pose.");
-        }
+        await AlignToGravityAsync(merged, actualTotal, posed.Select(i => poses.Cameras[i]!));
 
         LastCameras = poses.Cameras;
         LastPoseSource = "dav3-chunked";
@@ -1115,6 +1084,53 @@ public class MultiViewGenerationService
             Console.WriteLine($"[MultiView] overlap measurement failed ({ex.Message}); using an even spread.");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Stand a reconstruction up, if its cameras agree on which way that is.
+    ///
+    /// DAv3 and COLMAP both recover geometry up to an ARBITRARY rotation - their world +Y is
+    /// whatever the solver landed on. Everything downstream assumes +Y is up:
+    /// <c>CameraController.UpdateCamera</c> rebuilds the camera's up as <c>Vector3.UnitY</c> on
+    /// EVERY frame, so a capture pose's roll is discarded the moment anyone moves, and the
+    /// yaw/pitch model is defined about world +Y too. MEASURED on Bathroom: the room rendered
+    /// rotated about 90 degrees with the floor up the side of the screen, and tumbled when the
+    /// camera moved. TJ found it by looking; no number in the run showed it, because the trainer
+    /// renders from real CameraParams with the correct up and only the VIEWER forces +Y.
+    ///
+    /// A rigid rotation of the splats and their cameras TOGETHER, so it changes nothing about
+    /// what any camera sees - gated by
+    /// <c>SceneUpTests.AligningChangesNothingAboutWhatACameraSees</c>.
+    ///
+    /// ⚠ The cameras are mutated in place, deliberately: the training views hold the same
+    /// objects, and a scene rotated away from its cameras would be worse than one left alone.
+    /// </summary>
+    private async Task AlignToGravityAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> packed, int splatCount,
+        IEnumerable<CameraParams> cameras)
+    {
+        var list = cameras.ToList();
+        if (splatCount <= 0 || list.Count == 0) return;
+
+        if (!WorldSpaceGeometry.TryEstimateSceneUp(list, out var sceneUp, out float agreement))
+        {
+            Console.WriteLine(
+                $"[MultiView] gravity: the cameras agree only {agreement:P1} on an up direction " +
+                $"(needs {WorldSpaceGeometry.MinUpAgreement:P0}), so the scene is left in the " +
+                "solver's frame. A rig that rolls the camera has no meaningful up - TempleRing " +
+                "sits at 49.1% - and rotating onto it would tip the scene over.");
+            return;
+        }
+
+        var align = new Similarity3(
+            1f, WorldSpaceGeometry.RotationBringingUpToY(sceneUp), Vector3.Zero);
+        await _gaussianKernel.ApplySimilarityTransformAsync(
+            packed, splatCount, align.Scale, align.Rotation, align.Translation);
+        foreach (var cam in list) align.ApplyToCamera(cam);
+
+        Console.WriteLine(
+            $"[MultiView] gravity: scene up was ({sceneUp.X:F3},{sceneUp.Y:F3},{sceneUp.Z:F3}), " +
+            $"agreement {agreement:P1} across {list.Count} cameras - rotated onto +Y");
     }
 
     /// <summary>One joint forward, returning null rather than throwing when the device refuses it.</summary>
@@ -2011,6 +2027,12 @@ public class MultiViewGenerationService
                 return null;
             }
         }
+
+        // Same treatment for a ground-truth frame: COLMAP's world orientation is arbitrary too,
+        // and drjohnson's cameras come back pointing along +/-Y. It refuses itself on a rig that
+        // rolls the camera, so TempleRing - whose cameras sit 90 degrees off at 49.1% agreement -
+        // is left exactly as it was.
+        await AlignToGravityAsync(merged, actualTotal, cameras);
 
         Console.WriteLine($"[MultiView-GT] mvs_voxel=dense-gpu-full count={actualTotal:N0}");
         SetStatus($"GT complete: {actualTotal:N0} splats pose=gt+mvs");

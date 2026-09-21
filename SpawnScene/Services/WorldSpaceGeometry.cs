@@ -342,6 +342,23 @@ public static class WorldSpaceGeometry
     /// <paramref name="confidence"/> (the mean vector's length before normalising, 1 for
     /// perfect agreement) says so rather than returning a confident average of nothing.
     /// </summary>
+    /// <summary>
+    /// How strongly the cameras must agree on an up direction before the scene is rotated by it.
+    ///
+    /// This is a MEASURED separation, not a guessed threshold:
+    ///
+    ///   Bathroom, handheld phone, 34 cameras     agreement 0.913   up is real, align
+    ///   TempleRing, turntable rig, 47 cameras    agreement 0.491   90 degrees off, do NOT
+    ///
+    /// TempleRing's cameras are rolled a quarter turn AND spread around a ring, so their mean up
+    /// sits 90 degrees from world +Y. Aligning on it would tip the temple onto its side - and
+    /// TempleRing is the regression fixture, so that would corrupt the one measurement the
+    /// project checks itself against. A capture held upright by a person agrees far more
+    /// strongly than any rig that rolls the camera, and the gap between 0.91 and 0.49 is wide
+    /// enough to separate them without a per-dataset flag.
+    /// </summary>
+    public const float MinUpAgreement = 0.8f;
+
     public static bool TryEstimateSceneUp(
         IEnumerable<CameraParams> cameras, out Vector3 up, out float confidence)
     {
@@ -361,7 +378,7 @@ public static class WorldSpaceGeometry
 
         var mean = sum / n;
         confidence = mean.Length();
-        if (!(confidence > 1e-3f)) return false;   // the ups cancel: no consistent up exists
+        if (confidence < MinUpAgreement) return false;
 
         up = Vector3.Normalize(mean);
         return true;

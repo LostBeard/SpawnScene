@@ -18,6 +18,7 @@
     <Compile Include="..\SpawnScene\Models\CameraParams.cs" Link="Linked\CameraParams.cs" />
     <Compile Include="..\SpawnScene\Models\ExifReader.cs" Link="Linked\ExifReader.cs" />
     <Compile Include="..\SpawnScene\Services\WorldSpaceGeometry.cs" Link="Linked\WorldSpaceGeometry.cs" />
+    <Compile Include="..\SpawnScene\Services\ImageQuality.cs" Link="Linked\ImageQuality.cs" />
     <Compile Include="..\SpawnScene\Services\MultiViewChunkPlan.cs" Link="Linked\MultiViewChunkPlan.cs" />
     <Compile Include="..\SpawnScene\Services\ImageOrientation.cs" Link="Linked\ImageOrientation.cs" />
     <Compile Include="..\SpawnScene\Services\SplatCovariance.cs" Link="Linked\SplatCovariance.cs" />

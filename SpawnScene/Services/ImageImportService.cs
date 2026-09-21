@@ -571,6 +571,7 @@ public class ImageImportService : IDisposable
                 var imported = new ImportedImage
                 {
                     FileName = fileName,
+                    SourceUrl = basePath + fileName,
                     Width = imgWidth,
                     Height = imgHeight,
                     RgbaPixels = rgba,

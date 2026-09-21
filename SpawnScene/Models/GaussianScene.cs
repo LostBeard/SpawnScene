@@ -94,8 +94,16 @@ public sealed class TrainingView
     /// <summary>Pose and intrinsics this image was taken with.</summary>
     public required CameraParams Camera { get; init; }
 
-    /// <summary>Resolvable source name, e.g. a dataset filename.</summary>
+    /// <summary>
+    /// Where to fetch this photograph again: an app-relative URL, or a project-source filename
+    /// when <see cref="FromProjectStore"/> is set. Explicit rather than inferred from the shape
+    /// of the string - a heuristic like "contains a slash" silently sends a training run to the
+    /// wrong loader, and the symptom is a loss that will not fall.
+    /// </summary>
     public required string ImageName { get; init; }
+
+    /// <summary>True when <see cref="ImageName"/> names a file in the active project's store.</summary>
+    public bool FromProjectStore { get; init; }
 
     /// <summary>True when this view also seeded geometry (vs supervision only).</summary>
     public bool UsedForInit { get; init; }

@@ -34,7 +34,8 @@ public partial class Studio
     /// a renderable scene behind for the measurement that follows).
     /// </summary>
     private async Task TrainOnTrainingViewsAsync(
-        int iterations, int keysPerSplat = 8, bool optimiseGeometry = false)
+        int iterations, int keysPerSplat = 8, bool optimiseGeometry = false,
+        int maxTrainDimension = 720)
     {
         try
         {
@@ -69,7 +70,10 @@ public partial class Studio
                 $"[Train] scene aabb ({box.MinX:F3},{box.MinY:F3},{box.MinZ:F3})-" +
                 $"({box.MaxX:F3},{box.MaxY:F3},{box.MaxZ:F3}) diag={box.Diagonal:F3}");
 
-            // -- Viewport: the training photographs' own resolution --
+            // -- Viewport --
+            // The cameras carry capture resolution, which for a phone is 13 megapixels; 35 of
+            // those as float RGB targets is 5.5 GB. Training runs on a downscaled copy and the
+            // intrinsics come with it (CameraParams.ScaledTo).
             var views = scene.TrainingViews;
             int w = views[0].Camera.Width, h = views[0].Camera.Height;
             foreach (var v in views)
@@ -83,6 +87,13 @@ public partial class Studio
                 }
             }
 
+            var (tw, th) = views[0].Camera.FitWithin(maxTrainDimension);
+            if (tw != w || th != h)
+                Console.WriteLine(
+                    $"[Train] training at {tw}x{th} instead of {w}x{h} " +
+                    $"({(long)w * h / 1_000_000.0:F1} MP per view is too much target memory)");
+            w = tw; h = th;
+
             _trainer ??= new SplatTrainerGpu(_gpuService);
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
             _trainer.Resize(w, h, n, keysPerSplat);
@@ -93,18 +104,18 @@ public partial class Studio
             // more than a single image.
             int frameFloats = w * h * 3;
             using var targets = accel.Allocate1D<float>((long)views.Count * frameFloats);
-            var scratch = new float[frameFloats];
 
             var loadStart = DateTime.UtcNow;
             for (int i = 0; i < views.Count; i++)
             {
-                bool ok = await LoadTargetAsync(views[i].ImageName, views[i].QuarterTurns, w, h, scratch);
+                bool ok = await LoadTargetAsync(
+                    views[i].ImageName, views[i].FromProjectStore, views[i].QuarterTurns,
+                    w, h, targets, i);
                 if (!ok)
                 {
                     Console.WriteLine($"[Train] FAIL: could not load target {views[i].ImageName}");
                     return;
                 }
-                targets.View.SubView((long)i * frameFloats, frameFloats).CopyFromCPU(scratch);
             }
             await accel.SynchronizeAsync();
             Console.WriteLine(
@@ -175,7 +186,7 @@ public partial class Studio
             for (int it = 0; it < iterations; it++)
             {
                 int vi = supervised[it % supervised.Count];
-                var cam = views[vi].Camera;
+                var cam = views[vi].Camera.ScaledTo(w, h);
                 var (near, far) = SplatBounds.DepthRangeFor(box, cam);
 
                 _trainer.SetTargetFrom(targets, vi);
@@ -300,26 +311,19 @@ public partial class Studio
         SplatBounds.Aabb box)
     {
         var (w, h) = trainer.Size;
-        int frameFloats = w * h * 3;
         double sumInit = 0, sumHeld = 0;
         int nInit = 0, nHeld = 0;
 
         for (int i = 0; i < views.Count; i++)
         {
-            var cam = views[i].Camera;
+            var cam = views[i].Camera.ScaledTo(w, h);
             var (near, far) = SplatBounds.DepthRangeFor(box, cam);
-            float[] rendered = await trainer.RenderForwardAsync(packed, n, cam, near, far);
-            // CPU transfer: evaluation only, a handful of times per run.
-            float[] target = await targets.CopyToHostAsync<float>((long)i * frameFloats, frameFloats);
 
-            double se = 0;
-            for (int k = 0; k < frameFloats; k++)
-            {
-                double d = rendered[k] - target[k];
-                se += d * d;
-            }
-            double mse = se / frameFloats;
-            double psnr = mse <= 1e-12 ? 99.0 : 10.0 * Math.Log10(1.0 / mse);
+            // readback:false - the comparison happens on the GPU. Copying the render and the
+            // target back to difference them in a loop was about 650 MB per pass on a 35-view
+            // capture, to produce one number per view.
+            await trainer.RenderForwardAsync(packed, n, cam, near, far, readback: false);
+            double psnr = await trainer.PsnrAgainstAsync(targets, i);
 
             if (views[i].UsedForSupervision) { sumInit += psnr; nInit++; }
             else { sumHeld += psnr; nHeld++; }
@@ -334,39 +338,74 @@ public partial class Studio
     /// Matches how splat colour was created at import (byte/255), so the loss compares
     /// like with like.
     /// </summary>
-    private async Task<bool> LoadTargetAsync(string url, int quarterTurns, int w, int h, float[] dest)
+    private async Task<bool> LoadTargetAsync(
+        string url, bool fromProjectStore, int quarterTurns, int w, int h,
+        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex)
     {
         try
         {
-            byte[] bytes = await _http.GetByteArrayAsync(url);
+            byte[]? bytes;
+            if (fromProjectStore)
+            {
+                if (_activeProject == null)
+                {
+                    Console.WriteLine($"[Train] {url} is a project source but no project is open");
+                    return false;
+                }
+                bytes = await _projectService.GetSourceAsync(_activeProject.Id, url);
+                if (bytes == null)
+                {
+                    Console.WriteLine($"[Train] project source {url} is missing");
+                    return false;
+                }
+            }
+            else
+            {
+                bytes = await _http.GetByteArrayAsync(url);
+            }
             using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
             using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
 
             // The turn was applied to the camera at generation time; the picture has to get the
             // same one or the loss compares a render of one framing against pixels from another.
+            // The rotation happens at the TRAINER's resolution, not the capture's - turning a
+            // 13 megapixel frame byte by byte in WASM before throwing 99% of it away is pure
+            // waste, and DrawImage resamples on the GPU for free.
             int srcW = (quarterTurns % 2 == 0) ? w : h;
             int srcH = (quarterTurns % 2 == 0) ? h : w;
-            if ((int)bitmap.Width != srcW || (int)bitmap.Height != srcH)
+
+            float srcAspect = (float)bitmap.Width / (int)bitmap.Height;
+            float wantAspect = (float)srcW / srcH;
+            if (MathF.Abs(srcAspect - wantAspect) > 0.02f)
             {
                 Console.WriteLine(
-                    $"[Train] {url} is {bitmap.Width}x{bitmap.Height}, expected {srcW}x{srcH} " +
-                    $"for a {w}x{h} trainer with {quarterTurns} quarter turn(s)");
+                    $"[Train] {url} is {bitmap.Width}x{bitmap.Height} (aspect {srcAspect:F3}), " +
+                    $"but the camera says {srcW}x{srcH} (aspect {wantAspect:F3}) after " +
+                    $"{quarterTurns} quarter turn(s) - resizing would distort it");
                 return false;
             }
-            using var osc = new OffscreenCanvas(srcW, srcH);
-            using var ctx = osc.Get2DContext();
-            ctx.DrawImage(bitmap, 0, 0);
-            using var imageData = ctx.GetImageData(0, 0, srcW, srcH);
-            using var dataArray = imageData.Data;
-            var rgba = ImageOrientation.RotateRgba(dataArray.ReadBytes(), srcW, srcH, quarterTurns);
 
-            const float inv = 1f / 255f;
-            for (int p = 0; p < w * h; p++)
+            // Rotate on the CANVAS, not in .NET. A quarter turn is a transform the 2D context
+            // applies while resampling, so the upright image is produced in one draw and the
+            // pixels never need to be touched a second time.
+            using var osc = new OffscreenCanvas(w, h);
+            using var ctx = osc.Get2DContext();
+            if (quarterTurns != 0)
             {
-                dest[p * 3 + 0] = rgba[p * 4 + 0] * inv;
-                dest[p * 3 + 1] = rgba[p * 4 + 1] * inv;
-                dest[p * 3 + 2] = rgba[p * 4 + 2] * inv;
+                // Counter-clockwise, about the centre of the DESTINATION frame.
+                ctx.Translate(w / 2.0, h / 2.0);
+                ctx.Rotate(-quarterTurns * Math.PI / 2.0);
+                ctx.Translate(-srcW / 2.0, -srcH / 2.0);
             }
+            ctx.DrawImage(bitmap, 0, 0, srcW, srcH);
+            using var imageData = ctx.GetImageData(0, 0, w, h);
+            using var dataArray = imageData.Data;
+
+            // Straight from the canvas to the GPU: the pixels never enter the managed heap,
+            // and a kernel expands them into the float stack.
+            using var pixels = new Uint8Array(
+                dataArray.Buffer, dataArray.ByteOffset, dataArray.Length);
+            _trainer!.UploadTargetFrom(stack, viewIndex, pixels);
             return true;
         }
         catch (Exception ex)

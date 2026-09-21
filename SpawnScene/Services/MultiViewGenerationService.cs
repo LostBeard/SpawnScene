@@ -28,6 +28,17 @@ public class MultiViewGenerationService
     /// <summary>Camera poses recovered by the last SfM run (index matches input images).</summary>
     public CameraParams?[] SfmCameraPoses => _sfm.CameraPoses;
 
+    /// <summary>
+    /// The poses the SfM -> DAv3 -> fallback cascade settled on, one per input image, null where
+    /// a view could not be posed. Without these the optimiser cannot touch an unposed capture:
+    /// the cascade resolved them internally and then threw them away, so only the TempleRing
+    /// path (which has a calibration file) could ever be trained.
+    /// </summary>
+    public CameraParams?[] LastCameras { get; private set; } = [];
+
+    /// <summary>Where <see cref="LastCameras"/> came from: sfm, dav3 or fallback.</summary>
+    public string LastPoseSource { get; private set; } = "none";
+
     public MultiViewGenerationService(
         SpawnJSRuntime js,
         GpuService gpu,
@@ -364,6 +375,9 @@ public class MultiViewGenerationService
 
         var viewResults = new List<(MemoryBuffer1D<float, Stride1D.Dense> buf, int count)>();
         int totalSplats = 0;
+        LastCameras = cameras;
+        LastPoseSource = poseSource;
+
         bool useWorld = poseSource != "fallback";
         int nonRefIn = 0, nonRefKept = 0;
 

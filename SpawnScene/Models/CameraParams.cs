@@ -48,6 +48,60 @@ public class CameraParams
     /// <summary>Camera right direction (derived).</summary>
     public Vector3 Right => Vector3.Normalize(Vector3.Cross(Forward, Up));
 
+    /// <summary>
+    /// The same camera looking at a resized version of its image.
+    ///
+    /// Training cannot run at capture resolution - a 3120x4160 phone photo is 13 megapixels, and
+    /// 35 of them as float RGB targets is 5.5 GB - so the optimiser works on a downscaled copy.
+    /// The intrinsics have to come with it or every splat projects to the wrong place.
+    ///
+    /// Pixel coordinates here are continuous (pixel p spans [p, p+1)), so a resize by factor s
+    /// maps u to u*s, which scales the focal length AND the principal point by s. Scaling the
+    /// focal but not the principal point is the classic version of this bug: it looks right at
+    /// the image centre and drifts toward the edges.
+    ///
+    /// The axes scale independently, matching a stretch resize. Callers should preserve aspect
+    /// ratio (see <see cref="FitWithin"/>) unless they genuinely intend to stretch the pixels.
+    /// </summary>
+    public CameraParams ScaledTo(int width, int height)
+    {
+        if (width <= 0 || height <= 0)
+            throw new ArgumentOutOfRangeException(nameof(width), $"{width}x{height} is not a viewport");
+
+        float sx = (float)width / Width;
+        float sy = (float)height / Height;
+        return new CameraParams
+        {
+            Width = width,
+            Height = height,
+            FocalX = FocalX * sx,
+            FocalY = FocalY * sy,
+            CenterX = CenterX * sx,
+            CenterY = CenterY * sy,
+            Near = Near,
+            Far = Far,
+            Position = Position,
+            Forward = Forward,
+            Up = Up,
+        };
+    }
+
+    /// <summary>
+    /// The largest size with this camera's aspect ratio that fits inside
+    /// <paramref name="maxDimension"/>, rounded to even numbers so a 16px tile grid divides it
+    /// predictably. Never upscales.
+    /// </summary>
+    public (int Width, int Height) FitWithin(int maxDimension)
+    {
+        int longest = Math.Max(Width, Height);
+        if (longest <= maxDimension) return (Width, Height);
+
+        float s = (float)maxDimension / longest;
+        int w = Math.Max(2, (int)MathF.Round(Width * s / 2f) * 2);
+        int h = Math.Max(2, (int)MathF.Round(Height * s / 2f) * 2);
+        return (w, h);
+    }
+
     /// <summary>Aspect ratio.</summary>
     public float AspectRatio => (float)Width / Height;
 

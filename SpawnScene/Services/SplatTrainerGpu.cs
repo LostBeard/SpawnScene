@@ -40,6 +40,8 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _adamStep;
     GPUComputePipeline? _initLogits;
     GPUComputePipeline? _adamGeometry;
+    GPUComputePipeline? _evalSse;
+    GPUComputePipeline? _unpackTarget;
 
     GPUBuffer? _uniformBuf;     // TrainUniforms
     GPUBuffer? _capsBuf;        // vec4<u32>: key capacity
@@ -63,12 +65,14 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _opacityLogit;
     MemoryBuffer1D<float, Stride1D.Dense>? _logScale;    // 3 per splat
     MemoryBuffer1D<float, Stride1D.Dense>? _geomOut;     // 10 per splat, diagnostics + gate
+    MemoryBuffer1D<float, Stride1D.Dense>? _ssePartials; // 1 per 256-pixel workgroup
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
     MemoryBuffer1D<int, Stride1D.Dense>? _lossFixed;
     GPUBuffer? _dimsBuf;
     GPUBuffer? _adamCfgBuf;
     GPUBuffer? _geomCfgBuf;
+    GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
     int _adamStepCount;
 
     /// <summary>Gradient slots per splat. Must match GRADS_PER_SPLAT in the shaders.</summary>
@@ -118,6 +122,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _adamStep = MakePipeline(SplatTrainerShaders.AdamStep, "adam_step");
         _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
         _adamGeometry = MakePipeline(SplatTrainerShaders.GeometryAdam, "adam_geometry");
+        _evalSse = MakePipeline(SplatTrainerShaders.EvalSse, "eval_sse");
+        _unpackTarget = MakePipeline(SplatTrainerShaders.UnpackTarget, "unpack_target");
 
         _uniformBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
@@ -154,7 +160,8 @@ public sealed class SplatTrainerGpu : IDisposable
         });
 
         Console.WriteLine("[Trainer] pipelines created: emit_keys, tile_ranges, raster_forward, " +
-            "raster_backward, scatter_gradients, loss_l1, adam_step, init_logits, adam_geometry");
+            "raster_backward, scatter_gradients, loss_l1, adam_step, init_logits, adam_geometry, " +
+            "eval_sse, unpack_target");
     }
 
     GPUComputePipeline MakePipeline(string wgsl, string entry)
@@ -201,12 +208,19 @@ public sealed class SplatTrainerGpu : IDisposable
         _outEnd = accel.Allocate1D<uint>((long)width * height);
 
         _target = accel.Allocate1D<float>((long)width * height * 3);
+        _targetBytes?.Destroy(); _targetBytes?.Dispose();
+        _targetBytes = _device!.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = (ulong)width * (ulong)height * 4UL,
+            Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
+        });
         _dLdPix = accel.Allocate1D<float>((long)width * height * 3);
         _gradPerKey = accel.Allocate1D<float>((long)_keyCapacity * GradsPerSplat);
         _gradFixed = accel.Allocate1D<int>((long)splatCount * GradsPerSplat);
         _opacityLogit = accel.Allocate1D<float>(splatCount);
         _logScale = accel.Allocate1D<float>((long)splatCount * 3);
         _geomOut = accel.Allocate1D<float>((long)splatCount * GeomGradsPerSplat);
+        _ssePartials = accel.Allocate1D<float>(SseWorkgroups);
         _adamM = accel.Allocate1D<float>((long)splatCount * AdamSlots);
         _adamV = accel.Allocate1D<float>((long)splatCount * AdamSlots);
         _lossFixed = accel.Allocate1D<int>(1);
@@ -390,6 +404,64 @@ public sealed class SplatTrainerGpu : IDisposable
 
     /// <summary>The viewport the trainer is currently sized for.</summary>
     public (int Width, int Height) Size => (_width, _height);
+
+    int SseWorkgroups => (_width * _height + 255) / 256;
+
+    /// <summary>
+    /// PSNR of the current render against one image in a GPU-resident target stack.
+    ///
+    /// The whole comparison happens on the GPU; only one partial sum per 256 pixels comes back,
+    /// a few KB rather than the two full images this used to copy. On a 35-view capture that is
+    /// the difference between about 650 MB of readback per evaluation pass and about 600 KB.
+    /// </summary>
+    public async Task<double> PsnrAgainstAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex)
+    {
+        var accel = _gpu.WebGPUAccelerator;
+        long frameFloats = (long)_width * _height * 3;
+
+        WriteU32x2(_dimsBuf!, (uint)(_width * _height), (uint)(viewIndex * frameFloats));
+        Dispatch(_evalSse!, SseWorkgroups, 1, new[]
+        {
+            Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, stack.GetGPUBuffer()!),
+            Buf(2, _ssePartials!.GetGPUBuffer()!), Buf(3, _dimsBuf!),
+        });
+        await accel.SynchronizeAsync();
+
+        // CPU transfer: one float per 256 pixels, summed in double because a million f32 adds
+        // in sequence loses the tail.
+        float[] partials = await _ssePartials!.CopyToHostAsync<float>(0, SseWorkgroups);
+        double sse = 0;
+        foreach (float v in partials) sse += v;
+
+        double mse = sse / frameFloats;
+        return mse <= 1e-12 ? 99.0 : 10.0 * Math.Log10(1.0 / mse);
+    }
+
+    /// <summary>
+    /// Put one target photograph into a GPU-resident stack, straight from the canvas.
+    ///
+    /// <paramref name="rgba"/> is the JS typed array from <c>getImageData</c>; its bytes go to
+    /// the GPU without passing through the managed heap, and a kernel expands them into floats.
+    /// Reading them into .NET to convert in a loop was a million iterations and about 6 MB of
+    /// managed allocation per view.
+    /// </summary>
+    public void UploadTargetFrom(
+        MemoryBuffer1D<float, Stride1D.Dense> stack, int viewIndex, Uint8Array rgba)
+    {
+        long frameFloats = (long)_width * _height * 3;
+        long off = (long)viewIndex * frameFloats;
+        if (off + frameFloats > stack.Length)
+            throw new ArgumentOutOfRangeException(nameof(viewIndex),
+                $"view {viewIndex} does not fit a {stack.Length}-float stack");
+
+        _queue!.WriteBuffer(_targetBytes!, 0, rgba);
+        WriteU32x2(_dimsBuf!, (uint)(_width * _height), (uint)off);
+        Dispatch(_unpackTarget!, (_width * _height + 63) / 64, 1, new[]
+        {
+            Buf(0, _targetBytes!), Buf(1, stack.GetGPUBuffer()!), Buf(2, _dimsBuf!),
+        });
+    }
 
     /// <summary>Seed opacity logits from the splats' current opacity. Call once before training.</summary>
     public void InitOptimizerState(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
@@ -583,6 +655,14 @@ public sealed class SplatTrainerGpu : IDisposable
         _queue!.WriteBuffer(_uniformBuf!, 0, _uniformBytes);
     }
 
+    void WriteU32x2(GPUBuffer buf, uint x, uint y)
+    {
+        _scratch4![0] = x;
+        _scratch4[1] = y;
+        _scratch4[2] = 0; _scratch4[3] = 0;
+        _queue!.WriteBuffer(buf, 0, _scratch4);
+    }
+
     void WriteU32(GPUBuffer buf, uint value)
     {
         _scratch4![0] = value;
@@ -607,6 +687,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _opacityLogit?.Dispose(); _opacityLogit = null;
         _logScale?.Dispose(); _logScale = null;
         _geomOut?.Dispose(); _geomOut = null;
+        _ssePartials?.Dispose(); _ssePartials = null;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
         _lossFixed?.Dispose(); _lossFixed = null;
@@ -618,6 +699,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _uniformBuf?.Destroy(); _uniformBuf?.Dispose();
         _capsBuf?.Destroy(); _capsBuf?.Dispose();
         _geomCfgBuf?.Destroy(); _geomCfgBuf?.Dispose();
+        _targetBytes?.Destroy(); _targetBytes?.Dispose();
         _countBuf?.Destroy(); _countBuf?.Dispose();
         _dimsBuf?.Destroy(); _dimsBuf?.Dispose();
         _adamCfgBuf?.Destroy(); _adamCfgBuf?.Dispose();

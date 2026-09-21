@@ -26,6 +26,8 @@ public partial class Studio : IAsyncDisposable
     [Inject] private NavigationManager _nav { get; set; } = default!;
     [Inject] private XRService _xrService { get; set; } = default!;
     [Inject] private MultiViewGenerationService _multiViewService { get; set; } = default!;
+    // The dataset autotest loads unposed captures through the ordinary import path.
+    [Inject] private ImageImportService _importService { get; set; } = default!;
     [Inject] private SpawnJSRuntime _js { get; set; } = default!;
     [Inject] private GpuDepthColorizer _depthColorizer { get; set; } = default!;
     // SpawnDev.ILGPU.ML — created on-demand after GPU init (not injected)
@@ -198,6 +200,15 @@ public partial class Studio : IAsyncDisposable
             bool geom = query.TryGetValue("geom", out var gm) && gm is "1" or "true";
             await RunNovelViewAutotestAsync(
                 viewName ?? "templeR0016", onlyView, globalScale, trainIters, upright, geom);
+        }
+        else if (mode == "dataset")
+        {
+            // The unposed path: a real capture with no calibration file.
+            string name = query.TryGetValue("name", out var dn) ? dn : "Bathroom";
+            int iters = query.TryGetValue("train", out var dt) && int.TryParse(dt, out var dti) ? dti : 0;
+            bool dgeom = query.TryGetValue("geom", out var dg) && dg is "1" or "true";
+            int maxDim = query.TryGetValue("maxdim", out var md) && int.TryParse(md, out var mdi) ? mdi : 720;
+            await RunDatasetAutotestAsync(name, iters, dgeom, maxDim);
             return;
         }
 

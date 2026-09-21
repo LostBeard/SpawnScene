@@ -683,6 +683,84 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+    /// <summary>
+    /// Sum of squared error between the render and one target, for PSNR.
+    ///
+    /// The evaluation used to read BOTH the rendered image and the target back to the host and
+    /// difference them in a loop: about 650 MB of GPU-to-CPU traffic on a 35-view capture, to
+    /// produce one number per view. This reduces on the GPU and returns one partial sum per
+    /// workgroup - a few KB - which the host adds up.
+    ///
+    /// Partial sums in f32, not a fixed-point atomic: a per-pixel squared error is around 1e-4
+    /// and there are a million of them, so any single shared scale either overflows on the
+    /// total or quantises every term to zero. Summing per workgroup first keeps both ends of
+    /// that range representable.
+    /// </summary>
+    public const string EvalSse = @"
+@group(0) @binding(0) var<storage, read>       rendered  : array<f32>;   // 3 per pixel
+@group(0) @binding(1) var<storage, read>       ref_image : array<f32>;   // the whole target stack
+@group(0) @binding(2) var<storage, read_write> partials  : array<f32>;   // 1 per workgroup
+@group(0) @binding(3) var<uniform>             dims      : vec4<u32>;    // x=pixels, y=target float offset
+
+var<workgroup> acc : array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn eval_sse(
+    @builtin(global_invocation_id) gid : vec3<u32>,
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    let p = gid.x;
+    var e = 0.0;
+    if (p < dims.x) {
+        for (var c = 0u; c < 3u; c = c + 1u) {
+            let i = p * 3u + c;
+            let d = rendered[i] - ref_image[dims.y + i];
+            e = e + d * d;
+        }
+    }
+    acc[li] = e;
+    workgroupBarrier();
+
+    var stride = 128u;
+    loop {
+        if (stride == 0u) { break; }
+        if (li < stride) { acc[li] = acc[li] + acc[li + stride]; }
+        workgroupBarrier();
+        stride = stride >> 1u;
+    }
+    if (li == 0u) { partials[wg.x] = acc[0]; }
+}
+";
+
+    /// <summary>
+    /// Expand one target photograph from packed RGBA bytes into the float stack.
+    ///
+    /// The pixels arrive from the canvas as a JS typed array and are written straight to the
+    /// GPU; they never enter the managed heap. Before this, each target was read into a .NET
+    /// byte[], converted by a per-pixel CPU loop into a .NET float[] and uploaded - the
+    /// "CPU packing loop plus upload" anti-pattern, at a million pixels a view.
+    ///
+    /// Byte order is the canvas's: R in the low byte of each u32 on a little-endian machine,
+    /// which is every machine that runs WebGPU.
+    /// </summary>
+    public const string UnpackTarget = @"
+@group(0) @binding(0) var<storage, read>       src  : array<u32>;   // one packed RGBA per pixel
+@group(0) @binding(1) var<storage, read_write> dst  : array<f32>;   // the whole target stack
+@group(0) @binding(2) var<uniform>             dims : vec4<u32>;    // x=pixels, y=dst float offset
+
+@compute @workgroup_size(64)
+fn unpack_target(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let p = gid.x;
+    if (p >= dims.x) { return; }
+    let v = src[p];
+    let o = dims.y + p * 3u;
+    dst[o + 0u] = f32(v & 255u) / 255.0;
+    dst[o + 1u] = f32((v >> 8u) & 255u) / 255.0;
+    dst[o + 2u] = f32((v >> 16u) & 255u) / 255.0;
+}
+";
+
     /// <summary>Seed the logit buffer from the splats' current opacity, once before training.</summary>
     public const string InitLogits = @"
 @group(0) @binding(0) var<storage, read>       splats        : array<f32>;

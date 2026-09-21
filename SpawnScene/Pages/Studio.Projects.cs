@@ -280,6 +280,69 @@ public partial class Studio
 
     // ─── Dataset Testing ───
 
+    /// <summary>
+    /// Turn whatever the pose cascade produced into training views.
+    ///
+    /// Until this existed only the TempleRing path - which ships a calibration file - could be
+    /// optimised, so none of the real captures could be. Orientation comes from the POSE and
+    /// not from EXIF: Bathroom carries no Orientation tag at all, and Skull and SouthBuilding
+    /// report "normal" while a third of the frames are not.
+    ///
+    /// Fallback poses are deliberately refused. They are a placeholder, not a measurement, and
+    /// fitting a scene to them produces a confident reconstruction of a fiction.
+    /// </summary>
+    private void RecordTrainingViews(
+        GaussianScene scene, IReadOnlyList<ImportedImage> images, bool fromProjectStore)
+    {
+        var poses = _multiViewService.LastCameras;
+        string poseSource = _multiViewService.LastPoseSource;
+
+        if (poseSource is not ("sfm" or "dav3") || poses.Length == 0)
+        {
+            Console.WriteLine(
+                $"[Studio] pose source '{poseSource}' gives nothing to train against - the " +
+                "optimiser needs real poses, and a fallback pose is a placeholder");
+            return;
+        }
+
+        int held = 0, posed = 0, unposed = 0;
+        for (int i = 0; i < images.Count && i < poses.Length; i++)
+        {
+            var cam = poses[i];
+            if (cam == null) { unposed++; continue; }
+
+            string name = fromProjectStore ? images[i].FileName : images[i].SourceUrl;
+            if (string.IsNullOrEmpty(name)) { unposed++; continue; }
+
+            int turns = ImageOrientation.QuarterTurnsToUpright(cam);
+
+            // Hold every fourth posed view out, so the run reports a novel-view number rather
+            // than a reconstruction of its own input.
+            bool supervise = posed % 4 != 3;
+            if (!supervise) held++;
+            posed++;
+
+            scene.TrainingViews.Add(new TrainingView
+            {
+                Camera = turns != 0 ? ImageOrientation.Rotate(cam, turns) : cam,
+                ImageName = name,
+                FromProjectStore = fromProjectStore,
+                UsedForInit = true,
+                QuarterTurns = turns,
+                UsedForSupervision = supervise,
+            });
+            scene.TrainingCameras.Add(cam);
+        }
+
+        var turnCounts = scene.TrainingViews
+            .GroupBy(v => v.QuarterTurns)
+            .OrderBy(g => g.Key)
+            .Select(g => $"{g.Key}x{g.Count()}");
+        Console.WriteLine(
+            $"[Studio] supervision from {poseSource}: {posed} of {images.Count} views posed " +
+            $"({unposed} not), {held} held out, quarter turns [{string.Join(", ", turnCounts)}]");
+    }
+
     private async Task GenerateFromTempleRingAsync(int onlyView = -1, bool globalScale = false,
         bool upright = false)
     {
@@ -432,6 +495,7 @@ public partial class Studio
                     {
                         Camera = turns != 0 ? ImageOrientation.Rotate(cam, turns) : cam,
                         ImageName = $"datasets/TempleRing/{filename}",
+                        FromProjectStore = false,
                         UsedForInit = isInit,
                         QuarterTurns = turns,
                         UsedForSupervision = supervise,
@@ -563,6 +627,14 @@ public partial class Studio
                     // Hybrid path may lack TrainingCameras; FitToScene uses depth-splat origin then.
                     SourceName = "depth-splat",
                 };
+
+                // Record what the pose cascade settled on, so the optimiser can run on captures
+                // that have no calibration file. Until now only the TempleRing path populated
+                // this, which is why the optimiser could not touch any of the real datasets.
+                //
+                // Fallback poses are not recorded on purpose: they are a placeholder, not a
+                // measurement, and training against them would fit the scene to a fiction.
+                RecordTrainingViews(scene, images, fromProjectStore: true);
 
                 _renderService.SetActiveSceneGpuLoaded(scene);
                 _sceneManager.ActiveScene = scene;

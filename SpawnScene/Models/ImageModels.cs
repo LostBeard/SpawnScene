@@ -73,6 +73,14 @@ public class ImportedImage
     /// <summary>Original filename.</summary>
     public string FileName { get; set; } = "";
 
+    /// <summary>
+    /// Where this image can be fetched again, relative to the app base - e.g.
+    /// "datasets/Bathroom/IMG_20260223_133436884.jpg". The optimiser re-reads the photograph as
+    /// a training target long after the import buffers are freed, and a bare filename is not
+    /// enough to find it. Empty for images that came from a file picker rather than a URL.
+    /// </summary>
+    public string SourceUrl { get; set; } = "";
+
     /// <summary>Image dimensions.</summary>
     public int Width { get; set; }
     public int Height { get; set; }

@@ -272,6 +272,9 @@ public partial class Studio : IAsyncDisposable
             // also unlocks the size prunes - without it nothing removes a bloated splat.
             if (query.TryGetValue("opacityreset", out var orq) && int.TryParse(orq, out var ori))
                 OpacityResetEveryIters = ori;
+            // ?poslrdecay=N is how far the position rate falls over PositionLrMaxSteps; 1 = off.
+            if (query.TryGetValue("poslrdecay", out var pdq) && float.TryParse(pdq, out var pdf))
+                PositionLrDecay = pdf;
             // ?skipzerograd=1 stops colour/opacity Adam stepping splats with no gradient, the
             // guard adam_geometry has always had for position. Off by default: its effect on the
             // held-out curve is the measurement.

@@ -103,6 +103,18 @@ public partial class Studio
     public static float PositionLrDecay { get; set; } = 0.01f;
 
     /// <summary>
+    /// Steps the position decay is measured against. The reference's
+    /// <c>position_lr_max_steps</c>, which is a FIXED 30,000 - not the length of the run.
+    ///
+    /// I tied it to the run length, which is wrong and measurably so: an 8,000-iteration run
+    /// then travels the whole 100x decay, so geometry is frozen by iteration 4,000 while the
+    /// scene is still coarse. Held-out PSNR fell 1.5 dB against the same configuration without
+    /// decay. Against a fixed 30,000 an 8,000-step run ends around 0.46x its starting rate,
+    /// which is the schedule the published numbers come from.
+    /// </summary>
+    public static int PositionLrMaxSteps { get; set; } = 30_000;
+
+    /// <summary>
     /// Ceiling on the splat count during densification.
     ///
     /// Growth is unbounded by nature and a browser tab is not. Derived from the trainer key
@@ -385,7 +397,8 @@ public partial class Studio
                     geo = g0 with
                     {
                         PositionLr = TrainingSchedule.ExponentialLr(
-                            positionLrInit, positionLrInit * PositionLrDecay, it, iterations),
+                            positionLrInit, positionLrInit * PositionLrDecay,
+                            it, PositionLrMaxSteps),
                     };
 
                 int vi = supervised[it % supervised.Count];

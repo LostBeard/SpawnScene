@@ -43,6 +43,13 @@ public partial class Studio
     /// <summary>Multiplier on the position learning rate, for measuring rather than guessing.</summary>
     public static float PositionLrScale { get; set; } = 1f;
 
+    /// <summary>
+    /// Evaluate held-out PSNR every N cycles, 0 to disable. A full evaluation renders every
+    /// view, so this trades run time for the shape of the curve - worth it whenever the two
+    /// endpoints disagree about what is happening in between.
+    /// </summary>
+    public static int HeldOutEveryCycles { get; set; } = 10;
+
     private async Task TrainOnTrainingViewsAsync(
         int iterations, int keysPerSplat = 8, bool optimiseGeometry = false,
         int maxTrainDimension = 720)
@@ -265,6 +272,23 @@ public partial class Studio
                         Console.WriteLine(
                             $"[Train] cycle {cycle,4} mean loss {mean:F6} " +
                             $"({secs:F1}s, {(it + 1) / Math.Max(secs, 1e-6):F1} it/s)");
+                    }
+
+                    // Held-out PSNR DURING the run, not only at the ends.
+                    //
+                    // Bathroom starts at 12.41 dB held out and finishes at 10.81 while its
+                    // supervised number climbs, and two endpoints cannot tell the difference
+                    // between "peaks early then declines" and "degrades from the first step".
+                    // Those want opposite responses - the first is early stopping, the second
+                    // is a learning rate or a regulariser - so the curve is the measurement,
+                    // and guessing between them without it is how a day gets spent on the
+                    // wrong one.
+                    if (HeldOutEveryCycles > 0 && cycle % HeldOutEveryCycles == 0)
+                    {
+                        var (sup, held) = await EvaluateAsync(
+                            _trainer, packed, n, views, targets, box);
+                        Console.WriteLine(
+                            $"[Train] cycle {cycle,4} PSNR supervised {sup:F2} dB, held out {held:F2} dB");
                     }
                     cycleSum = 0; cycleN = 0;
                 }

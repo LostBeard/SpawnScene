@@ -33,6 +33,8 @@ const BUDGET = process.env.BUDGET ? `&budget=${process.env.BUDGET}` : '';
 // MAXSCALE=N caps a splat at N * scene diagonal; POSLR=N scales the position learning rate.
 const MAXSCALE = process.env.MAXSCALE ? `&maxscale=${process.env.MAXSCALE}` : '';
 const POSLR = process.env.POSLR ? `&poslr=${process.env.POSLR}` : '';
+// HELDEVERY=N evaluates held-out PSNR every N cycles, so the curve is visible, not just its ends.
+const HELDEVERY = process.env.HELDEVERY ? `&heldevery=${process.env.HELDEVERY}` : '';
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -87,7 +89,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${EXTRA}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

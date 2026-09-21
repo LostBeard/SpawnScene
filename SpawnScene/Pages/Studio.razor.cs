@@ -262,6 +262,9 @@ public partial class Studio : IAsyncDisposable
                 MaxScaleFraction = msf;
             if (query.TryGetValue("poslr", out var pl) && float.TryParse(pl, out var plf))
                 PositionLrScale = plf;
+            // ?heldevery=N evaluates held-out PSNR every N cycles (0 = only at the ends).
+            if (query.TryGetValue("heldevery", out var he) && int.TryParse(he, out var hei))
+                HeldOutEveryCycles = hei;
             await RunDatasetAutotestAsync(name, iters, dgeom, maxDim, poses, patches);
             return;
         }

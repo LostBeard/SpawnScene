@@ -404,10 +404,19 @@ public partial class Studio
                     // wrong one.
                     // Densify BEFORE evaluating, so the reported number is of the scene that
                     // will keep training rather than the one that just stopped existing.
-                    bool resetOpacity = OpacityResetEveryCycles > 0
+                    // Both densification AND opacity reset stop at the same point, as they do
+                    // in the reference: it resets every 3,000 iterations but only while
+                    // iteration < densify_until_iter.
+                    //
+                    // Carrying resets past that knocks every opacity down with no densification
+                    // left to compensate, and nothing recovers. MEASURED here: held out peaked
+                    // at 16.99 dB around cycle 40 and fell to 11.09 by cycle 80 with resets
+                    // running the whole way. The model has to be allowed to settle.
+                    bool stillGrowing = cycle < totalCycles * DensifyUntilFraction;
+                    bool resetOpacity = OpacityResetEveryCycles > 0 && stillGrowing
                         && cycle % OpacityResetEveryCycles == 0;
-                    bool densifying = DensifyEveryCycles > 0 && cycle % DensifyEveryCycles == 0
-                        && cycle < totalCycles * DensifyUntilFraction;
+                    bool densifying = DensifyEveryCycles > 0 && stillGrowing
+                        && cycle % DensifyEveryCycles == 0;
 
                     if (densifying || resetOpacity)
                     {

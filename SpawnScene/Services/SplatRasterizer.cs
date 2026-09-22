@@ -103,7 +103,6 @@ public static class SplatRasterizer
 
                 for (int k = 0; k < order.Length; k++)
                 {
-                    if (t < MinTransmittance) { stop = k; break; }
                     var s = splats[order[k]];
 
                     float g = Weight(in s, cx, cy);
@@ -111,10 +110,16 @@ public static class SplatRasterizer
                     float alpha = MathF.Min(MaxAlpha, s.Opacity * g);
                     if (alpha < MinAlpha) continue;
 
+                    // Match the reference CUDA forward: reject the splat that would push T
+                    // below MinTransmittance rather than accepting it. OrderEnd must stop at
+                    // the last APPLIED splat, or backward undoes an alpha forward never used.
+                    float testT = t * (1f - alpha);
+                    if (testT < MinTransmittance) { stop = k; break; }
+
                     accR += s.R * alpha * t;
                     accG += s.G * alpha * t;
                     accB += s.B * alpha * t;
-                    t *= (1f - alpha);
+                    t = testT;
                 }
 
                 colour[p * 3 + 0] = accR;

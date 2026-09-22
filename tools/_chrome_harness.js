@@ -17,7 +17,12 @@ const { spawn } = require('child_process');
 
 const CHROME = process.env.SPAWNSCENE_CHROME
   || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+// Agent split on one machine: Trip 9223, Tuvok 9224 (set SPAWNSCENE_CDP_PORT). Sharing a
+// port used to silently attach and then one agent would kill or starve the other's GPU run.
 const PORT = parseInt(process.env.SPAWNSCENE_CDP_PORT || '9223', 10);
+// Opt-in only. Default is launch-our-own: attaching to "whatever is on 9223" is how Trip and
+// Tuvok ended up driving the same Chrome (and blaming each other when it died).
+const ATTACH = process.env.SPAWNSCENE_CDP_ATTACH === '1';
 
 function probe(port) {
   return new Promise((res) => {
@@ -38,8 +43,14 @@ function probe(port) {
 async function ensureChrome({ headless = false } = {}) {
   const existing = await probe(PORT);
   if (existing) {
-    console.log(`[chrome] attaching to existing instance on ${PORT}`);
-    return { port: PORT, endpoint: existing.webSocketDebuggerUrl, close: async () => {} };
+    if (ATTACH) {
+      console.log(`[chrome] attaching to existing instance on ${PORT} (SPAWNSCENE_CDP_ATTACH=1)`);
+      return { port: PORT, endpoint: existing.webSocketDebuggerUrl, close: async () => {} };
+    }
+    throw new Error(
+      `Chrome already answers on CDP port ${PORT}. Another agent (or a leftover harness) owns ` +
+      `it - do NOT attach by default. Free that port, or set SPAWNSCENE_CDP_PORT to a free one ` +
+      `(Trip=9223, Tuvok=9224). SPAWNSCENE_CDP_ATTACH=1 only when you mean to share.`);
   }
 
   const profile = path.join(os.tmpdir(), `spawnscene-harness-${PORT}`);

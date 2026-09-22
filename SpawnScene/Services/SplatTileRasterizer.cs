@@ -174,19 +174,24 @@ public static class SplatTileRasterizer
 
                         for (int k = start; k < end; k++)
                         {
-                            if (t < SplatRasterizer.MinTransmittance) break;
                             var s = splats[b.Values[k]];
-                            consumed++;
 
                             float g = SplatRasterizer.Weight(in s, cx, cy);
-                            if (g <= 0f) continue;
+                            if (g <= 0f) { consumed++; continue; }
                             float alpha = MathF.Min(SplatRasterizer.MaxAlpha, s.Opacity * g);
-                            if (alpha < SplatRasterizer.MinAlpha) continue;
+                            if (alpha < SplatRasterizer.MinAlpha) { consumed++; continue; }
 
+                            // Match the reference CUDA forward and the WGSL raster_forward:
+                            // reject the splat that would push T below MinTransmittance and do
+                            // NOT count it as consumed, so backward never undoes an unused alpha.
+                            float testT = t * (1f - alpha);
+                            if (testT < SplatRasterizer.MinTransmittance) break;
+
+                            consumed++;
                             accR += s.R * alpha * t;
                             accG += s.G * alpha * t;
                             accB += s.B * alpha * t;
-                            t *= (1f - alpha);
+                            t = testT;
                         }
 
                         colour[p * 3 + 0] = accR;

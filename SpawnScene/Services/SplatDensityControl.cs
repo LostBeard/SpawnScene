@@ -23,21 +23,39 @@ namespace SpawnScene.Services;
 /// look like. Applying that to a GPU buffer is a separate compaction pass, and keeping the two
 /// apart is what makes the rules testable at all.
 ///
-/// Thresholds follow Kerbl et al. so the published numbers mean something. The one unit
-/// conversion that matters is called out on <see cref="GradientThresholdNdc"/>.
+/// Thresholds follow Kerbl et al. so the published numbers mean something. Units are
+/// called out on <see cref="GradientThreshold"/>.
 /// </summary>
 public static class SplatDensityControl
 {
     /// <summary>
     /// Gradient magnitude above which a Gaussian is considered under-reconstructed.
     ///
-    /// The reference quotes 2e-4 in NDC, where the frame spans [-1, 1]. This codebase works in
-    /// PIXELS, and ndc = 2 * pixel / width, so d/d(pixel) = (2/width) * d/d(ndc): a pixel-space
-    /// gradient has to be multiplied by width/2 before it can be compared to this number.
-    /// Comparing raw pixel gradients against 2e-4 would set the bar about 320x too high at
-    /// 640 wide, and nothing would ever densify.
+    /// The reference quotes <c>0.0002</c> against the L2 norm of the SCREEN-SPACE (pixel)
+    /// position gradient accumulated as a SUM over pixels (Kerbl / gsplat absgrad sum).
+    /// This trainer densifies on the PEAK per-pixel |dL/dmean2D| so small Gaussians can clone
+    /// (sum∝footprint → only splits; MEASURED Truck). Peak units are ~50-100x smaller:
+    /// MEASURED Truck 7K max avg ~3.7e-6, so the default bar is 1.5e-6. Override with
+    /// <c>?densifygrad=</c>. Do NOT reintroduce an NDC conversion. Training uses
+    /// <c>0.8 L1 + 0.2 D-SSIM</c> (<see cref="ImageQuality.LambdaDssim"/>).
     /// </summary>
-    public const float GradientThresholdNdc = 2e-4f;
+    public static float GradientThreshold { get; set; } = 1.5e-6f;
+
+    /// <summary>Obsolete alias kept so older <c>?densifygrad=</c> call sites still compile.</summary>
+    public static float GradientThresholdNdc
+    {
+        get => GradientThreshold;
+        set => GradientThreshold = value;
+    }
+
+    /// <summary>
+    /// Of the Gaussians above <see cref="GradientThreshold"/>, only this fraction actually
+    /// grow (highest gradient first). The reference densifies every candidate; Brush caps at
+    /// 0.2 and that is what stops a weak gradient signal from cloning the whole scene every
+    /// hundred iterations. Default 1 matches the reference; Studio lowers it for browser runs
+    /// until D-SSIM is in the training loss and position gradients match the paper.
+    /// </summary>
+    public static float GrowthSelectFraction { get; set; } = 1f;
 
     /// <summary>
     /// A Gaussian is "large" when its biggest axis exceeds this fraction of the scene extent.
@@ -74,7 +92,7 @@ public static class SplatDensityControl
     /// </summary>
     public struct Accumulator
     {
-        /// <summary>Sum over iterations of |dL/d(screen position)|, in NDC units.</summary>
+        /// <summary>Sum over iterations of |dL/d(screen position)|, in PIXEL units.</summary>
         public float GradientSum;
 
         /// <summary>Iterations in which this Gaussian contributed to any pixel.</summary>
@@ -114,14 +132,44 @@ public static class SplatDensityControl
         /// <summary>New Gaussians to append, from clones and from splits.</summary>
         public List<Splat> Add { get; } = new();
 
+        /// <summary>
+        /// Parallel to <see cref="Add"/>: old index whose SH / appearance the child inherits.
+        /// Kerbl copies features into densified children; Adam moments stay fresh (-1 in the
+        /// survivor map). Missing entries mean "no parent" (zero the rest bands).
+        /// </summary>
+        public List<int> AddParent { get; } = new();
+
         public int Cloned { get; set; }
         public int Split { get; set; }
         public int PrunedOpacity { get; set; }
         public int PrunedTooBig { get; set; }
+        /// <summary>Dropped because no supervised view ever gave them a gradient.</summary>
+        public int PrunedUnconstrained { get; set; }
 
         public override string ToString() =>
-            $"clone {Cloned}, split {Split}, prune {PrunedOpacity} faint + {PrunedTooBig} bloated, " +
-            $"net {Add.Count - Remove.Count:+#;-#;0}";
+            $"clone {Cloned}, split {Split}, prune {PrunedOpacity} faint + {PrunedTooBig} bloated" +
+            (PrunedUnconstrained > 0 ? $" + {PrunedUnconstrained} unconstrained" : "") +
+            $", net {Add.Count - Remove.Count:+#;-#;0}";
+    }
+
+    /// <summary>
+    /// Drop every splat that no supervised view constrained over a full cycle.
+    ///
+    /// Measured on depth-shell initialisation: ~half the scene sits in this bucket. Those
+    /// Gaussians cannot improve under photometric loss, cost raster time, and are free to be
+    /// wrong exactly where held-out views look. This is a support count, not an opacity, so it
+    /// runs once after the first cycle rather than as part of density control.
+    /// </summary>
+    public static Plan PruneUnconstrained(IReadOnlyList<uint> support)
+    {
+        var plan = new Plan();
+        for (int i = 0; i < support.Count; i++)
+        {
+            if (support[i] != 0) continue;
+            plan.Remove.Add(i);
+            plan.PrunedUnconstrained++;
+        }
+        return plan;
     }
 
     /// <summary>
@@ -155,6 +203,10 @@ public static class SplatDensityControl
         // at the cap rather than the tab dying, and pruning still runs so the set can recover.
         int budget = Math.Max(0, maxSplats - splats.Count);
 
+        // Collect densify candidates first so GrowthSelectFraction can keep only the most
+        // urgent ones. Prune decisions are independent and applied immediately.
+        var candidates = new List<(int Index, float Grad, bool Split)>(splats.Count / 8);
+
         for (int i = 0; i < splats.Count; i++)
         {
             var s = splats[i];
@@ -174,27 +226,48 @@ public static class SplatDensityControl
                 continue;
             }
 
-            if (stats[i].AverageGradient < GradientThresholdNdc) continue;
+            if (stats[i].AverageGradient < GradientThreshold) continue;
+            candidates.Add((i, stats[i].AverageGradient, s.MaxScale > sizeSplit));
+        }
 
-            if (s.MaxScale <= sizeSplit)
-            {
-                // Under-reconstructed: clone. The copy starts exactly where its parent is and
-                // the optimiser separates them - placing it by hand would be guessing at the
-                // direction the loss is already telling us about.
-                if (plan.Add.Count >= budget) continue;
-                plan.Add.Add(s);
-                plan.Cloned++;
-            }
-            else
+        // Highest gradient first. Stable by index so a run reproduces.
+        candidates.Sort((a, b) =>
+        {
+            int cmp = b.Grad.CompareTo(a.Grad);
+            return cmp != 0 ? cmp : a.Index.CompareTo(b.Index);
+        });
+
+        float frac = Math.Clamp(GrowthSelectFraction, 0f, 1f);
+        int take = frac >= 0.999f
+            ? candidates.Count
+            : Math.Min(candidates.Count, Math.Max(0, (int)MathF.Ceiling(candidates.Count * frac)));
+
+        for (int c = 0; c < take; c++)
+        {
+            int i = candidates[c].Index;
+            var s = splats[i];
+            if (candidates[c].Split)
             {
                 // Over-reconstructed: split into two smaller children, positioned by sampling
                 // the parent's OWN distribution. Offsetting along a fixed axis instead would
                 // bias every split in the scene the same way.
                 if (plan.Add.Count + 2 > budget) continue;
                 plan.Add.Add(Child(s, sampleUnitNormal));
+                plan.AddParent.Add(i);
                 plan.Add.Add(Child(s, sampleUnitNormal));
+                plan.AddParent.Add(i);
                 plan.Remove.Add(i);
                 plan.Split++;
+            }
+            else
+            {
+                // Under-reconstructed: clone. The copy starts exactly where its parent is and
+                // the optimiser separates them - placing it by hand would be guessing at the
+                // direction the loss is already telling us about.
+                if (plan.Add.Count >= budget) continue;
+                plan.Add.Add(s);
+                plan.AddParent.Add(i);
+                plan.Cloned++;
             }
         }
         return plan;
@@ -244,34 +317,47 @@ public static class SplatDensityControl
     }
 
     /// <summary>
+    /// Apply a plan, and report where each surviving Gaussian came from.
+    ///
+    /// <paramref name="adamSurvivors"/> maps each NEW index to the OLD index whose Adam
+    /// moments to keep, or -1 for a fresh densified child (moments start at zero).
+    /// <paramref name="featureSources"/> maps to the OLD index whose SH rest / appearance to
+    /// copy - for clones and split children that is the parent, matching Kerbl
+    /// <c>densification_postfix</c>. Without it every densify after SH degree rises births
+    /// DC-only children and view-dependent colour never accumulates in the grown set.
+    /// </summary>
+    public static List<Splat> Apply(
+        IReadOnlyList<Splat> splats, Plan plan, out int[] adamSurvivors, out int[] featureSources)
+    {
+        var drop = new HashSet<int>(plan.Remove);
+        var result = new List<Splat>(splats.Count - drop.Count + plan.Add.Count);
+        var adam = new List<int>(result.Capacity);
+        var feat = new List<int>(result.Capacity);
+        for (int i = 0; i < splats.Count; i++)
+            if (!drop.Contains(i)) { result.Add(splats[i]); adam.Add(i); feat.Add(i); }
+        for (int a = 0; a < plan.Add.Count; a++)
+        {
+            result.Add(plan.Add[a]);
+            adam.Add(-1);
+            int parent = a < plan.AddParent.Count ? plan.AddParent[a] : -1;
+            feat.Add(parent);
+        }
+        adamSurvivors = adam.ToArray();
+        featureSources = feat.ToArray();
+        return result;
+    }
+
+    /// <inheritdoc cref="Apply(IReadOnlyList{Splat}, Plan, out int[], out int[])"/>
+    public static List<Splat> Apply(
+        IReadOnlyList<Splat> splats, Plan plan, out int[] survivors)
+        => Apply(splats, plan, out survivors, out _);
+
+    /// <summary>
     /// Apply a plan, returning the new splat set. Removals are applied to the ORIGINAL indices
     /// and additions appended, so a plan is never invalidated by its own earlier entries.
     /// </summary>
     public static List<Splat> Apply(IReadOnlyList<Splat> splats, Plan plan)
-        => Apply(splats, plan, out _);
-
-    /// <summary>
-    /// Apply a plan, and report where each surviving Gaussian came from.
-    ///
-    /// <paramref name="survivors"/> maps each NEW index to the OLD index it kept its identity
-    /// from, or -1 for a clone or split child. Optimiser state is per-Gaussian and the buffers
-    /// are reallocated by the resize, so without this mapping every survivor silently loses its
-    /// Adam momentum - which shows up as a kick in the loss after each densification, not as an
-    /// error.
-    /// </summary>
-    public static List<Splat> Apply(
-        IReadOnlyList<Splat> splats, Plan plan, out int[] survivors)
-    {
-        var drop = new HashSet<int>(plan.Remove);
-        var result = new List<Splat>(splats.Count - drop.Count + plan.Add.Count);
-        var map = new List<int>(result.Capacity);
-        for (int i = 0; i < splats.Count; i++)
-            if (!drop.Contains(i)) { result.Add(splats[i]); map.Add(i); }
-        result.AddRange(plan.Add);
-        for (int i = 0; i < plan.Add.Count; i++) map.Add(-1);
-        survivors = map.ToArray();
-        return result;
-    }
+        => Apply(splats, plan, out _, out _);
 
     /// <summary>
     /// Cap every opacity, the periodic reset from the reference. It forces the optimiser to
@@ -286,13 +372,18 @@ public static class SplatDensityControl
     }
 
     /// <summary>
-    /// Convert a screen-space position gradient from PIXELS to NDC, so it can be compared with
-    /// <see cref="GradientThresholdNdc"/>. See that field for why this exists.
+    /// L2 norm of a screen-space position gradient in PIXEL units - the same quantity the
+    /// reference thresholds. Kept as a named helper so call sites cannot accidentally reinvent
+    /// an NDC conversion (see <see cref="GradientThreshold"/>).
+    /// </summary>
+    public static float PixelGradientMagnitude(float gradPxX, float gradPxY)
+        => MathF.Sqrt(gradPxX * gradPxX + gradPxY * gradPxY);
+
+    /// <summary>
+    /// Obsolete: the densify bar is in PIXEL space. This used to multiply by width/2 and that
+    /// is exactly the bug that made Truck 7K densify runaway. Returns the pixel magnitude and
+    /// ignores <paramref name="width"/>/<paramref name="height"/>.
     /// </summary>
     public static float PixelGradientToNdc(float gradPxX, float gradPxY, int width, int height)
-    {
-        float nx = gradPxX * width * 0.5f;
-        float ny = gradPxY * height * 0.5f;
-        return MathF.Sqrt(nx * nx + ny * ny);
-    }
+        => PixelGradientMagnitude(gradPxX, gradPxY);
 }

@@ -170,6 +170,175 @@ public static class ImageQuality
         return total / (wx * wy);
     }
 
+    /// <summary>
+    /// Reference training mix: <c>0.8 * L1 + 0.2 * (1 - SSIM)</c>. Kept here so the loss
+    /// shader and the host cannot disagree about the weights.
+    /// </summary>
+    public const float LambdaDssim = 0.2f;
+    public const float LambdaL1 = 1f - LambdaDssim;
+
+    /// <summary>
+    /// Gradient of <see cref="MeanSsim"/> w.r.t. interleaved RGB of image A, accumulated into
+    /// <paramref name="dRgbA"/>. Image B is the (constant) reference.
+    ///
+    /// The training loss uses <c>lambda * (1 - SSIM)</c>, so callers wanting that gradient pass
+    /// <paramref name="scale"/> = <c>-lambda</c>.
+    /// </summary>
+    public static void AddMeanSsimGradient(
+        ReadOnlySpan<float> rgbA, ReadOnlySpan<float> rgbB,
+        int width, int height, Span<float> dRgbA, double scale = 1.0)
+    {
+        if (width < WindowSize || height < WindowSize)
+            throw new ArgumentException(
+                $"{width}x{height} is smaller than the {WindowSize}x{WindowSize} SSIM window");
+        int nPix = width * height;
+        if (rgbA.Length < nPix * 3 || rgbB.Length < nPix * 3 || dRgbA.Length < nPix * 3)
+            throw new ArgumentException("RGB buffers shorter than width*height*3");
+
+        var a = LumaPlane(rgbA, width, height);
+        var b = LumaPlane(rgbB, width, height);
+        var dLuma = new double[nPix];
+        AddMeanSsimLumaGradient(a, b, width, height, dLuma, scale);
+
+        for (int i = 0; i < nPix; i++)
+        {
+            int o = i * 3;
+            double g = dLuma[i];
+            dRgbA[o] += (float)(g * LumaR);
+            dRgbA[o + 1] += (float)(g * LumaG);
+            dRgbA[o + 2] += (float)(g * LumaB);
+        }
+    }
+
+    /// <summary>
+    /// Gradient of mean SSIM on luma planes w.r.t. plane A. Separated so the GPU path and the
+    /// finite-difference gate can share one definition.
+    /// </summary>
+    public static void AddMeanSsimLumaGradient(
+        ReadOnlySpan<double> a, ReadOnlySpan<double> b,
+        int width, int height, Span<double> dA, double scale = 1.0)
+    {
+        var k = GaussianKernel1D();
+        int wx = width - WindowSize + 1;
+        int wy = height - WindowSize + 1;
+        int nWin = wx * wy;
+        double invN = scale / nWin;
+
+        // Horizontal pass - same layout as MeanSsimLuma / ssim_rows.
+        var rows = new double[wx * height * 5];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < wx; x++)
+            {
+                double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+                for (int t = 0; t < WindowSize; t++)
+                {
+                    double wt = k[t];
+                    double va = a[y * width + x + t];
+                    double vb = b[y * width + x + t];
+                    sa += wt * va;
+                    sb += wt * vb;
+                    saa += wt * va * va;
+                    sbb += wt * vb * vb;
+                    sab += wt * va * vb;
+                }
+                int o = (y * wx + x) * 5;
+                rows[o] = sa; rows[o + 1] = sb; rows[o + 2] = saa;
+                rows[o + 3] = sbb; rows[o + 4] = sab;
+            }
+        }
+
+        // dL/d(rows) from every window's vertical filter adjoint.
+        var dRows = new double[rows.Length];
+        for (int y = 0; y < wy; y++)
+        {
+            for (int x = 0; x < wx; x++)
+            {
+                double m0 = 0, m1 = 0, m2 = 0, m3 = 0, m4 = 0;
+                for (int t = 0; t < WindowSize; t++)
+                {
+                    double wt = k[t];
+                    int o = ((y + t) * wx + x) * 5;
+                    m0 += wt * rows[o];
+                    m1 += wt * rows[o + 1];
+                    m2 += wt * rows[o + 2];
+                    m3 += wt * rows[o + 3];
+                    m4 += wt * rows[o + 4];
+                }
+
+                double mu1 = m0, mu2 = m1;
+                double s1 = m2 - mu1 * mu1;
+                double s2 = m3 - mu2 * mu2;
+                double s12 = m4 - mu1 * mu2;
+
+                double A = mu1 * mu1 + mu2 * mu2 + C1;
+                double B = s1 + s2 + C2;
+                double C = 2 * mu1 * mu2 + C1;
+                double D = 2 * s12 + C2;
+                double den = A * B;
+                // dL/dS = invN for L = scale * mean(S); training uses scale = -lambda for (1-S).
+                double dLdS = invN;
+                // S = C*D/den. Differentiate w.r.t. M0..M4 through mu/s.
+                // Holding the other M fixed:
+                //   dmu1/dM0=1, ds1/dM0=-2*mu1, ds12/dM0=-mu2
+                //   dA/dM0=2*mu1, dB/dM0=-2*mu1, dC/dM0=2*mu2, dD/dM0=-2*mu2
+                double dCdM0 = 2 * mu2, dDdM0 = -2 * mu2, dAdM0 = 2 * mu1, dBdM0 = -2 * mu1;
+                double dSdM0 = ((dCdM0 * D + C * dDdM0) * den - C * D * (dAdM0 * B + A * dBdM0))
+                    / (den * den);
+
+                // M1 = mu2: ds2/dM1=-2*mu2, ds12/dM1=-mu1
+                double dCdM1 = 2 * mu1, dDdM1 = -2 * mu1, dAdM1 = 2 * mu2, dBdM1 = -2 * mu2;
+                double dSdM1 = ((dCdM1 * D + C * dDdM1) * den - C * D * (dAdM1 * B + A * dBdM1))
+                    / (den * den);
+
+                // M2 = E[a^2]: ds1=1, dB=1 → dS = -C*D*A / den^2 = -S/B
+                double dSdM2 = -C * D * A / (den * den);
+                // M3 = E[b^2]: same through B
+                double dSdM3 = -C * D * A / (den * den);
+                // M4 = E[ab]: ds12=1, dD=2 → dS = C*2 / den
+                double dSdM4 = 2 * C / den;
+
+                double g0 = dLdS * dSdM0;
+                double g1 = dLdS * dSdM1;
+                double g2 = dLdS * dSdM2;
+                double g3 = dLdS * dSdM3;
+                double g4 = dLdS * dSdM4;
+
+                for (int t = 0; t < WindowSize; t++)
+                {
+                    double wt = k[t];
+                    int o = ((y + t) * wx + x) * 5;
+                    dRows[o] += wt * g0;
+                    dRows[o + 1] += wt * g1;
+                    dRows[o + 2] += wt * g2;
+                    dRows[o + 3] += wt * g3;
+                    dRows[o + 4] += wt * g4;
+                }
+            }
+        }
+
+        // Horizontal adjoint: rows depend on luma a (and b, which we do not differentiate).
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < wx; x++)
+            {
+                int o = (y * wx + x) * 5;
+                double dSa = dRows[o];
+                double dSaa = dRows[o + 2];
+                double dSab = dRows[o + 4];
+                // d(sa)/d(va)=wt, d(saa)/d(va)=2*wt*va, d(sab)/d(va)=wt*vb
+                for (int t = 0; t < WindowSize; t++)
+                {
+                    double wt = k[t];
+                    int p = y * width + x + t;
+                    double va = a[p];
+                    double vb = b[p];
+                    dA[p] += wt * (dSa + 2 * dSaa * va + dSab * vb);
+                }
+            }
+        }
+    }
+
     /// <summary>PSNR of two interleaved RGB buffers in [0,1], matching the Python's psnr().</summary>
     public static double Psnr(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
     {

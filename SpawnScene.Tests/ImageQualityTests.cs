@@ -113,4 +113,69 @@ public class ImageQualityTests
         Assert.Throws<System.ArgumentException>(() => ImageQuality.MeanSsim(a, b, 8, 8),
             "the Python oracle raises here too; silently returning a number would be worse");
     }
+
+    /// <summary>
+    /// The D-SSIM term is about to drive densification. A wrong sign or a missing chain-rule
+    /// factor would push geometry the wrong way and look like "densify still does nothing".
+    /// Central finite difference on the analytic fixture is the gate.
+    /// </summary>
+    [Test]
+    public void MeanSsimGradient_MatchesCentralFiniteDifference()
+    {
+        const int W = 32, H = 28;
+        var (a, b) = ImageQuality.AnalyticFixture(W, H);
+        var grad = new float[a.Length];
+        ImageQuality.AddMeanSsimGradient(a, b, W, H, grad);
+
+        // Sparse sample: every 17th channel across the interior so the test stays fast but
+        // still covers pixels that sit in many overlapping windows and ones near the crop.
+        const float Eps = 1e-3f;
+        int checkedN = 0;
+        double maxRel = 0, maxAbs = 0;
+        for (int i = 0; i < a.Length; i += 17)
+        {
+            float save = a[i];
+            a[i] = save + Eps;
+            double plus = ImageQuality.MeanSsim(a, b, W, H);
+            a[i] = save - Eps;
+            double minus = ImageQuality.MeanSsim(a, b, W, H);
+            a[i] = save;
+
+            double numeric = (plus - minus) / (2 * Eps);
+            double analytic = grad[i];
+            double abs = System.Math.Abs(analytic - numeric);
+            if (abs > maxAbs) maxAbs = abs;
+            double floor = System.Math.Max(System.Math.Abs(numeric), 1e-8);
+            double rel = abs / floor;
+            if (rel > maxRel) maxRel = rel;
+            checkedN++;
+
+            // Near-zero grads: absolute bound. Meaningful grads: relative.
+            if (System.Math.Abs(numeric) < 1e-6)
+                Assert.That(abs, Is.LessThan(1e-8),
+                    $"channel {i}: analytic {analytic:G6} vs numeric {numeric:G6}");
+            else
+                Assert.That(rel, Is.LessThan(0.02),
+                    $"channel {i}: analytic {analytic:G6} vs numeric {numeric:G6} (rel {rel:G3})");
+        }
+        Assert.That(checkedN, Is.GreaterThan(20));
+        Assert.That(maxAbs, Is.LessThan(2e-4),
+            $"largest absolute FD disagreement {maxAbs:G4}");
+        Assert.That(maxRel, Is.LessThan(0.05),
+            $"largest relative FD disagreement {maxRel:G3}");
+    }
+
+    [Test]
+    public void DSsimLossGradient_IsNegatedMeanSsimGradient()
+    {
+        // loss = lambda * (1 - SSIM) ⇒ dL/d(pixel) = -lambda * dSSIM/d(pixel).
+        const int W = 24, H = 20;
+        var (a, b) = ImageQuality.AnalyticFixture(W, H);
+        var dSsim = new float[a.Length];
+        var dLoss = new float[a.Length];
+        ImageQuality.AddMeanSsimGradient(a, b, W, H, dSsim, scale: 1.0);
+        ImageQuality.AddMeanSsimGradient(a, b, W, H, dLoss, scale: -ImageQuality.LambdaDssim);
+        for (int i = 0; i < a.Length; i++)
+            Assert.That(dLoss[i], Is.EqualTo(-ImageQuality.LambdaDssim * dSsim[i]).Within(1e-6f));
+    }
 }

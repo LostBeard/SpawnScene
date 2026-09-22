@@ -16,8 +16,9 @@ public class SplatDensityControlTests
     const float Extent = 1.0f;                                   // scene extent
     const float Small = SplatDensityControl.PercentDense * Extent * 0.5f;   // clones
     const float Large = SplatDensityControl.PercentDense * Extent * 2f;     // splits
-    const float BigGrad = SplatDensityControl.GradientThresholdNdc * 2f;
-    const float SmallGrad = SplatDensityControl.GradientThresholdNdc * 0.5f;
+    // Not const: GradientThresholdNdc is a tunable static so a run can A/B it.
+    static float BigGrad => SplatDensityControl.GradientThresholdNdc * 2f;
+    static float SmallGrad => SplatDensityControl.GradientThresholdNdc * 0.5f;
 
     static SplatDensityControl.Splat Splat(float scale, float opacity = 0.5f) => new()
     {
@@ -230,24 +231,53 @@ public class SplatDensityControlTests
     }
 
     [Test]
-    public void PixelGradientsAreConvertedToNdcBeforeComparison()
+    public void PixelGradientMagnitudeIsComparedDirectlyToTheThreshold()
     {
-        // The published threshold is in NDC, where the frame spans [-1, 1]. Comparing a raw
-        // pixel-space gradient against it sets the bar about 320x too high at 640 wide, and
-        // nothing ever densifies - which reads as "densification does not help".
-        const int w = 640, h = 480;
+        // The published densify bar is in PIXEL space (means2D after ndc2Pix). Multiplying by
+        // width/2 and calling it NDC made the bar ~width/2 too easy and densify ran away on
+        // Truck 7K. The magnitude helper must stay in pixel units.
+        Assert.That(SplatDensityControl.PixelGradientMagnitude(3f, 4f), Is.EqualTo(5f).Within(1e-6f));
 
-        float ndc = SplatDensityControl.PixelGradientToNdc(1f, 0f, w, h);
-        Assert.That(ndc, Is.EqualTo(w * 0.5f).Within(1e-3f));
+        float onThreshold = SplatDensityControl.GradientThreshold;
+        Assert.That(SplatDensityControl.PixelGradientMagnitude(onThreshold, 0f),
+            Is.EqualTo(SplatDensityControl.GradientThreshold).Within(1e-9f));
 
-        // The pixel gradient that sits exactly on the threshold.
-        float onThreshold = SplatDensityControl.GradientThresholdNdc / (w * 0.5f);
-        Assert.That(SplatDensityControl.PixelGradientToNdc(onThreshold, 0f, w, h),
-            Is.EqualTo(SplatDensityControl.GradientThresholdNdc).Within(1e-9f));
+        // Obsolete helper must not reintroduce an NDC conversion.
+        Assert.That(SplatDensityControl.PixelGradientToNdc(3f, 4f, 640, 480),
+            Is.EqualTo(5f).Within(1e-6f));
+    }
 
-        // Both axes contribute; it is a magnitude, not a per-axis test.
-        float both = SplatDensityControl.PixelGradientToNdc(2f / w, 2f / h, w, h);
-        Assert.That(both, Is.EqualTo(MathF.Sqrt(2f)).Within(1e-4f));
+    [Test]
+    public void GrowthSelectFractionKeepsOnlyTheHighestGradientCandidates()
+    {
+        // Brush densifies a fraction of above-threshold candidates; without that cap a weak
+        // gradient signal clones most of the scene every densify step.
+        float prevFrac = SplatDensityControl.GrowthSelectFraction;
+        float prevThr = SplatDensityControl.GradientThreshold;
+        try
+        {
+            SplatDensityControl.GrowthSelectFraction = 0.25f;
+            SplatDensityControl.GradientThreshold = 0.001f;
+
+            var splats = new SplatDensityControl.Splat[8];
+            var stats = new SplatDensityControl.Accumulator[8];
+            for (int i = 0; i < 8; i++)
+            {
+                splats[i] = Splat(Small);
+                // All above threshold; grads 0.008 .. 0.001 so the top 25% are indices 0 and 1.
+                stats[i] = Acc(0.008f - i * 0.001f);
+            }
+
+            var plan = SplatDensityControl.Decide(splats, stats, Extent, false, Deviates(0f));
+            Assert.That(plan.Cloned, Is.EqualTo(2),
+                "0.25 of 8 candidates is 2 clones, highest gradient first");
+            Assert.That(plan.Split, Is.EqualTo(0));
+        }
+        finally
+        {
+            SplatDensityControl.GrowthSelectFraction = prevFrac;
+            SplatDensityControl.GradientThreshold = prevThr;
+        }
     }
 
     [Test]
@@ -288,7 +318,7 @@ public class SplatDensityControlTests
 
         // Survivors keep their old index, in order, with the removed ones gone.
         Assert.That(survivors[..4], Is.EqualTo(new[] { 0, 2, 3, 5 }));
-        // Added splats have no prior state.
+        // Added splats have no prior Adam state.
         Assert.That(survivors[4], Is.EqualTo(-1));
         Assert.That(survivors[5], Is.EqualTo(-1));
 
@@ -296,6 +326,59 @@ public class SplatDensityControlTests
         for (int i = 0; i < 4; i++)
             Assert.That(grown[i].PosX, Is.EqualTo((float)survivors[i]),
                 $"new splat {i} maps to old index {survivors[i]} but is not that splat");
+    }
+
+    [Test]
+    public void Apply_CopiesFeatureSourceFromAddParent()
+    {
+        var splats = new SplatDensityControl.Splat[3];
+        for (int i = 0; i < 3; i++)
+            splats[i] = new SplatDensityControl.Splat
+            {
+                PosX = i, ScaleX = 0.01f, ScaleY = 0.01f, ScaleZ = 0.01f,
+                QuatW = 1f, Opacity = 0.5f,
+            };
+
+        var plan = new SplatDensityControl.Plan();
+        plan.Add.Add(splats[1]);
+        plan.AddParent.Add(1);
+        plan.Add.Add(splats[1]);
+        plan.AddParent.Add(1);
+        plan.Remove.Add(1); // split-style: parent gone, two children
+
+        var grown = SplatDensityControl.Apply(splats, plan, out var adam, out var features);
+        Assert.That(grown, Has.Count.EqualTo(4)); // 0,2 kept + 2 children
+        Assert.That(adam, Is.EqualTo(new[] { 0, 2, -1, -1 }));
+        Assert.That(features, Is.EqualTo(new[] { 0, 2, 1, 1 }),
+            "children must inherit parent 1's SH rest, not start at zero");
+    }
+
+    [Test]
+    public void Decide_RecordsAddParentForCloneAndSplit()
+    {
+        var splats = new SplatDensityControl.Splat[2];
+        splats[0] = new SplatDensityControl.Splat
+        {
+            PosX = 0, ScaleX = 0.001f, ScaleY = 0.001f, ScaleZ = 0.001f,
+            QuatW = 1f, Opacity = 0.5f,
+        };
+        // Large enough to split at sceneExtent=10 (PercentDense*10=0.1)
+        splats[1] = new SplatDensityControl.Splat
+        {
+            PosX = 1, ScaleX = 0.2f, ScaleY = 0.2f, ScaleZ = 0.2f,
+            QuatW = 1f, Opacity = 0.5f,
+        };
+        var stats = new SplatDensityControl.Accumulator[2];
+        stats[0] = new SplatDensityControl.Accumulator { GradientSum = 1e-3f, VisibleCount = 1 };
+        stats[1] = new SplatDensityControl.Accumulator { GradientSum = 1e-3f, VisibleCount = 1 };
+
+        var plan = SplatDensityControl.Decide(splats, stats, sceneExtent: 10f,
+            afterFirstOpacityReset: false, sampleUnitNormal: () => 0f);
+
+        Assert.That(plan.AddParent, Has.Count.EqualTo(plan.Add.Count));
+        Assert.That(plan.Cloned + plan.Split * 2, Is.EqualTo(plan.Add.Count));
+        foreach (int p in plan.AddParent)
+            Assert.That(p, Is.EqualTo(0).Or.EqualTo(1));
     }
 
     [Test]
@@ -342,5 +425,69 @@ public class SplatDensityControlTests
             Assert.That(child.ColG, Is.EqualTo(0.5f));
             Assert.That(child.ColB, Is.EqualTo(0.75f));
         }
+    }
+
+    [Test]
+    public void PruneUnconstrainedDropsOnlyZeroSupport()
+    {
+        // The support census is the signal: a splat never constrained by any supervised view
+        // cannot improve under photometric loss and is free to be wrong on held-out views.
+        uint[] support = { 0, 1, 0, 2, 0, 4 };
+        var plan = SplatDensityControl.PruneUnconstrained(support);
+
+        Assert.That(plan.PrunedUnconstrained, Is.EqualTo(3));
+        Assert.That(plan.Remove, Is.EqualTo(new[] { 0, 2, 4 }));
+        Assert.That(plan.Add, Is.Empty);
+
+        var splats = new SplatDensityControl.Splat[6];
+        for (int i = 0; i < 6; i++)
+            splats[i] = new SplatDensityControl.Splat { PosX = i, QuatW = 1f, Opacity = 0.5f };
+
+        var grown = SplatDensityControl.Apply(splats, plan, out var survivors);
+        Assert.That(grown.Select(s => (int)s.PosX), Is.EqualTo(new[] { 1, 3, 5 }));
+        Assert.That(survivors, Is.EqualTo(new[] { 1, 3, 5 }));
+    }
+
+    [Test]
+    public void PruneUnconstrainedIsANoOpWhenEverySplatIsSeen()
+    {
+        uint[] support = { 1, 2, 3 };
+        var plan = SplatDensityControl.PruneUnconstrained(support);
+        Assert.That(plan.Remove, Is.Empty);
+        Assert.That(plan.PrunedUnconstrained, Is.EqualTo(0));
+    }
+
+    [Test]
+    public void AbsCentreMagnitudeSurvivesOpposingPullsThatCancelInASignedSum()
+    {
+        // AbsGS densify must not use a signed tile sum (cancels) or a sum of |dCentre| over
+        // pixels (scales with footprint → only LARGE Gaussians densify → 0 clones on Truck).
+        // Peak |dCentre| is size-fair so small under-reconstructed Gaussians can CLONE.
+        float thr = SplatDensityControl.GradientThreshold;
+        float signedMean = ((+thr) + (-thr)) / 2f;
+        float absMean = (Math.Abs(+thr) + Math.Abs(-thr)) / 2f;
+
+        Assert.That(signedMean, Is.EqualTo(0f).Within(1e-9f));
+        Assert.That(absMean, Is.EqualTo(thr).Within(1e-9f));
+
+        var splat = new[] { Splat(Small) };
+        var signedStats = new[] { Acc(signedMean, visible: 1) };
+        var absStats = new[] { Acc(absMean, visible: 1) };
+
+        Assert.That(Decide(splat, signedStats).Cloned, Is.EqualTo(0),
+            "signed cancel must stay below the densify bar");
+        Assert.That(Decide(splat, absStats).Cloned, Is.EqualTo(1),
+            "peak absgrad magnitude must clear the densify bar for a SMALL splat");
+    }
+
+    [Test]
+    public void LargeAndSmallHighGradBothDensifyAsSplitAndClone()
+    {
+        // Footprint decides clone vs split; the gradient bar must not silently exclude small.
+        var splats = new[] { Splat(Small), Splat(Large) };
+        var stats = new[] { Acc(BigGrad), Acc(BigGrad) };
+        var plan = Decide(splats, stats);
+        Assert.That(plan.Cloned, Is.EqualTo(1), "small + high grad -> clone");
+        Assert.That(plan.Split, Is.EqualTo(1), "large + high grad -> split");
     }
 }

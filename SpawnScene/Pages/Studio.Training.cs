@@ -121,6 +121,14 @@ public partial class Studio
     public static int FitSingleViewIndex { get; set; } = -1;
 
     /// <summary>
+    /// After the first full cycle, drop every splat no supervised view constrained.
+    ///
+    /// On by default: measured on depth-shell init as ~half the scene, and those Gaussians
+    /// cannot improve under photometric loss. <c>?pruneunseen=0</c> keeps them for A/B.
+    /// </summary>
+    public static bool PruneUnconstrainedAfterCycle { get; set; } = true;
+
+    /// <summary>
     /// Ceiling on the splat count during densification.
     ///
     /// Growth is unbounded by nature and a browser tab is not. Derived from the trainer key
@@ -141,9 +149,14 @@ public partial class Studio
     public static int OpacityResetEveryIters { get; set; }
 
     /// <summary>
-    /// Stop densifying after this fraction of the run, as the reference does at 15,000 of
-    /// 30,000. Splats added at the very end never get trained; they only add cost and noise.
+    /// Stop densifying after this iteration (absolute), matching Kerbl
+    /// <c>densify_until_iter=15000</c>. NOT a fraction of the run: a 7k checkpoint run must
+    /// densify for the whole 7k (MEASURED Truck: fraction 0.5 stopped at 3.5k and capped held-out
+    /// ~14.5 dB while clones had only just started helping). Opacity reset shares this gate.
     /// </summary>
+    public static int DensifyUntilIter { get; set; } = 15_000;
+
+    /// <summary>Obsolete fraction form; densify uses <see cref="DensifyUntilIter"/>.</summary>
     public const float DensifyUntilFraction = 0.5f;
 
     bool _hadOpacityReset;
@@ -249,6 +262,7 @@ public partial class Studio
             _trainer.SkipZeroGradientSteps = SkipZeroGradientSteps;
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
             _trainer.Resize(w, h, n, keysPerSplat);
+            _trainer.EnsureRgbConvertedToShDc(packed, n);
 
             // -- Upload every target photograph once --
             // Per-iteration upload would be 3.7 MB of traffic per step and would dominate the
@@ -408,6 +422,8 @@ public partial class Studio
             var probeIterations = TrainingSchedule.ProbeIterations(iterations, supervised.Count);
             var deadViews = new List<int>();
             var liveFraction = new float[supervised.Count];
+            var keysPerView = new int[supervised.Count];
+            var lossPerView = new float[supervised.Count];
             int totalCycles = iterations / Math.Max(1, supervised.Count);
 
             // Count, over the FIRST full cycle, how many views ever move each splat. Measured at
@@ -417,6 +433,10 @@ public partial class Studio
             double firstCycle = double.NaN, lastCycle = double.NaN;
             for (int it = 0; it < iterations; it++)
             {
+                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(it);
+                if (it == 0 || it == 1000 || it == 2000 || it == 3000)
+                    Console.WriteLine($"[Train] SH degree -> {_trainer.ActiveShDegree} at iter {it}");
+
                 // Decay the position rate as the reference does, 100x across the run. Rebuilt
                 // per iteration because it is the only rate that changes; the others are
                 // scale-free parameterisations (log scale, unit quaternion) and stay put.
@@ -456,11 +476,45 @@ public partial class Studio
                     if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
                         deadViews.Add(vi);
                     liveFraction[it] = (float)(st.ColourLive / (double)Math.Max(1, n));
+
+                    // Splits the question in two. A view that emitted NO keys was culled before
+                    // rasterisation, so the bug is in projection, depth range or tiling. A view
+                    // that emitted keys and still produced no gradient lost them in the backward
+                    // pass. Those are different files.
+                    keysPerView[it] = _trainer.LastKeyCount;
+                    lossPerView[it] = loss;
+
+                    // For a view that produced nothing, ask WHERE it was lost.
+                    if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
+                    {
+                        var (dl, pk, meanC, meanT) = await _trainer.ReadBackwardStagesAsync();
+                        Console.WriteLine(
+                            $"[Train]   STAGE PROBE view {vi} {ShortName(views[vi].ImageName)}: " +
+                            $"loss {loss:F4}, keys {_trainer.LastKeyCount:N0}, " +
+                            $"mean|rgb| {meanC:G4}, mean T {meanT:G4}, " +
+                            $"max|dL/dpix| {dl:G4}, max|gradPerKey| {pk:G4} -> " +
+                            (meanC <= 1e-8 ? "FORWARD rendered black (nothing for backward to credit)"
+                             : dl <= 0 ? "LOSS SHADER produced no pixel gradient"
+                             : pk <= 0 ? "RASTER_BACKWARD dropped a live render"
+                             : "SCATTER dropped it"));
+                    }
                 }
                 if (it == supervised.Count - 1)
                 {
                     await ReportViewSupportAsync(n);
-                    ReportViewCensus(views, supervised, deadViews, liveFraction);
+                    ReportViewCensus(views, supervised, deadViews, liveFraction,
+                        keysPerView, lossPerView);
+                    supervised = DropDeadViews(supervised, deadViews, views);
+                    if (PruneUnconstrainedAfterCycle)
+                    {
+                        var pruned = await PruneUnconstrainedAsync(packed, n);
+                        if (pruned != null)
+                        {
+                            (packed, n) = pruned.Value;
+                            var refreshed = await SplatBounds.ComputeAsync(accel, packed, n);
+                            if (refreshed != null) box = refreshed.Value;
+                        }
+                    }
                 }
                 if (DensifyEveryIters > 0) _trainer.AccumulateDensifyStats(n);
 
@@ -468,7 +522,10 @@ public partial class Studio
                 // iterations from 500 until half way, then the model is left to settle.
                 if (it >= DensifyFromIter)
                 {
-                    bool stillGrowing = it < iterations * DensifyUntilFraction;
+                    // Kerbl densify_until_iter is absolute 15_000, not half the run. A 7k
+                    // checkpoint densifies for the whole 7k; gating on iterations*0.5 stopped
+                    // growth (and the opacity resets that share this gate) halfway through.
+                    bool stillGrowing = it < DensifyUntilIter;
                     // Each schedule is checked on its OWN period. Nesting the reset inside the
                     // densify period would silently disable it whenever the two are not
                     // multiples of one another - a whitelist of one, in arithmetic form.
@@ -616,14 +673,63 @@ public partial class Studio
     }
 
     /// <summary>
-    /// How much of the gradient survives quantisation, and how many splats have none at all.
+    /// Drop every splat no supervised view constrained over the first cycle.
     ///
-    /// Over EVERY splat, via a GPU reduction. It used to copy the whole accumulator to the host
-    /// - 725k splats is 26 MB - and when that was cut to a 65,536-splat prefix it went blind:
-    /// the merged splat buffer is view-major, so a prefix is the top of view 0's depth map and
-    /// can legitimately be all zero. Every Bathroom run today printed "INCONCLUSIVE" because of
-    /// it. A prefix of a view-major buffer is not a sample.
+    /// Returns the compacted buffer, or null when every splat already earned its place.
     /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> PruneUnconstrainedAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> packed, int n)
+    {
+        uint[] support = await _trainer!.ReadViewSupportCountsAsync(n);
+        var plan = SplatDensityControl.PruneUnconstrained(support);
+        if (plan.Remove.Count == 0)
+        {
+            Console.WriteLine("[Train] prune unconstrained: nothing to drop");
+            return null;
+        }
+        if (plan.Remove.Count >= n)
+        {
+            // do NOT prune everything - a census that says the whole scene is dead is a
+            // measurement bug or a dead-view cascade, not a cue to delete the reconstruction.
+            Console.WriteLine(
+                $"[Train] prune unconstrained REFUSED: would drop all {n:N0} splats " +
+                "(support census says every splat is unconstrained)");
+            return null;
+        }
+
+        Console.WriteLine(
+            $"[Train] prune unconstrained: dropping {plan.Remove.Count:N0} of {n:N0} " +
+            $"({plan.Remove.Count * 100.0 / n:F1}%) that no supervised view constrained");
+        return await ApplySplatPlanAsync(packed, n, plan, resetOpacity: false, logTag: "Train");
+    }
+
+    /// <summary>
+    /// Drop supervised views that produced no gradient in the census. Paying for their loss
+    /// while their backward pass writes nothing is supervision in name only, and measured as
+    /// half the Bathroom views today.
+    /// </summary>
+    static List<int> DropDeadViews(
+        IReadOnlyList<int> supervised, IReadOnlyList<int> dead,
+        IReadOnlyList<TrainingView> views)
+    {
+        if (dead.Count == 0) return supervised.ToList();
+        var drop = new HashSet<int>(dead);
+        var kept = supervised.Where(v => !drop.Contains(v)).ToList();
+        if (kept.Count == 0)
+        {
+            Console.WriteLine(
+                "[Train] dead-view drop REFUSED: every supervised view is dead - " +
+                "keeping the original set so training still runs something");
+            return supervised.ToList();
+        }
+        Console.WriteLine(
+            $"[Train] dropping {dead.Count} dead supervised views, " +
+            $"{kept.Count} remain. Dead: " +
+            string.Join(", ", dead.Take(8).Select(v => $"{v}:{ShortName(views[v].ImageName)}")) +
+            (dead.Count > 8 ? ", ..." : ""));
+        return kept;
+    }
+
     /// <summary>
     /// One adaptive density control step: clone, split, prune, and rebuild the splat buffer.
     ///
@@ -640,23 +746,9 @@ public partial class Studio
         MemoryBuffer1D<float, Stride1D.Dense> packed, int n, float sceneExtent,
         bool densify, bool resetOpacity)
     {
-        var accel = _gpuService.WebGPUAccelerator;
         var stats = await _trainer!.ReadDensifyStatsAsync(n);
         float[] raw = await packed.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
-
-        var splats = new SplatDensityControl.Splat[n];
-        for (int i = 0; i < n; i++)
-        {
-            int o = i * SplatFormat.Floats;
-            splats[i] = new SplatDensityControl.Splat
-            {
-                PosX = raw[o], PosY = raw[o + 1], PosZ = raw[o + 2],
-                ColR = raw[o + 3], ColG = raw[o + 4], ColB = raw[o + 5],
-                ScaleX = raw[o + 6], ScaleY = raw[o + 7], ScaleZ = raw[o + 8],
-                Opacity = raw[o + 9],
-                QuatX = raw[o + 10], QuatY = raw[o + 11], QuatZ = raw[o + 12], QuatW = raw[o + 13],
-            };
-        }
+        var splats = UnpackSplats(raw, n);
 
         // Split children are drawn from their parent's own ellipsoid, so this needs normal
         // deviates. Seeded per step so a run reproduces; Box-Muller because there is no
@@ -703,7 +795,7 @@ public partial class Studio
         Console.WriteLine(
             $"[Densify] signal: {visible * 100.0 / n:F1}% of {n:N0} splats visible, " +
             $"avg |grad| median {avg[n / 2]:G3} p90 {avg[n * 9 / 10]:G3} max {avg[n - 1]:G3} " +
-            $"vs threshold {SplatDensityControl.GradientThresholdNdc:G3}; " +
+            $"vs threshold {SplatDensityControl.GradientThreshold:G3}; " +
             $"{big:N0} splats above the {sizeSplit:G3} split size; plan: {plan}");
 
         if (plan.Add.Count == 0 && plan.Remove.Count == 0 && !resetOpacity)
@@ -712,8 +804,49 @@ public partial class Studio
             return null;
         }
 
-        var priorAdam = await _trainer.ReadAdamStateAsync(n);
-        var grown = SplatDensityControl.Apply(splats, plan, out var survivors);
+        return await ApplySplatPlanAsync(packed, n, plan, resetOpacity, logTag: "Densify",
+            preloaded: (splats, raw));
+    }
+
+    static SplatDensityControl.Splat[] UnpackSplats(float[] raw, int n)
+    {
+        var splats = new SplatDensityControl.Splat[n];
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * SplatFormat.Floats;
+            splats[i] = new SplatDensityControl.Splat
+            {
+                PosX = raw[o], PosY = raw[o + 1], PosZ = raw[o + 2],
+                ColR = raw[o + 3], ColG = raw[o + 4], ColB = raw[o + 5],
+                ScaleX = raw[o + 6], ScaleY = raw[o + 7], ScaleZ = raw[o + 8],
+                Opacity = raw[o + 9],
+                QuatX = raw[o + 10], QuatY = raw[o + 11], QuatZ = raw[o + 12], QuatW = raw[o + 13],
+            };
+        }
+        return splats;
+    }
+
+    /// <summary>
+    /// Apply a clone/split/prune plan: compact, re-upload, resize the trainer, restore Adam.
+    /// Shared by densification and the one-shot unconstrained prune.
+    /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> ApplySplatPlanAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> packed, int n, SplatDensityControl.Plan plan,
+        bool resetOpacity, string logTag,
+        (SplatDensityControl.Splat[] splats, float[] raw)? preloaded = null)
+    {
+        var accel = _gpuService.WebGPUAccelerator;
+        SplatDensityControl.Splat[] splats;
+        if (preloaded != null) splats = preloaded.Value.splats;
+        else
+        {
+            float[] raw = await packed.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
+            splats = UnpackSplats(raw, n);
+        }
+
+        var priorAdam = await _trainer!.ReadAdamStateAsync(n);
+        var priorSh = await _trainer.ReadShRestAsync(n);
+        var grown = SplatDensityControl.Apply(splats, plan, out var adamSurvivors, out var featureSources);
 
         if (resetOpacity)
         {
@@ -722,13 +855,13 @@ public partial class Studio
             grown = arr.ToList();
             _hadOpacityReset = true;
             Console.WriteLine(
-                $"[Densify] opacity reset to at most {SplatDensityControl.OpacityResetTo} " +
+                $"[{logTag}] opacity reset to at most {SplatDensityControl.OpacityResetTo} " +
                 "- every Gaussian now has to re-earn its place, and the size prunes are live");
         }
         int m = grown.Count;
         if (m <= 0)
         {
-            Console.WriteLine("[Densify] plan would remove every splat - ignored");
+            Console.WriteLine($"[{logTag}] plan would remove every splat - ignored");
             _trainer.ResetDensifyStats();
             return null;
         }
@@ -756,26 +889,13 @@ public partial class Studio
         var live = _gpuRenderer.PackedSplatBuffer;
         if (live == null)
         {
-            Console.WriteLine("[Densify] FAIL: renderer did not take the grown buffer");
+            Console.WriteLine($"[{logTag}] FAIL: renderer did not take the grown buffer");
             return null;
         }
         if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = m;
 
-        // Re-size with the trainer's CURRENT key budget, not the caller's original guess.
-        //
-        // The loop measures peak key demand after the first cycle and re-sizes with headroom -
-        // drjohnson settles around 22 keys per splat, not the default 8. Passing the original
-        // argument back in threw that away and every frame after the first densification
-        // overflowed: "KEY OVERFLOW: 1,775,260 needed, capacity 641,256". A measurement the
-        // system already made is not something a later caller gets to discard.
-        // Re-size on MEASURED demand, not on the last sizing decision.
-        //
-        // The loop measures peak demand once, early, and adds 25% headroom. Densification then
-        // adds splats for hundreds of frames and eats it: the log filled with overflows missing
-        // by half a percent - "4,622,178 needed, capacity 4,601,320" - each one a frame trained
-        // on an incomplete render. The peak over the whole window is the evidence; use it, with
-        // the same headroom, rather than carrying forward a number that was true of a smaller
-        // scene.
+        // Re-size on MEASURED demand, not on the last sizing decision. Densification adds
+        // splats and eats headroom; the peak over the whole window is the evidence.
         var (w, h) = _trainer.Size;
         int keys = _trainer.KeysPerSplat;
         if (_trainer.PeakKeyDemand > 0)
@@ -784,7 +904,7 @@ public partial class Studio
             if (needed > keys)
             {
                 Console.WriteLine(
-                    $"[Densify] keysPerSplat {keys} -> {needed}: peak demand was " +
+                    $"[{logTag}] keysPerSplat {keys} -> {needed}: peak demand was " +
                     $"{_trainer.PeakKeyDemand:N0} keys for {n:N0} splats over this window");
                 keys = needed;
             }
@@ -792,19 +912,16 @@ public partial class Studio
         _trainer.Resize(w, h, m, keys);
         _trainer.ResetPeakKeyDemand();
 
-        // Reseed the derived state - opacity logits and log scales come from the packed buffer,
-        // which is correct for clones and split children alike - and then put the Adam moments
-        // back where they belong. InitOptimizerState zeroes them, so the order matters.
+        // Reseed derived state from the packed buffer, then put Adam moments back. Init zeroes
+        // them, so the order matters.
         _trainer.InitOptimizerState(live, m);
-
-        // Carrying opacity momentum through a reset would simply undo it within a few steps,
-        // which is why the reference zeroes it alongside. Slot 9 is opacity in the packed
-        // layout, and the Adam moments follow that layout one for one.
-        _trainer.RestoreAdamState(priorAdam, survivors,
+        _trainer.RestoreAdamState(priorAdam, adamSurvivors,
             zeroSlot: resetOpacity ? SplatFormat.OffOpacity : -1);
+        // SH rest follows featureSources (parent for densified children), not adamSurvivors.
+        _trainer.RestoreShRest(priorSh, featureSources);
         _trainer.ResetDensifyStats();
 
-        Console.WriteLine($"[Densify] {n:N0} -> {m:N0} splats: {plan}");
+        Console.WriteLine($"[{logTag}] {n:N0} -> {m:N0} splats: {plan}");
         return (live, m);
     }
 
@@ -814,7 +931,8 @@ public partial class Studio
     /// </summary>
     static void ReportViewCensus(
         IReadOnlyList<TrainingView> views, IReadOnlyList<int> supervised,
-        IReadOnlyList<int> dead, IReadOnlyList<float> liveFraction)
+        IReadOnlyList<int> dead, IReadOnlyList<float> liveFraction,
+        IReadOnlyList<int> keysPerView, IReadOnlyList<float> lossPerView)
     {
         var sorted = liveFraction.Order().ToArray();
         Console.WriteLine(
@@ -831,6 +949,27 @@ public partial class Studio
             $"[Train] ⚠ dead views ({dead.Count} of {supervised.Count}): {string.Join(", ", names)}" +
             (dead.Count > 8 ? ", ..." : "") +
             " - these contribute loss but no gradient, so they are supervision in name only");
+
+        int shown = 0;
+        for (int i = 0; i < supervised.Count && shown < 6; i++)
+        {
+            if (!dead.Contains(supervised[i])) continue;
+            Console.WriteLine(
+                $"[Train]   dead view {supervised[i]} {ShortName(views[supervised[i]].ImageName)}: " +
+                $"{keysPerView[i]:N0} keys emitted, loss {lossPerView[i]:F4}");
+            shown++;
+        }
+
+        // And a live one alongside, because a number means nothing without its counterpart.
+        for (int i = 0; i < supervised.Count; i++)
+        {
+            if (dead.Contains(supervised[i]) || keysPerView[i] == 0) continue;
+            Console.WriteLine(
+                $"[Train]   live view {supervised[i]} {ShortName(views[supervised[i]].ImageName)} " +
+                $"for comparison: {keysPerView[i]:N0} keys, loss {lossPerView[i]:F4}, " +
+                $"{liveFraction[i]:P2} of splats moved");
+            break;
+        }
     }
 
     static string ShortName(string path)

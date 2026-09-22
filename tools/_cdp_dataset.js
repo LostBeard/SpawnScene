@@ -27,7 +27,10 @@ const PATCHES = process.env.PATCHES ? `&patches=${process.env.PATCHES}` : '';
 const ANCHORS = process.env.ANCHORS ? `&anchors=${process.env.ANCHORS}` : '';
 const NVIEWS = process.env.N ? `&n=${process.env.N}` : '';
 // EXTRA passes anything else straight through, so a new knob does not need a new harness.
+// Quote EXTRA when setting it in cmd.exe: set "EXTRA=&init=points" — a bare & starts a new command.
 const EXTRA = process.env.EXTRA || '';
+// INIT=points uses the dataset's sparse SfM cloud (reference create_from_pcd).
+const INIT = process.env.INIT ? `&init=${process.env.INIT}` : '';
 // BUDGET=N splats for the initialisation.
 const BUDGET = process.env.BUDGET ? `&budget=${process.env.BUDGET}` : '';
 // MAXSCALE=N caps a splat at N * scene diagonal; POSLR=N scales the position learning rate.
@@ -41,6 +44,12 @@ const SKIPZEROGRAD = process.env.SKIPZEROGRAD ? `&skipzerograd=${process.env.SKI
 const GTPOSES = process.env.GTPOSES ? `&gtposes=${process.env.GTPOSES}` : '';
 // DENSIFY=N runs adaptive density control every N cycles.
 const DENSIFY = process.env.DENSIFY ? `&densify=${process.env.DENSIFY}` : '';
+// DENSIFYGRAD=X is the densify |grad| bar in peak-|dCentre| PIXEL units (default 1.5e-6).
+const DENSIFYGRAD = process.env.DENSIFYGRAD ? `&densifygrad=${process.env.DENSIFYGRAD}` : '';
+// DENSIFYFRAC=X keeps only the top fraction of above-threshold candidates (Brush: 0.2).
+const DENSIFYFRAC = process.env.DENSIFYFRAC ? `&densifyfrac=${process.env.DENSIFYFRAC}` : '';
+// DENSIFYUNTIL=N stops densify after iteration N (Kerbl: 15000 absolute).
+const DENSIFYUNTIL = process.env.DENSIFYUNTIL ? `&densifyuntil=${process.env.DENSIFYUNTIL}` : '';
 // OPACITYRESET=N caps every opacity every N cycles and unlocks the size prunes.
 const OPACITYRESET = process.env.OPACITYRESET ? `&opacityreset=${process.env.OPACITYRESET}` : '';
 // FITONE=N trains against view N alone: a capacity ceiling for the rasteriser.
@@ -110,7 +119,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${OPACITYRESET}${FITONE}${EXTRA}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

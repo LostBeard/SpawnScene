@@ -43,11 +43,18 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _evalSse;
     GPUComputePipeline? _ssimRowsPipe;
     GPUComputePipeline? _ssimReducePipe;
+    GPUComputePipeline? _ssimWinGradPipe;
+    GPUComputePipeline? _ssimRowsBwdPipe;
+    GPUComputePipeline? _ssimPixBwdPipe;
     GPUComputePipeline? _gradStats;
+    GPUComputePipeline? _maxMagnitude;
     GPUComputePipeline? _densifyAccum;
     GPUComputePipeline? _accumulateSupport;
     GPUComputePipeline? _supportHistogram;
     GPUComputePipeline? _unpackTarget;
+    GPUComputePipeline? _initRgbToDc;
+    GPUComputePipeline? _scatterShGrad;
+    GPUComputePipeline? _adamShRest;
 
     GPUBuffer? _uniformBuf;     // TrainUniforms
     GPUBuffer? _capsBuf;        // vec4<u32>: key capacity
@@ -71,23 +78,32 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyA;
     MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyB;
     MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyC;
-    MemoryBuffer1D<int, Stride1D.Dense>? _gradFixed;     // 4 per splat, fixed point
+    MemoryBuffer1D<int, Stride1D.Dense>? _gradFixed;     // 9 per splat, fixed point
+    MemoryBuffer1D<int, Stride1D.Dense>? _densifyAbs;    // 2 per splat: peak |dPx|,|dPy|
+
     MemoryBuffer1D<float, Stride1D.Dense>? _opacityLogit;
     MemoryBuffer1D<float, Stride1D.Dense>? _logScale;    // 3 per splat
     MemoryBuffer1D<float, Stride1D.Dense>? _geomOut;     // 10 per splat, diagnostics + gate
     MemoryBuffer1D<float, Stride1D.Dense>? _ssePartials; // 1 per 256-pixel workgroup
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimRows;    // 5 filtered channels per (window col, row)
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimPartials;// 1 per 256-window workgroup
+    MemoryBuffer1D<float, Stride1D.Dense>? _ssimWinGrad; // 5 per valid window (dL/dM)
+    MemoryBuffer1D<float, Stride1D.Dense>? _ssimDRows;   // 5 per (window col, row) - row adjoint
     MemoryBuffer1D<float, Stride1D.Dense>? _gradStatsPartials; // 6 per workgroup, 256 workgroups
-    MemoryBuffer1D<float, Stride1D.Dense>? _densifyStats;   // 2 per splat: NDC grad sum, visible count
+    MemoryBuffer1D<float, Stride1D.Dense>? _densifyStats;   // 2 per splat: pixel grad sum, visible count
     MemoryBuffer1D<uint, Stride1D.Dense>? _viewSupport;        // views that ever moved each splat
     MemoryBuffer1D<float, Stride1D.Dense>? _supportPartials;   // 6 per workgroup, 256 workgroups
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
+    MemoryBuffer1D<float, Stride1D.Dense>? _shRest;
+    MemoryBuffer1D<int, Stride1D.Dense>? _gradShRest;
+    MemoryBuffer1D<float, Stride1D.Dense>? _adamShM;
+    MemoryBuffer1D<float, Stride1D.Dense>? _adamShV;
     MemoryBuffer1D<int, Stride1D.Dense>? _lossFixed;
     GPUBuffer? _dimsBuf;
     GPUBuffer? _ssimDimsBuf;
     GPUBuffer? _ssimCfgBuf;
+    GPUBuffer? _lossWeightsBuf;
     GPUBuffer? _adamFlagsBuf;
     GPUBuffer? _gradScaleBuf;
     GPUBuffer? _adamCfgBuf;
@@ -128,6 +144,13 @@ public sealed class SplatTrainerGpu : IDisposable
     public const float DefaultColourScale = 67108864f;   // 2^26
     public const float DefaultCentreScale = 67108864f;   // 2^26
     public const float DefaultConicScale = 1048576f;     // 2^20
+    /// <summary>
+    /// Fixed-point scale for densify_abs only. Must NOT share <see cref="CentreScale"/>:
+    /// Adam retargets centre up to 2^40 for tiny signed means, and per-pixel |dCentre| sums
+    /// overflow i32 under that scale (MEASURED Truck 7K: densify max stuck ~1e-4 while wrap
+    /// destroyed the rest). 2^20 leaves headroom for abs sums up to ~2e3.
+    /// </summary>
+    public const float DensifyAbsScale = 1048576f;       // 2^20
 
     /// <summary>
     /// The scale a gradient slot is stored at. Was a static with two literals in it, which is
@@ -227,6 +250,11 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public int LastKeyDemand { get; private set; }
 
+    /// <summary>Active SH degree 0..3, sent in <c>TrainUniforms.sh_degree</c>.</summary>
+    public int ActiveShDegree { get; set; }
+
+    bool _rgbToDcDone;
+
     public SplatTrainerGpu(GpuService gpu) => _gpu = gpu;
 
     const int UniformFloats = 28;   // 112 bytes: 4 vec4 + 3 vec2 + 2 u32 + 2 f32 + u32 + pad
@@ -250,11 +278,18 @@ public sealed class SplatTrainerGpu : IDisposable
         _evalSse = MakePipeline(SplatTrainerShaders.EvalSse, "eval_sse");
         _ssimRowsPipe = MakePipeline(SplatTrainerShaders.SsimRows, "ssim_rows");
         _ssimReducePipe = MakePipeline(SplatTrainerShaders.SsimReduce, "ssim_reduce");
+        _ssimWinGradPipe = MakePipeline(SplatTrainerShaders.SsimWinGrad, "ssim_win_grad");
+        _ssimRowsBwdPipe = MakePipeline(SplatTrainerShaders.SsimRowsBwd, "ssim_rows_bwd");
+        _ssimPixBwdPipe = MakePipeline(SplatTrainerShaders.SsimPixBwd, "ssim_pix_bwd");
         _gradStats = MakePipeline(SplatTrainerShaders.GradStats, "grad_stats");
+        _maxMagnitude = MakePipeline(SplatTrainerShaders.MaxMagnitude, "max_magnitude");
         _densifyAccum = MakePipeline(SplatTrainerShaders.DensifyAccum, "densify_accum");
         _accumulateSupport = MakePipeline(SplatTrainerShaders.AccumulateSupport, "accumulate_support");
         _supportHistogram = MakePipeline(SplatTrainerShaders.SupportHistogram, "support_histogram");
         _unpackTarget = MakePipeline(SplatTrainerShaders.UnpackTarget, "unpack_target");
+        _initRgbToDc = MakePipeline(SplatTrainerShaders.InitRgbToDc, "init_rgb_to_dc");
+        _scatterShGrad = MakePipeline(SplatTrainerShaders.ScatterShGrad, "scatter_sh_grad");
+        _adamShRest = MakePipeline(SplatTrainerShaders.AdamShRest, "adam_sh_rest");
 
         _uniformBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
@@ -317,10 +352,16 @@ public sealed class SplatTrainerGpu : IDisposable
             Size = 80,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
+        _lossWeightsBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
 
         Console.WriteLine("[Trainer] pipelines created: emit_keys, tile_ranges, raster_forward, " +
             "raster_backward, scatter_gradients, loss_l1, adam_step, init_logits, adam_geometry, " +
-            "eval_sse, unpack_target, ssim_rows, ssim_reduce, grad_stats");
+            "eval_sse, unpack_target, ssim_rows, ssim_reduce, ssim_win_grad, ssim_rows_bwd, " +
+            "ssim_pix_bwd, grad_stats");
     }
 
     GPUComputePipeline MakePipeline(string wgsl, string entry)
@@ -476,6 +517,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _gradKeyB = accel.Allocate1D<float>((long)_keyCapacity * 3);
         _gradKeyC = accel.Allocate1D<float>((long)_keyCapacity * 3);
         _gradFixed = accel.Allocate1D<int>((long)splatCount * GradsPerSplat);
+        _densifyAbs = accel.Allocate1D<int>((long)splatCount * 2);
         _opacityLogit = accel.Allocate1D<float>(splatCount);
         _logScale = accel.Allocate1D<float>((long)splatCount * 3);
         _geomOut = accel.Allocate1D<float>((long)splatCount * GeomGradsPerSplat);
@@ -492,10 +534,19 @@ public sealed class SplatTrainerGpu : IDisposable
         {
             _ssimRows = accel.Allocate1D<float>((long)SsimWindowsX * _height * 5);
             _ssimPartials = accel.Allocate1D<float>(SsimWorkgroups);
+            _ssimWinGrad = accel.Allocate1D<float>((long)SsimWindowsX * SsimWindowsY * 5);
+            _ssimDRows = accel.Allocate1D<float>((long)SsimWindowsX * _height * 5);
             WriteSsimCfg();
         }
         _adamM = accel.Allocate1D<float>((long)splatCount * AdamSlots);
         _adamV = accel.Allocate1D<float>((long)splatCount * AdamSlots);
+        _shRest = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+        _gradShRest = accel.Allocate1D<int>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+        _adamShM = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+        _adamShV = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+        _shRest.MemSetToZero();
+        _adamShM.MemSetToZero();
+        _adamShV.MemSetToZero();
         _lossFixed = accel.Allocate1D<int>(1);
         _adamStepCount = 0;
 
@@ -546,6 +597,7 @@ public sealed class SplatTrainerGpu : IDisposable
                     new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = _values!.GetGPUBuffer()! } },
                     new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = _counter!.GetGPUBuffer()! } },
                     new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _capsBuf! } },
+                    ShRestBindEntry(12),
                 },
             });
             pass.SetBindGroup(0, bg);
@@ -623,6 +675,7 @@ public sealed class SplatTrainerGpu : IDisposable
                     new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = _outColour!.GetGPUBuffer()! } },
                     new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _outFinalT!.GetGPUBuffer()! } },
                     new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _outEnd!.GetGPUBuffer()! } },
+                    ShRestBindEntry(12),
                 },
             });
             pass.SetBindGroup(0, bg);
@@ -822,6 +875,57 @@ public sealed class SplatTrainerGpu : IDisposable
     /// <summary>Clear the peak, at the start of a new densification window.</summary>
     public void ResetPeakKeyDemand() => PeakKeyDemand = 0;
 
+    /// <summary>
+    /// Where a view's gradient dies: magnitudes at each stage of the chain, plus whether the
+    /// forward pass painted anything. keys + loss + zero per-key can mean "forward was black"
+    /// or "backward dropped a live render" - those are different files.
+    /// </summary>
+    public async Task<(double DLdPix, double PerKey, double MeanColour, double MeanFinalT)> ReadBackwardStagesAsync()
+    {
+        long pixels = (long)_width * _height;
+        double dl = await MaxMagnitudeAsync(_dLdPix!, pixels * 3);
+        double pk = await MaxMagnitudeAsync(_gradKeyA!, (long)LastKeyCount * 3);
+        double meanC = await MeanAbsAsync(_outColour!, pixels * 3);
+        double meanT = await MeanAbsAsync(_outFinalT!, pixels);
+        return (dl, pk, meanC, meanT);
+    }
+
+    async Task<double> MeanAbsAsync(MemoryBuffer1D<float, Stride1D.Dense> buf, long count)
+    {
+        // Reuse the max-magnitude reduction's partials buffer as a scratch: mean is only for
+        // the stage probe (a few dead views), so a second reduction shader is not justified yet.
+        // CPU transfer of the whole buffer would be the render target - megabytes per probe.
+        if (count <= 0) return 0;
+        // Sample every Nth element so a 540x720x3 target stays a few KB. Stride is prime-ish
+        // relative to a scanline so a dead column cannot hide a live image.
+        const int MaxSamples = 4096;
+        int stride = Math.Max(1, (int)(count / MaxSamples));
+        int n = (int)Math.Min(MaxSamples, (count + stride - 1) / stride);
+        float[] host = await buf.CopyToHostAsync<float>(0, Math.Min(buf.Length, count));
+        double sum = 0;
+        int taken = 0;
+        for (int i = 0; i < host.Length && taken < n; i += stride, taken++)
+            sum += Math.Abs(host[i]);
+        return taken > 0 ? sum / taken : 0;
+    }
+
+    async Task<double> MaxMagnitudeAsync(MemoryBuffer1D<float, Stride1D.Dense> buf, long count)
+    {
+        if (count <= 0) return 0;
+        var accel = _gpu.WebGPUAccelerator;
+        WriteU32x4(_dimsBuf!, (uint)Math.Min(count, buf.Length), 0, 0, 0);
+        Dispatch(_maxMagnitude!, GradStatsWorkgroups, 1, new[]
+        {
+            Buf(0, buf.GetGPUBuffer()!), Buf(1, _gradStatsPartials!.GetGPUBuffer()!),
+            Buf(2, _dimsBuf!),
+        });
+        await accel.SynchronizeAsync();
+        float[] p = await _gradStatsPartials!.CopyToHostAsync<float>(0, GradStatsWorkgroups);
+        double m = 0;
+        foreach (float v in p) m = Math.Max(m, v);
+        return m;
+    }
+
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
     public void ResetDensifyStats() => _densifyStats!.MemSetToZero();
 
@@ -836,7 +940,7 @@ public sealed class SplatTrainerGpu : IDisposable
         WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height, 0);
         Dispatch(_densifyAccum!, (splatCount + 255) / 256, 1, new[]
         {
-            Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
+            Buf(0, _densifyAbs!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
             Buf(2, _dimsBuf!), Buf(3, _gradScaleBuf!),
         });
     }
@@ -941,6 +1045,19 @@ public sealed class SplatTrainerGpu : IDisposable
             splatCount, _supportViewsAccumulated,
             (long)c0, (long)c1, (long)c2, (long)c3, (long)c4,
             splatCount > 0 ? total / splatCount : 0.0);
+    }
+
+    /// <summary>
+    /// Per-splat view-support counts after a full cycle. Used to compact out the unconstrained
+    /// half before densification starts spending budget on them.
+    ///
+    /// CPU transfer: 4 bytes per splat. One read per run, and the alternative is leaving half
+    /// the scene as dead weight that can only hurt held-out views.
+    /// </summary>
+    public async Task<uint[]> ReadViewSupportCountsAsync(int splatCount)
+    {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        return await _viewSupport!.CopyToHostAsync<uint>(0, splatCount);
     }
 
     /// <summary>
@@ -1116,8 +1233,52 @@ public sealed class SplatTrainerGpu : IDisposable
         });
         _adamM!.MemSetToZero();
         _adamV!.MemSetToZero();
+        _adamShM?.MemSetToZero();
+        _adamShV?.MemSetToZero();
         _adamStepCount = 0;
     }
+
+    /// <summary>Convert packed linear RGB to SH DC once before the first training step.</summary>
+    public void EnsureRgbConvertedToShDc(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
+    {
+        if (_rgbToDcDone) return;
+        var splatGpu = splatBuf.GetGPUBuffer()!;
+        WriteU32(_dimsBuf!, (uint)splatCount);
+        Dispatch(_initRgbToDc!, (splatCount + 63) / 64, 1, new[]
+        {
+            Buf(0, splatGpu), Buf(1, _dimsBuf!),
+        });
+        _rgbToDcDone = true;
+    }
+
+    public async Task<float[]> ReadShRestAsync(int splatCount)
+    {
+        if (_shRest == null) return System.Array.Empty<float>();
+        return await _shRest.CopyToHostAsync<float>(0, (long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+    }
+
+    public void RestoreShRest(ReadOnlySpan<float> prior, int[] survivors)
+    {
+        if (_shRest == null) return;
+        int n = survivors.Length;
+        int stride = SphericalHarmonics.RestFloatsPerSplat;
+        int oldCount = prior.Length / stride;
+        var next = new float[(long)n * stride];
+        for (int i = 0; i < n; i++)
+        {
+            int src = survivors[i];
+            if (src >= 0 && src < oldCount)
+                prior.Slice(src * stride, stride).CopyTo(next.AsSpan(i * stride, stride));
+        }
+        _shRest.CopyFromCPU(next);
+    }
+
+    GPUBindGroupEntry ShRestBindEntry(int binding) =>
+        new()
+        {
+            Binding = (uint)binding,
+            Resource = new GPUBufferBinding { Buffer = _shRest!.GetGPUBuffer()! },
+        };
 
     /// <summary>
     /// One training iteration on the current target: forward, loss, backward, scatter, Adam.
@@ -1139,21 +1300,75 @@ public sealed class SplatTrainerGpu : IDisposable
 
         // Forward also refreshes the tile binning for this view.
         await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false);
-        if (LastKeyCount == 0) return 0f;
+        if (LastKeyCount == 0)
+        {
+            // Clear before returning: the view-support census and densify accum read these
+            // buffers after TrainStepAsync returns. Leaving the previous view's gradients here
+            // made a zero-key view look live (Sonnet audit 2026-09-21).
+            _gradFixed!.MemSetToZero();
+            _densifyAbs!.MemSetToZero();
+            return 0f;
+        }
 
         int pixels = _width * _height;
 
-        // ── Loss and dL/d(pixel) ──
+        // ── Loss and dL/d(pixel): 0.8 L1 + 0.2 D-SSIM, matching the reference ──
         _lossFixed!.MemSetToZero();
         await accel.SynchronizeAsync();
         WriteU32(_dimsBuf!, (uint)pixels);
+        WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaL1, ImageQuality.LambdaDssim, 0f, 0f);
         Dispatch(_lossL1!, (pixels + 63) / 64, 1, new[]
         {
             Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
-            Buf(2, _dLdPix!.GetGPUBuffer()!), Buf(3, _lossFixed!.GetGPUBuffer()!), Buf(4, _dimsBuf!),
+            Buf(2, _dLdPix!.GetGPUBuffer()!), Buf(3, _lossFixed!.GetGPUBuffer()!),
+            Buf(4, _dimsBuf!), Buf(5, _lossWeightsBuf!),
         });
 
-        // ── Backward: one workgroup per tile, no atomics ──
+        if (HasSsimWindows && _ssimRows != null && _ssimWinGrad != null && _ssimDRows != null)
+        {
+            // Reuse the scoring forward's horizontal pass, then the three adjoint passes that
+            // mirror ImageQuality.AddMeanSsimLumaGradient (FD-gated).
+            // ssim_rows dims: wx, wy (=height-10), srcW, targetOffset. srcH = wy+10.
+            WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_width, 0);
+            int rowThreads = SsimWindowsX * _height;
+            Dispatch(_ssimRowsPipe!, (rowThreads + 63) / 64, 1, new[]
+            {
+                Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
+                Buf(2, _ssimRows!.GetGPUBuffer()!), Buf(3, _ssimDimsBuf!), Buf(4, _ssimCfgBuf!),
+            });
+
+            WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_width, 0);
+            WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaDssim, 0f, 0f, 0f);
+            int winThreads = SsimWindowsX * SsimWindowsY;
+            Dispatch(_ssimWinGradPipe!, (winThreads + 255) / 256, 1, new[]
+            {
+                Buf(0, _ssimRows!.GetGPUBuffer()!), Buf(1, _ssimWinGrad!.GetGPUBuffer()!),
+                Buf(2, _ssimDimsBuf!), Buf(3, _ssimCfgBuf!), Buf(4, _lossWeightsBuf!),
+            });
+
+            WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_height, 0);
+            Dispatch(_ssimRowsBwdPipe!, (rowThreads + 255) / 256, 1, new[]
+            {
+                Buf(0, _ssimWinGrad!.GetGPUBuffer()!), Buf(1, _ssimDRows!.GetGPUBuffer()!),
+                Buf(2, _ssimDimsBuf!), Buf(3, _ssimCfgBuf!),
+            });
+
+            WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)_width, (uint)_height, 0);
+            Dispatch(_ssimPixBwdPipe!, (pixels + 255) / 256, 1, new[]
+            {
+                Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
+                Buf(2, _ssimDRows!.GetGPUBuffer()!), Buf(3, _dLdPix!.GetGPUBuffer()!),
+                Buf(4, _ssimDimsBuf!), Buf(5, _ssimCfgBuf!),
+            });
+        }
+
+        // ── Backward: one workgroup per tile, no atomics for signed grads ──
+        // densify_abs is filled HERE with peak per-pixel |dCentre| (AbsGS). Clear first so a
+        // previous view cannot leak into densify_accum after this step.
+        _densifyAbs!.MemSetToZero();
+        // .w = DensifyAbsScale for per-pixel abs atomics; .y stays CentreScale for Adam scatter.
+        WriteVec4(_gradScaleBuf!, ColourScale, CentreScale, ConicScale, DensifyAbsScale);
+        await accel.SynchronizeAsync();
         // grad_per_key is written for every key this frame, so stale values cannot leak in.
         Dispatch(_rasterBackward!, _tilesX, _tilesY, new[]
         {
@@ -1162,6 +1377,8 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(5, _outEnd!.GetGPUBuffer()!), Buf(6, _dLdPix!.GetGPUBuffer()!),
             Buf(7, _gradKeyA!.GetGPUBuffer()!), Buf(8, _gradKeyB!.GetGPUBuffer()!),
             Buf(9, _gradKeyC!.GetGPUBuffer()!),
+            Buf(10, _densifyAbs!.GetGPUBuffer()!), Buf(11, _gradScaleBuf!),
+            ShRestBindEntry(12),
         });
 
         // ── Scatter per-key gradients into per-splat totals ──
@@ -1179,9 +1396,6 @@ public sealed class SplatTrainerGpu : IDisposable
         _adamStepCount++;
         WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
         WriteVec4(_adamFlagsBuf!, SkipZeroGradientSteps ? 1f : 0f, 0f, 0f, 0f);
-        // One buffer for writer and readers, written before the scatter, so a step cannot
-        // accumulate at one scale and divide by another.
-        WriteVec4(_gradScaleBuf!, ColourScale, CentreScale, ConicScale, 0f);
         Dispatch(_adamStep!, (splatCount + 63) / 64, 1, new[]
         {
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),
@@ -1189,6 +1403,27 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(4, _adamV!.GetGPUBuffer()!), Buf(5, _adamCfgBuf!), Buf(6, _adamFlagsBuf!),
             Buf(7, _gradScaleBuf!),
         });
+
+        if (ActiveShDegree >= 1 && _scatterShGrad != null && _adamShRest != null)
+        {
+            _gradShRest!.MemSetToZero();
+            await accel.SynchronizeAsync();
+            // Scatter cfg: .x = colour fixed-point scale, .w = splat count (matches shader).
+            WriteVec4(_adamCfgBuf!, ColourScale, 0f, 0f, splatCount);
+            Dispatch(_scatterShGrad, (splatCount + 63) / 64, 1, new[]
+            {
+                Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
+                Buf(3, _gradShRest!.GetGPUBuffer()!), Buf(4, _adamCfgBuf!),
+            });
+            // Rest bands use feature_lr / 20 (Kerbl).
+            WriteVec4(_adamCfgBuf!, colourLr / 20f, ColourScale, _adamStepCount, splatCount);
+            Dispatch(_adamShRest, (splatCount + 63) / 64, 1, new[]
+            {
+                Buf(0, _shRest!.GetGPUBuffer()!), Buf(1, _gradShRest!.GetGPUBuffer()!),
+                Buf(2, _adamShM!.GetGPUBuffer()!), Buf(3, _adamShV!.GetGPUBuffer()!),
+                Buf(4, _adamCfgBuf!),
+            });
+        }
 
         // -- Geometry: the 2D gradients chained back to position, scale and rotation --
         // Separate dispatch, and optional, so a run can isolate whether a change came from
@@ -1340,7 +1575,7 @@ public sealed class SplatTrainerGpu : IDisposable
         f[24] = depthNear;
         f[25] = depthFar;
         f[26] = BitConverter.Int32BitsToSingle(splatCount);
-        f[27] = 0f;
+        f[27] = BitConverter.Int32BitsToSingle(Math.Clamp(ActiveShDegree, 0, SphericalHarmonics.MaxDegree));
 
         Buffer.BlockCopy(f, 0, _uniformBytes!, 0, _uniformBytes!.Length);
         _queue!.WriteBuffer(_uniformBuf!, 0, _uniformBytes);
@@ -1377,18 +1612,25 @@ public sealed class SplatTrainerGpu : IDisposable
         _gradKeyB?.Dispose(); _gradKeyB = null;
         _gradKeyC?.Dispose(); _gradKeyC = null;
         _gradFixed?.Dispose(); _gradFixed = null;
+        _densifyAbs?.Dispose(); _densifyAbs = null;
         _opacityLogit?.Dispose(); _opacityLogit = null;
         _logScale?.Dispose(); _logScale = null;
         _geomOut?.Dispose(); _geomOut = null;
         _ssePartials?.Dispose(); _ssePartials = null;
         _ssimRows?.Dispose(); _ssimRows = null;
         _ssimPartials?.Dispose(); _ssimPartials = null;
+        _ssimWinGrad?.Dispose(); _ssimWinGrad = null;
+        _ssimDRows?.Dispose(); _ssimDRows = null;
         _gradStatsPartials?.Dispose(); _gradStatsPartials = null;
         _densifyStats?.Dispose(); _densifyStats = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
+        _shRest?.Dispose(); _shRest = null;
+        _gradShRest?.Dispose(); _gradShRest = null;
+        _adamShM?.Dispose(); _adamShM = null;
+        _adamShV?.Dispose(); _adamShV = null;
         _lossFixed?.Dispose(); _lossFixed = null;
     }
 
@@ -1406,6 +1648,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _gradScaleBuf?.Destroy(); _gradScaleBuf?.Dispose();
         _ssimDimsBuf?.Destroy(); _ssimDimsBuf?.Dispose();
         _ssimCfgBuf?.Destroy(); _ssimCfgBuf?.Dispose();
+        _lossWeightsBuf?.Destroy(); _lossWeightsBuf?.Dispose();
         _scratch4?.Dispose();
         _emitKeys?.Dispose();
         _tileRanges?.Dispose();
@@ -1413,6 +1656,11 @@ public sealed class SplatTrainerGpu : IDisposable
         _rasterBackward?.Dispose();
         _scatterGrad?.Dispose();
         _lossL1?.Dispose();
+        _ssimRowsPipe?.Dispose();
+        _ssimReducePipe?.Dispose();
+        _ssimWinGradPipe?.Dispose();
+        _ssimRowsBwdPipe?.Dispose();
+        _ssimPixBwdPipe?.Dispose();
         _adamStep?.Dispose();
         _initLogits?.Dispose();
     }

@@ -60,7 +60,7 @@ struct TrainUniforms {
     depth_near : f32,
     depth_far  : f32,
     splat_count: u32,
-    _pad0      : u32,
+    sh_degree  : u32,   // active SH degree 0..3 (Kerbl: +1 every 1000 iters)
 };
 
 @group(0) @binding(0) var<uniform> u : TrainUniforms;
@@ -108,8 +108,15 @@ const EWA_FILTER_PX2 : f32 = 0.3;
 
     public const string Common = UniformsBlock + @"
 // Packed splat source: SplatFormat.Floats (14) per splat.
-//   0..2 pos   3..5 colour   6..8 scale   9 opacity   10..13 quat(x,y,z,w)
+//   0..2 pos   3..5 SH DC (rgb = C0*dc+0.5 at degree 0)   6..8 scale   9 opacity   10..13 quat
 @group(0) @binding(1) var<storage, read> splats : array<f32>;
+// 15 higher SH bands x RGB (45 floats), zero until degree rises. Binding 12 avoids clashing
+// with emit_keys (2..5) and raster_forward (2..6).
+@group(0) @binding(12) var<storage, read> sh_rest : array<f32>;
+
+const SH_REST_FLOATS : u32 = 45u;
+const SH_C0 : f32 = 0.28209479177387814;
+const SH_C1 : f32 = 0.4886025119029199;
 
 const TILE : u32 = 16u;
 const MIN_ALPHA : f32 = 0.00392156862;   // 1/255, matches SplatRasterizer.MinAlpha
@@ -127,6 +134,67 @@ struct Projected {
     extent : vec2<f32>,   // half-extent of the 3-sigma footprint, pixels
 };
 
+// View-dependent RGB from SH DC + rest (graphdeco / cvlab-epfl gaussian-splatting-web).
+fn eval_sh_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
+    let dir = normalize(pos - u.cam_pos.xyz);
+    let x = dir.x;
+    let y = dir.y;
+    let z = dir.z;
+    var result = SH_C0 * dc;
+    let deg = u.sh_degree;
+    let base = i * SH_REST_FLOATS;
+
+    if (deg >= 1u) {
+        let sh1 = vec3<f32>(sh_rest[base + 0u], sh_rest[base + 1u], sh_rest[base + 2u]);
+        let sh2 = vec3<f32>(sh_rest[base + 3u], sh_rest[base + 4u], sh_rest[base + 5u]);
+        let sh3 = vec3<f32>(sh_rest[base + 6u], sh_rest[base + 7u], sh_rest[base + 8u]);
+        result = result + SH_C1 * (-y * sh1 + z * sh2 - x * sh3);
+    }
+    if (deg >= 2u) {
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let sh4 = vec3<f32>(sh_rest[base + 9u], sh_rest[base + 10u], sh_rest[base + 11u]);
+        let sh5 = vec3<f32>(sh_rest[base + 12u], sh_rest[base + 13u], sh_rest[base + 14u]);
+        let sh6 = vec3<f32>(sh_rest[base + 15u], sh_rest[base + 16u], sh_rest[base + 17u]);
+        let sh7 = vec3<f32>(sh_rest[base + 18u], sh_rest[base + 19u], sh_rest[base + 20u]);
+        let sh8 = vec3<f32>(sh_rest[base + 21u], sh_rest[base + 22u], sh_rest[base + 23u]);
+        result = result
+            + 1.0925484305920792 * xy * sh4
+            + (-1.0925484305920792) * yz * sh5
+            + 0.31539156525252005 * (2.0 * zz - xx - yy) * sh6
+            + (-1.0925484305920792) * xz * sh7
+            + 0.5462742152960396 * (xx - yy) * sh8;
+    }
+    if (deg >= 3u) {
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let sh9 = vec3<f32>(sh_rest[base + 24u], sh_rest[base + 25u], sh_rest[base + 26u]);
+        let sh10 = vec3<f32>(sh_rest[base + 27u], sh_rest[base + 28u], sh_rest[base + 29u]);
+        let sh11 = vec3<f32>(sh_rest[base + 30u], sh_rest[base + 31u], sh_rest[base + 32u]);
+        let sh12 = vec3<f32>(sh_rest[base + 33u], sh_rest[base + 34u], sh_rest[base + 35u]);
+        let sh13 = vec3<f32>(sh_rest[base + 36u], sh_rest[base + 37u], sh_rest[base + 38u]);
+        let sh14 = vec3<f32>(sh_rest[base + 39u], sh_rest[base + 40u], sh_rest[base + 41u]);
+        let sh15 = vec3<f32>(sh_rest[base + 42u], sh_rest[base + 43u], sh_rest[base + 44u]);
+        result = result
+            + (-0.5900435899266435) * y * (3.0 * xx - yy) * sh9
+            + 2.890611442640554 * xy * z * sh10
+            + (-0.4570457994644658) * y * (4.0 * zz - xx - yy) * sh11
+            + 0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * sh12
+            + (-0.4570457994644658) * x * (4.0 * zz - xx - yy) * sh13
+            + 1.445305721320277 * z * (xx - yy) * sh14
+            + (-0.5900435899266435) * x * (xx - 3.0 * yy) * sh15;
+    }
+    return max(result + vec3<f32>(0.5), vec3<f32>(0.0));
+}
+
 // Project one splat to screen space. Mirrors SplatCovariance.Cov3DFromScaleQuat ->
 // RotateToCamera -> ProjectCov2D, which are unit-tested against analytic answers.
 fn project(i : u32) -> Projected {
@@ -135,7 +203,8 @@ fn project(i : u32) -> Projected {
 
     let o = i * FLOATS_PER_SPLAT;
     let pos = vec3<f32>(splats[o + 0u], splats[o + 1u], splats[o + 2u]);
-    p.colour = vec3<f32>(splats[o + 3u], splats[o + 4u], splats[o + 5u]);
+    let dc = vec3<f32>(splats[o + 3u], splats[o + 4u], splats[o + 5u]);
+    p.colour = eval_sh_rgb(i, pos, dc);
     let scale = vec3<f32>(splats[o + 6u], splats[o + 7u], splats[o + 8u]);
     p.opacity = splats[o + 9u];
     let q = normalize(vec4<f32>(splats[o + 10u], splats[o + 11u], splats[o + 12u], splats[o + 13u]));
@@ -378,14 +447,20 @@ fn raster_forward(
 
         if (!done) {
             for (var k = 0u; k < batch; k = k + 1u) {
-                if (t < MIN_T) { done = true; break; }
+                // Match the reference CUDA forward (graphdeco-inria forward.cu): reject the
+                // splat that would push T below MIN_T, and do NOT count it as a contributor.
+                // Counting it left end_idx one past the last applied splat; backward then
+                // undid an alpha the forward never applied and zeroed opaque-view gradients
+                // (STAGE PROBE: mean T == MIN_T, max|gradPerKey| == 0).
                 let g = splat_weight(sh_conic[k], sh_centre[k], pixel);
-                consumed = consumed + 1u;
-                if (g <= 0.0) { continue; }
+                if (g <= 0.0) { consumed = consumed + 1u; continue; }
                 let alpha = min(MAX_ALPHA, sh_opacity[k] * g);
-                if (alpha < MIN_ALPHA) { continue; }
+                if (alpha < MIN_ALPHA) { consumed = consumed + 1u; continue; }
+                let test_t = t * (1.0 - alpha);
+                if (test_t < MIN_T) { done = true; break; }
+                consumed = consumed + 1u;
                 acc = acc + sh_colour[k] * alpha * t;
-                t = t * (1.0 - alpha);
+                t = test_t;
             }
         }
         workgroupBarrier();
@@ -443,13 +518,18 @@ fn raster_forward(
 @group(0) @binding(7) var<storage, read_write> grad_a : array<f32>;   // dR, dG, dB
 @group(0) @binding(8) var<storage, read_write> grad_b : array<f32>;   // dOpacity, dCentre.x, dCentre.y
 @group(0) @binding(9) var<storage, read_write> grad_c : array<f32>;   // dConic a, b, c
+// Per-pixel |dL/dmean2D| for densify (AbsGS / gsplat absgrad). Signed centre cancels inside
+// the tile reduction below; abs must be reduced separately or densify never clears 2e-4.
+@group(0) @binding(10) var<storage, read_write> densify_abs : array<atomic<i32>>; // 2 per splat: max |dPx|,|dPy|
+@group(0) @binding(11) var<uniform>             densify_scale : vec4<f32>; // w = densify abs fixed-point scale
 
-// Three tile-wide reductions, 12 KB of workgroup storage against a 16 KB guaranteed minimum.
+// Three tile-wide reductions, plus abs centre. 256*(16+16+4+8)=11 KB against 16 KB min.
 // One pass rather than three sequential ones: the space is affordable and tripling the barrier
 // count in the innermost loop is not.
 var<workgroup> redA : array<vec4<f32>, 256>;   // dR, dG, dB, dOpacity
 var<workgroup> redB : array<vec4<f32>, 256>;   // dCentreX, dCentreY, dConicA, dConicB
 var<workgroup> redC : array<f32, 256>;         // dConicC
+var<workgroup> redAbs : array<vec2<f32>, 256>; // |dCentreX|, |dCentreY| per pixel
 
 @compute @workgroup_size(16, 16, 1)
 fn raster_backward(
@@ -487,9 +567,15 @@ fn raster_backward(
         var contrib = vec4<f32>(0.0);
         var geom = vec4<f32>(0.0);
         var geom_cc = 0.0;
+        var abs_c = vec2<f32>(0.0);
 
         // A thread only participates for splats its own pixel actually reached.
-        if (inside && k < my_end) {
+        //
+        // Bool local, not an inline compound: a compound short-circuit in an if-body has
+        // silently dropped every thread on this project's WebGPU path before
+        // (fb-wgsl-inline-predicate-drops-all). Evaluate, then branch.
+        let participate = inside && (k < my_end);
+        if (participate) {
             let p = project(values[k]);
             if (p.valid) {
                 let g = splat_weight(p.conic, p.centre, pixel);
@@ -522,12 +608,16 @@ fn raster_backward(
                             // compares against.
                             let d = pixel - p.centre;
                             let dL_dpower = p.opacity * dL_dalpha * g;
+                            let dCx = dL_dpower * (p.conic.x * d.x + p.conic.y * d.y);
+                            let dCy = dL_dpower * (p.conic.z * d.y + p.conic.y * d.x);
                             geom = vec4<f32>(
-                                dL_dpower * (p.conic.x * d.x + p.conic.y * d.y),
-                                dL_dpower * (p.conic.z * d.y + p.conic.y * d.x),
+                                dCx,
+                                dCy,
                                 dL_dpower * (-0.5 * d.x * d.x),
                                 dL_dpower * (-d.x * d.y));
                             geom_cc = dL_dpower * (-0.5 * d.y * d.y);
+                            // AbsGS: take abs PER PIXEL before the tile sum. |sum| cancels.
+                            abs_c = vec2<f32>(abs(dCx), abs(dCy));
                         }
 
                         rec = alpha * p.colour + (1.0 - alpha) * rec;
@@ -540,6 +630,7 @@ fn raster_backward(
         redA[li] = contrib;
         redB[li] = geom;
         redC[li] = geom_cc;
+        redAbs[li] = abs_c;
         workgroupBarrier();
         var stride = 128u;
         loop {
@@ -548,6 +639,10 @@ fn raster_backward(
                 redA[li] = redA[li] + redA[li + stride];
                 redB[li] = redB[li] + redB[li + stride];
                 redC[li] = redC[li] + redC[li + stride];
+                // MAX of |dCentre|, not sum: sum scales with footprint so only large Gaussians
+                // cleared the densify bar (MEASURED Truck 7K: 828 splits, 0 clones; median SfM
+                // spacing 0.067 already above sizeSplit 0.053). Peak |grad| is size-fair.
+                redAbs[li] = max(redAbs[li], redAbs[li + stride]);
             }
             workgroupBarrier();
             stride = stride >> 1u;
@@ -564,6 +659,17 @@ fn raster_backward(
             grad_c[b3 + 0u] = redB[0].z;
             grad_c[b3 + 1u] = redB[0].w;
             grad_c[b3 + 2u] = redC[0];
+
+            // Peak per-pixel |dCentre| into densify_abs (fixed-point). densify_scale.w is
+            // DensifyAbsScale - NOT centre Adam scale (retargets to 2^40 and overflows).
+            let splat = values[k];
+            let sx = densify_scale.w;
+            if (redAbs[0].x != 0.0) {
+                atomicMax(&densify_abs[splat * 2u], i32(round(redAbs[0].x * sx)));
+            }
+            if (redAbs[0].y != 0.0) {
+                atomicMax(&densify_abs[splat * 2u + 1u], i32(round(redAbs[0].y * sx)));
+            }
         }
         workgroupBarrier();
     }
@@ -604,8 +710,8 @@ fn scatter_gradients(
     let b3 = k * 3u;
     let out = splat * GRADS_PER_SPLAT;
 
-    // Slots 0..5 are bounded small and get 64x the precision; only the conic grows with a
-    // splat's pixel area, so only the conic needs the coarse range.
+    // Densify absgrad is accumulated in raster_backward (per-pixel |dCentre|), not here:
+    // |sum over tile| still cancels opposing pixels inside one key.
     for (var c = 0u; c < 3u; c = c + 1u) {
         let va = grad_a[b3 + c];
         if (va != 0.0) { atomicAdd(&grad_fixed[out + c], i32(round(va * grad_scale.x))); }
@@ -627,9 +733,11 @@ fn scatter_gradients(
     /// Pass 7: L1 loss and its gradient w.r.t. the rendered image, in one pass.
     ///
     /// The forward's colour buffer is compared against the target image and dL/d(pixel) is
-    /// written for the backward kernel. The loss itself is accumulated in fixed point because
-    /// WebGPU has no float atomics; it is only a scalar for reporting, so precision there is
-    /// not load-bearing.
+    /// written for the backward kernel. Weighted by <c>weights.x</c> (= ImageQuality.LambdaL1)
+    /// so the D-SSIM term can add the remaining share into the same buffer.
+    ///
+    /// The loss itself is accumulated in fixed point because WebGPU has no float atomics; it is
+    /// only a scalar for reporting, so precision there is not load-bearing.
     /// </summary>
     public const string LossL1 = @"
 @group(0) @binding(0) var<storage, read>       rendered : array<f32>;   // 3 per pixel
@@ -638,6 +746,7 @@ fn scatter_gradients(
 @group(0) @binding(2) var<storage, read_write> dL_dpix  : array<f32>;   // 3 per pixel
 @group(0) @binding(3) var<storage, read_write> loss_fixed : atomic<i32>;
 @group(0) @binding(4) var<uniform>             dims     : vec4<u32>;    // x = pixel count
+@group(0) @binding(5) var<uniform>             weights  : vec4<f32>;    // x = L1 weight (0.8)
 
 const LOSS_SCALE : f32 = 1048576.0;
 
@@ -647,15 +756,16 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (p >= dims.x) { return; }
 
     let n = f32(dims.x * 3u);
+    let w = weights.x;
     var total = 0.0;
     for (var c = 0u; c < 3u; c = c + 1u) {
         let i = p * 3u + c;
         let d = rendered[i] - ref_image[i];
         total = total + abs(d);
-        // d|x|/dx = sign(x), averaged over every channel of every pixel.
-        dL_dpix[i] = sign(d) / n;
+        // d|x|/dx = sign(x), averaged over every channel of every pixel, scaled by lambda_L1.
+        dL_dpix[i] = w * sign(d) / n;
     }
-    atomicAdd(&loss_fixed, i32(round(total / n * LOSS_SCALE)));
+    atomicAdd(&loss_fixed, i32(round(w * total / n * LOSS_SCALE)));
 }
 ";
 
@@ -682,6 +792,7 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
 const FLOATS_PER_SPLAT : u32 = 14u;
 const GRADS_PER_SPLAT : u32 = 9u;
 const ADAM_SLOTS : u32 = 14u;
+const SH_C0 : f32 = 0.28209479177387814;
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
 const EPS : f32 = 1e-15;
@@ -720,15 +831,15 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
         if (gz0 == 0 && gz1 == 0 && gz2 == 0 && gz3 == 0) { return; }
     }
 
-    // Colour (SH degree 0 / DC term).
+    // SH DC: raster backward is w.r.t. displayed RGB; dc parameter is rgb = SH_C0*dc + sh_rest(...) + 0.5.
     for (var c = 0u; c < 3u; c = c + 1u) {
-        let g = f32(grad_fixed[i * GRADS_PER_SPLAT + c]) / grad_scale.x;
+        let g = f32(grad_fixed[i * GRADS_PER_SPLAT + c]) / grad_scale.x * SH_C0;
         var m = adam_m[i * ADAM_SLOTS + c];
         var v = adam_v[i * ADAM_SLOTS + c];
         let updated = adam(splats[o + 3u + c], g, cfg.x, step, &m, &v);
         adam_m[i * ADAM_SLOTS + c] = m;
         adam_v[i * ADAM_SLOTS + c] = v;
-        splats[o + 3u + c] = clamp(updated, 0.0, 1.0);
+        splats[o + 3u + c] = updated;
     }
 
     // Opacity, optimised in logit space.
@@ -893,46 +1004,72 @@ fn grad_stats(
 ";
 
     /// <summary>
-    /// Accumulate the per-splat screen-position gradient that adaptive density control needs.
+    /// Largest magnitude in an arbitrary float buffer, as a reduction.
     ///
-    /// The signal Kerbl et al. densify on: a Gaussian the loss keeps trying to drag across the
-    /// image is being asked to explain more than one thing, and the answer is to clone or split
-    /// it rather than keep moving it. Averaged over the iterations the splat was VISIBLE, not
-    /// over all iterations - otherwise a splat seen in one view of thirty looks thirty times
-    /// less urgent than an identical one seen in all of them, purely because of camera placement.
-    ///
-    /// Converted to NDC here, where the frame size is known, because the published threshold of
-    /// 2e-4 is in NDC and a pixel-space gradient is about 320x smaller at 640 wide.
+    /// A stage probe. Gradients pass through dL/d(pixel), then per-key gradients, then the
+    /// fixed-point per-splat accumulator, and when the last one comes back empty for a view
+    /// whose loss is plainly non-zero, the question is which stage dropped it. Reading a PREFIX
+    /// would not answer it - a prefix of a view-major buffer is not a sample, which this project
+    /// has already learned the expensive way.
+    /// </summary>
+    public const string MaxMagnitude = @"
+@group(0) @binding(0) var<storage, read>       src      : array<f32>;
+@group(0) @binding(1) var<storage, read_write> partials : array<f32>;   // 1 per workgroup
+@group(0) @binding(2) var<uniform>             dims     : vec4<u32>;    // x = element count
+
+const THREADS : u32 = 65536u;   // 256 workgroups x 256
+
+var<workgroup> acc : array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn max_magnitude(
+    @builtin(global_invocation_id) gid : vec3<u32>,
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    var m = 0.0;
+    for (var i = gid.x; i < dims.x; i = i + THREADS) {
+        m = max(m, abs(src[i]));
+    }
+    acc[li] = m;
+    workgroupBarrier();
+
+    var stride = 128u;
+    loop {
+        if (stride == 0u) { break; }
+        if (li < stride) { acc[li] = max(acc[li], acc[li + stride]); }
+        workgroupBarrier();
+        stride = stride >> 1u;
+    }
+    if (li == 0u) { partials[wg.x] = acc[0]; }
+}
+";
+
+    /// <summary>
+    /// Accumulate AbsGS densify signal: peak per-pixel |dL/dPx|, |dL/dPy| from raster_backward
+    /// (max across tiles/pixels, not sum - sum made only large footprints clear the bar).
+    /// Pixel units; start at Kerbl's 2e-4 and retune from the densify signal log.
     /// </summary>
     public const string DensifyAccum = @"
-@group(0) @binding(0) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(0) var<storage, read>       densify_abs : array<i32>;  // 2 per splat max |dPx|,|dPy|
 @group(0) @binding(1) var<storage, read_write> accum      : array<f32>;   // 2 per splat
-@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count y=w z=h
-@group(0) @binding(3) var<uniform>             grad_scale : vec4<f32>;    // y = centre scale
-
-const GRADS_PER_SPLAT : u32 = 9u;
+@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count
+@group(0) @binding(3) var<uniform>             grad_scale : vec4<f32>;    // w = densify abs scale
 
 @compute @workgroup_size(256)
 fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
     let i = gid.x;
     if (i >= dims.x) { return; }
 
-    let b = i * GRADS_PER_SPLAT;
+    // Peak |dL/dmean2D| over pixels this view (fixed-point at DensifyAbsScale in .w).
+    let ax = densify_abs[i * 2u];
+    let ay = densify_abs[i * 2u + 1u];
+    if (ax == 0 && ay == 0) { return; }
 
-    var live = false;
-    for (var c = 0u; c < GRADS_PER_SPLAT; c = c + 1u) {
-        if (grad_fixed[b + c] != 0) { live = true; }
-    }
-    if (!live) { return; }
+    let gx = f32(ax) / grad_scale.w;
+    let gy = f32(ay) / grad_scale.w;
 
-    // Slots 4 and 5 are the screen centre, in PIXELS, stored at the centre scale.
-    let gx = f32(grad_fixed[b + 4u]) / grad_scale.y;
-    let gy = f32(grad_fixed[b + 5u]) / grad_scale.y;
-
-    let nx = gx * f32(dims.y) * 0.5;
-    let ny = gy * f32(dims.z) * 0.5;
-
-    accum[i * 2u] = accum[i * 2u] + sqrt(nx * nx + ny * ny);
+    accum[i * 2u] = accum[i * 2u] + sqrt(gx * gx + gy * gy);
     accum[i * 2u + 1u] = accum[i * 2u + 1u] + 1.0;
 }
 ";
@@ -1209,6 +1346,223 @@ fn ssim_reduce(
 ";
 
     /// <summary>
+    /// D-SSIM backward, pass 1: per valid window, write dL/d(M0..M4) where M are the
+    /// vertically-filtered row moments. Loss contribution is <c>weights.x * (1 - S) / N</c>,
+    /// so dL/dS = -weights.x / N. Matches <see cref="ImageQuality.AddMeanSsimLumaGradient"/>.
+    /// </summary>
+    public const string SsimWinGrad = @"
+struct SsimCfg {
+    luma   : vec4<f32>,
+    consts : vec4<f32>,
+    w      : array<vec4<f32>, 3>,
+};
+
+@group(0) @binding(0) var<storage, read>       rows     : array<f32>;   // 5 per (x, y)
+@group(0) @binding(1) var<storage, read_write> win_grad : array<f32>;   // 5 per window
+@group(0) @binding(2) var<uniform>             dims     : vec4<u32>;    // wx, wy, srcW, unused
+@group(0) @binding(3) var<uniform>             cfg      : SsimCfg;
+@group(0) @binding(4) var<uniform>             weights  : vec4<f32>;    // x = lambda_dssim
+
+const WINDOW : u32 = 11u;
+
+fn weight(t : u32) -> f32 {
+    let v = cfg.w[t / 4u];
+    let m = t % 4u;
+    if (m == 0u) { return v.x; }
+    if (m == 1u) { return v.y; }
+    if (m == 2u) { return v.z; }
+    return v.w;
+}
+
+@compute @workgroup_size(256)
+fn ssim_win_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let wx = dims.x;
+    let wy = dims.y;
+    let j = gid.x;
+    if (j >= wx * wy) { return; }
+
+    let y = j / wx;
+    let x = j - y * wx;
+
+    var m0 = 0.0; var m1 = 0.0; var m2 = 0.0; var m3 = 0.0; var m4 = 0.0;
+    for (var t = 0u; t < WINDOW; t = t + 1u) {
+        let wt = weight(t);
+        let o = ((y + t) * wx + x) * 5u;
+        m0 = m0 + wt * rows[o];
+        m1 = m1 + wt * rows[o + 1u];
+        m2 = m2 + wt * rows[o + 2u];
+        m3 = m3 + wt * rows[o + 3u];
+        m4 = m4 + wt * rows[o + 4u];
+    }
+
+    let mu1 = m0;
+    let mu2 = m1;
+    let s1 = m2 - mu1 * mu1;
+    let s2 = m3 - mu2 * mu2;
+    let s12 = m4 - mu1 * mu2;
+
+    let c1 = cfg.consts.x;
+    let c2 = cfg.consts.y;
+    let A = mu1 * mu1 + mu2 * mu2 + c1;
+    let B = s1 + s2 + c2;
+    let C = 2.0 * mu1 * mu2 + c1;
+    let D = 2.0 * s12 + c2;
+    let den = A * B;
+
+    // L = lambda * mean(1 - S) ⇒ dL/dS = -lambda / N
+    let dLdS = -weights.x / f32(wx * wy);
+
+    let dCdM0 = 2.0 * mu2; let dDdM0 = -2.0 * mu2;
+    let dAdM0 = 2.0 * mu1; let dBdM0 = -2.0 * mu1;
+    let dSdM0 = ((dCdM0 * D + C * dDdM0) * den - C * D * (dAdM0 * B + A * dBdM0)) / (den * den);
+
+    let dCdM1 = 2.0 * mu1; let dDdM1 = -2.0 * mu1;
+    let dAdM1 = 2.0 * mu2; let dBdM1 = -2.0 * mu2;
+    let dSdM1 = ((dCdM1 * D + C * dDdM1) * den - C * D * (dAdM1 * B + A * dBdM1)) / (den * den);
+
+    let dSdM2 = -C * D * A / (den * den);
+    let dSdM3 = -C * D * A / (den * den);
+    let dSdM4 = 2.0 * C / den;
+
+    let o = j * 5u;
+    win_grad[o] = dLdS * dSdM0;
+    win_grad[o + 1u] = dLdS * dSdM1;
+    win_grad[o + 2u] = dLdS * dSdM2;
+    win_grad[o + 3u] = dLdS * dSdM3;
+    win_grad[o + 4u] = dLdS * dSdM4;
+}
+";
+
+    /// <summary>
+    /// D-SSIM backward, pass 2: vertical-filter adjoint into the row buffer (gather, no atomics).
+    /// </summary>
+    public const string SsimRowsBwd = @"
+struct SsimCfg {
+    luma   : vec4<f32>,
+    consts : vec4<f32>,
+    w      : array<vec4<f32>, 3>,
+};
+
+@group(0) @binding(0) var<storage, read>       win_grad : array<f32>;   // 5 per window
+@group(0) @binding(1) var<storage, read_write> d_rows   : array<f32>;   // 5 per (x, y)
+@group(0) @binding(2) var<uniform>             dims     : vec4<u32>;    // wx, wy, srcH, unused
+@group(0) @binding(3) var<uniform>             cfg      : SsimCfg;
+
+const WINDOW : u32 = 11u;
+
+fn weight(t : u32) -> f32 {
+    let v = cfg.w[t / 4u];
+    let m = t % 4u;
+    if (m == 0u) { return v.x; }
+    if (m == 1u) { return v.y; }
+    if (m == 2u) { return v.z; }
+    return v.w;
+}
+
+@compute @workgroup_size(256)
+fn ssim_rows_bwd(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let wx = dims.x;
+    let wy = dims.y;
+    let srcH = dims.z;
+    let i = gid.x;
+    if (i >= wx * srcH) { return; }
+
+    let y = i / wx;
+    let x = i - y * wx;
+
+    var g0 = 0.0; var g1 = 0.0; var g2 = 0.0; var g3 = 0.0; var g4 = 0.0;
+    // Windows whose vertical span covers this row: wy_start = y - t for t in 0..10.
+    for (var t = 0u; t < WINDOW; t = t + 1u) {
+        if (y < t) { continue; }
+        let wy_start = y - t;
+        if (wy_start >= wy) { continue; }
+        let wt = weight(t);
+        let o = (wy_start * wx + x) * 5u;
+        g0 = g0 + wt * win_grad[o];
+        g1 = g1 + wt * win_grad[o + 1u];
+        g2 = g2 + wt * win_grad[o + 2u];
+        g3 = g3 + wt * win_grad[o + 3u];
+        g4 = g4 + wt * win_grad[o + 4u];
+    }
+
+    let o = i * 5u;
+    d_rows[o] = g0;
+    d_rows[o + 1u] = g1;
+    d_rows[o + 2u] = g2;
+    d_rows[o + 3u] = g3;
+    d_rows[o + 4u] = g4;
+}
+";
+
+    /// <summary>
+    /// D-SSIM backward, pass 3: horizontal-filter adjoint into RGB dL/d(pixel), ADDED onto the
+    /// L1 gradient already written by loss_l1.
+    /// </summary>
+    public const string SsimPixBwd = @"
+struct SsimCfg {
+    luma   : vec4<f32>,
+    consts : vec4<f32>,
+    w      : array<vec4<f32>, 3>,
+};
+
+@group(0) @binding(0) var<storage, read>       rendered : array<f32>;   // 3 per pixel (image A)
+@group(0) @binding(1) var<storage, read>       ref_image : array<f32>;  // 3 per pixel (image B)
+@group(0) @binding(2) var<storage, read>       d_rows   : array<f32>;   // 5 per (x, y)
+@group(0) @binding(3) var<storage, read_write> dL_dpix  : array<f32>;   // 3 per pixel
+@group(0) @binding(4) var<uniform>             dims     : vec4<u32>;    // wx, srcW, srcH, unused
+@group(0) @binding(5) var<uniform>             cfg      : SsimCfg;
+
+const WINDOW : u32 = 11u;
+
+fn weight(t : u32) -> f32 {
+    let v = cfg.w[t / 4u];
+    let m = t % 4u;
+    if (m == 0u) { return v.x; }
+    if (m == 1u) { return v.y; }
+    if (m == 2u) { return v.z; }
+    return v.w;
+}
+
+@compute @workgroup_size(256)
+fn ssim_pix_bwd(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let wx = dims.x;
+    let srcW = dims.y;
+    let srcH = dims.z;
+    let p = gid.x;
+    if (p >= srcW * srcH) { return; }
+
+    let py = p / srcW;
+    let px = p - py * srcW;
+
+    // Gather from every horizontal window column that covers this pixel.
+    var dLuma = 0.0;
+    for (var t = 0u; t < WINDOW; t = t + 1u) {
+        if (px < t) { continue; }
+        let x = px - t;
+        if (x >= wx) { continue; }
+        let wt = weight(t);
+        let o = (py * wx + x) * 5u;
+        let dSa = d_rows[o];
+        let dSaa = d_rows[o + 2u];
+        let dSab = d_rows[o + 4u];
+        let base = p * 3u;
+        let va = rendered[base] * cfg.luma.x
+               + rendered[base + 1u] * cfg.luma.y
+               + rendered[base + 2u] * cfg.luma.z;
+        let vb = ref_image[base] * cfg.luma.x
+               + ref_image[base + 1u] * cfg.luma.y
+               + ref_image[base + 2u] * cfg.luma.z;
+        dLuma = dLuma + wt * (dSa + 2.0 * dSaa * va + dSab * vb);
+    }
+
+    let base = p * 3u;
+    dL_dpix[base] = dL_dpix[base] + dLuma * cfg.luma.x;
+    dL_dpix[base + 1u] = dL_dpix[base + 1u] + dLuma * cfg.luma.y;
+    dL_dpix[base + 2u] = dL_dpix[base + 2u] + dLuma * cfg.luma.z;
+}
+";
+
+    /// <summary>
     /// Expand one target photograph from packed RGBA bytes into the float stack.
     ///
     /// The pixels arrive from the canvas as a JS typed array and are written straight to the
@@ -1237,6 +1591,24 @@ fn unpack_target(@builtin(global_invocation_id) gid : vec3<u32>) {
 ";
 
     /// <summary>Seed the logit buffer from the splats' current opacity, once before training.</summary>
+    /// <summary>Once per run: linear RGB in packed colour slots -> SH DC coefficients.</summary>
+    public const string InitRgbToDc = @"
+@group(0) @binding(0) var<storage, read_write> splats : array<f32>;
+@group(0) @binding(1) var<uniform>             cfg   : vec4<u32>; // x = splat count
+const FLOATS_PER_SPLAT : u32 = 14u;
+const SH_C0 : f32 = 0.28209479177387814;
+
+@compute @workgroup_size(64)
+fn init_rgb_to_dc(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= cfg.x) { return; }
+    let o = i * FLOATS_PER_SPLAT;
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        splats[o + 3u + c] = (splats[o + 3u + c] - 0.5) / SH_C0;
+    }
+}
+";
+
     public const string InitLogits = @"
 @group(0) @binding(0) var<storage, read>       splats        : array<f32>;
 @group(0) @binding(1) var<storage, read_write> opacity_logit : array<f32>;
@@ -1514,6 +1886,142 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     splats[o + 11u] = qout.y;
     splats[o + 12u] = qout.z;
     splats[o + 13u] = qout.w;
+}
+";
+
+    /// <summary>Fold dL/dRGB into dL/d(SH rest) using the same basis as <c>eval_sh_rgb</c>.</summary>
+    // UniformsBlock already declares FLOATS_PER_SPLAT / GRADS_PER_SPLAT; do not redeclare.
+    public const string ScatterShGrad = UniformsBlock + @"
+@group(0) @binding(1) var<storage, read>       splats     : array<f32>;
+@group(0) @binding(2) var<storage, read>       grad_fixed : array<i32>;
+@group(0) @binding(3) var<storage, read_write> grad_sh    : array<atomic<i32>>;
+@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=colour scale, w=splat count
+
+const SH_REST_FLOATS : u32 = 45u;
+
+@compute @workgroup_size(64)
+fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= u32(cfg.w)) { return; }
+    if (u.sh_degree < 1u) { return; }
+
+    let o = i * FLOATS_PER_SPLAT;
+    let pos = vec3<f32>(splats[o], splats[o + 1u], splats[o + 2u]);
+    let dir = normalize(pos - u.cam_pos.xyz);
+    let x = dir.x;
+    let y = dir.y;
+    let z = dir.z;
+
+    var gr = vec3<f32>(
+        f32(grad_fixed[i * GRADS_PER_SPLAT + 0u]),
+        f32(grad_fixed[i * GRADS_PER_SPLAT + 1u]),
+        f32(grad_fixed[i * GRADS_PER_SPLAT + 2u]));
+    if (gr.x == 0.0 && gr.y == 0.0 && gr.z == 0.0) { return; }
+    gr = gr / cfg.x; // dequantize fixed-point colour grads
+
+    let out = i * SH_REST_FLOATS;
+
+    if (u.sh_degree >= 1u) {
+        let b1 = -y * 0.4886025119029199;
+        let b2 = z * 0.4886025119029199;
+        let b3 = -x * 0.4886025119029199;
+        for (var c = 0u; c < 3u; c = c + 1u) {
+            let gc = gr[c];
+            if (gc != 0.0) {
+                atomicAdd(&grad_sh[out + 0u + c], i32(round(gc * b1 * cfg.x)));
+                atomicAdd(&grad_sh[out + 3u + c], i32(round(gc * b2 * cfg.x)));
+                atomicAdd(&grad_sh[out + 6u + c], i32(round(gc * b3 * cfg.x)));
+            }
+        }
+    }
+    if (u.sh_degree >= 2u) {
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let bs = array<f32, 5>(
+            1.0925484305920792 * xy,
+            -1.0925484305920792 * yz,
+            0.31539156525252005 * (2.0 * zz - xx - yy),
+            -1.0925484305920792 * xz,
+            0.5462742152960396 * (xx - yy));
+        for (var k = 0u; k < 5u; k = k + 1u) {
+            let bk = bs[k];
+            for (var c = 0u; c < 3u; c = c + 1u) {
+                let gc = gr[c];
+                if (gc != 0.0) {
+                    atomicAdd(&grad_sh[out + 9u + k * 3u + c], i32(round(gc * bk * cfg.x)));
+                }
+            }
+        }
+    }
+    if (u.sh_degree >= 3u) {
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let bs = array<f32, 7>(
+            -0.5900435899266435 * y * (3.0 * xx - yy),
+            2.890611442640554 * xy * z,
+            -0.4570457994644658 * y * (4.0 * zz - xx - yy),
+            0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy),
+            -0.4570457994644658 * x * (4.0 * zz - xx - yy),
+            1.445305721320277 * z * (xx - yy),
+            -0.5900435899266435 * x * (xx - 3.0 * yy));
+        for (var k = 0u; k < 7u; k = k + 1u) {
+            let bk = bs[k];
+            for (var c = 0u; c < 3u; c = c + 1u) {
+                let gc = gr[c];
+                if (gc != 0.0) {
+                    atomicAdd(&grad_sh[out + 24u + k * 3u + c], i32(round(gc * bk * cfg.x)));
+                }
+            }
+        }
+    }
+}
+";
+
+    public const string AdamShRest = @"
+@group(0) @binding(0) var<storage, read_write> sh_rest    : array<f32>;
+@group(0) @binding(1) var<storage, read>       grad_sh    : array<i32>;
+@group(0) @binding(2) var<storage, read_write> adam_m     : array<f32>;
+@group(0) @binding(3) var<storage, read_write> adam_v     : array<f32>;
+@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=lr y=scale z=step w=count
+
+const SH_REST_FLOATS : u32 = 45u;
+const BETA1 : f32 = 0.9;
+const BETA2 : f32 = 0.999;
+const EPS : f32 = 1e-15;
+
+fn adam(value : f32, grad : f32, lr : f32, step : f32, m : ptr<function, f32>, v : ptr<function, f32>) -> f32 {
+    *m = BETA1 * (*m) + (1.0 - BETA1) * grad;
+    *v = BETA2 * (*v) + (1.0 - BETA2) * grad * grad;
+    let m_hat = *m / (1.0 - pow(BETA1, step));
+    let v_hat = *v / (1.0 - pow(BETA2, step));
+    return value - lr * m_hat / (sqrt(v_hat) + EPS);
+}
+
+@compute @workgroup_size(64)
+fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= u32(cfg.w)) { return; }
+    let step = cfg.z;
+    let lr = cfg.x;
+    let scale = cfg.y;
+    let base = i * SH_REST_FLOATS;
+    for (var j = 0u; j < SH_REST_FLOATS; j = j + 1u) {
+        let g = f32(grad_sh[base + j]) / scale;
+        if (g == 0.0) { continue; }
+        var m = adam_m[base + j];
+        var v = adam_v[base + j];
+        sh_rest[base + j] = adam(sh_rest[base + j], g, lr, step, &m, &v);
+        adam_m[base + j] = m;
+        adam_v[base + j] = v;
+    }
 }
 ";
 }

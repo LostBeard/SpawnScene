@@ -268,6 +268,20 @@ public partial class Studio : IAsyncDisposable
             // ?densify=N runs adaptive density control every N ITERATIONS (reference: 100).
             if (query.TryGetValue("densify", out var dnq) && int.TryParse(dnq, out var dni))
                 DensifyEveryIters = dni;
+            // ?densifygrad=X is the densify |grad| bar in PIXEL peak-|dCentre| units
+            // (default 1.5e-6; Kerbl's 2e-4 is for the SUM-over-pixels signal we no longer use).
+            if (query.TryGetValue("densifygrad", out var dgq) && float.TryParse(dgq,
+                    System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var dgf))
+                SplatDensityControl.GradientThreshold = dgf;
+            // ?densifyuntil=N stops densify/opacity-reset after iteration N (Kerbl: 15000).
+            if (query.TryGetValue("densifyuntil", out var duq) && int.TryParse(duq, out var dui))
+                DensifyUntilIter = dui;
+            // ?densifyfrac=X keeps only the top fraction of above-threshold candidates (Brush: 0.2).
+            if (query.TryGetValue("densifyfrac", out var dfq) && float.TryParse(dfq,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var dff))
+                SplatDensityControl.GrowthSelectFraction = dff;
             // ?opacityreset=N caps every opacity every N ITERATIONS (reference: 3000), which
             // also unlocks the size prunes - without it nothing removes a bloated splat.
             if (query.TryGetValue("opacityreset", out var orq) && int.TryParse(orq, out var ori))
@@ -279,6 +293,10 @@ public partial class Studio : IAsyncDisposable
             // gradients can express, independent of supervision or scheduling.
             if (query.TryGetValue("fitone", out var foq) && int.TryParse(foq, out var foi))
                 FitSingleViewIndex = foi;
+            // ?pruneunseen=0 keeps splats no supervised view constrained (default: drop them
+            // after the first cycle - measured as ~half a depth-shell scene).
+            if (query.TryGetValue("pruneunseen", out var pu))
+                PruneUnconstrainedAfterCycle = pu is not ("0" or "false");
             // ?skipzerograd=1 stops colour/opacity Adam stepping splats with no gradient, the
             // guard adam_geometry has always had for position. Off by default: its effect on the
             // held-out curve is the measurement.

@@ -315,20 +315,17 @@ public partial class Studio
             {
 
                 positionLrInit = PositionLrScale * 1.6e-4f * rigRadius;
+                // Ceiling must use the SAME extent densify uses (rig radius), not the AABB
+                // diagonal. Truck's SfM cloud has far outliers (aabb diag ~397) so
+                // 0.1*diag = 39.7 let Adam grow house-sized blobs; densify's prune bar is
+                // 0.1*rigRadius ≈ 0.53. Matching them stops the pre-opacity-reset growth that
+                // made the display look like soft coloured soup.
                 geo = new SplatTrainerGpu.GeometryStep(
                     PositionLr: positionLrInit,
                     LogScaleLr: 0.005f,
                     RotationLr: 0.001f,
-                    // Without density control nothing prunes, so a splat that stops being
-                    // constrained has to be BOUNDED rather than removed - and a bound is not a
-                    // substitute for a prune. The reference uses 0.1 * scene extent to DELETE a
-                    // bloated Gaussian; used as a ceiling instead, a splat grows to it and stays
-                    // there, so one splat can span a tenth of the room. MEASURED on Bathroom with
-                    // a 12.41 dB initialisation: training took held-out to 10.81 while supervised
-                    // climbed, and the render melted into vertical drips. That is what a
-                    // population of splats sitting on the ceiling looks like.
                     MinScale: 1e-6f,
-                    MaxScale: MaxScaleFraction * MathF.Max(box.Diagonal, 1e-3f));
+                    MaxScale: MaxScaleFraction * MathF.Max(rigRadius, 1e-3f));
 
                 Console.WriteLine(
                     $"[Train] geometry ON: rig radius {rigRadius:F3}, " +

@@ -256,6 +256,14 @@ public class GpuGaussianRenderer : IDisposable
         _gaussianKernel = gaussianKernel;
     }
 
+    /// <summary>
+    /// When true, packed colour slots hold SH DC (after
+    /// <c>EnsureRgbConvertedToShDc</c>), not linear RGB. Pack must run
+    /// <c>max(C0*dc+0.5,0)</c> before unorm8 or the viewer shows clamped DC as
+    /// washed blobs (MEASURED: Truck looks recognisable but messy without this).
+    /// </summary>
+    public bool ColoursAreShDc { get; set; }
+
     /// <summary>Whether the GPU has a valid packed splat buffer ready to render.</summary>
     public bool HasGpuData => _splatCount > 0;
 
@@ -520,12 +528,12 @@ public class GpuGaussianRenderer : IDisposable
         // Pre-allocate reusable byte buffers for direct WriteBuffer — avoids HeapView/PrimeHeap on every frame
         _uniformByteData = new byte[_uniformData.Length * sizeof(float)];
         _casByteData = new byte[_casData.Length * sizeof(float)];
-        _packCountJsArray = new Uint32Array(1);
+        _packCountJsArray = new Uint32Array(4);
 
-        // Pack count uniform (4 bytes): holds visibleCount for pack shader guard
+        // Pack uniforms (16-byte aligned): count, colours_are_sh_dc flag, pad.
         _packCountBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
-            Size = 4,
+            Size = 16,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
 
@@ -1594,8 +1602,11 @@ public class GpuGaussianRenderer : IDisposable
         var srcIdxBuffer = idxBuf.GetGPUBuffer();
         if (srcIdxBuffer == null) return;
 
-        // Write visible count to uniform buffer (before encoder submit, queue.writeBuffer runs first).
+        // Write pack uniforms (before encoder submit, queue.writeBuffer runs first).
         _packCountJsArray![0] = (uint)visibleCount;
+        _packCountJsArray[1] = ColoursAreShDc ? 1u : 0u;
+        _packCountJsArray[2] = 0u;
+        _packCountJsArray[3] = 0u;
         _queue!.WriteBuffer(_packCountBuf, 0, _packCountJsArray);
 
         // Create or reuse pack bind group (invalidate only when GPU buffer refs change)
@@ -1622,7 +1633,7 @@ public class GpuGaussianRenderer : IDisposable
         // 2D dispatch to stay within WebGPU's maxComputeWorkgroupsPerDimension (65535).
         // For scenes ≤ 4.2M splats: wgY=1 (identical to old 1D path).
         // For larger scenes (e.g. 5K full-res = 14.7M splats): wgY=4.
-        // Out-of-bounds threads hit the i >= u_count guard in the shader and return early.
+        // Out-of-bounds threads hit the i >= u.count guard in the shader and return early.
         const uint maxWG = 65535u;
         uint totalWG = (uint)((visibleCount + 63) / 64);
         uint wgX = Math.Min(totalWG, maxWG);
@@ -2044,10 +2055,19 @@ fn fs_accum(input : VSOutput) -> @location(0) vec4<f32> {
     //          (pos3_bitcast, color_alpha_u8x4, scale_f16x4, quat_f16x4) = 32 bytes
     // ════════════════════════════════════════════════════════════
     private const string PackComputeSource = @"
-@group(0) @binding(0) var<storage, read>       src     : array<f32>;  // original packed splat data (10 floats/splat)
+struct PackUniforms {
+    count             : u32,
+    colours_are_sh_dc : u32,
+    _pad0             : u32,
+    _pad1             : u32,
+}
+
+@group(0) @binding(0) var<storage, read>       src     : array<f32>;  // SplatFormat.Floats per splat
 @group(0) @binding(1) var<storage, read>       idx     : array<i32>;  // sorted indices; -1 = culled sentinel
-@group(0) @binding(2) var<storage, read_write> dst     : array<u32>;  // packed vertex output (6 u32s/splat)
-@group(0) @binding(3) var<uniform>             u_count : u32;         // visible splat count (deferred readback)
+@group(0) @binding(2) var<storage, read_write> dst     : array<u32>;  // packed vertex output (8 u32s/splat)
+@group(0) @binding(3) var<uniform>             u       : PackUniforms;
+
+const SH_C0 : f32 = 0.28209479177387814;
 
 @compute @workgroup_size(64)
 fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
@@ -2055,7 +2075,7 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     // 2D dispatch: recompute linear index from row (gid.y) and column (gid.x).
     // nwg.x = wgX (workgroups in X), so nwg.x * 64 = total threads per row.
     let i = gid.y * nwg.x * 64u + gid.x;
-    if (i >= u_count) { return; }
+    if (i >= u.count) { return; }
 
     let dstOff = i * 8u;
 
@@ -2082,13 +2102,14 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     dst[dstOff + 1u] = bitcast<u32>(src[srcOff + 1u]);  // pos.y
     dst[dstOff + 2u] = bitcast<u32>(src[srcOff + 2u]);  // pos.z
 
-    // Color + opacity: pack RGBA as 4 normalized bytes (Unorm8x4)
-    let color_alpha = vec4<f32>(
-        src[srcOff + 3u],   // R
-        src[srcOff + 4u],   // G
-        src[srcOff + 5u],   // B
-        src[srcOff + 9u]    // opacity
-    );
+    // Colour: linear RGB, OR SH DC -> RGB when training converted the buffer.
+    // pack4x8unorm clamps to [0,1]; feeding raw DC (often outside that) made every
+    // trained scene look like washed blobs.
+    var rgb = vec3<f32>(src[srcOff + 3u], src[srcOff + 4u], src[srcOff + 5u]);
+    if (u.colours_are_sh_dc != 0u) {
+        rgb = max(SH_C0 * rgb + vec3<f32>(0.5), vec3<f32>(0.0));
+    }
+    let color_alpha = vec4<f32>(rgb.r, rgb.g, rgb.b, src[srcOff + 9u]);
     dst[dstOff + 3u] = pack4x8unorm(color_alpha);
 
     // Scale: pack as Float16x4 (sx, sy, sz, 0)

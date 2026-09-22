@@ -263,6 +263,8 @@ public partial class Studio
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
             _trainer.Resize(w, h, n, keysPerSplat);
             _trainer.EnsureRgbConvertedToShDc(packed, n);
+            // Pack must DcToRgb from here on; without this the viewer clamps raw DC as unorm8.
+            _gpuRenderer.ColoursAreShDc = true;
 
             // -- Upload every target photograph once --
             // Per-iteration upload would be 3.7 MB of traffic per step and would dominate the

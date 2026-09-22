@@ -92,6 +92,13 @@ public partial class Studio
             using var trainer = new SplatTrainerGpu(_gpuService);
             trainer.Initialize();
             trainer.Resize(GateWidth, GateHeight, n);
+            // Colour slots are SH DC after this (Kerbl). The forward shader always evaluates
+            // C0*dc+0.5; without the convert the gate was comparing linear RGB on CPU to
+            // remapped DC-as-if-RGB on GPU and failed with maxAbs~0.35.
+            trainer.EnsureRgbConvertedToShDc(splatBuf, n);
+            await accel.SynchronizeAsync();
+            float[] packedDc = await splatBuf.CopyToHostAsync<float>(0, packed.Length);
+
             var gpuColour = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar);
 
             if (trainer.LastOverflowed)
@@ -101,8 +108,8 @@ public partial class Studio
             }
             Console.WriteLine($"[TrainerGate] gpu keys={trainer.LastKeyCount:N0}");
 
-            // ── CPU model over the same data ──
-            var cpuSplats = ProjectForCpu(packed, n, cam);
+            // ── CPU model over the same DC data ──
+            var cpuSplats = ProjectForCpu(packedDc, n, cam, shDegree: trainer.ActiveShDegree);
             var bin = SplatTileRasterizer.Bin(cpuSplats, GateWidth, GateHeight);
             var (cpuColour, _, _) = SplatTileRasterizer.Forward(cpuSplats, bin);
             Console.WriteLine($"[TrainerGate] cpu keys={bin.Keys.Length:N0}");
@@ -142,17 +149,19 @@ public partial class Studio
 
             if (!await SsimGateAsync(trainer, accel, gpuColour)) return;
 
-            // ── Training: fit colour+opacity back to a target rendered from KNOWN parameters ──
+            // ── Training: fit SH DC + opacity back to a target rendered from KNOWN parameters ──
             // The target is this same scene; the splats are then perturbed. So the optimiser
             // has a reachable answer and we can check it walks toward it, rather than only
             // that some number went down - which a loop that merely dims everything also does.
             trainer.SetTarget(gpuColour);
 
-            var perturbed = (float[])packed.Clone();
+            var perturbed = (float[])packedDc.Clone();
+            // Mid-grey in RGB -> DC, so the starting point is in the same units as truth.
+            var midDc = SphericalHarmonics.RgbToDc(new Vector3(0.5f, 0.5f, 0.5f));
             for (int i = 0; i < n; i++)
             {
                 int o = i * SplatFormat.Floats;
-                perturbed[o + 3] = 0.5f; perturbed[o + 4] = 0.5f; perturbed[o + 5] = 0.5f;
+                perturbed[o + 3] = midDc.X; perturbed[o + 4] = midDc.Y; perturbed[o + 5] = midDc.Z;
                 perturbed[o + 9] = 0.5f;
             }
             using var trainBuf = accel.Allocate1D<float>(perturbed.Length);
@@ -160,9 +169,14 @@ public partial class Studio
             await accel.SynchronizeAsync();
 
             trainer.InitOptimizerState(trainBuf, n);
+            // Already DC; EnsureRgbConvertedToShDc is a once-per-run flag on the trainer from
+            // the forward pass above, so do not call it again on mid-grey RGB by mistake.
 
             float first = 0f, last = 0f;
-            const int iterations = 300;
+            // SH DC Adam scales the colour gradient by C0 (~0.28), so the same LR moves RGB
+            // ~C0 times slower than the pre-SH gate. 300 iters left recovery at 37% (needed 40%);
+            // 1000 restores the previous wall-clock progress in RGB space.
+            const int iterations = 1000;
             for (int it = 0; it < iterations; it++)
             {
                 float loss = await trainer.TrainStepAsync(trainBuf, n, cam, depthNear, depthFar);
@@ -172,16 +186,24 @@ public partial class Studio
             }
 
             // Did the parameters move toward the truth, or just the loss downward?
+            // Score in RGB (via DcToRgb): DC units are ~1/C0 larger, so a threshold tuned
+            // on linear RGB falsely fails a real recovery (0.72->0.46 DC was 37%, needed 40%).
             float[] fitted = await trainBuf.CopyToHostAsync<float>(0, perturbed.Length);
             float errBefore = 0f, errAfter = 0f;
             for (int i = 0; i < n; i++)
             {
                 int o = i * SplatFormat.Floats;
-                for (int c = 0; c < 3; c++)
-                {
-                    errBefore += MathF.Abs(0.5f - packed[o + 3 + c]);
-                    errAfter += MathF.Abs(fitted[o + 3 + c] - packed[o + 3 + c]);
-                }
+                var truthRgb = SphericalHarmonics.DcToRgb(new Vector3(
+                    packedDc[o + 3], packedDc[o + 4], packedDc[o + 5]));
+                var startRgb = SphericalHarmonics.DcToRgb(midDc);
+                var fitRgb = SphericalHarmonics.DcToRgb(new Vector3(
+                    fitted[o + 3], fitted[o + 4], fitted[o + 5]));
+                errBefore += MathF.Abs(startRgb.X - truthRgb.X)
+                           + MathF.Abs(startRgb.Y - truthRgb.Y)
+                           + MathF.Abs(startRgb.Z - truthRgb.Z);
+                errAfter += MathF.Abs(fitRgb.X - truthRgb.X)
+                          + MathF.Abs(fitRgb.Y - truthRgb.Y)
+                          + MathF.Abs(fitRgb.Z - truthRgb.Z);
             }
             errBefore /= n * 3; errAfter /= n * 3;
 
@@ -196,7 +218,7 @@ public partial class Studio
             Console.WriteLine("[TrainerGate] colour/opacity PASS");
 
             // -- Gradients: do the shaders compute what the verified CPU oracles compute? --
-            if (!await GradientGateAsync(trainer, splatBuf, packed, n, cam, depthNear, depthFar)) return;
+            if (!await GradientGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
 
             Console.WriteLine("[TrainerGate] PASS");
         }
@@ -242,10 +264,15 @@ public partial class Studio
         float[] gpuGeo = await trainer.ReadGeometryGradientsAsync(n);
 
         // -- CPU, from the same state --
-        var cpuSplats = ProjectForCpu(state, n, cam);
+        // Match TrainStepAsync's loss: 0.8 L1 + 0.2 D-SSIM. A bare L1Gradient here was why
+        // the gate reported mean rel ~0.34 after SSIM was wired into training.
+        var cpuSplats = ProjectForCpu(state, n, cam, shDegree: trainer.ActiveShDegree);
         var bin = SplatTileRasterizer.Bin(cpuSplats, GateWidth, GateHeight);
         var (colour, finalT, endIdx) = SplatTileRasterizer.Forward(cpuSplats, bin);
         var dPix = SplatRasterizer.L1Gradient(colour, target);
+        for (int i = 0; i < dPix.Length; i++) dPix[i] *= ImageQuality.LambdaL1;
+        ImageQuality.AddMeanSsimGradient(colour, target, GateWidth, GateHeight, dPix,
+            scale: -ImageQuality.LambdaDssim);
         var cpu2d = SplatTileRasterizer.Backward(cpuSplats, bin, finalT, endIdx, dPix);
 
         // ProjectForCpu drops splats behind the camera, so CPU index != splat index. Rebuild
@@ -538,12 +565,16 @@ public partial class Studio
 
     /// <summary>
     /// Project packed splats to screen space the way the shader does, so the CPU model sees
-    /// the same inputs. Mirrors <c>project()</c> in SplatTrainerShaders.Common.
+    /// the same inputs. Mirrors <c>project()</c> in SplatTrainerShaders.Common, including
+    /// SH evaluation of colour (slots 3..5 are DC, not linear RGB).
     /// </summary>
-    static List<SplatRasterizer.Splat2D> ProjectForCpu(float[] packed, int n, CameraParams cam)
+    static List<SplatRasterizer.Splat2D> ProjectForCpu(
+        float[] packed, int n, CameraParams cam, int shDegree = 0, float[]? shRest = null)
     {
         WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var right, out var up, out var fwd, out var pos);
         var list = new List<SplatRasterizer.Splat2D>(n);
+        Span<float> emptyRest = stackalloc float[SphericalHarmonics.RestFloatsPerSplat];
+        emptyRest.Clear();
 
         for (int i = 0; i < n; i++)
         {
@@ -572,6 +603,12 @@ public partial class Studio
             if (!(det > 1e-20f)) continue;
             float invDet = 1f / det;
 
+            Span<float> dc = stackalloc float[3] { packed[o + 3], packed[o + 4], packed[o + 5] };
+            ReadOnlySpan<float> rest = shRest != null
+                ? shRest.AsSpan(i * SphericalHarmonics.RestFloatsPerSplat, SphericalHarmonics.RestFloatsPerSplat)
+                : emptyRest;
+            var rgb = SphericalHarmonics.EvalRgb(shDegree, dc, rest, Vector3.Normalize(p - pos));
+
             list.Add(new SplatRasterizer.Splat2D
             {
                 // Screen y grows DOWN, camera y grows UP.
@@ -580,7 +617,7 @@ public partial class Studio
                 ConicA = cov2.C * invDet,
                 ConicB = -cov2.B * invDet,
                 ConicC = cov2.A * invDet,
-                R = packed[o + 3], G = packed[o + 4], B = packed[o + 5],
+                R = rgb.X, G = rgb.Y, B = rgb.Z,
                 Opacity = packed[o + 9],
                 Depth = cz,
             });

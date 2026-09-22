@@ -353,6 +353,25 @@ public static class SplatDensityControl
         => Apply(splats, plan, out survivors, out _);
 
     /// <summary>
+    /// Densify remapping for per-splat float rows. <paramref name="sources"/>[i] is the OLD
+    /// index to copy, or -1 to leave zeros (new densified child / no parent).
+    /// Shared by SH rest (parent features) and Adam moment restores (survivors only).
+    /// </summary>
+    public static float[] RemapFloatRows(ReadOnlySpan<float> prior, int[] sources, int stride)
+    {
+        int n = sources.Length;
+        int oldCount = stride > 0 ? prior.Length / stride : 0;
+        var next = new float[(long)n * stride];
+        for (int i = 0; i < n; i++)
+        {
+            int src = sources[i];
+            if (src >= 0 && src < oldCount)
+                prior.Slice(src * stride, stride).CopyTo(next.AsSpan(i * stride, stride));
+        }
+        return next;
+    }
+
+    /// <summary>
     /// Apply a plan, returning the new splat set. Removals are applied to the ORIGINAL indices
     /// and additions appended, so a plan is never invalidated by its own earlier entries.
     /// </summary>

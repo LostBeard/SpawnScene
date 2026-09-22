@@ -329,6 +329,16 @@ public class SplatDensityControlTests
     }
 
     [Test]
+    public void RemapFloatRows_CopiesSourcesAndZerosMissing()
+    {
+        // Two old splats, 3 floats each. New layout: keep 0, drop 1, add child of 0.
+        float[] prior = [1f, 2f, 3f, 10f, 20f, 30f];
+        int[] sources = [0, -1, 0]; // survivor 0, new child, clone of 0
+        var next = SplatDensityControl.RemapFloatRows(prior, sources, stride: 3);
+        Assert.That(next, Is.EqualTo(new float[] { 1f, 2f, 3f, 0f, 0f, 0f, 1f, 2f, 3f }));
+    }
+
+    [Test]
     public void Apply_CopiesFeatureSourceFromAddParent()
     {
         var splats = new SplatDensityControl.Splat[3];

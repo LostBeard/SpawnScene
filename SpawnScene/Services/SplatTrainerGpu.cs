@@ -1257,20 +1257,36 @@ public sealed class SplatTrainerGpu : IDisposable
         return await _shRest.CopyToHostAsync<float>(0, (long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
     }
 
-    public void RestoreShRest(ReadOnlySpan<float> prior, int[] survivors)
+    /// <summary>
+    /// SH-rest Adam moments across a densify. Same survivor map as colour Adam: keep for
+    /// survivors, zero for densified children. Resize zeros these; without a restore every
+    /// densify (every 100 iters) throws away SH momentum while colour Adam is carefully kept.
+    /// </summary>
+    public readonly record struct ShAdamState(float[] M, float[] V);
+
+    public async Task<ShAdamState> ReadShAdamStateAsync(int splatCount)
+    {
+        if (_adamShM == null || _adamShV == null)
+            return new ShAdamState(System.Array.Empty<float>(), System.Array.Empty<float>());
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        long len = (long)splatCount * SphericalHarmonics.RestFloatsPerSplat;
+        return new ShAdamState(
+            await _adamShM.CopyToHostAsync<float>(0, len),
+            await _adamShV.CopyToHostAsync<float>(0, len));
+    }
+
+    public void RestoreShRest(ReadOnlySpan<float> prior, int[] featureSources)
     {
         if (_shRest == null) return;
-        int n = survivors.Length;
+        _shRest.CopyFromCPU(SplatDensityControl.RemapFloatRows(prior, featureSources, SphericalHarmonics.RestFloatsPerSplat));
+    }
+
+    public void RestoreShAdamState(ShAdamState prior, int[] adamSurvivors)
+    {
+        if (_adamShM == null || _adamShV == null) return;
         int stride = SphericalHarmonics.RestFloatsPerSplat;
-        int oldCount = prior.Length / stride;
-        var next = new float[(long)n * stride];
-        for (int i = 0; i < n; i++)
-        {
-            int src = survivors[i];
-            if (src >= 0 && src < oldCount)
-                prior.Slice(src * stride, stride).CopyTo(next.AsSpan(i * stride, stride));
-        }
-        _shRest.CopyFromCPU(next);
+        _adamShM.CopyFromCPU(SplatDensityControl.RemapFloatRows(prior.M, adamSurvivors, stride));
+        _adamShV.CopyFromCPU(SplatDensityControl.RemapFloatRows(prior.V, adamSurvivors, stride));
     }
 
     GPUBindGroupEntry ShRestBindEntry(int binding) =>

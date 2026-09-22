@@ -846,6 +846,7 @@ public partial class Studio
 
         var priorAdam = await _trainer!.ReadAdamStateAsync(n);
         var priorSh = await _trainer.ReadShRestAsync(n);
+        var priorShAdam = await _trainer.ReadShAdamStateAsync(n);
         var grown = SplatDensityControl.Apply(splats, plan, out var adamSurvivors, out var featureSources);
 
         if (resetOpacity)
@@ -919,6 +920,9 @@ public partial class Studio
             zeroSlot: resetOpacity ? SplatFormat.OffOpacity : -1);
         // SH rest follows featureSources (parent for densified children), not adamSurvivors.
         _trainer.RestoreShRest(priorSh, featureSources);
+        // SH Adam moments follow adamSurvivors (Kerbl: survivors keep, children start at zero).
+        // InitOptimizerState zeroed them; without this every densify wiped SH momentum.
+        _trainer.RestoreShAdamState(priorShAdam, adamSurvivors);
         _trainer.ResetDensifyStats();
 
         Console.WriteLine($"[{logTag}] {n:N0} -> {m:N0} splats: {plan}");

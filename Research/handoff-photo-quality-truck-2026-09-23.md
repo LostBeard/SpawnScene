@@ -6,16 +6,16 @@ SUPERSEDED (they tuned a bug). Claim **SpawnScene** on the board before editing.
 
 ## Status: two root causes found and fixed, quality is now photo-like
 
-| Metric | 2026-09-22 best | Now (2K, densify on) | Now (7K, densify OFF) | Target |
+| Metric | 2026-09-22 best | 2K densify | **7K densify + reset (truck7k-np-densify)** | Target |
 |---|---|---|---|---|
-| Supervised PSNR | 17.4 @7K | **22.58 @2K** | 19.51 | >=22 @7K |
-| Held-out PSNR | 11-15 (baseline was 10.6) | **18.50** (COMPARE 17.33) | 10.72 (pre near-plane fix) | ~21 |
-| Dead views | 5-9 of 95 | **0 of 95** | 5-9 | 0 |
-| Shots | soft dreamscape | wood grain, rust, hub, mud flap | photo-like | hard edges |
+| Supervised PSNR | 17.4 @7K | 22.58 | **25.46** (SSIM 0.882) | >=22 @7K |
+| Held-out PSNR | 11-15 (baseline 10.6) | 18.50 | **19.83** (COMPARE 18.92, SSIM 0.795) | ~21 (paper 7K ~23, at 1.5M+ splats; we cap 450k) |
+| Dead views | 5-9 of 95 | 0 | **0 of 95** | 0 |
+| Shots | soft dreamscape | photo-like | **photo-like; free-left reads "Sanford Square Market"** | hard edges |
 
-Shots: `_shots/dataset/Truck__truck2k-np-densify-probe*.png`,
-`_shots/dataset/Truck__truck7k-f32-nodensify-20260922-225358*.png` (free-left has readable
-"Sanford Square Market" lettering).
+Shots: `_shots/dataset/Truck__truck7k-np-densify*.png`. The densify NO-OP run (apply path on
+an empty plan, 2K) measured before == after at every apply to 0.01 dB, and ended sup 20.74 /
+held 16.93 vs 22.58 / 18.50 with real plans: the apply path is clean and densify is net positive.
 
 ## Root cause 1 (commit 9476714): i32 fixed-point gradient accumulator
 
@@ -60,11 +60,12 @@ shows up here or in a run).
 
 ## Next
 
-1. Read noop + 7K results. If 7K supervised >= 22 and held-out ~20+, Truck DoD is met on PSNR;
-   judge shots visually (rails, tire, foliage).
-2. If the noop probe shows a drop, the apply path (host round trip, Resize, InitOptimizerState,
-   hybrid Adam/SH remap) is the bug; otherwise the early 1.5 dB apply drops are plan semantics
-   (clone alpha compounding, split opacity) and recover within the interval.
-3. Opacity reset fires at 3000 in the 7K run; watch the held-out dip and recovery.
-4. Then: real captures (Bathroom, room) without GT poses - the pose cascade is the next
+1. Held-out 19.8 vs paper ~23: the 450k `maxdensify` cap is hit by iter ~2200 (Kerbl reaches
+   1.5M+ on Truck). Raising it needs the key/binding budget (128 MiB per storage binding) and
+   the host round trip in ApplySplatPlanAsync (46 MB at 800k) looked at; growhost OOM'd at
+   ~780k before. Splitting the packed buffer across bindings or a GPU-side Apply is the path.
+2. The early apply-probe drops (~1.5 dB, first applies only) are plan semantics (clone alpha
+   compounding, split children keep parent opacity) and recover within the 100-iter interval.
+   Not a bug, same as the reference.
+3. Then: real captures (Bathroom, room) without GT poses - the pose cascade is the next
    variable, now that the optimiser is proven on GT poses.

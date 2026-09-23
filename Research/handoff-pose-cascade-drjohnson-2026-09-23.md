@@ -179,8 +179,10 @@ It is no longer "stuck because train died." Commit of the SpawnScene tree still 
   GT with the same bookkeeping picks its own. Coverage and device loss are no longer the
   blocker - the cameras do not describe the same room COLMAP does.
 - Harness: `SPAWNSCENE_CHROME_LOG` + VRAM sampler are how the next silent GPU death gets named.
-- Next: TempleRing `?autotest=dav3-pose` for a known-calibration baseline of the same
-  extrinsics decode; then decide whether the cliff is DAv3's geometry or our `[R|t]` unpack.
+- Next: ~~TempleRing `?autotest=dav3-pose`~~ DONE (`_runs/dav3-pose-temple.log`): single-pass
+  N=6 vs GT residual **5.4% / 4.5% of spread**, batch dependence **0.4%**. Extrinsics decode is
+  correct. The DrJohnson 110% RMS is the **chunked cascade on a walk-through**, not `[R|t]` unpack.
+  Next measurement: same single-pass gate on a DrJohnson 6-view subset vs COLMAP.
 
 ## Harness notes
 

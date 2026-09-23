@@ -480,6 +480,78 @@ public static class WorldSpaceGeometry
         => scale * Vector3.Transform(p, rotation) + translation;
 
     /// <summary>
+    /// How far an estimated camera set is from a reference after the best similarity alignment
+    /// (frame is arbitrary; only shape and relative orientation are comparable).
+    /// </summary>
+    public readonly record struct CameraSetAccuracy(
+        int Compared, float Scale, float PositionRms, float Spread,
+        float MedianPosFrac, float P90PosFrac, float MedianForwardDeg, float P90ForwardDeg);
+
+    /// <summary>
+    /// Align <paramref name="estimated"/> onto <paramref name="reference"/> by Umeyama on
+    /// positions, then report position residual as a fraction of the reference camera spread
+    /// and forward-direction error in degrees. Pair by index; nulls on either side are skipped.
+    ///
+    /// MEASURED 2026-09-23 DrJohnson dav3-chunked vs COLMAP: held-out cross-match picked the
+    /// WRONG target on every sampled view (GT with the same bookkeeping picked its own). This
+    /// is the number that separates "the optimiser cannot generalise" from "the cameras are
+    /// looking at the wrong place".
+    /// </summary>
+    public static bool TryMeasureCameraSetAccuracy(
+        IReadOnlyList<CameraParams?> estimated, IReadOnlyList<CameraParams?> reference,
+        out CameraSetAccuracy accuracy, out float[] perViewPosFrac, out float[] perViewForwardDeg)
+    {
+        accuracy = default;
+        perViewPosFrac = Array.Empty<float>();
+        perViewForwardDeg = Array.Empty<float>();
+        int n = Math.Min(estimated.Count, reference.Count);
+        var src = new List<Vector3>();
+        var dst = new List<Vector3>();
+        var estCams = new List<CameraParams>();
+        var refCams = new List<CameraParams>();
+        for (int i = 0; i < n; i++)
+        {
+            if (estimated[i] == null || reference[i] == null) continue;
+            src.Add(estimated[i]!.Position);
+            dst.Add(reference[i]!.Position);
+            estCams.Add(estimated[i]!);
+            refCams.Add(reference[i]!);
+        }
+        if (src.Count < 3) return false;
+        if (!TryUmeyamaSimilarity(src, dst, out float s, out var R, out var t, out float rms))
+            return false;
+
+        float spread = 0f;
+        var centroid = Vector3.Zero;
+        foreach (var p in dst) centroid += p;
+        centroid /= dst.Count;
+        foreach (var p in dst) spread += Vector3.Distance(p, centroid);
+        spread /= dst.Count;
+        if (!(spread > 1e-8f)) return false;
+
+        var sim = new Similarity3(s, R, t);
+        perViewPosFrac = new float[src.Count];
+        perViewForwardDeg = new float[src.Count];
+        for (int i = 0; i < src.Count; i++)
+        {
+            var p = sim.Apply(estCams[i].Position);
+            perViewPosFrac[i] = Vector3.Distance(p, refCams[i].Position) / spread;
+            var fwd = sim.ApplyDirection(estCams[i].Forward);
+            float dot = Math.Clamp(Vector3.Dot(Vector3.Normalize(fwd), Vector3.Normalize(refCams[i].Forward)), -1f, 1f);
+            perViewForwardDeg[i] = MathF.Acos(dot) * (180f / MathF.PI);
+        }
+        var posSorted = perViewPosFrac.OrderBy(x => x).ToArray();
+        var fwdSorted = perViewForwardDeg.OrderBy(x => x).ToArray();
+        accuracy = new CameraSetAccuracy(
+            src.Count, s, rms, spread,
+            posSorted[posSorted.Length / 2],
+            posSorted[(int)(posSorted.Length * 0.9f)],
+            fwdSorted[fwdSorted.Length / 2],
+            fwdSorted[(int)(fwdSorted.Length * 0.9f)]);
+        return true;
+    }
+
+    /// <summary>
     /// Eigenvector of the LARGEST eigenvalue of the symmetric 4x4 <paramref name="n16"/> (row
     /// major), which for Horn's N matrix is the optimal rotation as a quaternion.
     ///

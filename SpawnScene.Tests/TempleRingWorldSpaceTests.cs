@@ -264,6 +264,82 @@ public class TempleRingWorldSpaceTests
         }
     }
 
+    [Test]
+    public void MeasureCameraSetAccuracy_ExactSimilarity_IsNearZero()
+    {
+        // Four cameras on a rectangle; reference is a known similarity of the estimate.
+        float scale = 2.5f;
+        var R = Matrix4x4.CreateRotationY(MathF.PI / 2);
+        var t = new Vector3(3, -1, 2);
+        var sim = new Similarity3(scale, R, t);
+
+        CameraParams?[] est = new CameraParams?[4];
+        CameraParams?[] reference = new CameraParams?[4];
+        var centres = new[]
+        {
+            new Vector3(0, 0, 0), new Vector3(1, 0, 0),
+            new Vector3(1, 0, 1), new Vector3(0, 0, 1),
+        };
+        for (int i = 0; i < 4; i++)
+        {
+            var e = CameraParams.CreateDefault(100, 100);
+            e.Position = centres[i];
+            e.Forward = Vector3.Normalize(new Vector3(0.2f, -0.1f, 1f));
+            e.Up = Vector3.UnitY;
+            est[i] = e;
+            var r = CameraParams.CreateDefault(100, 100);
+            r.Position = sim.Apply(e.Position);
+            r.Forward = sim.ApplyDirection(e.Forward);
+            r.Up = sim.ApplyDirection(e.Up);
+            reference[i] = r;
+        }
+
+        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(
+            est, reference, out var acc, out var posFrac, out var fwdDeg), Is.True);
+        TestContext.Out.WriteLine(
+            $"acc scale={acc.Scale:F4} rms={acc.PositionRms:E3} medPos={acc.MedianPosFrac:P2} medFwd={acc.MedianForwardDeg:F2}");
+        Assert.That(acc.Scale, Is.EqualTo(scale).Within(1e-3f));
+        Assert.That(acc.PositionRms, Is.LessThan(1e-3f));
+        Assert.That(acc.MedianPosFrac, Is.LessThan(1e-3f));
+        Assert.That(acc.MedianForwardDeg, Is.LessThan(0.1f));
+        Assert.That(posFrac.All(f => f < 1e-3f), Is.True);
+        Assert.That(fwdDeg.All(d => d < 0.1f), Is.True);
+    }
+
+    [Test]
+    public void MeasureCameraSetAccuracy_OneTwistedCamera_RaisesForwardP90()
+    {
+        CameraParams?[] est = new CameraParams?[4];
+        CameraParams?[] reference = new CameraParams?[4];
+        var centres = new[]
+        {
+            new Vector3(0, 0, 0), new Vector3(1, 0, 0),
+            new Vector3(1, 0, 1), new Vector3(0, 0, 1),
+        };
+        for (int i = 0; i < 4; i++)
+        {
+            var e = CameraParams.CreateDefault(100, 100);
+            e.Position = centres[i];
+            e.Forward = Vector3.UnitZ;
+            e.Up = Vector3.UnitY;
+            est[i] = e;
+            var r = CameraParams.CreateDefault(100, 100);
+            r.Position = centres[i];
+            r.Forward = Vector3.UnitZ;
+            r.Up = Vector3.UnitY;
+            reference[i] = r;
+        }
+        // View 2 looks 30 deg off.
+        est[2]!.Forward = Vector3.Normalize(
+            Vector3.Transform(Vector3.UnitZ, Matrix4x4.CreateRotationY(30f * MathF.PI / 180f)));
+
+        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(
+            est, reference, out var acc, out _, out var fwdDeg), Is.True);
+        Assert.That(acc.MedianForwardDeg, Is.LessThan(1f));
+        Assert.That(acc.P90ForwardDeg, Is.GreaterThan(20f));
+        Assert.That(fwdDeg[2], Is.EqualTo(30f).Within(1f));
+    }
+
     /// <summary>
     /// Regression: the fit used to come back TRUE with a wrong transform.
     ///

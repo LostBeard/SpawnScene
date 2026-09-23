@@ -173,10 +173,14 @@ It is no longer "stuck because train died." Commit of the SpawnScene tree still 
 
 - ~~Bathroom smoke (step 3)~~: **34/35 posed, 0 rejected**, released 4322 MB, train DONE past
   the old 773k device-loss point (`_runs/bath2k-dav3-outside.run-fixed-20260923.log`).
-- Held-out quality: fold got every view into one frame; the ~13 dB (DrJohnson) / ~10.6 dB
-  (Bathroom) ceiling is now a pose / depth / fuse question, not a coverage or device-loss one.
+- **Held-out quality is pose shape, measured.** DrJohnson dav3-chunked vs COLMAP after best
+  Umeyama (`_runs/dj-pose-vs-gt.log`): position RMS **109.7% of spread**, median forward error
+  **61.5 deg** (p90 108.6). Held-out cross-match picks the wrong target on every sampled view;
+  GT with the same bookkeeping picks its own. Coverage and device loss are no longer the
+  blocker - the cameras do not describe the same room COLMAP does.
 - Harness: `SPAWNSCENE_CHROME_LOG` + VRAM sampler are how the next silent GPU death gets named.
-- **Commit of the SpawnScene tree waits on TJ.**
+- Next: TempleRing `?autotest=dav3-pose` for a known-calibration baseline of the same
+  extrinsics decode; then decide whether the cliff is DAv3's geometry or our `[R|t]` unpack.
 
 ## Harness notes
 

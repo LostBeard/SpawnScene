@@ -182,6 +182,17 @@ public partial class Studio
             // do not need the project store.
             RecordTrainingViews(scene, images, fromProjectStore: false);
 
+            // When COLMAP poses are on disk but we recovered our own, print how far off we are.
+            // Held-out cross-match on DrJohnson dav3-chunked picked the wrong target on every
+            // sampled view; GT with the same bookkeeping picked its own. This is that gap as a
+            // number, not a theory.
+            if (!string.Equals(_multiViewService.LastPoseSource, "colmap", StringComparison.Ordinal))
+            {
+                var gtForCompare = await LoadGroundTruthCamerasAsync(datasetName, images);
+                if (gtForCompare != null)
+                    ReportPoseAccuracyVsGroundTruth(_multiViewService.LastCameras, gtForCompare);
+            }
+
             _renderService.SetActiveSceneGpuLoaded(scene);
             _sceneManager.ActiveScene = scene;
             _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
@@ -384,5 +395,37 @@ public partial class Studio
             Console.WriteLine($"[Dataset] could not read {manifest.Poses}: {ex.Message}");
             return null;
         }
+    }
+
+    /// <summary>
+    /// Log estimated-vs-COLMAP camera accuracy after the best similarity alignment. Pair by
+    /// image index. Does not change any camera.
+    /// </summary>
+    static void ReportPoseAccuracyVsGroundTruth(
+        CameraParams?[] estimated, IReadOnlyList<CameraParams> groundTruth)
+    {
+        var gt = new CameraParams?[groundTruth.Count];
+        for (int i = 0; i < groundTruth.Count; i++) gt[i] = groundTruth[i];
+        if (!WorldSpaceGeometry.TryMeasureCameraSetAccuracy(
+                estimated, gt, out var acc, out var posFrac, out var fwdDeg))
+        {
+            Console.WriteLine(
+                "[Dataset] pose-vs-GT: could not align (need >=3 paired cameras with a non-degenerate spread)");
+            return;
+        }
+
+        Console.WriteLine(
+            $"[Dataset] pose-vs-GT ({acc.Compared} cams, source aligned to COLMAP): " +
+            $"scale {acc.Scale:F4}, position RMS {acc.PositionRms:F4} on spread {acc.Spread:F4} " +
+            $"({(acc.Spread > 0 ? acc.PositionRms / acc.Spread : float.NaN):P1} of it); " +
+            $"pos frac median {acc.MedianPosFrac:P1} p90 {acc.P90PosFrac:P1}; " +
+            $"forward err median {acc.MedianForwardDeg:F1}deg p90 {acc.P90ForwardDeg:F1}deg");
+
+        // Name the worst few so a bad fold / bad view is findable in the log.
+        var order = Enumerable.Range(0, posFrac.Length).OrderByDescending(i => posFrac[i]).Take(5);
+        foreach (int i in order)
+            Console.WriteLine(
+                $"[Dataset]   pose-vs-GT worst: view {i} pos {posFrac[i]:P1} of spread, " +
+                $"forward {fwdDeg[i]:F1}deg");
     }
 }

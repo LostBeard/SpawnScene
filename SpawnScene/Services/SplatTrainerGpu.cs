@@ -367,7 +367,41 @@ public sealed class SplatTrainerGpu : IDisposable
         return _maxBindingBytes;
     }
 
-    public void Resize(int width, int height, int splatCount, int keysPerSplat = 8)
+    /// <summary>
+    /// Size every per-frame and per-splat buffer, waiting on the device after each group of
+    /// allocations so a device loss is attributed to the group that caused it. MEASURED
+    /// (dj2k-dav3-pose run 4, 2026-09-23): the second sizing at 913k splats lost the device with
+    /// reason "unknown" and no validation error, somewhere between the first allocation and the
+    /// sync after the last; the first sizing at 920k on a fresh trainer did not. Which group is
+    /// the one that matters is what these stages answer.
+    /// </summary>
+    public async Task ResizeAsync(int width, int height, int splatCount, int keysPerSplat = 8)
+    {
+        var accel = _gpu.WebGPUAccelerator;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var stages = new List<string>();
+        string current = "start";
+        try
+        {
+            await ResizeCoreAsync(width, height, splatCount, keysPerSplat, async name =>
+            {
+                current = name;
+                await accel.SynchronizeAsync();
+                stages.Add($"{name} {clock.ElapsedMilliseconds}ms");
+            });
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine(
+                $"[Trainer] resize to {splatCount:N0} FAILED in stage '{current}' after " +
+                $"[{string.Join(", ", stages)}]: {ex.Message}");
+            throw;
+        }
+        Console.WriteLine($"[Trainer] sized {width}x{height} = {_tilesX}x{_tilesY} tiles, " +
+            $"{splatCount:N0} splats, key capacity {_keyCapacity:N0} [{string.Join(", ", stages)}]");
+    }
+
+    async Task ResizeCoreAsync(int width, int height, int splatCount, int keysPerSplat, Func<string, Task> stage)
     {
         var accel = _gpu.WebGPUAccelerator;
 
@@ -427,7 +461,17 @@ public sealed class SplatTrainerGpu : IDisposable
                 $"{_keyCapacity * bytesPerKey / (1024 * 1024)} MiB for a single binding. " +
                 "Reduce the splat count or the training resolution.");
 
-        DisposeBuffers();
+        // Rows already carried to this count by CarryOptimizerRowsAsync stay; anything else
+        // sized for the old count goes. A carry for a DIFFERENT count is a caller bug, not
+        // something to paper over by reallocating - it would silently drop the momentum.
+        bool carried = _carriedRowsFor == splatCount;
+        if (_carriedRowsFor >= 0 && !carried)
+            throw new InvalidOperationException(
+                $"optimizer rows were carried to {_carriedRowsFor:N0} splats but Resize was " +
+                $"called for {splatCount:N0}");
+        _carriedRowsFor = -1;
+        DisposeBuffers(keepOptimizerRows: carried);
+        await stage("released");
         _keys = accel.Allocate1D<uint>(_keyCapacity);
         _values = accel.Allocate1D<uint>(_keyCapacity);
         _counter = accel.Allocate1D<int>(1);
@@ -435,6 +479,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _outColour = accel.Allocate1D<float>((long)width * height * 3);
         _outFinalT = accel.Allocate1D<float>((long)width * height);
         _outEnd = accel.Allocate1D<uint>((long)width * height);
+        await stage("keys+frame");
 
         _target = accel.Allocate1D<float>((long)width * height * 3);
         _targetBytes?.Destroy(); _targetBytes?.Dispose();
@@ -447,6 +492,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _gradKeyA = accel.Allocate1D<float>((long)_keyCapacity * 3);
         _gradKeyB = accel.Allocate1D<float>((long)_keyCapacity * 3);
         _gradKeyC = accel.Allocate1D<float>((long)_keyCapacity * 3);
+        await stage("target+gradKeys");
         _gradFixed = accel.Allocate1D<int>((long)splatCount * GradsPerSplat);
         _densifyAbs = accel.Allocate1D<int>((long)splatCount * 2);
         _opacityLogit = accel.Allocate1D<float>(splatCount);
@@ -458,6 +504,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _densifyStats = accel.Allocate1D<float>((long)splatCount * 2);
         _viewSupport = accel.Allocate1D<uint>(splatCount);
         _supportPartials = accel.Allocate1D<float>(SupportWorkgroups * SupportSlots);
+        await stage("per-splat");
 
         // SSIM works on 'valid' windows, so a viewport smaller than the window has none and the
         // metric is genuinely undefined there - the Python oracle raises rather than inventing a
@@ -470,24 +517,28 @@ public sealed class SplatTrainerGpu : IDisposable
             _ssimDRows = accel.Allocate1D<float>((long)SsimWindowsX * _height * 5);
             WriteSsimCfg();
         }
-        _adamM = accel.Allocate1D<float>((long)splatCount * AdamSlots);
-        _adamV = accel.Allocate1D<float>((long)splatCount * AdamSlots);
-        _shRest = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+        await stage("ssim");
         _gradShRest = accel.Allocate1D<int>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
-        _adamShM = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
-        _adamShV = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
-        _shRest.MemSetToZero();
-        _adamShM.MemSetToZero();
-        _adamShV.MemSetToZero();
+        await stage("gradShRest");
+        if (!carried)
+        {
+            _adamM = accel.Allocate1D<float>((long)splatCount * AdamSlots);
+            _adamV = accel.Allocate1D<float>((long)splatCount * AdamSlots);
+            _shRest = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+            _adamShM = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+            _adamShV = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+            _shRest.MemSetToZero();
+            _adamShM.MemSetToZero();
+            _adamShV.MemSetToZero();
+            _adamStepCount = 0;
+            await stage("adam+sh");
+        }
         _lossFixed = accel.Allocate1D<int>(1);
-        _adamStepCount = 0;
 
         int temp = accel.ComputeRadixSortPairsTempStorageSize<uint, uint, AscendingUInt32>((Index1D)_keyCapacity);
         _sortTemp = accel.Allocate1D<int>(Math.Max(1, temp));
         _sortPairs = accel.CreateRadixSortPairs<uint, Stride1D.Dense, uint, Stride1D.Dense, AscendingUInt32>();
-
-        Console.WriteLine($"[Trainer] sized {width}x{height} = {_tilesX}x{_tilesY} tiles, " +
-            $"{splatCount:N0} splats, key capacity {_keyCapacity:N0}");
+        await stage($"sort temp {temp:N0}");
     }
 
     /// <summary>
@@ -667,18 +718,6 @@ public sealed class SplatTrainerGpu : IDisposable
         });
     }
 
-    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>? _copyKernel;
-
-    static void CopyKernel(
-        Index1D index,
-        ArrayView1D<float, Stride1D.Dense> src,
-        ArrayView1D<float, Stride1D.Dense> dst)
-    {
-        int i = index;
-        if (i >= dst.Length) return;
-        dst[i] = src[i];
-    }
-
     /// <summary>
     /// Gradient coverage over every splat. Magnitudes are the true float gradients.
     /// </summary>
@@ -744,80 +783,130 @@ public sealed class SplatTrainerGpu : IDisposable
             centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic, maxColour);
     }
 
-    /// <summary>
-    /// Steal optimizer row buffers before <see cref="Resize"/> so densify can remap on GPU
-    /// without a host round-trip. Caller must Dispose the returned buffers after remap.
-    /// </summary>
-    public (MemoryBuffer1D<float, Stride1D.Dense>? AdamM,
-            MemoryBuffer1D<float, Stride1D.Dense>? AdamV,
-            MemoryBuffer1D<float, Stride1D.Dense>? ShRest,
-            MemoryBuffer1D<float, Stride1D.Dense>? ShAdamM,
-            MemoryBuffer1D<float, Stride1D.Dense>? ShAdamV,
-            int StepCount) DetachOptimizerRows()
-    {
-        var t = (_adamM, _adamV, _shRest, _adamShM, _adamShV, _adamStepCount);
-        _adamM = null; _adamV = null; _shRest = null; _adamShM = null; _adamShV = null;
-        return t;
-    }
-
     public void SetAdamStepCount(int step) => _adamStepCount = Math.Max(0, step);
 
     /// <summary>
-    /// Densify restore: host RemapFloatRows for Adam (proven; GPU path killed opacity), GPU
-    /// RemapFloatRows for SH banks with a readback fence so ILGPU SynchronizeAsync is not
-    /// trusted to drain the raw WebGPU <c>_queue</c> Submit used by <see cref="Dispatch"/>.
-    /// Host SH CopyToHost OOM'd at ~780k (MEASURED growhost).
+    /// Splat count the optimizer rows were already carried to by
+    /// <see cref="CarryOptimizerRowsAsync"/>, so the next <see cref="Resize"/> keeps them
+    /// instead of reallocating. -1 when there is nothing carried.
     /// </summary>
-    public async Task RemapOptimizerRowsHybridAsync(
-        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamM,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamV,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShRest,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamM,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamV,
-        int priorCount,
-        int priorStep,
-        int[] adamSurvivors,
-        int[] featureSources,
+    int _carriedRowsFor = -1;
+
+    /// <summary>
+    /// Carry the per-splat optimizer rows (Adam m/v, SH rest, SH Adam m/v) to a new splat set
+    /// BEFORE <see cref="Resize"/>, one bank at a time, releasing the frame buffers first.
+    ///
+    /// The previous shape detached all five prior banks, ran Resize (which allocated all five
+    /// again at the new count, plus every frame buffer), and only then remapped and disposed.
+    /// At 912k splats the detached generation is 3 x 164 MB of SH plus 2 x 51 MB of Adam held
+    /// alongside a complete new generation. MEASURED: the GT run densified to 450k through
+    /// dozens of these with no trouble; Bathroom at 757k (bath2k-dav3-outside) and DrJohnson at
+    /// 912k (dj2k-dav3-pose, after the pose-aware fold posed all 44 views) both lost the device
+    /// at the SynchronizeAsync right after Resize, on the very first apply, with the buffers at
+    /// the old count having run a full cycle without incident. The steady state fits; the
+    /// doubled transient does not.
+    ///
+    /// Here the peak above steady state is ONE bank: frame buffers are released, then each
+    /// bank is remapped into a fresh buffer and its prior disposed before the next is touched.
+    /// Adam m/v go through the host (GPU remap of Adam killed opacity - MEASURED); SH banks are
+    /// remapped on the GPU with a readback fence, because host SH OOM'd at ~780k (growhost).
+    /// The trainer is unusable between this call and the Resize that must follow it.
+    /// </summary>
+    public async Task CarryOptimizerRowsAsync(
+        int priorCount, int newCount, int[] adamSurvivors, int[] featureSources,
         int zeroAdamSlot = -1)
     {
-        if (priorCount <= 0 || adamSurvivors.Length <= 0) return;
-        int m = adamSurvivors.Length;
-        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        if (priorCount <= 0 || newCount <= 0 || adamSurvivors.Length != newCount
+            || featureSources.Length != newCount)
+            throw new ArgumentException(
+                $"carry {priorCount:N0} -> {newCount:N0} needs one survivor and one feature " +
+                $"source per new splat (got {adamSurvivors.Length:N0} / {featureSources.Length:N0})");
 
-        if (priorAdamM != null && priorAdamV != null)
+        var accel = _gpu.WebGPUAccelerator;
+        await accel.SynchronizeAsync();
+        int step = _adamStepCount;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        // Everything sized for the old count that is NOT carried goes first, so the carry
+        // runs against the smallest resident set the trainer can have.
+        DisposeBuffers(keepOptimizerRows: true);
+        await Stage("released frame buffers");
+
+        if (_adamM != null && _adamV != null)
         {
             long adamLen = (long)priorCount * AdamSlots;
-            // CPU transfer: Adam m/v only (~87 MB at 780k) — opacity-safe path.
+            // CPU transfer: Adam m/v only (~100 MB at 900k) - the opacity-safe path.
             var state = new AdamState(
-                await priorAdamM.CopyToHostAsync<float>(0, adamLen),
-                await priorAdamV.CopyToHostAsync<float>(0, adamLen),
-                priorStep);
+                await _adamM.CopyToHostAsync<float>(0, adamLen),
+                await _adamV.CopyToHostAsync<float>(0, adamLen),
+                step);
+            await Stage("read Adam m/v");
+            _adamM.Dispose(); _adamV.Dispose();
+            _adamM = accel.Allocate1D<float>((long)newCount * AdamSlots);
+            _adamV = accel.Allocate1D<float>((long)newCount * AdamSlots);
             RestoreAdamState(state, adamSurvivors, zeroAdamSlot);
+            await Stage("restored Adam m/v");
         }
         else
-            SetAdamStepCount(priorStep);
+        {
+            // Nothing to carry (Resize never ran): the banks still have to exist at the new
+            // count, because the Resize that follows keeps whatever is here.
+            _adamM = accel.Allocate1D<float>((long)newCount * AdamSlots);
+            _adamV = accel.Allocate1D<float>((long)newCount * AdamSlots);
+        }
 
-        if (_remapFloatRows == null) return;
-        var accel = _gpu.WebGPUAccelerator;
-        var adamSrc = accel.Allocate1D<int>(m);
+        var adamSrc = accel.Allocate1D<int>(newCount);
         adamSrc.CopyFromCPU(adamSurvivors);
-        var featSrc = accel.Allocate1D<int>(m);
+        var featSrc = accel.Allocate1D<int>(newCount);
         featSrc.CopyFromCPU(featureSources);
-        // CPU transfer: 1 float fence after each SH remap so Dispose cannot race _queue.
         try
         {
-            await RemapGpuFencedAsync(priorShRest, _shRest, featSrc, priorCount, m,
-                SphericalHarmonics.RestFloatsPerSplat);
-            await RemapGpuFencedAsync(priorShAdamM, _adamShM, adamSrc, priorCount, m,
-                SphericalHarmonics.RestFloatsPerSplat);
-            await RemapGpuFencedAsync(priorShAdamV, _adamShV, adamSrc, priorCount, m,
-                SphericalHarmonics.RestFloatsPerSplat);
+            _shRest = await CarryBankAsync(_shRest, featSrc, priorCount, newCount);
+            await Stage("carried SH rest");
+            _adamShM = await CarryBankAsync(_adamShM, adamSrc, priorCount, newCount);
+            await Stage("carried SH Adam m");
+            _adamShV = await CarryBankAsync(_adamShV, adamSrc, priorCount, newCount);
+            await Stage("carried SH Adam v");
         }
         finally
         {
             adamSrc.Dispose();
             featSrc.Dispose();
         }
+
+        _adamStepCount = step;
+        _carriedRowsFor = newCount;
+
+        // Each stage waits for the device and says so. A device loss is reported by whichever
+        // interop call happens to be awaiting, which names nothing; this names the stage.
+        async Task Stage(string what)
+        {
+            await accel.SynchronizeAsync();
+            Console.WriteLine(
+                $"[Trainer] carry {priorCount:N0} -> {newCount:N0}: {what} ({clock.ElapsedMilliseconds} ms)");
+        }
+    }
+
+    /// <summary>
+    /// One SH-shaped bank: allocate at the new count, gather the prior rows into it on the GPU,
+    /// fence, dispose the prior. Peak is prior + next for THIS bank only.
+    /// </summary>
+    async Task<MemoryBuffer1D<float, Stride1D.Dense>?> CarryBankAsync(
+        MemoryBuffer1D<float, Stride1D.Dense>? prior,
+        MemoryBuffer1D<int, Stride1D.Dense> sources, int priorCount, int newCount)
+    {
+        var next = _gpu.WebGPUAccelerator.Allocate1D<float>(
+            (long)newCount * SphericalHarmonics.RestFloatsPerSplat);
+        if (prior == null)
+        {
+            // No prior bank (Resize never ran) - zeros, as Resize itself would hand out.
+            next.MemSetToZero();
+            return next;
+        }
+        await RemapGpuFencedAsync(prior, next, sources, priorCount, newCount,
+            SphericalHarmonics.RestFloatsPerSplat);
+        prior.Dispose();
+        return next;
     }
 
     async Task RemapGpuFencedAsync(
@@ -840,78 +929,6 @@ public sealed class SplatTrainerGpu : IDisposable
         });
         // CPU transfer: 4-byte fence — drains WebGPU queue after Dispatch Submit.
         _ = await next.CopyToHostAsync<float>(0, 1);
-    }
-
-    /// <summary>
-    /// Full GPU densify remap. Prefer <see cref="RemapOptimizerRowsHybridAsync"/> — pure GPU
-    /// Adam remap still fails opacity (MEASURED) even with SynchronizeAsync.
-    /// </summary>
-    public async Task RemapOptimizerRowsGpuAsync(
-        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamM,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamV,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShRest,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamM,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamV,
-        int priorCount,
-        int[] adamSurvivors,
-        int[] featureSources,
-        int zeroAdamSlot = -1)
-    {
-        int m = adamSurvivors.Length;
-        if (m <= 0 || _remapFloatRows == null) return;
-        var adamSrc = _gpu.WebGPUAccelerator.Allocate1D<int>(m);
-        adamSrc.CopyFromCPU(adamSurvivors);
-        var featSrc = _gpu.WebGPUAccelerator.Allocate1D<int>(m);
-        featSrc.CopyFromCPU(featureSources);
-        try
-        {
-            await RemapGpuFencedAsync(priorAdamM, _adamM, adamSrc, priorCount, m, AdamSlots, zeroAdamSlot);
-            await RemapGpuFencedAsync(priorAdamV, _adamV, adamSrc, priorCount, m, AdamSlots, zeroAdamSlot);
-            await RemapGpuFencedAsync(priorShRest, _shRest, featSrc, priorCount, m,
-                SphericalHarmonics.RestFloatsPerSplat);
-            await RemapGpuFencedAsync(priorShAdamM, _adamShM, adamSrc, priorCount, m,
-                SphericalHarmonics.RestFloatsPerSplat);
-            await RemapGpuFencedAsync(priorShAdamV, _adamShV, adamSrc, priorCount, m,
-                SphericalHarmonics.RestFloatsPerSplat);
-        }
-        finally
-        {
-            adamSrc.Dispose();
-            featSrc.Dispose();
-        }
-    }
-
-    /// <summary>
-    /// Densify Adam/SH restore via host RemapFloatRows (proven for Adam). Prefer hybrid for
-    /// large N — full host SH CopyToHost OOM'd at ~780k (MEASURED growhost).
-    /// </summary>
-    public async Task RemapOptimizerRowsHostAsync(
-        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamM,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamV,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShRest,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamM,
-        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamV,
-        int priorCount,
-        int priorStep,
-        int[] adamSurvivors,
-        int[] featureSources,
-        int zeroAdamSlot = -1)
-    {
-        // Same as hybrid Adam path + host SH (small scenes).
-        await RemapOptimizerRowsHybridAsync(
-            priorAdamM, priorAdamV, null, null, null,
-            priorCount, priorStep, adamSurvivors, featureSources, zeroAdamSlot);
-        long shLen = (long)priorCount * SphericalHarmonics.RestFloatsPerSplat;
-        if (priorShRest != null)
-            RestoreShRest(await priorShRest.CopyToHostAsync<float>(0, shLen), featureSources);
-        if (priorShAdamM != null && priorShAdamV != null)
-        {
-            RestoreShAdamState(
-                new ShAdamState(
-                    await priorShAdamM.CopyToHostAsync<float>(0, shLen),
-                    await priorShAdamV.CopyToHostAsync<float>(0, shLen)),
-                adamSurvivors);
-        }
     }
 
     /// <summary>Adam moments and the global step count, as one movable blob.</summary>
@@ -1348,8 +1365,26 @@ public sealed class SplatTrainerGpu : IDisposable
         _queue!.WriteBuffer(stack.GetGPUBuffer()!, (ulong)(off * 4), rgba);
     }
 
-    /// <summary>Seed opacity logits from the splats' current opacity. Call once before training.</summary>
+    /// <summary>
+    /// Seed opacity logits and log scales from the splats, and zero every moment. Call once
+    /// before training. After a densify or prune use <see cref="SeedLogits"/> instead, so the
+    /// moments <see cref="CarryOptimizerRowsAsync"/> just carried are not thrown away.
+    /// </summary>
     public void InitOptimizerState(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
+    {
+        SeedLogits(splatBuf, splatCount);
+        _adamM!.MemSetToZero();
+        _adamV!.MemSetToZero();
+        _adamShM?.MemSetToZero();
+        _adamShV?.MemSetToZero();
+        _adamStepCount = 0;
+    }
+
+    /// <summary>
+    /// Opacity logits and log scales from the packed splats - the trainable parameters the
+    /// packed format does not store in trainable form. Leaves Adam and SH state alone.
+    /// </summary>
+    public void SeedLogits(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
     {
         var splatGpu = splatBuf.GetGPUBuffer()!;
         WriteU32(_dimsBuf!, (uint)splatCount);
@@ -1358,11 +1393,6 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(0, splatGpu), Buf(1, _opacityLogit!.GetGPUBuffer()!), Buf(2, _dimsBuf!),
             Buf(3, _logScale!.GetGPUBuffer()!),
         });
-        _adamM!.MemSetToZero();
-        _adamV!.MemSetToZero();
-        _adamShM?.MemSetToZero();
-        _adamShV?.MemSetToZero();
-        _adamStepCount = 0;
     }
 
     /// <summary>Convert packed linear RGB to SH DC once before the first training step.</summary>
@@ -1787,7 +1817,11 @@ public sealed class SplatTrainerGpu : IDisposable
         _queue!.WriteBuffer(buf, 0, _scratch4);
     }
 
-    void DisposeBuffers()
+    /// <param name="keepOptimizerRows">
+    /// Leave Adam m/v, SH rest and SH Adam m/v alone - they were carried to the new count by
+    /// <see cref="CarryOptimizerRowsAsync"/> and the Resize that follows must not lose them.
+    /// </param>
+    void DisposeBuffers(bool keepOptimizerRows = false)
     {
         _keys?.Dispose(); _keys = null;
         _values?.Dispose(); _values = null;
@@ -1817,13 +1851,14 @@ public sealed class SplatTrainerGpu : IDisposable
         _densifyStats?.Dispose(); _densifyStats = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
+        _gradShRest?.Dispose(); _gradShRest = null;
+        _lossFixed?.Dispose(); _lossFixed = null;
+        if (keepOptimizerRows) return;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
         _shRest?.Dispose(); _shRest = null;
-        _gradShRest?.Dispose(); _gradShRest = null;
         _adamShM?.Dispose(); _adamShM = null;
         _adamShV?.Dispose(); _adamShV = null;
-        _lossFixed?.Dispose(); _lossFixed = null;
     }
 
     public void Dispose()

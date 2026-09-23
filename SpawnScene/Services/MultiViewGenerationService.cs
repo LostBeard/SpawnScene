@@ -65,9 +65,15 @@ public class MultiViewGenerationService
     /// median depth ratio. On Bathroom that produced a cloud that rendered as soup.
     ///
     /// "dav3" keeps depth and poses in the same frame. "sfm" is the old behaviour. "auto"
-    /// prefers SfM and falls back, which is what shipped.
+    /// prefers SfM and falls back.
+    ///
+    /// Default is dav3 (MEASURED 2026-09-23 on DrJohnson 2K): dav3-chunked reached supervised
+    /// ~22 dB / held ~13 before a device loss; sfm finished supervised 14.9 / held 12.6 with
+    /// held-out cross-match picking the WRONG target on every sampled view. Preferring SfM
+    /// under "auto" put joint DAv3 depths and SfM cameras in different frames - the Bathroom
+    /// soup case the comment above already named.
     /// </summary>
-    public string PosePreference { get; set; } = "auto";
+    public string PosePreference { get; set; } = "dav3";
 
     /// <summary>
     /// Pose every view by running the joint depth model in chunks that share anchor views, rather
@@ -100,11 +106,13 @@ public class MultiViewGenerationService
     /// <summary>
     /// Keep splats the screening reference camera cannot see.
     ///
-    /// Default false preserves the object-centric behaviour that shipped. For a ROOM it is
-    /// almost certainly wrong - see <see cref="WorldSpaceGeometry.ClassifySplatVsRef"/> - but
-    /// that is a measurement to make, not a default to change quietly.
+    /// Default true for rooms (MEASURED 2026-09-23 on DrJohnson dav3-chunked): with false, a
+    /// non-reference view kept 0 / 39,928 splats - reject reason "outside the reference view"
+    /// for 39,915 of them. That is the object-centric frustum screen eating the other walls.
+    /// Object-centric captures that need the old behaviour can set <c>?outside=0</c>.
+    /// See <see cref="WorldSpaceGeometry.ClassifySplatVsRef"/>.
     /// </summary>
-    public bool KeepOutsideReferenceView { get; set; }
+    public bool KeepOutsideReferenceView { get; set; } = true;
 
     /// <summary>
     /// Relative depth agreement the screen demands. 0.06 is what the object path uses; an
@@ -990,7 +998,7 @@ public class MultiViewGenerationService
             var cams = CamerasFromRun(images, chunk, run);
             bool fitted = MultiViewChunkPlan.TryFitChunkToReference(
                 chunk, cams, placed, out var sim, out float rms, out int used, out float spread,
-                out int inliers);
+                out int inliers, out int[] inlierSlots);
 
             // Always report residual AGAINST the spread. The threshold is otherwise a judgement
             // call nobody can check, and at MinAnchors the fit is over-determined by only two -
@@ -998,14 +1006,21 @@ public class MultiViewGenerationService
             // anchor triangle in this pass than in the reference one.
             // When no subset found support there is no fit, and rms is still the sentinel:
             // printing it gives 3.4e38 and reads as a broken number rather than as "no fit".
-            string residual = inliers >= MultiViewChunkPlan.MinAnchors
+            string residual = inliers >= MultiViewChunkPlan.MinFoldAnchors
                 ? $"residual {rms:F4} on a spread of {spread:F4} " +
                   $"({(spread > 0 ? rms / spread : float.NaN):P1} of it, limit " +
                   $"{MultiViewChunkPlan.MaxAnchorRmsFraction:P0})"
-                : $"no subset of them agreed (spread {spread:F4}, tolerance " +
-                  $"{MultiViewChunkPlan.InlierAnchorFraction:P0})";
+                : $"no pair of them agreed in both position and orientation (spread {spread:F4}, " +
+                  $"tolerance {MultiViewChunkPlan.InlierAnchorFraction:P0} / " +
+                  $"{MultiViewChunkPlan.MaxAnchorRotationRadians * 180f / MathF.PI:F0} deg)";
+            // Name the anchor the fold threw out. On DrJohnson that is the whole story of a pass.
+            var excluded = Enumerable.Range(0, chunk.AnchorCount)
+                .Where(s => cams[s] != null && placed.ContainsKey(chunk.Views[s]) && !inlierSlots.Contains(s))
+                .Select(s => chunk.Views[s]).ToArray();
             string fitLine =
-                $"anchors {used}/{chunk.AnchorCount} recovered, {inliers} agreeing, {residual}";
+                $"anchors {used}/{chunk.AnchorCount} recovered, {inliers} agreeing" +
+                (fitted && excluded.Length > 0 ? $" (anchor {string.Join(",", excluded)} excluded)" : "") +
+                $", {residual}";
 
             LogAnchorTriangle(ci, chunk, cams, placed);
 
@@ -1040,6 +1055,10 @@ public class MultiViewGenerationService
         Console.WriteLine(
             $"[MultiView] chunked poses done: {result.PosedCount}/{images.Count} views posed in one " +
             $"frame, {result.ChunksRejected} chunk(s) rejected");
+        // Depth is finished for this generate; training is next on the same GPU. Without this the
+        // session keeps its entire activation arena (MEASURED 3.9 GB after 14 DAv3 N=6 passes) and
+        // the trainer's first densify resize is what finally tips Chrome over.
+        _depthService.ReleaseWorkingMemory();
         return result;
     }
 
@@ -1315,6 +1334,38 @@ public class MultiViewGenerationService
         Console.WriteLine(
             $"[MultiView]   chunk {chunkIndex} anchor triangle: {string.Join("  ", parts)} " +
             $"-> median {median:F3}, typical deviation {relMad:P1}, worst pair {worst:P1}");
+
+        // Each anchor's own estimate of the frame rotation, and how far the anchors disagree
+        // pairwise. This is the number that calibrates MaxAnchorRotationRadians: a pair the
+        // model placed consistently agrees to within noise, the anchor it guessed at does not.
+        var rot = new List<(int view, Quaternion q)>();
+        for (int a = 0; a < chunk.AnchorCount; a++)
+        {
+            if (cams[a] == null || !reference.TryGetValue(chunk.Views[a], out var refA)) continue;
+            if (MultiViewChunkPlan.TryRotationBetweenCameras(cams[a]!, refA, out var q))
+                rot.Add((chunk.Views[a], q));
+        }
+        if (rot.Count < 2) return;
+        var rotParts = new List<string>();
+        for (int a = 0; a < rot.Count; a++)
+            for (int b = a + 1; b < rot.Count; b++)
+                rotParts.Add(
+                    $"{rot[a].view}-{rot[b].view} " +
+                    $"{MultiViewChunkPlan.AngleBetween(rot[a].q, rot[b].q) * 180f / MathF.PI:F1}deg");
+        Console.WriteLine(
+            $"[MultiView]   chunk {chunkIndex} anchor rotation disagreement: {string.Join("  ", rotParts)} " +
+            $"(limit {MultiViewChunkPlan.MaxAnchorRotationRadians * 180f / MathF.PI:F0}deg)");
+
+        // What the fold actually chose between: each pair's inliers and its score, position and
+        // orientation terms separately (each in units of its tolerance). This is the line that
+        // says WHY an anchor was excluded; the disagreement line above only says by how much.
+        var pairs = MultiViewChunkPlan.ScoreAnchorPairs(chunk, cams, reference);
+        if (pairs.Count == 0) return;
+        var pairParts = pairs.Select(p => p.InlierViews.Length == 0
+            ? $"{p.ViewA}-{p.ViewB} gated ({p.PairRotationRadians * 180f / MathF.PI:F1}deg)"
+            : $"{p.ViewA}-{p.ViewB} in[{string.Join(",", p.InlierViews)}] " +
+              $"pos {p.PositionError:F2} + rot {p.RotationError:F2} = {p.PositionError + p.RotationError:F2}");
+        Console.WriteLine($"[MultiView]   chunk {chunkIndex} pair scores: {string.Join("  ", pairParts)}");
     }
 
     private static Dictionary<int, CameraParams> BuildPlacedLookup(ChunkedPoseResult result)

@@ -230,8 +230,9 @@ public partial class Studio : IAsyncDisposable
             int iters = query.TryGetValue("train", out var dt) && int.TryParse(dt, out var dti) ? dti : 0;
             bool dgeom = query.TryGetValue("geom", out var dg) && dg is "1" or "true";
             int maxDim = query.TryGetValue("maxdim", out var md) && int.TryParse(md, out var mdi) ? mdi : 720;
-            // ?poses=dav3 keeps depth and cameras in one frame by skipping SfM.
-            string poses = query.TryGetValue("poses", out var pp) ? pp : "auto";
+            // ?poses=dav3 keeps depth and cameras in one frame (product default after
+            // DrJohnson 2026-09-23). ?poses=sfm / auto remain for A/B.
+            string poses = query.TryGetValue("poses", out var pp) ? pp : "dav3";
             // ?patches=N binds a square NxN ViT patch grid. 37 = the familiar 518. Same
             // meaning as the novel-view harness; it used to mean a TOTAL here, which made
             // PATCHES=64 bind a 7x9 grid.
@@ -246,8 +247,9 @@ public partial class Studio : IAsyncDisposable
             // limit; the first pass proves whatever is asked for on this device and backs off.
             if (query.TryGetValue("n", out var nn) && int.TryParse(nn, out var nni))
                 DepthEstimationService.MaxMultiViewImages = nni;
-            // ?outside=1 keeps splats the screening reference cannot see - the other walls of a
-            // room. ?relthresh=N is how closely depths must agree to survive the screen.
+            // ?outside=1 keeps splats the screening reference cannot see (default ON after
+            // DrJohnson 2026-09-23: outside=false zeroed non-ref views). ?outside=0 restores the
+            // object-centric screen. ?relthresh=N is how closely depths must agree.
             if (query.TryGetValue("outside", out var ov2))
                 _multiViewService.KeepOutsideReferenceView = ov2 is "1" or "true";
             if (query.TryGetValue("relthresh", out var rt) && float.TryParse(rt, out var rtf))

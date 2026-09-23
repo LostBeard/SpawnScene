@@ -182,6 +182,10 @@ public partial class Studio
 
             var accel = _gpuService.WebGPUAccelerator;
 
+            // Depth is finished; its activation arena has no more work to do and would otherwise
+            // sit on the GPU while the trainer allocates (~3.9 GB after a DAv3 cascade, MEASURED).
+            _depthService.ReleaseWorkingMemory();
+
             // -- Scene extent, from the splats themselves --
             // The sort key packs depth into 18 bits, so it needs a real range to quantise
             // against. Deriving it from the scene means a room works the same way an object does.
@@ -259,7 +263,7 @@ public partial class Studio
             _trainer ??= new SplatTrainerGpu(_gpuService);
             _trainer.SkipZeroGradientSteps = SkipZeroGradientSteps;
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
-            _trainer.Resize(w, h, n, keysPerSplat);
+            await _trainer.ResizeAsync(w, h, n, keysPerSplat);
             _trainer.EnsureRgbConvertedToShDc(packed, n);
             // Pack must DcToRgb from here on; without this the viewer clamps raw DC as unorm8.
             _gpuRenderer.ColoursAreShDc = true;
@@ -397,7 +401,7 @@ public partial class Studio
                         $"re-sizing to {want} per splat with 25% headroom");
                     // The target STACK is a separate allocation and stays filled; Resize only
                     // reallocates the trainer's own per-frame buffers.
-                    _trainer.Resize(w, h, n, want);
+                    await _trainer.ResizeAsync(w, h, n, want);
                 }
             }
 
@@ -1009,27 +1013,25 @@ public partial class Studio
             }
         }
 
-        // Steal optimizer rows, Resize, Init, hybrid-remap survivors.
-        // Adam: host RemapFloatRows (GPU Adam remap killed opacity — MEASURED).
-        // SH: GPU RemapFloatRows with CopyToHost fence (full host SH OOM'd at ~780k — growhost).
-        var (priorM, priorV, priorSh, priorShM, priorShV, priorStep) =
-            _trainer.DetachOptimizerRows();
-        try
-        {
-            _trainer.Resize(w, h, m, keys);
-            _trainer.ResetPeakKeyDemand();
-            _trainer.InitOptimizerState(live, m);
-            await accel.SynchronizeAsync();
-            await _trainer.RemapOptimizerRowsHybridAsync(
-                priorM, priorV, priorSh, priorShM, priorShV, n, priorStep,
-                adamSurvivors, featureSources,
-                zeroAdamSlot: resetOpacity ? 3 : -1);
-        }
-        finally
-        {
-            priorM?.Dispose(); priorV?.Dispose();
-            priorSh?.Dispose(); priorShM?.Dispose(); priorShV?.Dispose();
-        }
+        // Carry the optimizer rows to the new set FIRST, one bank at a time with the old frame
+        // buffers already released, then Resize keeps them. Detaching all five prior banks and
+        // resizing on top of them held two full generations at once; that is what lost the
+        // device on the first apply at 757k (Bathroom) and 912k (DrJohnson, 44/44 posed) while
+        // 450k sailed through - see SplatTrainerGpu.CarryOptimizerRowsAsync for the numbers.
+        // Adam: host RemapFloatRows (GPU Adam remap killed opacity - MEASURED).
+        // SH: GPU RemapFloatRows with CopyToHost fence (full host SH OOM'd at ~780k - growhost).
+        await _trainer.CarryOptimizerRowsAsync(
+            n, m, adamSurvivors, featureSources, zeroAdamSlot: resetOpacity ? 3 : -1);
+        await _trainer.ResizeAsync(w, h, m, keys);
+        // Wait for the device after Resize on its own, so a loss caused by the allocations is
+        // reported here and not blamed on the first dispatch that follows.
+        await accel.SynchronizeAsync();
+        Console.WriteLine($"[{logTag}] resized trainer to {m:N0} splats");
+        _trainer.ResetPeakKeyDemand();
+        // Logits and log scales come from the packed splats; the moments were just carried and
+        // must NOT be zeroed here (InitOptimizerState would).
+        _trainer.SeedLogits(live, m);
+        await accel.SynchronizeAsync();
         _trainer.ResetDensifyStats();
 
         Console.WriteLine($"[{logTag}] {n:N0} -> {m:N0} splats: {plan}");

@@ -73,7 +73,34 @@ public class GpuService : IBackgroundService, IAsyncDisposable
         WebGPUAccelerator = (WebGPUAccelerator)await devices[0].CreateAcceleratorAsync(_context, null);
         _initialized = true;
 
+        // Name the cause of a device loss. Without these two, a loss surfaces only as Dawn's
+        // wire message "A valid external Instance reference no longer exists" thrown from
+        // whichever interop call happened to be awaiting - which says the device is gone and
+        // nothing about why. device.lost carries Dawn's reason and message; the uncaptured
+        // error that precedes an out-of-memory loss names the allocation that failed.
+        // MEASURED: DrJohnson 912k and Bathroom 757k both died on the first ApplySplatPlan with
+        // exactly that message and no further information, twice, until this was added.
+        WebGPUAccelerator.DeviceLost += (reason, message) =>
+            Console.WriteLine($"[GpuService] DEVICE LOST: reason={reason} message={message}");
+        NativeDevice.OnUncapturedError += OnUncapturedGpuError;
+
         Console.WriteLine($"[GpuService] WebGPU initialized: {DeviceName}");
+    }
+
+    /// <summary>
+    /// Instance-method listener so it can be detached in <see cref="DisposeAsync"/>: SpawnJS
+    /// ActionEvent subscriptions live in a static table keyed by delegate and pin the target.
+    /// </summary>
+    private void OnUncapturedGpuError(GPUUncapturedErrorEvent e)
+    {
+        try
+        {
+            Console.WriteLine($"[GpuService] GPU ERROR ({e.Error?.GetType().Name}): {e.Error?.Message}");
+        }
+        catch
+        {
+            // Never let a diagnostic take the runtime down on top of the error it reports.
+        }
     }
 
     /// <summary>
@@ -101,6 +128,10 @@ public class GpuService : IBackgroundService, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        if (_initialized)
+        {
+            try { NativeDevice.OnUncapturedError -= OnUncapturedGpuError; } catch { }
+        }
         WebGPUAccelerator?.Dispose();
         _context?.Dispose();
         _initialized = false;

@@ -68,6 +68,15 @@ async function ensureChrome({ headless = false } = {}) {
     'about:blank',
   ];
   if (headless) args.unshift('--headless=new');
+  // SPAWNSCENE_CHROME_LOG=<file>: Chrome's own log (browser + GPU process). The page only ever sees
+  // "A valid external Instance reference no longer exists" when the GPU process drops its Dawn
+  // instance; WHY (D3D12 DEVICE_REMOVED hresult, GPU process exit code, Dawn OOM) is logged
+  // GPU-process-side and is unreachable from CDP. --v=1 is what makes GpuProcessHost say why.
+  const chromeLog = process.env.SPAWNSCENE_CHROME_LOG;
+  if (chromeLog) {
+    args.unshift('--enable-logging', `--log-file=${path.resolve(chromeLog)}`, '--v=1');
+    console.log(`[chrome] logging to ${path.resolve(chromeLog)}`);
+  }
 
   console.log(`[chrome] launching ${path.basename(CHROME)} on ${PORT} (profile ${profile})`);
   const child = spawn(CHROME, args, { detached: false, stdio: 'ignore' });

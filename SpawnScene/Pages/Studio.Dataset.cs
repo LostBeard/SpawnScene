@@ -64,7 +64,7 @@ public partial class Studio
 
     private async Task RunDatasetAutotestAsync(
         string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension,
-        string posePreference = "auto", int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches,
+        string posePreference = "dav3", int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches,
         bool useGroundTruthPoses = false, bool initFromPointCloud = false)
     {
         Console.WriteLine(

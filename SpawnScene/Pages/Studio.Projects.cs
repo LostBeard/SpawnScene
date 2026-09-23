@@ -362,6 +362,18 @@ public partial class Studio
         Console.WriteLine(
             $"[Studio] supervision from {poseSource}: {posed} of {images.Count} views posed " +
             $"({unposed} not), {held} held out, quarter turns [{string.Join(", ", turnCounts)}]");
+
+        // MEASURED 2026-09-23 DrJohnson dav3-chunked: 20/44 posed (8 chunks rejected). Training
+        // still runs, but held-out cannot climb while half the capture never entered the frame.
+        // Do not refuse here - a thin pose set is still better than inventing cameras - but the
+        // product path must surface it so the cascade gap is not mistaken for an optimiser miss.
+        if (images.Count >= 4 && posed * 2 < images.Count)
+        {
+            Console.WriteLine(
+                $"[Studio] WARNING: only {posed}/{images.Count} views posed in one frame - " +
+                "held-out quality will be cascade-limited, not optimiser-limited. " +
+                "See Research/handoff-pose-cascade-drjohnson-2026-09-23.md");
+        }
     }
 
     private async Task GenerateFromTempleRingAsync(int onlyView = -1, bool globalScale = false,

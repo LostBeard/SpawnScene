@@ -99,6 +99,33 @@ public static class MultiViewChunkPlan
     public const float InlierAnchorFraction = 0.15f;
 
     /// <summary>
+    /// Fewest anchors a POSE-aware fold needs. A camera is a full rigid pose, not a point: its
+    /// orientation alone fixes the frame rotation, so two cameras give 12 constraints for the 7
+    /// a similarity has. Planning still carries <see cref="MinAnchors"/> per chunk - the third
+    /// anchor is what makes a bad one identifiable, not what makes the fold solvable.
+    /// </summary>
+    public const int MinFoldAnchors = 2;
+
+    /// <summary>
+    /// How far one anchor's orientation may disagree with the frame rotation the fold settles on
+    /// and still count as agreeing, in radians.
+    ///
+    /// 10 degrees. MEASURED on DrJohnson 2000 (dav3, 13 chunks, anchors 3/12/37, 2026-09-23) from
+    /// the <c>[MultiView] chunk N anchor rotation disagreement</c> lines:
+    ///   - honest pair 3-12: 1.0 to 3.4 degrees on every chunk (the noise floor this must sit above);
+    ///   - anchor 37 (the one whose depth scale swung 0.52x to 1.43x): 52-54 (chunks 2, 7, 12),
+    ///     26-27 (8), 13.7/12.9 (11), 10.5/9.0 (9), 8.9/10.0 (5), 7.4/9.7 (10), 6.7/6.1 (13),
+    ///     4.3/4.0 (1, 3), 3.3/1.4 (6); chunk 4, where 37 was honest, 2.9/3.2.
+    /// So orientation alone names 37 on 7 of its 12 bad passes; the position vote catches the rest
+    /// (chunks 1, 3, 5, 6, 10, 13), and no honest anchor is ever rejected. Bathroom 2000
+    /// (dav3, anchors 31/32/33): every disagreement 0.1-0.5 deg, so the same gate never rejects
+    /// an honest Bathroom anchor either. Loosening this past the point
+    /// where 37 counts as agreeing defeats the purpose; tightening below ~4 degrees rejects honest
+    /// anchors.
+    /// </summary>
+    public const float MaxAnchorRotationRadians = 10f * MathF.PI / 180f;
+
+    /// <summary>
     /// Split <paramref name="viewCount"/> images into chunks of at most <paramref name="chunkSize"/>,
     /// each carrying the same <paramref name="anchorCount"/> anchor views.
     ///
@@ -392,13 +419,11 @@ public static class MultiViewChunkPlan
     /// anchors that were RIGHT - which is how one bad view drags a whole chunk out of position
     /// while the residual still looks survivable.
     ///
-    /// So: fit on every three-anchor subset, score each candidate by how many of ALL the anchors
-    /// it agrees with, and refit on the winner's inliers. The search is exhaustive rather than
-    /// randomised - C(8,3) is 56 - so it is deterministic, which a diagnostic has to be.
-    ///
-    /// At exactly <see cref="MinAnchors"/> anchors this degrades to the plain fit, and that is
-    /// not a limitation of the method: three points have no majority to disagree with. Detecting
-    /// a bad anchor needs four, and identifying WHICH one needs five.
+    /// MEASURED again on DrJohnson (dj2k-dav3-pose, anchors 3/12/37): pair 3-12 held at 1.00
+    /// across all 13 passes (0.88-1.12, which is per-pass scale and is absorbed) while every pair
+    /// involving 37 swung 0.52-1.43. The position-only fit rejected 8 of 13 chunks, because three
+    /// POINTS over-determine a similarity by two and cannot say which of them is the liar - so
+    /// the residual crossed 15% and the chunk was lost, along with 24 of 44 views.
     /// </summary>
     public static bool TryFitChunkToReference(
         MultiViewChunk chunk,
@@ -406,96 +431,321 @@ public static class MultiViewChunkPlan
         IReadOnlyDictionary<int, CameraParams> reference,
         out Similarity3 similarity, out float rms, out int anchorsUsed, out float anchorSpread,
         out int inlierCount)
+        => TryFitChunkToReference(chunk, chunkCameras, reference,
+            out similarity, out rms, out anchorsUsed, out anchorSpread, out inlierCount, out _);
+
+    /// <summary>
+    /// The fold itself, also naming the anchor SLOTS the transform was fitted on
+    /// (<paramref name="inlierSlots"/>), so the caller can print which anchor was thrown out.
+    ///
+    /// A camera is a POSE, not a point. Its orientation alone fixes the frame rotation: for anchor
+    /// i the rotation carrying this pass's frame into the reference frame is simply
+    /// R_i = basis_chunk(i)^T · basis_ref(i), one estimate per anchor with no fitting at all. Two
+    /// anchors then give 12 constraints for a 7-parameter similarity, and three give 18 - enough
+    /// redundancy to detect a bad anchor with two and to name it with three, where positions alone
+    /// needed four and five.
+    ///
+    /// So: every anchor PAIR whose two rotation estimates agree proposes a similarity (rotation =
+    /// their mean, scale = their distance ratio, translation from their midpoint). Each proposal is
+    /// scored by how many of ALL the anchors agree with it in BOTH position
+    /// (<see cref="InlierAnchorFraction"/> of the spread) and orientation
+    /// (<see cref="MaxAnchorRotationRadians"/>). The winner is refitted on its inliers. A pair
+    /// fits its own positions exactly, so the independent evidence behind a two-anchor fold is
+    /// that the two cameras' RELATIVE rotation matches the reference - which the model cannot get
+    /// right by accident for two views it has placed inconsistently.
+    ///
+    /// Deterministic and exhaustive: C(n,2) proposals, no randomness, so a diagnostic reproduces.
+    /// </summary>
+    public static bool TryFitChunkToReference(
+        MultiViewChunk chunk,
+        IReadOnlyList<CameraParams?> chunkCameras,
+        IReadOnlyDictionary<int, CameraParams> reference,
+        out Similarity3 similarity, out float rms, out int anchorsUsed, out float anchorSpread,
+        out int inlierCount, out int[] inlierSlots)
     {
         similarity = Similarity3.Identity;
         rms = float.MaxValue;
         anchorsUsed = 0;
         anchorSpread = 0f;
         inlierCount = 0;
+        inlierSlots = Array.Empty<int>();
 
-        var source = new List<Vector3>();
-        var target = new List<Vector3>();
+        if (!TryCollectAnchors(chunk, chunkCameras, reference,
+                out var slots, out var source, out var target, out var perAnchorRotation, out float spread))
+        {
+            anchorsUsed = source.Count;
+            anchorSpread = spread;
+            return false;
+        }
+        anchorsUsed = source.Count;
+        anchorSpread = spread;
+
+        var candidates = ScoreAnchorPairs(source, target, perAnchorRotation, spread);
+        AnchorPairCandidate? best = null;
+        foreach (var c in candidates)
+            if (best == null || c.InlierCount > best.Value.InlierCount
+                || (c.InlierCount == best.Value.InlierCount && c.Error < best.Value.Error))
+                best = c;
+
+        // A pair always fits itself, so two agreeing anchors out of six is not support, it is a
+        // coincidence with company. The fold needs a strict MAJORITY of the recovered anchors:
+        // 2 of 2, 2 of 3, 3 of 4, 4 of 6. That is what lets DrJohnson fold on 3+12 with 37 out,
+        // and refuses a pass where nothing agrees with anything.
+        if (best == null || best.Value.InlierCount < MinFoldAnchors) return false;
+        var bestInliers = best.Value.Inliers;
+        if (bestInliers.Length * 2 <= anchorsUsed) return false;
+
+        // Refit on the agreeing set. Rotation is the mean of the inliers' own estimates - each
+        // one is a direct measurement, not something recovered from a point triangle that a
+        // single bad point can tilt. Scale and translation are least squares over their positions.
+        var meanRotation = MeanRotation(bestInliers.Select(i => perAnchorRotation[i]));
+        var fitRotation = Matrix4x4.CreateFromQuaternion(meanRotation);
+
+        var hereCentroid = Vector3.Zero;
+        var thereCentroid = Vector3.Zero;
+        foreach (int i in bestInliers) { hereCentroid += source[i]; thereCentroid += target[i]; }
+        hereCentroid /= bestInliers.Length;
+        thereCentroid /= bestInliers.Length;
+
+        float numer = 0f, denom = 0f;
+        foreach (int i in bestInliers)
+        {
+            var h = Vector3.Transform(source[i] - hereCentroid, fitRotation);
+            numer += Vector3.Dot(h, target[i] - thereCentroid);
+            denom += h.LengthSquared();
+        }
+        if (!(denom > 1e-12f) || !(numer > 0f)) return false;
+        float fitScale = numer / denom;
+        var fitTranslation = thereCentroid - fitScale * Vector3.Transform(hereCentroid, fitRotation);
+
+        float sq = 0f;
+        foreach (int i in bestInliers)
+        {
+            float d = Vector3.Distance(
+                WorldSpaceGeometry.ApplySimilarity(source[i], fitScale, fitRotation, fitTranslation), target[i]);
+            sq += d * d;
+        }
+        rms = MathF.Sqrt(sq / bestInliers.Length);
+        if (rms > MaxAnchorRmsFraction * spread) return false;
+
+        inlierCount = bestInliers.Length;
+        inlierSlots = bestInliers.Select(i => slots[i]).ToArray();
+        similarity = new Similarity3(fitScale, fitRotation, fitTranslation);
+        return true;
+    }
+
+    /// <summary>
+    /// One anchor pair's proposal for the fold and how the recovered anchors judged it.
+    /// Indices are into the RECOVERED anchor list (see <see cref="ScoreAnchorPairs"/>), which the
+    /// public overload maps back to chunk slots. <see cref="PositionError"/> and
+    /// <see cref="RotationError"/> are the inliers' summed misfits, each in units of its own
+    /// tolerance, so a value of 1.0 means "one inlier sat exactly on the limit".
+    /// </summary>
+    public readonly record struct AnchorPairCandidate(
+        int A, int B, int[] Inliers, float PositionError, float RotationError, float PairRotationRadians)
+    {
+        public int InlierCount => Inliers.Length;
+        public float Error => PositionError + RotationError;
+    }
+
+    /// <summary>
+    /// Every pair proposal for a chunk, with slots mapped to chunk view indices - what the fold
+    /// chooses between, for the log. Empty when fewer than <see cref="MinFoldAnchors"/> anchors
+    /// were recovered.
+    /// </summary>
+    public static IReadOnlyList<(int ViewA, int ViewB, int[] InlierViews, float PositionError, float RotationError, float PairRotationRadians)>
+        ScoreAnchorPairs(
+            MultiViewChunk chunk,
+            IReadOnlyList<CameraParams?> chunkCameras,
+            IReadOnlyDictionary<int, CameraParams> reference)
+    {
+        if (!TryCollectAnchors(chunk, chunkCameras, reference,
+                out var slots, out var source, out var target, out var rotations, out float spread))
+            return Array.Empty<(int, int, int[], float, float, float)>();
+        return ScoreAnchorPairs(source, target, rotations, spread)
+            .Select(c => (
+                chunk.Views[slots[c.A]], chunk.Views[slots[c.B]],
+                c.Inliers.Select(i => chunk.Views[slots[i]]).ToArray(),
+                c.PositionError, c.RotationError, c.PairRotationRadians))
+            .ToList();
+    }
+
+    /// <summary>
+    /// The anchors a fold can use: those recovered in this pass, present in the reference, and
+    /// with a non-degenerate orientation. <paramref name="spread"/> is the mean distance of the
+    /// reference anchors from their centroid - what every residual is judged against.
+    /// False when fewer than <see cref="MinFoldAnchors"/> qualify or they all sit at one point.
+    /// </summary>
+    static bool TryCollectAnchors(
+        MultiViewChunk chunk,
+        IReadOnlyList<CameraParams?> chunkCameras,
+        IReadOnlyDictionary<int, CameraParams> reference,
+        out List<int> slots, out List<Vector3> source, out List<Vector3> target,
+        out List<Quaternion> perAnchorRotation, out float spread)
+    {
+        slots = new List<int>();
+        source = new List<Vector3>();
+        target = new List<Vector3>();
+        perAnchorRotation = new List<Quaternion>();
+        spread = 0f;
         for (int slot = 0; slot < chunk.AnchorCount && slot < chunkCameras.Count; slot++)
         {
             var here = chunkCameras[slot];
             if (here == null) continue;
             if (!reference.TryGetValue(chunk.Views[slot], out var there)) continue;
+            if (!TryRotationBetweenCameras(here, there, out var q)) continue;
+            slots.Add(slot);
             source.Add(here.Position);
             target.Add(there.Position);
+            perAnchorRotation.Add(q);
         }
-
-        anchorsUsed = source.Count;
-        if (anchorsUsed < MinAnchors) return false;
+        if (source.Count < MinFoldAnchors) return false;
 
         // Residual is only meaningful against how far apart the anchors are.
         var centroid = Vector3.Zero;
         foreach (var t in target) centroid += t;
         centroid /= target.Count;
-        float spread = 0f;
         foreach (var t in target) spread += Vector3.Distance(t, centroid);
         spread /= target.Count;
-        anchorSpread = spread;
-        if (!(spread > 1e-6f)) return false;
+        return spread > 1e-6f;
+    }
 
+    /// <summary>
+    /// Every anchor pair whose two rotation estimates agree proposes a similarity (rotation =
+    /// their mean, scale = their distance ratio, translation from their midpoint), and every
+    /// recovered anchor votes on it in BOTH position (<see cref="InlierAnchorFraction"/> of the
+    /// spread) and orientation (<see cref="MaxAnchorRotationRadians"/>).
+    ///
+    /// Score = inlier count, then the inliers' combined misfit in units of tolerance. A pair's
+    /// OWN members fix scale and translation exactly, so the only way they can misfit is in
+    /// direction: the here-baseline carried by the pair's rotation versus the reference
+    /// baseline. That is an angle, and it is scored as one (against
+    /// <see cref="MaxAnchorRotationRadians"/>), not as a distance. Every other anchor misfits
+    /// in position for real and is scored as a distance against the spread tolerance.
+    ///
+    /// MEASURED on DrJohnson chunk 10 (dj2k-dav3-pose, 2026-09-23), scoring member misfit as a
+    /// distance: 3-12 pos 1.47 + rot 0.33 = 1.80, 3-37 pos 0.63 + rot 0.74 = 1.36, so the fold
+    /// kept 37 and threw out 12 - the anchor that agreed with 3 to within 3.4 deg in all 13
+    /// passes. Back-computed, the direction misfit was 5.3 deg on BOTH pairs; the 1.47 versus
+    /// 0.63 was nothing but 3-12's baseline being 2.3x longer (1.04 against 0.45). Position
+    /// distance for a pair's own members is baseline bias, not evidence. As angles: 3-12 1.07 +
+    /// 0.33 = 1.40, 3-37 1.06 + 0.74 = 1.80 - the orientation evidence decides, and every other
+    /// chunk in that run keeps the decision it already had.
+    /// </summary>
+    static List<AnchorPairCandidate> ScoreAnchorPairs(
+        IReadOnlyList<Vector3> source, IReadOnlyList<Vector3> target,
+        IReadOnlyList<Quaternion> perAnchorRotation, float spread)
+    {
+        int n = source.Count;
         float tolerance = InlierAnchorFraction * spread;
-        List<int>? bestInliers = null;
+        var candidates = new List<AnchorPairCandidate>();
+        for (int a = 0; a < n; a++)
+            for (int b = a + 1; b < n; b++)
+            {
+                float pairAngle = AngleBetween(perAnchorRotation[a], perAnchorRotation[b]);
+                // Two anchors that disagree about the frame rotation cannot both be right, so
+                // they do not get to propose together. Reported with no inliers so the log
+                // still shows the pair and why it sat out.
+                if (pairAngle > MaxAnchorRotationRadians)
+                {
+                    candidates.Add(new AnchorPairCandidate(a, b, Array.Empty<int>(), 0f, 0f, pairAngle));
+                    continue;
+                }
 
-        if (anchorsUsed == MinAnchors)
-        {
-            bestInliers = Enumerable.Range(0, anchorsUsed).ToList();
-        }
-        else
-        {
-            float bestError = float.MaxValue;
-            for (int a = 0; a < anchorsUsed; a++)
-                for (int b = a + 1; b < anchorsUsed; b++)
-                    for (int c = b + 1; c < anchorsUsed; c++)
-                    {
-                        var subS = new[] { source[a], source[b], source[c] };
-                        var subT = new[] { target[a], target[b], target[c] };
-                        if (!WorldSpaceGeometry.TryUmeyamaSimilarity(
-                                subS, subT, out float cs, out var cr, out var ct, out _))
-                            continue;
+                float hereDist = Vector3.Distance(source[a], source[b]);
+                if (!(hereDist > 1e-6f)) continue;
+                float scale = Vector3.Distance(target[a], target[b]) / hereDist;
+                var rotation = Matrix4x4.CreateFromQuaternion(
+                    Quaternion.Normalize(Quaternion.Slerp(perAnchorRotation[a], perAnchorRotation[b], 0.5f)));
+                var midHere = (source[a] + source[b]) * 0.5f;
+                var midThere = (target[a] + target[b]) * 0.5f;
+                var translation = midThere - scale * Vector3.Transform(midHere, rotation);
+                var candidate = Quaternion.CreateFromRotationMatrix(rotation);
 
-                        var inliers = new List<int>();
-                        float error = 0f;
-                        for (int i = 0; i < anchorsUsed; i++)
-                        {
-                            float d = Vector3.Distance(
-                                WorldSpaceGeometry.ApplySimilarity(source[i], cs, cr, ct), target[i]);
-                            if (d <= tolerance) { inliers.Add(i); error += d; }
-                        }
+                // The pair's own direction misfit: the here-baseline under the pair's rotation
+                // against the reference baseline. Symmetric, so one angle serves both members.
+                var hereDir = Vector3.Normalize(Vector3.Transform(source[b] - source[a], rotation));
+                var thereDir = Vector3.Normalize(target[b] - target[a]);
+                float directionMisfit = MathF.Acos(Math.Clamp(Vector3.Dot(hereDir, thereDir), -1f, 1f));
 
-                        if (inliers.Count > (bestInliers?.Count ?? 0)
-                            || (inliers.Count == (bestInliers?.Count ?? 0) && error < bestError))
-                        {
-                            bestInliers = inliers;
-                            bestError = error;
-                        }
-                    }
-        }
+                var inliers = new List<int>();
+                float positionError = 0f, rotationError = 0f;
+                for (int i = 0; i < n; i++)
+                {
+                    float d = Vector3.Distance(
+                        WorldSpaceGeometry.ApplySimilarity(source[i], scale, rotation, translation), target[i]);
+                    if (d > tolerance) continue;
+                    float angle = AngleBetween(perAnchorRotation[i], candidate);
+                    if (angle > MaxAnchorRotationRadians) continue;
+                    inliers.Add(i);
+                    positionError += i == a || i == b
+                        ? directionMisfit / MaxAnchorRotationRadians
+                        : d / tolerance;
+                    rotationError += angle / MaxAnchorRotationRadians;
+                }
+                candidates.Add(new AnchorPairCandidate(
+                    a, b, inliers.ToArray(), positionError, rotationError, pairAngle));
+            }
+        return candidates;
+    }
 
-        // A MINIMAL subset always fits itself, so three inliers from a three-point sample is not
-        // evidence of anything - it is the sample agreeing with itself. Real support means at
-        // least one anchor from OUTSIDE the sample agrees too. With exactly MinAnchors available
-        // there is no outside, so that case keeps the plain fit and leans on the residual
-        // threshold instead, which is meaningful because three points over-determine a
-        // similarity by two.
-        int required = anchorsUsed <= MinAnchors ? MinAnchors : MinAnchors + 1;
-        if (bestInliers == null || bestInliers.Count < required) return false;
-        inlierCount = bestInliers.Count;
+    /// <summary>
+    /// The rotation carrying <paramref name="here"/>'s frame onto <paramref name="there"/>'s,
+    /// from the two cameras' orientations alone. Both describe the SAME physical camera, so the
+    /// rotation that maps one camera basis onto the other is the rotation between the frames.
+    /// False when either camera's forward and up are degenerate.
+    /// </summary>
+    public static bool TryRotationBetweenCameras(CameraParams here, CameraParams there, out Quaternion rotation)
+    {
+        rotation = Quaternion.Identity;
+        if (!TryCameraBasis(here, out var hr, out var hu, out var hf)) return false;
+        if (!TryCameraBasis(there, out var tr, out var tu, out var tf)) return false;
 
-        // Refit on the agreeing set: the subset that won is only three points, and the other
-        // inliers carry information the final transform should use.
-        var fitS = bestInliers.Select(i => source[i]).ToList();
-        var fitT = bestInliers.Select(i => target[i]).ToList();
-        if (!WorldSpaceGeometry.TryUmeyamaSimilarity(
-                fitS, fitT, out var scale, out var rotation, out var translation, out rms))
-            return false;
+        // Row-vector convention (System.Numerics: v' = v * M). With B_here rows = (right, up,
+        // forward) and B_there likewise, B_here * M = B_there, so M = B_here^T * B_there.
+        var m = new Matrix4x4(
+            hr.X * tr.X + hu.X * tu.X + hf.X * tf.X, hr.X * tr.Y + hu.X * tu.Y + hf.X * tf.Y, hr.X * tr.Z + hu.X * tu.Z + hf.X * tf.Z, 0f,
+            hr.Y * tr.X + hu.Y * tu.X + hf.Y * tf.X, hr.Y * tr.Y + hu.Y * tu.Y + hf.Y * tf.Y, hr.Y * tr.Z + hu.Y * tu.Z + hf.Y * tf.Z, 0f,
+            hr.Z * tr.X + hu.Z * tu.X + hf.Z * tf.X, hr.Z * tr.Y + hu.Z * tu.Y + hf.Z * tf.Y, hr.Z * tr.Z + hu.Z * tu.Z + hf.Z * tf.Z, 0f,
+            0f, 0f, 0f, 1f);
+        rotation = Quaternion.Normalize(Quaternion.CreateFromRotationMatrix(m));
+        return !float.IsNaN(rotation.X);
+    }
 
-        if (rms > MaxAnchorRmsFraction * spread) return false;
+    /// <summary>Angle in radians between two rotations.</summary>
+    public static float AngleBetween(Quaternion a, Quaternion b)
+    {
+        float dot = MathF.Abs(Quaternion.Dot(Quaternion.Normalize(a), Quaternion.Normalize(b)));
+        return 2f * MathF.Acos(MathF.Min(1f, dot));
+    }
 
-        similarity = new Similarity3(scale, rotation, translation);
+    private static bool TryCameraBasis(CameraParams cam, out Vector3 right, out Vector3 up, out Vector3 forward)
+    {
+        forward = cam.Forward;
+        right = Vector3.Cross(forward, cam.Up);
+        up = Vector3.Zero;
+        if (!(forward.LengthSquared() > 1e-12f) || !(right.LengthSquared() > 1e-12f)) return false;
+        forward = Vector3.Normalize(forward);
+        right = Vector3.Normalize(right);
+        up = Vector3.Cross(right, forward);
         return true;
+    }
+
+    /// <summary>
+    /// Mean of near-agreeing rotations: sign-aligned quaternion sum, normalised. Exact for two,
+    /// and within the tolerances used here for any number that already agree.
+    /// </summary>
+    private static Quaternion MeanRotation(IEnumerable<Quaternion> rotations)
+    {
+        Quaternion? first = null;
+        var sum = new Quaternion(0, 0, 0, 0);
+        foreach (var q in rotations)
+        {
+            var n = Quaternion.Normalize(q);
+            first ??= n;
+            if (Quaternion.Dot(first.Value, n) < 0f) n = Quaternion.Negate(n);
+            sum = Quaternion.Add(sum, n);
+        }
+        return Quaternion.Normalize(sum);
     }
 }

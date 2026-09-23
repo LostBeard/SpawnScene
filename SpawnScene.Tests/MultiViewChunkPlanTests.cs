@@ -207,11 +207,12 @@ public class MultiViewChunkPlanTests
             [2] = CamAt(new Vector3(0, 1, 0.6f)),
         };
         // The chunk sees the same cameras through the INVERSE of truth, so fitting must return truth.
+        // Whole poses, not points: a pass reports each camera's orientation in its frame too.
         var chunkCams = new CameraParams?[]
         {
-            CamAt(InverseOf(truth, reference[0].Position)),
-            CamAt(InverseOf(truth, reference[1].Position)),
-            CamAt(InverseOf(truth, reference[2].Position)),
+            Seen(truth, reference[0]),
+            Seen(truth, reference[1]),
+            Seen(truth, reference[2]),
             CamAt(new Vector3(5, 5, 5)),
         };
 
@@ -443,14 +444,13 @@ public class MultiViewChunkPlanTests
             new Vector3(0, 0, 0), new Vector3(1, 0, 0), new Vector3(0, 1, 0),
             new Vector3(0, 0, 1), new Vector3(1, 1, 0), new Vector3(0.4f, -0.7f, 0.9f),
         };
-        for (int i = 0; i < world.Length; i++) reference[i] = CamAt(world[i]);
+        for (int i = 0; i < world.Length; i++) reference[i] = CamAt(world[i], aimedAt: i);
 
         var chunk = new MultiViewChunk(new[] { 0, 1, 2, 3, 4, 5 }, AnchorCount: 6);
-        var inverse = InverseSimilarity(truth);
-        var cams = world.Select(w => (CameraParams?)CamAt(inverse.Apply(w))).ToArray();
+        var cams = world.Select((_, i) => (CameraParams?)Seen(truth, reference[i])).ToArray();
 
-        // Anchor 3 comes back somewhere else entirely, as view 17 did.
-        cams[3] = CamAt(inverse.Apply(world[3]) + new Vector3(4.2f, -3.1f, 2.7f));
+        // Anchor 3 comes back somewhere else entirely, as view 17 did - aimed right, placed wrong.
+        cams[3]!.Position += new Vector3(4.2f, -3.1f, 2.7f);
 
         Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
                 chunk, cams, reference,
@@ -519,47 +519,225 @@ public class MultiViewChunkPlanTests
         Assert.That(inliers, Is.LessThan(MultiViewChunkPlan.MinAnchors + 1));
     }
 
+    /// <summary>
+    /// A camera is a pose. Two surviving anchors whose ORIENTATIONS agree on the frame rotation
+    /// pin the roll that two points alone could not, so the chunk folds. One cannot.
+    /// </summary>
     [Test]
-    public void FitChunkToReference_RefusesTooFewSurvivingAnchors()
+    public void FitChunkToReference_TwoPoseAnchorsFold_OneDoesNot()
     {
+        var truth = new Similarity3(
+            1.3f, Matrix4x4.CreateFromYawPitchRoll(-0.5f, 0.3f, 0.8f), new Vector3(1f, 2f, -3f));
         var chunk = new MultiViewChunk(new[] { 0, 1, 2, 7 }, AnchorCount: 3);
         var reference = new Dictionary<int, CameraParams>
         {
-            [0] = CamAt(Vector3.Zero),
-            [1] = CamAt(new Vector3(1, 0, 0)),
-            [2] = CamAt(new Vector3(0, 1, 0)),
+            [0] = CamAt(Vector3.Zero, aimedAt: 0),
+            [1] = CamAt(new Vector3(1, 0, 0), aimedAt: 1),
+            [2] = CamAt(new Vector3(0, 1, 0), aimedAt: 2),
         };
-        var cams = new CameraParams?[] { CamAt(Vector3.Zero), null, CamAt(new Vector3(0, 1, 0)), CamAt(Vector3.One) };
+        var cams = new CameraParams?[] { Seen(truth, reference[0]), null, Seen(truth, reference[2]), CamAt(Vector3.One) };
 
         Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
-            chunk, cams, reference, out _, out _, out var used), Is.False,
-            "two anchors cannot pin the roll; placing the chunk anyway puts real splats in the wrong room");
+            chunk, cams, reference, out var sim, out _, out var used), Is.True,
+            "two full poses over-determine a similarity by five");
         Assert.That(used, Is.EqualTo(2));
+        var probe = new Vector3(0.3f, -0.8f, 2f);
+        Assert.That(Vector3.Distance(sim.Apply(probe), truth.Apply(probe)), Is.LessThan(1e-3f));
+
+        cams[2] = null;
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+            chunk, cams, reference, out _, out _, out used), Is.False, "one pose fixes no scale");
+        Assert.That(used, Is.EqualTo(1));
     }
 
+    /// <summary>
+    /// Red check for the two-anchor fold: two anchors whose positions fit trivially but whose
+    /// orientations DISAGREE about the frame rotation are not evidence, and are refused.
+    /// </summary>
     [Test]
-    public void FitChunkToReference_RefusesAChunkWhoseAnchorsDisagree()
+    public void RedCheck_TwoAnchorsWithDisagreeingOrientationsAreRefused()
+    {
+        var truth = new Similarity3(
+            1.3f, Matrix4x4.CreateFromYawPitchRoll(-0.5f, 0.3f, 0.8f), new Vector3(1f, 2f, -3f));
+        var chunk = new MultiViewChunk(new[] { 0, 1, 7 }, AnchorCount: 2);
+        var reference = new Dictionary<int, CameraParams>
+        {
+            [0] = CamAt(Vector3.Zero, aimedAt: 0),
+            [1] = CamAt(new Vector3(1, 0, 0), aimedAt: 1),
+        };
+        var cams = new CameraParams?[] { Seen(truth, reference[0]), Seen(truth, reference[1]), CamAt(Vector3.One) };
+        // Anchor 1 is where it should be but aimed 40 degrees off.
+        var twist = Matrix4x4.CreateFromAxisAngle(Vector3.Normalize(new Vector3(0.2f, 1f, 0.1f)), 40f * MathF.PI / 180f);
+        cams[1]!.Forward = Vector3.Normalize(Vector3.Transform(cams[1]!.Forward, twist));
+        cams[1]!.Up = Vector3.Normalize(Vector3.Transform(cams[1]!.Up, twist));
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+            chunk, cams, reference, out _, out _, out _), Is.False);
+    }
+
+    /// <summary>
+    /// DrJohnson, dj2k-dav3-pose: anchors 3, 12, 37. In 13 passes the 3-12 distance ratio held at
+    /// 1.00 (0.88-1.12, per-pass scale) while every pair with 37 swung 0.52-1.43 - the model
+    /// placed that one camera differently each time. Points alone cannot say which of three is
+    /// the liar; poses can. The chunk folds on 3 and 12 and names 37 as excluded.
+    /// </summary>
+    [Test]
+    public void ThreePoseAnchors_OneMisplaced_FoldsOnTheOtherTwoAndNamesIt()
+    {
+        var truth = new Similarity3(
+            0.95f, Matrix4x4.CreateFromYawPitchRoll(0.6f, -0.2f, 0.1f), new Vector3(-2f, 0.5f, 1f));
+        var chunk = new MultiViewChunk(new[] { 3, 12, 37, 20, 21, 22 }, AnchorCount: 3);
+        var reference = new Dictionary<int, CameraParams>
+        {
+            [3] = CamAt(new Vector3(0, 0, 0), aimedAt: 3),
+            [12] = CamAt(new Vector3(1.04f, 0.1f, 0.2f), aimedAt: 12),
+            [37] = CamAt(new Vector3(0.3f, -0.1f, 0.45f), aimedAt: 37),
+        };
+        var cams = new CameraParams?[6];
+        for (int s = 0; s < 3; s++) cams[s] = Seen(truth, reference[chunk.Views[s]]);
+        for (int s = 3; s < 6; s++) cams[s] = CamAt(new Vector3(s, 0, 0));
+
+        // 37 comes back 35% of the anchor spread away from where it belongs, aimed 25 degrees off:
+        // the model related it to the others differently in this company.
+        var twist = Matrix4x4.CreateFromAxisAngle(Vector3.UnitY, 25f * MathF.PI / 180f);
+        cams[2]!.Position += new Vector3(0.15f, 0.05f, -0.12f);
+        cams[2]!.Forward = Vector3.Normalize(Vector3.Transform(cams[2]!.Forward, twist));
+        cams[2]!.Up = Vector3.Normalize(Vector3.Transform(cams[2]!.Up, twist));
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+                chunk, cams, reference, out var sim, out float rms, out int used, out float spread,
+                out int inliers, out int[] inlierSlots),
+            Is.True, "two of three anchors agree in position AND orientation; that is a majority");
+        Assert.That(used, Is.EqualTo(3));
+        Assert.That(inliers, Is.EqualTo(2));
+        Assert.That(inlierSlots, Is.EquivalentTo(new[] { 0, 1 }), "37 (slot 2) is the one thrown out");
+        Assert.That(rms, Is.LessThan(0.01f * spread));
+
+        var probe = new Vector3(0.8f, 0.2f, -0.5f);
+        Assert.That(Vector3.Distance(sim.Apply(probe), truth.Apply(probe)), Is.LessThan(2e-3f),
+            "the fold is the one 3 and 12 describe, untouched by 37");
+
+        // Red check: the position-only fit on the same three points is dragged off by 37.
+        Assert.That(WorldSpaceGeometry.TryUmeyamaSimilarity(
+            cams.Take(3).Select(c => c!.Position).ToList(),
+            chunk.Views.Take(3).Select(v => reference[v].Position).ToList(),
+            out _, out _, out _, out float pointRms), Is.True);
+        Assert.That(pointRms, Is.GreaterThan(MultiViewChunkPlan.MaxAnchorRmsFraction * spread),
+            "points alone would have REJECTED this chunk, as DrJohnson did 8 times");
+    }
+
+    /// <summary>
+    /// DrJohnson chunk 10 (dj2k-dav3-pose, 2026-09-23), from the logged pair scores. Anchor 37:
+    /// 7.4 deg off 3 in orientation, 21% too far along a 0.45 baseline. Anchor 12: 3.3 deg off 3
+    /// on a 1.04 baseline. Every pair proposes, every pair has exactly its own two inliers. And
+    /// the model's positions disagree with its orientations by the SAME 5.3 deg on both pairs
+    /// (back-computed from pos 1.47 on 1.04 and pos 0.63 on 0.45) - DAv3 noise that is common
+    /// to every anchor. Scored as a distance, that shared misfit costs the long-baseline pair
+    /// 2.3x more than the short one and the fold kept 37 and threw out 12. Scored as the angle
+    /// it is, the two pairs tie on it and the orientation evidence names 37. Red check: scoring
+    /// member misfit as a distance fails this test (verified by disabling the angle path).
+    /// </summary>
+    [Test]
+    public void ThreePoseAnchors_SharedDirectionMisfit_ShortBaselineDoesNotWin()
+    {
+        var truth = new Similarity3(
+            1.05f, Matrix4x4.CreateFromYawPitchRoll(-0.4f, 0.25f, -0.15f), new Vector3(1.5f, -0.3f, 0.8f));
+        var chunk = new MultiViewChunk(new[] { 3, 12, 37, 20, 21, 22 }, AnchorCount: 3);
+        var reference = new Dictionary<int, CameraParams>
+        {
+            [3] = CamAt(new Vector3(0, 0, 0), aimedAt: 3),
+            [12] = CamAt(new Vector3(1.04f, 0.1f, 0.2f), aimedAt: 12),
+            [37] = CamAt(new Vector3(0.36f, -0.08f, 0.26f), aimedAt: 37),
+        };
+        var cams = new CameraParams?[6];
+        for (int s = 0; s < 3; s++) cams[s] = Seen(truth, reference[chunk.Views[s]]);
+        for (int s = 3; s < 6; s++) cams[s] = CamAt(new Vector3(s, 0, 0));
+
+        // The shared position-versus-orientation misfit: rotate every anchor POSITION 5.3 deg
+        // about the anchor centroid, on an axis across both baselines, leaving orientations
+        // alone. Both pairs now carry the same direction misfit, as the log showed.
+        var b312 = cams[1]!.Position - cams[0]!.Position;
+        var b337 = cams[2]!.Position - cams[0]!.Position;
+        var axis = Vector3.Normalize(Vector3.Cross(b312, b337));
+        var centroid = (cams[0]!.Position + cams[1]!.Position + cams[2]!.Position) / 3f;
+        var shared = Matrix4x4.CreateFromAxisAngle(axis, 5.3f * MathF.PI / 180f);
+        for (int s = 0; s < 3; s++)
+            cams[s]!.Position = centroid + Vector3.Transform(cams[s]!.Position - centroid, shared);
+
+        // 12: honest, 3.3 deg of orientation noise (3-12 ran 1.0-3.4 deg over 13 passes). The
+        // twist is ABOUT the baseline so it changes the orientation evidence and nothing else -
+        // the direction misfit stays the shared 5.3 deg on both pairs, as the log showed.
+        Twist(cams[1]!, b312, -2.8f);
+
+        // 37: 21% too far from 3 along its own baseline and 7 deg twisted the other way - so
+        // 3-37 is ~7 deg and 12-37 ~9.7 deg apart as in the log, both under the 10 deg gate,
+        // and nothing excludes 37 up front. All three pairs propose.
+        cams[2]!.Position += Vector3.Normalize(cams[2]!.Position - cams[0]!.Position) * (b337.Length() * 0.21f);
+        Twist(cams[2]!, b337, 7.0f);
+
+        var pairs = MultiViewChunkPlan.ScoreAnchorPairs(chunk, cams, reference);
+        string dump = string.Join("  ", pairs.Select(p =>
+            $"{p.ViewA}-{p.ViewB} in[{string.Join(",", p.InlierViews)}] pos {p.PositionError:F2} rot {p.RotationError:F2} " +
+            $"pair {p.PairRotationRadians * 180 / MathF.PI:F1}deg"));
+        TestContext.Out.WriteLine(dump);
+        var p312 = pairs.Single(p => p.ViewA == 3 && p.ViewB == 12);
+        var p337 = pairs.Single(p => p.ViewA == 3 && p.ViewB == 37);
+        Assert.That(p312.InlierViews, Is.EquivalentTo(new[] { 3, 12 }), "3-12 has only itself");
+        Assert.That(p337.InlierViews, Is.EquivalentTo(new[] { 3, 37 }), "3-37 has only itself");
+        Assert.That(pairs.All(p => p.PairRotationRadians < MultiViewChunkPlan.MaxAnchorRotationRadians), Is.True,
+            "every pair must pass the rotation gate, or this is not the three-way tie-break case: " + dump);
+        Assert.That(p312.PositionError, Is.EqualTo(p337.PositionError).Within(0.15f),
+            "the shared direction misfit must cost both pairs the same - it is the same angle");
+        Assert.That(p312.RotationError, Is.LessThan(p337.RotationError),
+            "3 and 12 agree in orientation better than 3 and 37 - the evidence that must decide");
+
+        Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
+                chunk, cams, reference, out var sim, out _, out int used, out _,
+                out int inliers, out int[] inlierSlots),
+            Is.True);
+        Assert.That(used, Is.EqualTo(3));
+        Assert.That(inliers, Is.EqualTo(2));
+        Assert.That(inlierSlots, Is.EquivalentTo(new[] { 0, 1 }), "37 (slot 2) is the one thrown out");
+        Assert.That(sim.Scale, Is.EqualTo(truth.Scale).Within(0.03f),
+            "the fold carries the honest pair's scale, not the 21%-off one 3+37 would give");
+    }
+
+    /// <summary>Rotate a camera's orientation in place by <paramref name="degrees"/> about <paramref name="axis"/>.</summary>
+    private static void Twist(CameraParams cam, Vector3 axis, float degrees)
+    {
+        var m = Matrix4x4.CreateFromAxisAngle(Vector3.Normalize(axis), degrees * MathF.PI / 180f);
+        cam.Forward = Vector3.Normalize(Vector3.Transform(cam.Forward, m));
+        cam.Up = Vector3.Normalize(Vector3.Transform(cam.Up, m));
+    }
+
+    /// <summary>
+    /// Three of four agree, one is somewhere else entirely: the three fold the chunk and the
+    /// fourth is named. This is Bathroom's anchor 17 and it used to cost the whole pass.
+    /// </summary>
+    [Test]
+    public void FitChunkToReference_DropsTheOneMisplacedAnchorOfFour()
     {
         var chunk = new MultiViewChunk(new[] { 0, 1, 2, 3, 7 }, AnchorCount: 4);
         var reference = new Dictionary<int, CameraParams>
         {
-            [0] = CamAt(Vector3.Zero),
-            [1] = CamAt(new Vector3(1, 0, 0)),
-            [2] = CamAt(new Vector3(0, 1, 0)),
-            [3] = CamAt(new Vector3(0, 0, 1)),
+            [0] = CamAt(Vector3.Zero, aimedAt: 0),
+            [1] = CamAt(new Vector3(1, 0, 0), aimedAt: 1),
+            [2] = CamAt(new Vector3(0, 1, 0), aimedAt: 2),
+            [3] = CamAt(new Vector3(0, 0, 1), aimedAt: 3),
         };
-        // Anchor 3 is badly misplaced in this pass - no similarity explains all four.
         var cams = new CameraParams?[]
         {
-            CamAt(Vector3.Zero), CamAt(new Vector3(1, 0, 0)),
-            CamAt(new Vector3(0, 1, 0)), CamAt(new Vector3(0, 0, -4f)),
+            Clone(reference[0]), Clone(reference[1]), Clone(reference[2]),
+            CamAt(new Vector3(0, 0, -4f), aimedAt: 3),
             CamAt(Vector3.One),
         };
 
         Assert.That(MultiViewChunkPlan.TryFitChunkToReference(
-            chunk, cams, reference, out _, out var rms, out _), Is.False,
-            "a residual this large means the pass did not recover the anchors; it must not be placed");
-        Assert.That(rms, Is.GreaterThan(0.1f));
+            chunk, cams, reference, out var sim, out var rms, out _, out _, out int inliers, out int[] slots), Is.True);
+        Assert.That(inliers, Is.EqualTo(3));
+        Assert.That(slots, Is.EquivalentTo(new[] { 0, 1, 2 }));
+        Assert.That(rms, Is.LessThan(1e-4f));
+        Assert.That(sim.Scale, Is.EqualTo(1f).Within(1e-4f));
     }
 
     // ---- helpers ----
@@ -569,6 +747,24 @@ public class MultiViewChunkPlanTests
         Width = 640, Height = 480, FocalX = 500, FocalY = 500, CenterX = 320, CenterY = 240,
         Position = p, Forward = -Vector3.UnitZ, Up = Vector3.UnitY,
     };
+
+    /// <summary>A camera at <paramref name="p"/> with a distinct, non-degenerate orientation per index.</summary>
+    private static CameraParams CamAt(Vector3 p, int aimedAt)
+    {
+        var cam = CamAt(p);
+        var q = Quaternion.CreateFromYawPitchRoll(0.7f * aimedAt, 0.31f * aimedAt - 0.4f, 0.17f * aimedAt);
+        cam.Forward = Vector3.Normalize(Vector3.Transform(-Vector3.UnitZ, q));
+        cam.Up = Vector3.Normalize(Vector3.Transform(Vector3.UnitY, q));
+        return cam;
+    }
+
+    /// <summary>The camera as a pass whose frame is the INVERSE of <paramref name="frame"/> reports it.</summary>
+    private static CameraParams Seen(Similarity3 frame, CameraParams truth)
+    {
+        var cam = Clone(truth);
+        InverseSimilarity(frame).ApplyToCamera(cam);
+        return cam;
+    }
 
     private static CameraParams Clone(CameraParams c) => new()
     {
@@ -613,5 +809,4 @@ public class MultiViewChunkPlanTests
         return new Similarity3(invScale, rInv, -invScale * Vector3.Transform(s.Translation, rInv));
     }
 
-    private static Vector3 InverseOf(Similarity3 s, Vector3 p) => InverseSimilarity(s).Apply(p);
 }

@@ -479,6 +479,23 @@ public class DepthEstimationService : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Give back the GPU memory the loaded model keeps parked between runs (its activation arena and
+    /// any capture plan), keeping the weights loaded. Returns the bytes freed, 0 if no model is loaded.
+    ///
+    /// Call this when depth work is finished and the GPU is about to be used for something else.
+    /// MEASURED 2026-09-23, DrJohnson 2000: after the 14-pass DAv3 cascade the GPU process held
+    /// 6.1 GB dedicated VRAM, 3.9 GB of it this arena; the trainer's own 1.2 GB on top took Chrome
+    /// to 7.4 GB and it dropped the device on the trainer's second resize.
+    /// </summary>
+    public long ReleaseWorkingMemory()
+    {
+        if (_pipe == null) return 0;
+        long freed = _pipe.ReleaseWorkingMemory();
+        Console.WriteLine($"[Depth] released {freed / 1048576.0:F0} MB of depth working memory (weights kept)");
+        return freed;
+    }
+
     public ValueTask DisposeAsync()
     {
         _pipe?.Dispose();

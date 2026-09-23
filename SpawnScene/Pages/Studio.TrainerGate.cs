@@ -91,7 +91,7 @@ public partial class Studio
             // ── GPU ──
             using var trainer = new SplatTrainerGpu(_gpuService);
             trainer.Initialize();
-            trainer.Resize(GateWidth, GateHeight, n);
+            await trainer.ResizeAsync(GateWidth, GateHeight, n);
             // Colour slots are SH DC after this (Kerbl). The forward shader always evaluates
             // C0*dc+0.5; without the convert the gate was comparing linear RGB on CPU to
             // remapped DC-as-if-RGB on GPU and failed with maxAbs~0.35.

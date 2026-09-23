@@ -1701,9 +1701,56 @@ public sealed class SplatTrainerGpu : IDisposable
         _queue!.WriteBuffer(buf, 0, bytes);
     }
 
+    Vector3 _lastCamPos, _lastCamFwd;
+
+    /// <summary>
+    /// Dead-view forensics, probe only: how many splats each pixel applied (from end_idx minus
+    /// the tile's range start) and who the first keys in the centre tile are. Answers "is one
+    /// frame-covering splat in front of this camera" with data instead of theory.
+    /// CPU transfer: end_idx + ranges (about 1.2 MB at 720x402) on the handful of dead views.
+    /// </summary>
+    public async Task<string> ReadDeadViewForensicsAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
+    {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        long pixels = (long)_width * _height;
+        uint[] end = await _outEnd!.CopyToHostAsync<uint>(0, pixels);
+        uint[] ranges = await _ranges!.CopyToHostAsync<uint>(0, (long)_tilesX * _tilesY * 2);
+        long c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+        for (int py = 0; py < _height; py++)
+        for (int px = 0; px < _width; px++)
+        {
+            int tile = (py / 16) * _tilesX + (px / 16);
+            long consumed = (long)end[py * _width + px] - ranges[tile * 2];
+            if (consumed <= 0) c0++; else if (consumed == 1) c1++; else if (consumed == 2) c2++; else c3++;
+        }
+        var sb = new System.Text.StringBuilder();
+        sb.Append($"consumed per pixel: 0:{c0 * 100.0 / pixels:F1}% 1:{c1 * 100.0 / pixels:F1}% ")
+          .Append($"2:{c2 * 100.0 / pixels:F1}% 3+:{c3 * 100.0 / pixels:F1}%; ");
+
+        int ct = (_tilesY / 2) * _tilesX + _tilesX / 2;
+        uint r0 = ranges[ct * 2], r1 = ranges[ct * 2 + 1];
+        sb.Append($"centre tile keys {r1 - r0}; first:");
+        int take = (int)Math.Min(3, r1 - r0);
+        if (take > 0)
+        {
+            uint[] ids = await _values!.CopyToHostAsync<uint>(r0, take);
+            for (int i = 0; i < take; i++)
+            {
+                if (ids[i] >= splatCount) { sb.Append($" [#{ids[i]} OUT OF RANGE]"); continue; }
+                float[] s = await splatBuf.CopyToHostAsync<float>((long)ids[i] * SplatFormat.Floats, SplatFormat.Floats);
+                var rel = new Vector3(s[0], s[1], s[2]) - _lastCamPos;
+                float depth = Vector3.Dot(_lastCamFwd, rel);
+                sb.Append($" [#{ids[i]} depth {depth:G4} dist {rel.Length():G4} scale ({s[6]:G3},{s[7]:G3},{s[8]:G3}) opacity {s[9]:G4}]");
+            }
+        }
+        return sb.ToString();
+    }
+
     void WriteUniforms(CameraParams cam, float depthNear, float depthFar, int splatCount)
     {
         WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var right, out var up, out var fwd, out var pos);
+        _lastCamPos = pos; _lastCamFwd = fwd;
 
         var f = new float[UniformFloats];
         void V4(int o, Vector3 v, float w) { f[o] = v.X; f[o + 1] = v.Y; f[o + 2] = v.Z; f[o + 3] = w; }

@@ -287,6 +287,34 @@ public class SplatGeometryGradientsTests
     }
 
     [Test]
+    public void Project_CullsAtTheReferenceNearPlane_NotJustBehindTheEye()
+    {
+        // The exact splat the Truck forensics probe found in front of every dead view: 14.85 m off
+        // to the camera's right, 9.3e-5 in front of its plane, scale 0.17. With a behind-the-eye
+        // test (z <= 1e-6) this splat is "valid", projects to a footprint ~5e6 px across, clamps to
+        // MaxAlpha at every pixel and zeroes the whole view's gradient. The reference culls at 0.2.
+        Assert.That(SplatGeometryGradients.MinDepth, Is.EqualTo(0.2f), "reference in_frustum near plane");
+
+        var v = Camera(0.4f, 0.25f, 1.2f);
+        float side = 14.85f;
+        SplatGeometryGradients.Geometry At(float depth) => Splat(
+            v.EyeX + v.Rx * side + v.Fx3 * depth,
+            v.EyeY + v.Ry * side + v.Fy3 * depth,
+            v.EyeZ + v.Rz * side + v.Fz3 * depth,
+            0.173f, 0.171f, 0.173f, 0f, 0f, 0f, 1f);
+
+        Assert.That(SplatGeometryGradients.Project(At(9.3e-5f), v).Valid, Is.False, "in the camera plane");
+        Assert.That(SplatGeometryGradients.Project(At(0.19f), v).Valid, Is.False, "inside the near plane");
+        Assert.That(SplatGeometryGradients.Project(At(0.21f), v).Valid, Is.True, "just past the near plane");
+        Assert.That(SplatGeometryGradients.Project(At(6.1f), v).Valid, Is.True, "ordinary scene depth");
+
+        // Nothing inside the near plane may receive a gradient either: the backward re-projects.
+        var d = SplatGeometryGradients.Backward(At(9.3e-5f), v, Mixed);
+        Assert.That(d.PosX, Is.Zero);
+        Assert.That(d.ScaleX, Is.Zero);
+    }
+
+    [Test]
     public void Project_MatchesTheRasterizersOwnProjection()
     {
         // The rasteriser gate projects splats with its own copy of this arithmetic. If the two

@@ -589,7 +589,7 @@ public partial class Studio
             float cx = Vector3.Dot(right, rel);
             float cy = Vector3.Dot(up, rel);
             float cz = Vector3.Dot(fwd, rel);
-            if (cz <= 1e-6f) continue;
+            if (cz <= SplatGeometryGradients.MinDepth) continue; // same near plane as the shader
 
             var q = new SplatCovariance.Quat
             {

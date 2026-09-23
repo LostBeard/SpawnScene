@@ -1781,7 +1781,9 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
     let cx = dot(u.cam_right.xyz, rel);
     let cy = dot(u.cam_up.xyz, rel);
     let cz = dot(u.cam_fwd.xyz, rel);
-    if (cz <= 1e-6) { return splat_reject(uv, rgb); }
+    // Near plane 0.2 scene units, same as the trainer and the reference rasteriser. A splat at
+    // depth 1e-5 projects to a frame-covering quad whose f32 conic is garbage: a full-screen flash.
+    if (cz <= 0.2) { return splat_reject(uv, rgb); }
 
     // -- Sigma_world = R S S^T R^T --
     let q = normalize(input.quat);

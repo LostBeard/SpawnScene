@@ -123,6 +123,15 @@ const MIN_ALPHA : f32 = 0.00392156862;   // 1/255, matches SplatRasterizer.MinAl
 const MAX_ALPHA : f32 = 0.99;            // matches SplatRasterizer.MaxAlpha
 const MIN_T : f32 = 1e-4;                // matches SplatRasterizer.MinTransmittance
 const SIGMA_CUTOFF : f32 = 3.0;
+// Near-plane cull in scene units, matching the reference rasteriser (graphdeco-inria
+// auxiliary.h in_frustum: p_view.z <= 0.2 -> culled) and SplatGeometryGradients.MinDepth.
+// This used to be 1e-6, which is a behind-the-eye test, not a near plane. MEASURED on Truck
+// (forensics probe, 7K f32-grad run): every one of the 5-9 dead views had splats at camera
+// depth 5e-6..2e-4 sitting 3-25 m off to the side. At that depth invz ~ 1e5, the 2D covariance
+// is ~1e15 px^2 and the footprint spans the whole frame; the per-pixel quadratic form is then
+// f32 garbage, one splat clamps to MAX_ALPHA at 100% of pixels, the clamp's derivative is zero,
+// and the view produces loss but no gradient. Culling at 0.2 removes the regime entirely.
+const NEAR_PLANE : f32 = 0.2;
 
 struct Projected {
     valid  : bool,
@@ -214,7 +223,7 @@ fn project(i : u32) -> Projected {
     let cx = dot(u.cam_right.xyz, rel);
     let cy = dot(u.cam_up.xyz, rel);
     let cz = dot(u.cam_fwd.xyz, rel);
-    if (cz <= 1e-6) { return p; }
+    if (cz <= NEAR_PLANE) { return p; }
     p.depth = cz;
 
     // Sigma_world = R S S^T R^T, columns of R pre-scaled.
@@ -1766,7 +1775,7 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     let tx = dot(u.cam_right.xyz, rel);
     let ty = dot(u.cam_up.xyz, rel);
     let tz = dot(u.cam_fwd.xyz, rel);
-    if (tz <= 1e-6) { return; }
+    if (tz <= NEAR_PLANE) { return; }
 
     let qlen = length(q_raw);
     if (qlen < 1e-20) { return; }

@@ -151,6 +151,9 @@ public partial class Studio
     /// </summary>
     public static int DensifyUntilIter { get; set; } = 15_000;
 
+    /// <summary>Force the densify apply path to run on an empty plan (?densifynoop=1). Diagnostic.</summary>
+    public static bool DensifyNoOp { get; set; }
+
     /// <summary>Obsolete fraction form; densify uses <see cref="DensifyUntilIter"/>.</summary>
     public const float DensifyUntilFraction = 0.5f;
 
@@ -500,6 +503,9 @@ public partial class Studio
                              : dl <= 0 ? "LOSS SHADER produced no pixel gradient"
                              : pk <= 0 ? "RASTER_BACKWARD dropped a live render"
                              : "SCATTER dropped it"));
+                        if (!_trainer.LastOverflowed && meanC > 1e-8 && dl > 0 && pk <= 0)
+                            Console.WriteLine("[Train]     forensics: " +
+                                await _trainer.ReadDeadViewForensicsAsync(packed, n));
                     }
                 }
                 if (it == supervised.Count - 1)
@@ -556,7 +562,8 @@ public partial class Studio
                         // conic live at ~0.1% (MEASURED truck7k-initcap). Densify only grows
                         // the model; scales stay where the last step put them.
                         var grown = await DensifyAsync(
-                            packed, n, rigRadius, densifying, resetOpacity);
+                            packed, n, rigRadius, densifying, resetOpacity,
+                            (views, targets, box, supervised));
                         if (grown != null)
                         {
                             (packed, n) = grown.Value;
@@ -621,6 +628,7 @@ public partial class Studio
 
             var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box);
             WarnOnEvalOverflow(fitted, views.Count);
+            await ReportHeldOutCrossMatchAsync(_trainer, packed, n, views, targets, box);
 
             Console.WriteLine(
                 $"[Train] trainer supervised PSNR {baseline.SupPsnr:F2} -> {fitted.SupPsnr:F2} dB, " +
@@ -764,7 +772,9 @@ public partial class Studio
     /// </summary>
     private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> DensifyAsync(
         MemoryBuffer1D<float, Stride1D.Dense> packed, int n, float sceneExtent,
-        bool densify, bool resetOpacity)
+        bool densify, bool resetOpacity,
+        (IReadOnlyList<TrainingView> views, MemoryBuffer1D<uint, Stride1D.Dense> targets,
+         SplatBounds.Aabb box, IReadOnlyList<int> supervised)? probe = null)
     {
         var stats = await _trainer!.ReadDensifyStatsAsync(n);
         float[] raw = await packed.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
@@ -789,7 +799,7 @@ public partial class Studio
         // The size prunes are unlocked by the first opacity reset, exactly as in the reference.
         // Before it, a large Gaussian may simply not have been given the chance to shrink; after
         // it, one that is still large and still faint is not going to earn its place.
-        var plan = densify
+        var plan = densify && !DensifyNoOp
             ? SplatDensityControl.Decide(
                 splats, stats, sceneExtent, _hadOpacityReset, NextNormal, budget)
             : new SplatDensityControl.Plan();
@@ -818,14 +828,87 @@ public partial class Studio
             $"vs threshold {SplatDensityControl.GradientThreshold:G3}; " +
             $"{big:N0} splats above the {sizeSplit:G3} split size; plan: {plan}");
 
-        if (plan.Add.Count == 0 && plan.Remove.Count == 0 && !resetOpacity)
+        if (plan.Add.Count == 0 && plan.Remove.Count == 0 && !resetOpacity && !DensifyNoOp)
         {
             _trainer.ResetDensifyStats();
             return null;
         }
 
-        return await ApplySplatPlanAsync(packed, n, plan, resetOpacity, logTag: "Densify",
+        // Score a few supervised views on either side of the apply. A clone renders as the same
+        // Gaussian twice and a split as two smaller ones, so the image should barely move; a
+        // large drop here is the APPLY path (remap, re-init, re-upload), not the plan.
+        string before = probe != null
+            ? await ProbeViewsAsync(_trainer, packed, n, probe.Value.views, probe.Value.targets,
+                probe.Value.box, probe.Value.supervised)
+            : "";
+        var result = await ApplySplatPlanAsync(packed, n, plan, resetOpacity, logTag: "Densify",
             preloaded: (splats, raw));
+        if (probe != null && result != null)
+        {
+            string after = await ProbeViewsAsync(_trainer, result.Value.packed, result.Value.n,
+                probe.Value.views, probe.Value.targets, probe.Value.box, probe.Value.supervised);
+            Console.WriteLine($"[Densify] apply probe (supervised PSNR): before {before} -> after {after}" +
+                (DensifyNoOp ? " [NO-OP plan]" : ""));
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Held-out forensics. MEASURED Truck 7K no-densify: supervised 10.59 -> 19.51 dB while
+    /// HELD OUT went 10.57 -> 10.72, i.e. stayed at the untrained baseline, yet a free camera
+    /// between the supervised poses rendered a photo-quality truck. A model that generalises to
+    /// a free pose but scores at baseline on every held-out pose is being scored against the
+    /// WRONG picture or from the WRONG pose. So: render each of the first three held-out views
+    /// and score that one render against EVERY target. If the best match is not its own index,
+    /// the view/target/pose bookkeeping is the bug, not the optimiser.
+    /// </summary>
+    static async Task ReportHeldOutCrossMatchAsync(
+        SplatTrainerGpu trainer, MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
+        IReadOnlyList<TrainingView> views, MemoryBuffer1D<uint, Stride1D.Dense> targets,
+        SplatBounds.Aabb box)
+    {
+        var (w, h) = trainer.Size;
+        int shown = 0;
+        for (int i = 0; i < views.Count && shown < 3; i++)
+        {
+            if (views[i].UsedForSupervision) continue;
+            shown++;
+            var cam = views[i].Camera.ScaledTo(w, h);
+            var (near, far) = SplatBounds.DepthRangeFor(box, cam);
+            await trainer.RenderForwardAsync(packed, n, cam, near, far, readback: false);
+            double own = 0, best = double.NegativeInfinity; int bestJ = -1;
+            for (int j = 0; j < views.Count; j++)
+            {
+                var (psnr, _) = await trainer.ScoreAgainstAsync(targets, j);
+                if (j == i) own = psnr;
+                if (psnr > best) { best = psnr; bestJ = j; }
+            }
+            Console.WriteLine(
+                $"[Train] held-out cross-match: view {i} {ShortName(views[i].ImageName)} scores " +
+                $"{own:F2} dB against its own target; best match is target {bestJ} " +
+                $"{ShortName(views[bestJ].ImageName)} at {best:F2} dB " +
+                (bestJ == i ? "(own - bookkeeping is right)" : "(NOT its own - view/target/pose mismatch)"));
+        }
+    }
+
+    /// <summary>PSNR of the first three supervised views, as a compact string.</summary>
+    static async Task<string> ProbeViewsAsync(
+        SplatTrainerGpu trainer, MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
+        IReadOnlyList<TrainingView> views, MemoryBuffer1D<uint, Stride1D.Dense> targets,
+        SplatBounds.Aabb box, IReadOnlyList<int> supervised)
+    {
+        var (w, h) = trainer.Size;
+        var parts = new List<string>(3);
+        for (int k = 0; k < Math.Min(3, supervised.Count); k++)
+        {
+            int vi = supervised[k * Math.Max(1, supervised.Count / 3)];
+            var cam = views[vi].Camera.ScaledTo(w, h);
+            var (near, far) = SplatBounds.DepthRangeFor(box, cam);
+            await trainer.RenderForwardAsync(packed, n, cam, near, far, readback: false);
+            var (psnr, _) = await trainer.ScoreAgainstAsync(targets, vi);
+            parts.Add($"v{vi} {psnr:F2}");
+        }
+        return string.Join(" ", parts);
     }
 
     static SplatDensityControl.Splat[] UnpackSplats(float[] raw, int n)

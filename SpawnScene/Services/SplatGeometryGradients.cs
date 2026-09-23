@@ -78,8 +78,13 @@ public static class SplatGeometryGradients
     /// </summary>
     public const float MinDet = 1e-20f;
 
-    /// <summary>Camera-space z below which the splat is at or behind the eye.</summary>
-    public const float MinDepth = 1e-6f;
+    /// <summary>
+    /// Near-plane cull, scene units. Matches the reference rasteriser (in_frustum: z &lt;= 0.2 is
+    /// culled) and NEAR_PLANE in SplatTrainerShaders. Was 1e-6 (a behind-the-eye test): splats at
+    /// camera depth 1e-5..1e-4 project to a frame-covering footprint whose f32 quadratic form is
+    /// meaningless, clamp to MaxAlpha everywhere and kill the view's gradient (Truck dead views).
+    /// </summary>
+    public const float MinDepth = 0.2f;
 
     /// <summary>
     /// The forward pass, exactly as the rasteriser and the WGSL shader do it. Tests finite

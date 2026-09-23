@@ -282,6 +282,11 @@ public partial class Studio : IAsyncDisposable
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var dff))
                 SplatDensityControl.GrowthSelectFraction = dff;
+            // ?densifynoop=1 runs the whole densify APPLY path (host round trip, Resize, Adam/SH
+            // remap, renderer re-upload) on an EMPTY plan every period. Bisects "the apply path
+            // damages the model" from "the clones/splits/prunes do".
+            if (query.TryGetValue("densifynoop", out var dnoq) && dnoq == "1")
+                DensifyNoOp = true;
             // ?maxdensify=N caps splat count during densify (default 450k; growhost OOM'd ~780k).
             if (query.TryGetValue("maxdensify", out var mdnq) && int.TryParse(mdnq, out var mdni))
                 MaxDensifiedSplats = mdni;

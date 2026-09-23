@@ -1738,6 +1738,7 @@ struct GeomCfg {
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
 const EPS : f32 = 1e-15;
+const NEAR_PLANE : f32 = 0.2;   // same cull as project() in Common; this module has no Common
 
 fn adam(value : f32, grad : f32, lr : f32, step : f32,
         m : ptr<function, f32>, v : ptr<function, f32>) -> f32 {

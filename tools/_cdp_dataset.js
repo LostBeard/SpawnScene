@@ -48,6 +48,8 @@ const DENSIFY = process.env.DENSIFY ? `&densify=${process.env.DENSIFY}` : '';
 const DENSIFYGRAD = process.env.DENSIFYGRAD ? `&densifygrad=${process.env.DENSIFYGRAD}` : '';
 // DENSIFYFRAC=X keeps only the top fraction of above-threshold candidates (Brush: 0.2).
 const DENSIFYFRAC = process.env.DENSIFYFRAC ? `&densifyfrac=${process.env.DENSIFYFRAC}` : '';
+// MAXDENSIFY=N caps splat count during densify (default 450k in app).
+const MAXDENSIFY = process.env.MAXDENSIFY ? `&maxdensify=${process.env.MAXDENSIFY}` : '';
 // DENSIFYUNTIL=N stops densify after iteration N (Kerbl: 15000 absolute).
 const DENSIFYUNTIL = process.env.DENSIFYUNTIL ? `&densifyuntil=${process.env.DENSIFYUNTIL}` : '';
 // OPACITYRESET=N caps every opacity every N cycles and unlocks the size prunes.
@@ -119,7 +121,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${EXTRA}&cb=${Date.now()}`;
+    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${MAXDENSIFY}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

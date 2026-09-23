@@ -231,20 +231,19 @@ public class SplatDensityControlTests
     }
 
     [Test]
-    public void PixelGradientMagnitudeIsComparedDirectlyToTheThreshold()
+    public void DensifyGradientIsTheReferenceNdcNorm()
     {
-        // The published densify bar is in PIXEL space (means2D after ndc2Pix). Multiplying by
-        // width/2 and calling it NDC made the bar ~width/2 too easy and densify ran away on
-        // Truck 7K. The magnitude helper must stay in pixel units.
+        // Kerbl's backward.cu accumulates dL/dmean2D scaled by ddelx_dx = 0.5*W and
+        // ddely_dy = 0.5*H, and densify_grad_threshold = 0.0002 is applied to the norm of that.
+        // The helper is the CPU mirror of densify_accum and must apply the same scaling.
         Assert.That(SplatDensityControl.PixelGradientMagnitude(3f, 4f), Is.EqualTo(5f).Within(1e-6f));
 
-        float onThreshold = SplatDensityControl.GradientThreshold;
-        Assert.That(SplatDensityControl.PixelGradientMagnitude(onThreshold, 0f),
-            Is.EqualTo(SplatDensityControl.GradientThreshold).Within(1e-9f));
-
-        // Obsolete helper must not reintroduce an NDC conversion.
+        // 640x480: x scaled by 320, y by 240 -> (960, 960) -> norm 960*sqrt(2).
         Assert.That(SplatDensityControl.PixelGradientToNdc(3f, 4f, 640, 480),
-            Is.EqualTo(5f).Within(1e-6f));
+            Is.EqualTo(960f * MathF.Sqrt(2f)).Within(1e-2f));
+
+        // Default bar is the published one.
+        Assert.That(SplatDensityControl.GradientThreshold, Is.EqualTo(2e-4f).Within(1e-12f));
     }
 
     [Test]

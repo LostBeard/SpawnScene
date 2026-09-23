@@ -48,7 +48,9 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _ssimPixBwdPipe;
     GPUComputePipeline? _gradStats;
     GPUComputePipeline? _maxMagnitude;
+    GPUComputePipeline? _sampleStride;
     GPUComputePipeline? _densifyAccum;
+    GPUComputePipeline? _remapFloatRows;
     GPUComputePipeline? _accumulateSupport;
     GPUComputePipeline? _supportHistogram;
     GPUComputePipeline? _unpackTarget;
@@ -78,7 +80,7 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyA;
     MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyB;
     MemoryBuffer1D<float, Stride1D.Dense>? _gradKeyC;
-    MemoryBuffer1D<int, Stride1D.Dense>? _gradFixed;     // 9 per splat, fixed point
+    MemoryBuffer1D<int, Stride1D.Dense>? _gradFixed;     // 9 per splat, f32 bit patterns (CAS-summed)
     MemoryBuffer1D<int, Stride1D.Dense>? _densifyAbs;    // 2 per splat: peak |dPx|,|dPy|
 
     MemoryBuffer1D<float, Stride1D.Dense>? _opacityLogit;
@@ -90,6 +92,8 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimWinGrad; // 5 per valid window (dL/dM)
     MemoryBuffer1D<float, Stride1D.Dense>? _ssimDRows;   // 5 per (window col, row) - row adjoint
     MemoryBuffer1D<float, Stride1D.Dense>? _gradStatsPartials; // 6 per workgroup, 256 workgroups
+    MemoryBuffer1D<float, Stride1D.Dense>? _fitSample; // stride gather for the scale histogram
+    const int FitSampleCount = 4096;
     MemoryBuffer1D<float, Stride1D.Dense>? _densifyStats;   // 2 per splat: pixel grad sum, visible count
     MemoryBuffer1D<uint, Stride1D.Dense>? _viewSupport;        // views that ever moved each splat
     MemoryBuffer1D<float, Stride1D.Dense>? _supportPartials;   // 6 per workgroup, 256 workgroups
@@ -105,7 +109,6 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUBuffer? _ssimCfgBuf;
     GPUBuffer? _lossWeightsBuf;
     GPUBuffer? _adamFlagsBuf;
-    GPUBuffer? _gradScaleBuf;
     GPUBuffer? _adamCfgBuf;
     GPUBuffer? _geomCfgBuf;
     GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
@@ -116,114 +119,48 @@ public sealed class SplatTrainerGpu : IDisposable
 
     /// <summary>Adam moment slots per splat: 3 colour, 1 opacity, 3 position, 3 scale, 4 quaternion.</summary>
     const int AdamSlots = 14;
+    /// <summary>Adam layout: RGB(0..2), opacity(3), pos(4..6), log-scale(7..9), quat(10..13).</summary>
+    const int AdamOpacitySlot = 3;
 
     /// <summary>Geometry gradients reported per splat: position xyz, scale xyz, quaternion xyzw.</summary>
     public const int GeomGradsPerSplat = 10;
 
-    /// <summary>
-    /// Fixed-point scale for each of the nine gradient slots. Must match the shaders.
-    /// Slots 0..5 (colour, opacity, screen centre) are bounded small and get 2^26; the conic
-    /// grows with a splat's pixel area and keeps 2^20 for the range. See the note in
-    /// SplatTrainerShaders.UniformsBlock.
-    /// </summary>
-    /// <summary>Scale for slots 0..3 - colour and opacity. Bounded: colour gradients are &lt;= 1/3.</summary>
-    public float ColourScale { get; private set; } = DefaultColourScale;
+    // The gradient accumulator (_gradFixed, 9 per splat) holds IEEE f32 bit patterns summed by
+    // a compare-exchange loop in scatter_gradients. There is NO fixed-point scale any more.
+    //
+    // History, so nobody reintroduces one: the i32 fixed-point accumulator needed one scale per
+    // slot, and no scale worked for the conic. Too coarse and it rounded to zero (no scale or
+    // rotation learning - init-sized soft blobs). Too fine and ~200 keys per splat wrapped the
+    // i32 (wrong-sign steps). The per-key +-1e5 clamp that stopped the wrap saturated typical
+    // conic keys, which turns each conic component into a sign count and hands adam_geometry a
+    // distorted a:b:c ratio to chain into scale and rotation. Twelve Truck 2K gates on
+    // 2026-09-22 were spent fitting that scale; supervised PSNR never passed ~17 dB.
 
     /// <summary>
-    /// Scale for slots 4..5, the screen centre.
-    ///
-    /// Separate from colour because it is orders of magnitude smaller. They shared a scale, and
-    /// fitting that shared scale to the centre put COLOUR past the i32 wrap - measured, by doing
-    /// exactly that: held-out PSNR fell 12.33 -> 9.95 dB on drjohnson in the run that tried it.
+    /// Linear-scale p10/median/p90 from log-scale params (GPU stride sample). Geometry learning
+    /// proof: median must shrink vs init (~0.017 on Truck points) once conic grads live.
     /// </summary>
-    public float CentreScale { get; private set; } = DefaultCentreScale;
-
-    /// <summary>Scale for slots 6..8, the conic - the one that grows with splat AREA.</summary>
-    public float ConicScale { get; private set; } = DefaultConicScale;
-
-    public const float DefaultColourScale = 67108864f;   // 2^26
-    public const float DefaultCentreScale = 67108864f;   // 2^26
-    public const float DefaultConicScale = 1048576f;     // 2^20
-    /// <summary>
-    /// Fixed-point scale for densify_abs only. Must NOT share <see cref="CentreScale"/>:
-    /// Adam retargets centre up to 2^40 for tiny signed means, and per-pixel |dCentre| sums
-    /// overflow i32 under that scale (MEASURED Truck 7K: densify max stuck ~1e-4 while wrap
-    /// destroyed the rest). 2^20 leaves headroom for abs sums up to ~2e3.
-    /// </summary>
-    public const float DensifyAbsScale = 1048576f;       // 2^20
-
-    /// <summary>
-    /// The scale a gradient slot is stored at. Was a static with two literals in it, which is
-    /// precisely why it ended up wrong for a scene nobody had tried yet.
-    /// </summary>
-    public float FixedScaleFor(int slot) => slot < 4 ? ColourScale : slot < 6 ? CentreScale : ConicScale;
-
-    /// <summary>
-    /// Re-scale the fixed-point gradients from what the last step actually produced.
-    ///
-    /// Both scales were consts chosen for TempleRing and Bathroom, and on drjohnson they were
-    /// wrong in OPPOSITE directions at once: the screen-centre gradient carried ONE quantum of
-    /// 32, so position was rounded away and the geometry could not move, while the conic sat at
-    /// 96% of the i32 wrap point - and the atomic WRAPS rather than clamping, so those gradients
-    /// were wrong rather than merely coarse. The conic grows with a splat's screen AREA, so no
-    /// single constant can serve a 3.8-unit scene and a 14.5-unit one.
-    ///
-    /// Aim each scale so the largest value seen lands at <see cref="TargetSaturation"/> of the
-    /// ceiling: far enough from the wrap to be safe, close enough that the small values still
-    /// land on several quanta rather than rounding to zero. Driven by the measurement rather
-    /// than by a formula, because the thing being measured is the whole problem.
-    ///
-    /// Returns true when anything moved, so a caller can say so.
-    /// </summary>
-    public bool RecalibrateGradientScales(GradientStats stats)
+    public async Task<(float P10, float Median, float P90)> ReadScaleHistogramAsync(int splatCount)
     {
-        const float TargetSaturation = 0.25f;
-        float ceiling = int.MaxValue * TargetSaturation;
-
-        static float Retarget(float current, double maxQuanta, float ceiling, float fallback)
+        if (_logScale == null || splatCount <= 0 || _fitSample == null || _sampleStride == null)
+            return (0, 0, 0);
+        long count = (long)splatCount * 3;
+        int n = (int)Math.Min(FitSampleCount, count);
+        int stride = Math.Max(1, (int)(count / n));
+        n = (int)Math.Min(FitSampleCount, (count + stride - 1) / stride);
+        WriteU32x4(_dimsBuf!, (uint)n, (uint)stride, (uint)Math.Min(count, _logScale.Length), 0);
+        Dispatch(_sampleStride, (n + 255) / 256, 1, new[]
         {
-            // Nothing was measured, so there is nothing to fit to - leave it alone rather than
-            // inventing a scale from an empty sample.
-            if (maxQuanta <= 0) return fallback;
-            double maxValue = maxQuanta / current;
-            double wanted = ceiling / maxValue;
-            // Keep it a power of two: the quantisation error is then exactly representable and
-            // a scale change cannot introduce a rounding difference of its own.
-            double exp = Math.Round(Math.Log2(wanted));
-            return (float)Math.Pow(2, Math.Clamp(exp, 4, 40));
-        }
-
-        // Colour has an ANALYTIC bound the measurement cannot see: with an L1 loss averaged over
-        // the image, |dL/dcolour| <= 1/3. Fitting purely to the largest value observed SO FAR
-        // would pick a scale that wraps the moment a gradient grows - and drjohnson's first
-        // reading, 8.55e3 quanta at 2^26, is 1.3e-4, which is 2600x below that bound. A scale
-        // chosen from it alone leaves no room for the run to change.
-        //
-        // So the measurement sets the scale and the bound caps it: never finer than the point
-        // where the largest gradient the loss can produce still fits.
-        const float ColourGradientBound = 1f / 3f;
-        float colourCap = (float)Math.Pow(2, Math.Floor(Math.Log2(int.MaxValue / ColourGradientBound)));
-        float colour = Math.Min(
-            Retarget(ColourScale, stats.MaxColourQuanta, ceiling, ColourScale), colourCap);
-        float centre = Retarget(CentreScale, stats.MaxCentreQuanta, ceiling, CentreScale);
-        float conic = Retarget(ConicScale, stats.MaxConicQuanta, ceiling, ConicScale);
-
-        bool moved = Math.Abs(Math.Log2(colour / ColourScale)) >= 0.5
-                  || Math.Abs(Math.Log2(centre / CentreScale)) >= 0.5
-                  || Math.Abs(Math.Log2(conic / ConicScale)) >= 0.5;
-        if (!moved) return false;
-
-        Console.WriteLine(
-            $"[Trainer] gradient scales: colour 2^{Math.Log2(ColourScale):F0} -> 2^{Math.Log2(colour):F0}, " +
-            $"centre 2^{Math.Log2(CentreScale):F0} -> 2^{Math.Log2(centre):F0}, " +
-            $"conic 2^{Math.Log2(ConicScale):F0} -> 2^{Math.Log2(conic):F0} " +
-            $"(max quanta: colour {stats.MaxColourQuanta:G3}, centre {stats.MaxCentreQuanta:G3}, " +
-            $"conic {stats.MaxConicQuanta:G3}; aiming at {TargetSaturation:P0} of the i32 ceiling)");
-
-        ColourScale = colour;
-        CentreScale = centre;
-        ConicScale = conic;
-        return true;
+            Buf(0, _logScale.GetGPUBuffer()!), Buf(1, _fitSample.GetGPUBuffer()!), Buf(2, _dimsBuf!),
+        });
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        // CPU transfer: scale histogram for train logs (gate: median vs init).
+        float[] host = await _fitSample.CopyToHostAsync<float>(0, n);
+        var lin = new float[n];
+        for (int i = 0; i < n; i++) lin[i] = MathF.Exp(host[i]);
+        System.Array.Sort(lin);
+        float At(double p) => lin[(int)Math.Clamp(Math.Round((n - 1) * p), 0, n - 1)];
+        return (At(0.10), At(0.50), At(0.90));
     }
 
     RadixSortPairs<uint, Stride1D.Dense, uint, Stride1D.Dense>? _sortPairs;
@@ -283,7 +220,9 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimPixBwdPipe = MakePipeline(SplatTrainerShaders.SsimPixBwd, "ssim_pix_bwd");
         _gradStats = MakePipeline(SplatTrainerShaders.GradStats, "grad_stats");
         _maxMagnitude = MakePipeline(SplatTrainerShaders.MaxMagnitude, "max_magnitude");
+        _sampleStride = MakePipeline(SplatTrainerShaders.SampleStride, "sample_stride");
         _densifyAccum = MakePipeline(SplatTrainerShaders.DensifyAccum, "densify_accum");
+        _remapFloatRows = MakePipeline(SplatTrainerShaders.RemapFloatRows, "remap_float_rows");
         _accumulateSupport = MakePipeline(SplatTrainerShaders.AccumulateSupport, "accumulate_support");
         _supportHistogram = MakePipeline(SplatTrainerShaders.SupportHistogram, "support_histogram");
         _unpackTarget = MakePipeline(SplatTrainerShaders.UnpackTarget, "unpack_target");
@@ -322,14 +261,6 @@ public sealed class SplatTrainerGpu : IDisposable
         // its allocation gives the driver's unhelpful "[Invalid CommandBuffer] ... previous
         // error", reported from whichever dispatch runs next rather than from the guilty one.
         _adamFlagsBuf = _device.CreateBuffer(new GPUBufferDescriptor
-        {
-            Size = 16,
-            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
-        });
-
-        // Shared by scatter_gradients (writer) and both adam passes (readers). One buffer so a
-        // step cannot write at one scale and read at another.
-        _gradScaleBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
             Size = 16,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
@@ -523,6 +454,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _geomOut = accel.Allocate1D<float>((long)splatCount * GeomGradsPerSplat);
         _ssePartials = accel.Allocate1D<float>(SseWorkgroups);
         _gradStatsPartials = accel.Allocate1D<float>(GradStatsWorkgroups * GradStatsSlots);
+        _fitSample = accel.Allocate1D<float>(FitSampleCount);
         _densifyStats = accel.Allocate1D<float>((long)splatCount * 2);
         _viewSupport = accel.Allocate1D<uint>(splatCount);
         _supportPartials = accel.Allocate1D<float>(SupportWorkgroups * SupportSlots);
@@ -576,8 +508,18 @@ public sealed class SplatTrainerGpu : IDisposable
 
         // Clear the counter and the tile ranges. Tiles with no keys are never written by the
         // ranges kernel, so stale values from a previous frame would be read as real spans.
+        // Also clear colour / T / end_idx: a view that paints nothing must not leave the
+        // previous view's image in the loss (MEASURED Truck STAGE PROBE: mean|rgb| live,
+        // max|gradPerKey|==0 on a subset of views - stale colour + consumed=0 fits that split).
+        // Clear keys/values too: overflow frames write only a prefix; the rest used to keep
+        // the previous view's splat ids, and sort then fed mixed lists into raster.
         _counter!.MemSetToZero();
         _ranges!.MemSetToZero();
+        _outColour!.MemSetToZero();
+        _outFinalT!.MemSetToZero();
+        _outEnd!.MemSetToZero();
+        _keys!.MemSetToZero();
+        _values!.MemSetToZero();
         await accel.SynchronizeAsync();
 
         // ── 1. Emit (tile, depth) keys ──
@@ -738,16 +680,12 @@ public sealed class SplatTrainerGpu : IDisposable
     }
 
     /// <summary>
-    /// Gradient coverage over every splat, in fixed-point QUANTA.
-    ///
-    /// Quanta rather than values because an i32 atomic WRAPS rather than clamping, so how close
-    /// a gradient sits to its ceiling is the question that matters, and the ceiling is an
-    /// integer one.
+    /// Gradient coverage over every splat. Magnitudes are the true float gradients.
     /// </summary>
     public readonly record struct GradientStats(
         long Splats, long ColourLive, long CentreLive, long ConicLive,
-        double MeanCentreQuanta, double MaxCentreQuanta, double MaxConicQuanta,
-        double MaxColourQuanta)
+        double MeanCentreAbs, double MaxCentreAbs, double MaxConicAbs,
+        double MaxColourAbs)
     {
         /// <summary>
         /// Splats that will take an Adam step on a gradient of exactly zero this iteration.
@@ -804,6 +742,176 @@ public sealed class SplatTrainerGpu : IDisposable
         return new GradientStats(
             splatCount, (long)colour, (long)centre, (long)conic,
             centre > 0 ? sumCentre / centre : 0.0, maxCentre, maxConic, maxColour);
+    }
+
+    /// <summary>
+    /// Steal optimizer row buffers before <see cref="Resize"/> so densify can remap on GPU
+    /// without a host round-trip. Caller must Dispose the returned buffers after remap.
+    /// </summary>
+    public (MemoryBuffer1D<float, Stride1D.Dense>? AdamM,
+            MemoryBuffer1D<float, Stride1D.Dense>? AdamV,
+            MemoryBuffer1D<float, Stride1D.Dense>? ShRest,
+            MemoryBuffer1D<float, Stride1D.Dense>? ShAdamM,
+            MemoryBuffer1D<float, Stride1D.Dense>? ShAdamV,
+            int StepCount) DetachOptimizerRows()
+    {
+        var t = (_adamM, _adamV, _shRest, _adamShM, _adamShV, _adamStepCount);
+        _adamM = null; _adamV = null; _shRest = null; _adamShM = null; _adamShV = null;
+        return t;
+    }
+
+    public void SetAdamStepCount(int step) => _adamStepCount = Math.Max(0, step);
+
+    /// <summary>
+    /// Densify restore: host RemapFloatRows for Adam (proven; GPU path killed opacity), GPU
+    /// RemapFloatRows for SH banks with a readback fence so ILGPU SynchronizeAsync is not
+    /// trusted to drain the raw WebGPU <c>_queue</c> Submit used by <see cref="Dispatch"/>.
+    /// Host SH CopyToHost OOM'd at ~780k (MEASURED growhost).
+    /// </summary>
+    public async Task RemapOptimizerRowsHybridAsync(
+        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamM,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamV,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShRest,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamM,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamV,
+        int priorCount,
+        int priorStep,
+        int[] adamSurvivors,
+        int[] featureSources,
+        int zeroAdamSlot = -1)
+    {
+        if (priorCount <= 0 || adamSurvivors.Length <= 0) return;
+        int m = adamSurvivors.Length;
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+
+        if (priorAdamM != null && priorAdamV != null)
+        {
+            long adamLen = (long)priorCount * AdamSlots;
+            // CPU transfer: Adam m/v only (~87 MB at 780k) — opacity-safe path.
+            var state = new AdamState(
+                await priorAdamM.CopyToHostAsync<float>(0, adamLen),
+                await priorAdamV.CopyToHostAsync<float>(0, adamLen),
+                priorStep);
+            RestoreAdamState(state, adamSurvivors, zeroAdamSlot);
+        }
+        else
+            SetAdamStepCount(priorStep);
+
+        if (_remapFloatRows == null) return;
+        var accel = _gpu.WebGPUAccelerator;
+        var adamSrc = accel.Allocate1D<int>(m);
+        adamSrc.CopyFromCPU(adamSurvivors);
+        var featSrc = accel.Allocate1D<int>(m);
+        featSrc.CopyFromCPU(featureSources);
+        // CPU transfer: 1 float fence after each SH remap so Dispose cannot race _queue.
+        try
+        {
+            await RemapGpuFencedAsync(priorShRest, _shRest, featSrc, priorCount, m,
+                SphericalHarmonics.RestFloatsPerSplat);
+            await RemapGpuFencedAsync(priorShAdamM, _adamShM, adamSrc, priorCount, m,
+                SphericalHarmonics.RestFloatsPerSplat);
+            await RemapGpuFencedAsync(priorShAdamV, _adamShV, adamSrc, priorCount, m,
+                SphericalHarmonics.RestFloatsPerSplat);
+        }
+        finally
+        {
+            adamSrc.Dispose();
+            featSrc.Dispose();
+        }
+    }
+
+    async Task RemapGpuFencedAsync(
+        MemoryBuffer1D<float, Stride1D.Dense>? prior,
+        MemoryBuffer1D<float, Stride1D.Dense>? next,
+        MemoryBuffer1D<int, Stride1D.Dense> sources,
+        int priorCount,
+        int newCount,
+        int stride,
+        int zeroSlot = -1)
+    {
+        if (prior == null || next == null || _remapFloatRows == null) return;
+        next.MemSetToZero();
+        uint z = zeroSlot >= 0 && zeroSlot < stride ? (uint)zeroSlot : uint.MaxValue;
+        WriteU32x4(_dimsBuf!, (uint)newCount, (uint)stride, (uint)priorCount, z);
+        Dispatch(_remapFloatRows!, (newCount + 63) / 64, 1, new[]
+        {
+            Buf(0, prior.GetGPUBuffer()!), Buf(1, next.GetGPUBuffer()!),
+            Buf(2, sources.GetGPUBuffer()!), Buf(3, _dimsBuf!),
+        });
+        // CPU transfer: 4-byte fence — drains WebGPU queue after Dispatch Submit.
+        _ = await next.CopyToHostAsync<float>(0, 1);
+    }
+
+    /// <summary>
+    /// Full GPU densify remap. Prefer <see cref="RemapOptimizerRowsHybridAsync"/> — pure GPU
+    /// Adam remap still fails opacity (MEASURED) even with SynchronizeAsync.
+    /// </summary>
+    public async Task RemapOptimizerRowsGpuAsync(
+        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamM,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamV,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShRest,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamM,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamV,
+        int priorCount,
+        int[] adamSurvivors,
+        int[] featureSources,
+        int zeroAdamSlot = -1)
+    {
+        int m = adamSurvivors.Length;
+        if (m <= 0 || _remapFloatRows == null) return;
+        var adamSrc = _gpu.WebGPUAccelerator.Allocate1D<int>(m);
+        adamSrc.CopyFromCPU(adamSurvivors);
+        var featSrc = _gpu.WebGPUAccelerator.Allocate1D<int>(m);
+        featSrc.CopyFromCPU(featureSources);
+        try
+        {
+            await RemapGpuFencedAsync(priorAdamM, _adamM, adamSrc, priorCount, m, AdamSlots, zeroAdamSlot);
+            await RemapGpuFencedAsync(priorAdamV, _adamV, adamSrc, priorCount, m, AdamSlots, zeroAdamSlot);
+            await RemapGpuFencedAsync(priorShRest, _shRest, featSrc, priorCount, m,
+                SphericalHarmonics.RestFloatsPerSplat);
+            await RemapGpuFencedAsync(priorShAdamM, _adamShM, adamSrc, priorCount, m,
+                SphericalHarmonics.RestFloatsPerSplat);
+            await RemapGpuFencedAsync(priorShAdamV, _adamShV, adamSrc, priorCount, m,
+                SphericalHarmonics.RestFloatsPerSplat);
+        }
+        finally
+        {
+            adamSrc.Dispose();
+            featSrc.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Densify Adam/SH restore via host RemapFloatRows (proven for Adam). Prefer hybrid for
+    /// large N — full host SH CopyToHost OOM'd at ~780k (MEASURED growhost).
+    /// </summary>
+    public async Task RemapOptimizerRowsHostAsync(
+        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamM,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorAdamV,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShRest,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamM,
+        MemoryBuffer1D<float, Stride1D.Dense>? priorShAdamV,
+        int priorCount,
+        int priorStep,
+        int[] adamSurvivors,
+        int[] featureSources,
+        int zeroAdamSlot = -1)
+    {
+        // Same as hybrid Adam path + host SH (small scenes).
+        await RemapOptimizerRowsHybridAsync(
+            priorAdamM, priorAdamV, null, null, null,
+            priorCount, priorStep, adamSurvivors, featureSources, zeroAdamSlot);
+        long shLen = (long)priorCount * SphericalHarmonics.RestFloatsPerSplat;
+        if (priorShRest != null)
+            RestoreShRest(await priorShRest.CopyToHostAsync<float>(0, shLen), featureSources);
+        if (priorShAdamM != null && priorShAdamV != null)
+        {
+            RestoreShAdamState(
+                new ShAdamState(
+                    await priorShAdamM.CopyToHostAsync<float>(0, shLen),
+                    await priorShAdamV.CopyToHostAsync<float>(0, shLen)),
+                adamSurvivors);
+        }
     }
 
     /// <summary>Adam moments and the global step count, as one movable blob.</summary>
@@ -880,33 +988,52 @@ public sealed class SplatTrainerGpu : IDisposable
     /// forward pass painted anything. keys + loss + zero per-key can mean "forward was black"
     /// or "backward dropped a live render" - those are different files.
     /// </summary>
-    public async Task<(double DLdPix, double PerKey, double MeanColour, double MeanFinalT)> ReadBackwardStagesAsync()
+    public async Task<(double DLdPix, double PerKey, double MeanColour, double MeanFinalT,
+        int NanKeys, int NanT, double FracTOneOpaque)> ReadBackwardStagesAsync()
     {
         long pixels = (long)_width * _height;
         double dl = await MaxMagnitudeAsync(_dLdPix!, pixels * 3);
         double pk = await MaxMagnitudeAsync(_gradKeyA!, (long)LastKeyCount * 3);
-        double meanC = await MeanAbsAsync(_outColour!, pixels * 3);
-        double meanT = await MeanAbsAsync(_outFinalT!, pixels);
-        return (dl, pk, meanC, meanT);
+        var (meanC, _, _) = await SampleStatsAsync(_outColour!, pixels * 3);
+        // max_magnitude reports 0 for an all-NaN buffer (max(0, NaN) drops the NaN), so a NaN
+        // backward looks identical to an empty one. Count NaNs explicitly. T == 1-MAX_ALPHA at
+        // a pixel means exactly one splat was applied at the alpha cap and nothing after it;
+        // that is what min(MAX_ALPHA, NaN) produces in the forward.
+        var (_, nanKeys, _) = await SampleStatsAsync(_gradKeyA!, (long)LastKeyCount * 3);
+        var (meanT, nanT, fracT) = await SampleStatsAsync(_outFinalT!, pixels, 0.0100000179f, 1e-6f);
+        return (dl, pk, meanC, meanT, nanKeys, nanT, fracT);
     }
 
-    async Task<double> MeanAbsAsync(MemoryBuffer1D<float, Stride1D.Dense> buf, long count)
+    /// <summary>
+    /// Stride-sampled (mean |x|, NaN count, fraction within <paramref name="tol"/> of
+    /// <paramref name="match"/>) over a GPU buffer. Stage-probe only: it runs on the handful
+    /// of views that produced no gradient, never in the training loop.
+    /// </summary>
+    async Task<(double MeanAbs, int NanCount, double FracMatch)> SampleStatsAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> buf, long count, float match = float.NaN, float tol = 0f)
     {
-        // Reuse the max-magnitude reduction's partials buffer as a scratch: mean is only for
-        // the stage probe (a few dead views), so a second reduction shader is not justified yet.
-        // CPU transfer of the whole buffer would be the render target - megabytes per probe.
-        if (count <= 0) return 0;
-        // Sample every Nth element so a 540x720x3 target stays a few KB. Stride is prime-ish
-        // relative to a scanline so a dead column cannot hide a live image.
-        const int MaxSamples = 4096;
-        int stride = Math.Max(1, (int)(count / MaxSamples));
-        int n = (int)Math.Min(MaxSamples, (count + stride - 1) / stride);
-        float[] host = await buf.CopyToHostAsync<float>(0, Math.Min(buf.Length, count));
-        double sum = 0;
-        int taken = 0;
-        for (int i = 0; i < host.Length && taken < n; i += stride, taken++)
-            sum += Math.Abs(host[i]);
-        return taken > 0 ? sum / taken : 0;
+        if (count <= 0 || _fitSample == null || _sampleStride == null) return (0, 0, 0);
+        int n = (int)Math.Min(FitSampleCount, count);
+        int stride = Math.Max(1, (int)(count / n));
+        n = (int)Math.Min(FitSampleCount, (count + stride - 1) / stride);
+        WriteU32x4(_dimsBuf!, (uint)n, (uint)stride, (uint)Math.Min(count, buf.Length), 0);
+        Dispatch(_sampleStride, (n + 255) / 256, 1, new[]
+        {
+            Buf(0, buf.GetGPUBuffer()!), Buf(1, _fitSample.GetGPUBuffer()!), Buf(2, _dimsBuf!),
+        });
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        // CPU transfer: 4K-float stride sample for the dead-view stage probe.
+        float[] host = await _fitSample.CopyToHostAsync<float>(0, n);
+        double sum = 0; int nan = 0, hit = 0;
+        for (int i = 0; i < host.Length; i++)
+        {
+            float v = host[i];
+            if (float.IsNaN(v) || float.IsInfinity(v)) { nan++; continue; }
+            sum += Math.Abs(v);
+            if (!float.IsNaN(match) && Math.Abs(v - match) <= tol) hit++;
+        }
+        int finite = host.Length - nan;
+        return (finite > 0 ? sum / finite : 0, nan, host.Length > 0 ? (double)hit / host.Length : 0);
     }
 
     async Task<double> MaxMagnitudeAsync(MemoryBuffer1D<float, Stride1D.Dense> buf, long count)
@@ -940,8 +1067,8 @@ public sealed class SplatTrainerGpu : IDisposable
         WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height, 0);
         Dispatch(_densifyAccum!, (splatCount + 255) / 256, 1, new[]
         {
-            Buf(0, _densifyAbs!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
-            Buf(2, _dimsBuf!), Buf(3, _gradScaleBuf!),
+            Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
+            Buf(2, _dimsBuf!),
         });
     }
 
@@ -1382,8 +1509,6 @@ public sealed class SplatTrainerGpu : IDisposable
         // densify_abs is filled HERE with peak per-pixel |dCentre| (AbsGS). Clear first so a
         // previous view cannot leak into densify_accum after this step.
         _densifyAbs!.MemSetToZero();
-        // .w = DensifyAbsScale for per-pixel abs atomics; .y stays CentreScale for Adam scatter.
-        WriteVec4(_gradScaleBuf!, ColourScale, CentreScale, ConicScale, DensifyAbsScale);
         await accel.SynchronizeAsync();
         // grad_per_key is written for every key this frame, so stale values cannot leak in.
         Dispatch(_rasterBackward!, _tilesX, _tilesY, new[]
@@ -1393,19 +1518,22 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(5, _outEnd!.GetGPUBuffer()!), Buf(6, _dLdPix!.GetGPUBuffer()!),
             Buf(7, _gradKeyA!.GetGPUBuffer()!), Buf(8, _gradKeyB!.GetGPUBuffer()!),
             Buf(9, _gradKeyC!.GetGPUBuffer()!),
-            Buf(10, _densifyAbs!.GetGPUBuffer()!), Buf(11, _gradScaleBuf!),
+            Buf(10, _densifyAbs!.GetGPUBuffer()!),
             ShRestBindEntry(12),
         });
 
-        // ── Scatter per-key gradients into per-splat totals ──
+        // Cleared here, not at the top of the step: the census and densify accum read the
+        // completed step's totals after TrainStepAsync returns.
         _gradFixed!.MemSetToZero();
         await accel.SynchronizeAsync();
+
+        // ── Scatter per-key gradients into per-splat totals (f32 CAS add) ──
         WriteU32(_countBuf!, (uint)LastKeyCount);
         DispatchLinear(_scatterGrad!, LastKeyCount, new[]
         {
             Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
             Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
-            Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!), Buf(6, _gradScaleBuf!),
+            Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
         });
 
         // ── Adam ──
@@ -1417,22 +1545,21 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),
             Buf(2, _opacityLogit!.GetGPUBuffer()!), Buf(3, _adamM!.GetGPUBuffer()!),
             Buf(4, _adamV!.GetGPUBuffer()!), Buf(5, _adamCfgBuf!), Buf(6, _adamFlagsBuf!),
-            Buf(7, _gradScaleBuf!),
         });
 
         if (ActiveShDegree >= 1 && _scatterShGrad != null && _adamShRest != null)
         {
             _gradShRest!.MemSetToZero();
             await accel.SynchronizeAsync();
-            // Scatter cfg: .x = colour fixed-point scale, .w = splat count (matches shader).
-            WriteVec4(_adamCfgBuf!, ColourScale, 0f, 0f, splatCount);
+            // Scatter cfg: .w = splat count (matches shader).
+            WriteVec4(_adamCfgBuf!, 0f, 0f, 0f, splatCount);
             Dispatch(_scatterShGrad, (splatCount + 63) / 64, 1, new[]
             {
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
                 Buf(3, _gradShRest!.GetGPUBuffer()!), Buf(4, _adamCfgBuf!),
             });
             // Rest bands use feature_lr / 20 (Kerbl).
-            WriteVec4(_adamCfgBuf!, colourLr / 20f, ColourScale, _adamStepCount, splatCount);
+            WriteVec4(_adamCfgBuf!, colourLr / 20f, 0f, _adamStepCount, splatCount);
             Dispatch(_adamShRest, (splatCount + 63) / 64, 1, new[]
             {
                 Buf(0, _shRest!.GetGPUBuffer()!), Buf(1, _gradShRest!.GetGPUBuffer()!),
@@ -1454,7 +1581,7 @@ public sealed class SplatTrainerGpu : IDisposable
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
                 Buf(3, _logScale!.GetGPUBuffer()!), Buf(4, _adamM!.GetGPUBuffer()!),
                 Buf(5, _adamV!.GetGPUBuffer()!), Buf(6, _geomCfgBuf!),
-                Buf(7, _geomOut!.GetGPUBuffer()!), Buf(8, _gradScaleBuf!),
+                Buf(7, _geomOut!.GetGPUBuffer()!),
             });
         }
 
@@ -1478,7 +1605,7 @@ public sealed class SplatTrainerGpu : IDisposable
         float MaxScale);
 
     /// <summary>
-    /// Per-splat accumulated gradients, dequantised. Nine per splat, in the shader's order:
+    /// Per-splat accumulated gradients. Nine per splat, in the shader's order:
     /// colour RGB, opacity, screen centre x and y, conic a, b and c. For the GPU gate only.
     /// </summary>
     /// <remarks>
@@ -1491,9 +1618,10 @@ public sealed class SplatTrainerGpu : IDisposable
     public async Task<float[]> ReadGradientsAsync(int splatCount)
     {
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        // The buffer is f32 bit patterns in an int-typed allocation; reinterpret, do not convert.
         int[] raw = await _gradFixed!.CopyToHostAsync<int>(0, (long)splatCount * GradsPerSplat);
         var outp = new float[raw.Length];
-        for (int i = 0; i < raw.Length; i++) outp[i] = raw[i] / FixedScaleFor(i % GradsPerSplat);
+        for (int i = 0; i < raw.Length; i++) outp[i] = BitConverter.Int32BitsToSingle(raw[i]);
         return outp;
     }
 
@@ -1638,6 +1766,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimWinGrad?.Dispose(); _ssimWinGrad = null;
         _ssimDRows?.Dispose(); _ssimDRows = null;
         _gradStatsPartials?.Dispose(); _gradStatsPartials = null;
+        _fitSample?.Dispose(); _fitSample = null;
         _densifyStats?.Dispose(); _densifyStats = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
@@ -1661,7 +1790,6 @@ public sealed class SplatTrainerGpu : IDisposable
         _dimsBuf?.Destroy(); _dimsBuf?.Dispose();
         _adamCfgBuf?.Destroy(); _adamCfgBuf?.Dispose();
         _adamFlagsBuf?.Destroy(); _adamFlagsBuf?.Dispose();
-        _gradScaleBuf?.Destroy(); _gradScaleBuf?.Dispose();
         _ssimDimsBuf?.Destroy(); _ssimDimsBuf?.Dispose();
         _ssimCfgBuf?.Destroy(); _ssimCfgBuf?.Dispose();
         _lossWeightsBuf?.Destroy(); _lossWeightsBuf?.Dispose();

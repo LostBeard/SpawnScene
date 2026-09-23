@@ -289,6 +289,17 @@ public partial class Studio
         // something.
         const double RelevantMagnitude = 1e-4;
 
+        // The accumulator is f32 summed by CAS; its error scales with the largest term summed
+        // into that SLOT, not with a quantum. So the absolute check is taken relative to each
+        // slot's own peak magnitude on the CPU side (per-slot ulp budget), and the relative
+        // check below still guards the values that are large enough to be meaningful.
+        var slotPeak = new double[SplatTrainerGpu.GradsPerSplat];
+        foreach (var c in cpu2d)
+        {
+            float[] w = { c.R, c.G, c.B, c.Opacity, c.Px, c.Py, c.ConicA, c.ConicB, c.ConicC };
+            for (int k = 0; k < w.Length; k++) slotPeak[k] = Math.Max(slotPeak[k], Math.Abs(w[k]));
+        }
+
         double sumAbs = 0, maxAbs = 0;
         double sumRelBig = 0, maxRelBig = 0;
         int compared = 0, comparedBig = 0;
@@ -302,13 +313,10 @@ public partial class Studio
                 float got = gpu2d[i * SplatTrainerGpu.GradsPerSplat + k];
                 double err = Math.Abs(got - want[k]);
 
-                // In QUANTA of this slot's own scale - they differ by 64x between the conic
-                // and everything else, so one absolute bound would mean two different things.
-                // The RELATIVE check must use the unscaled error; multiplying the quantised
-                // one by 2^20 turned a 0.17% disagreement into a reported 1800x.
-                double quanta = err * trainer.FixedScaleFor(k);
-                sumAbs += quanta;
-                if (quanta > maxAbs) maxAbs = quanta;
+                // Error in units of 1e-6 of the slot's peak: one "part per million of range".
+                double ppm = slotPeak[k] > 0 ? err / slotPeak[k] * 1e6 : (err > 0 ? 1e9 : 0);
+                sumAbs += ppm;
+                if (ppm > maxAbs) maxAbs = ppm;
                 compared++;
 
                 if (Math.Abs(want[k]) > RelevantMagnitude)
@@ -324,8 +332,8 @@ public partial class Studio
         double maxAbsQ = maxAbs;
         double meanRelBig = comparedBig > 0 ? sumRelBig / comparedBig : 1.0;
         Console.WriteLine(
-            $"[TrainerGate] 2D gradients: {compared} values, mean err {meanAbsQ:F2} quanta, " +
-            $"max {maxAbsQ:F1} quanta; of the {comparedBig} above {RelevantMagnitude:G2}, " +
+            $"[TrainerGate] 2D gradients: {compared} values, mean err {meanAbsQ:F2} ppm of slot peak, " +
+            $"max {maxAbsQ:F1} ppm; of the {comparedBig} above {RelevantMagnitude:G2}, " +
             $"mean rel {meanRelBig:F5}, max rel {maxRelBig:F5}");
 
         if (compared < n * 5)
@@ -340,10 +348,11 @@ public partial class Studio
                 "relatively - the fixture is not exercising the backward hard enough");
             return false;
         }
-        // A few quanta of disagreement is the rounding; a wrong shader is off by orders.
-        if (!(meanAbsQ < 4.0) || !(maxAbsQ < 400.0))
+        // f32 summation over a few hundred keys lands within tens of ppm of the slot peak; a
+        // wrong shader is off by orders of magnitude.
+        if (!(meanAbsQ < 20.0) || !(maxAbsQ < 2000.0))
         {
-            Console.WriteLine("[TrainerGate] FAIL: GPU and CPU 2D gradients disagree beyond quantisation");
+            Console.WriteLine("[TrainerGate] FAIL: GPU and CPU 2D gradients disagree beyond f32 rounding");
             return false;
         }
         if (!(meanRelBig < 0.02) || !(maxRelBig < 0.2))
@@ -425,16 +434,12 @@ public partial class Studio
             int b = i * SplatTrainerGpu.GradsPerSplat;
             if (gpu2d[b] != 0f || gpu2d[b + 1] != 0f || gpu2d[b + 2] != 0f) cColour++;
 
-            // gpu2d is already divided by the fixed-point scales; the reduction reports QUANTA,
-            // so scale back to compare like with like.
-            double cen = Math.Max(Math.Abs(gpu2d[b + 4]), Math.Abs(gpu2d[b + 5]))
-                         * trainer.FixedScaleFor(4);
+            double cen = Math.Max(Math.Abs(gpu2d[b + 4]), Math.Abs(gpu2d[b + 5]));
             if (cen > 0) { cCentre++; cSumCentre += cen; }
             cMaxCentre = Math.Max(cMaxCentre, cen);
 
             double con = Math.Max(Math.Abs(gpu2d[b + 6]),
-                         Math.Max(Math.Abs(gpu2d[b + 7]), Math.Abs(gpu2d[b + 8])))
-                         * trainer.FixedScaleFor(6);
+                         Math.Max(Math.Abs(gpu2d[b + 7]), Math.Abs(gpu2d[b + 8])));
             if (con > 0) cConic++;
             cMaxConic = Math.Max(cMaxConic, con);
         }
@@ -443,7 +448,7 @@ public partial class Studio
         Console.WriteLine(
             $"[TrainerGate] grad stats: colour {stats.ColourLive}/{cColour}, " +
             $"centre {stats.CentreLive}/{cCentre}, conic {stats.ConicLive}/{cConic}, " +
-            $"meanCentre {stats.MeanCentreQuanta:F1}/{cMeanCentre:F1} quanta, " +
+            $"meanCentre {stats.MeanCentreAbs:G4}/{cMeanCentre:G4}, " +
             $"stale {stats.StaleColourFraction:P1}");
 
         if (cColour == 0 && cCentre == 0)
@@ -457,7 +462,7 @@ public partial class Studio
             return false;
         }
         if (cMeanCentre > 0 &&
-            Math.Abs(stats.MeanCentreQuanta - cMeanCentre) / cMeanCentre > 1e-3)
+            Math.Abs(stats.MeanCentreAbs - cMeanCentre) / cMeanCentre > 1e-3)
         {
             Console.WriteLine("[TrainerGate] FAIL: grad_stats mean magnitude disagrees");
             return false;

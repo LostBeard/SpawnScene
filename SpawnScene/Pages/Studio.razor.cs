@@ -268,8 +268,8 @@ public partial class Studio : IAsyncDisposable
             // ?densify=N runs adaptive density control every N ITERATIONS (reference: 100).
             if (query.TryGetValue("densify", out var dnq) && int.TryParse(dnq, out var dni))
                 DensifyEveryIters = dni;
-            // ?densifygrad=X is the densify |grad| bar in PIXEL peak-|dCentre| units
-            // (default 1.5e-6; Kerbl's 2e-4 is for the SUM-over-pixels signal we no longer use).
+            // ?densifygrad=X is the densify bar on the reference quantity: mean over views of
+            // |dL/dmean2D| in NDC units (default 2e-4, Kerbl's densify_grad_threshold).
             if (query.TryGetValue("densifygrad", out var dgq) && float.TryParse(dgq,
                     System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var dgf))
@@ -282,6 +282,9 @@ public partial class Studio : IAsyncDisposable
                 System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var dff))
                 SplatDensityControl.GrowthSelectFraction = dff;
+            // ?maxdensify=N caps splat count during densify (default 450k; growhost OOM'd ~780k).
+            if (query.TryGetValue("maxdensify", out var mdnq) && int.TryParse(mdnq, out var mdni))
+                MaxDensifiedSplats = mdni;
             // ?opacityreset=N caps every opacity every N ITERATIONS (reference: 3000), which
             // also unlocks the size prunes - without it nothing removes a bloated splat.
             if (query.TryGetValue("opacityreset", out var orq) && int.TryParse(orq, out var ori))
@@ -302,9 +305,6 @@ public partial class Studio : IAsyncDisposable
             // held-out curve is the measurement.
             if (query.TryGetValue("skipzerograd", out var sz))
                 SkipZeroGradientSteps = sz is "1" or "true";
-            // ?adaptscales=0 keeps the old fixed 2^26 / 2^20 gradient scales, for comparison.
-            if (query.TryGetValue("adaptscales", out var asc))
-                AdaptGradientScales = asc is "1" or "true";
             // ?gtposes=1 uses the dataset's own COLMAP poses and skips pose recovery, so the
             // optimiser can be measured without the pose error folded in.
             bool gtPoses = query.TryGetValue("gtposes", out var gp) && gp is "1" or "true";

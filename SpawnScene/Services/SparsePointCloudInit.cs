@@ -73,8 +73,13 @@ public static class SparsePointCloudInit
     /// splat is about as big as the gap it has to cover. A single constant cannot do this: the
     /// same cloud has dense points on a textured wall and sparse ones across a floor, and one
     /// size either leaves holes or smears detail.
+    ///
+    /// <paramref name="maxScale"/> caps the initial size. Truck's SfM cloud has far outliers
+    /// whose 3-NN spacing is huge (MEASURED p90 0.26 with median 0.017); without a cap those
+    /// start at the Adam MaxScale ceiling and the scene is blobby before the first step.
+    /// Pass the training MaxScale (or densify split size) when known; 0 = no cap.
     /// </summary>
-    public static float[] BuildPacked(PointCloud cloud)
+    public static float[] BuildPacked(PointCloud cloud, float maxScale = 0f)
     {
         int n = cloud.Count;
         var packed = new float[(long)n * SplatFormat.Floats];
@@ -82,12 +87,22 @@ public static class SparsePointCloudInit
 
         float[] spacing = LocalSpacing(cloud.Positions);
 
+        // Cap outlier spacings. Truck MEASURED: median 0.017, p90 0.265 - the tail is SfM
+        // outliers, not real surface spacing. Without a cap those Gaussians start at the Adam
+        // MaxScale ceiling and the scene is blobby before step 0. Kerbl's distCUDA2 has the
+        // same formula but their clouds are cleaner; we clamp to 10x the median (or an
+        // explicit maxScale when the caller knows the training bound).
+        float[] sorted = (float[])spacing.Clone();
+        Array.Sort(sorted);
+        float median = sorted[n / 2];
+        float cap = maxScale > 0f ? maxScale : MathF.Max(median * 10f, 1e-4f);
+
         for (int i = 0; i < n; i++)
         {
             int o = i * SplatFormat.Floats;
             var p = cloud.Positions[i];
             var c = i < cloud.Colors.Length ? cloud.Colors[i] : new Vector3(0.5f);
-            float s = spacing[i];
+            float s = MathF.Min(spacing[i], cap);
 
             packed[o + SplatFormat.OffPos] = p.X;
             packed[o + SplatFormat.OffPos + 1] = p.Y;

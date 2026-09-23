@@ -386,3 +386,8 @@ FodyWeavers.xsd
 
 # Gate output: rendered captures and comparison images. Large, regenerable.
 _shots/
+
+# Agent publish slots and run logs (see Research/handoff-*.md)
+_pub_trip*/
+_runs/
+

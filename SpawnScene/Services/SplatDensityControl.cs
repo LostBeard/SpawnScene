@@ -31,17 +31,19 @@ public static class SplatDensityControl
     /// <summary>
     /// Gradient magnitude above which a Gaussian is considered under-reconstructed.
     ///
-    /// The reference quotes <c>0.0002</c> against the L2 norm of the SCREEN-SPACE (pixel)
-    /// position gradient accumulated as a SUM over pixels (Kerbl / gsplat absgrad sum).
-    /// This trainer densifies on the PEAK per-pixel |dL/dmean2D| so small Gaussians can clone
-    /// (sum∝footprint → only splits; MEASURED Truck). Peak units are ~50-100x smaller:
-    /// MEASURED Truck 7K max avg ~3.7e-6, so the default bar is 1.5e-6. Override with
-    /// <c>?densifygrad=</c>. Do NOT reintroduce an NDC conversion. Training uses
-    /// <c>0.8 L1 + 0.2 D-SSIM</c> (<see cref="ImageQuality.LambdaDssim"/>).
+    /// The reference (Kerbl, <c>densify_grad_threshold = 0.0002</c>) thresholds the mean over
+    /// views of the L2 norm of <c>dL/dmean2D</c>, where each view's value is the SIGNED sum over
+    /// pixels and <c>backward.cu</c> scales it by <c>0.5*W</c> / <c>0.5*H</c> (NDC units) before
+    /// accumulating. <c>densify_accum</c> computes exactly that from the f32 gradient
+    /// accumulator. The previous peak-per-pixel PIXEL-unit criterion and its 1e-6 bar were
+    /// tuned against a fixed-point accumulator whose densify signal was quantised to one
+    /// 2^-20 quantum (MEASURED Truck 2K: p90 = 9.54e-7 exactly), so every nonzero value sat at
+    /// the bar. Override with <c>?densifygrad=</c>. Training uses <c>0.8 L1 + 0.2 D-SSIM</c>
+    /// (<see cref="ImageQuality.LambdaDssim"/>).
     /// </summary>
-    public static float GradientThreshold { get; set; } = 1.5e-6f;
+    public static float GradientThreshold { get; set; } = 2e-4f;
 
-    /// <summary>Obsolete alias kept so older <c>?densifygrad=</c> call sites still compile.</summary>
+    /// <summary>Alias: the threshold IS in NDC units, as the reference's is.</summary>
     public static float GradientThresholdNdc
     {
         get => GradientThreshold;
@@ -390,19 +392,16 @@ public static class SplatDensityControl
             splats[i].Opacity = MathF.Min(splats[i].Opacity, OpacityResetTo);
     }
 
-    /// <summary>
-    /// L2 norm of a screen-space position gradient in PIXEL units - the same quantity the
-    /// reference thresholds. Kept as a named helper so call sites cannot accidentally reinvent
-    /// an NDC conversion (see <see cref="GradientThreshold"/>).
-    /// </summary>
+    /// <summary>L2 norm of a screen-space position gradient in PIXEL units.</summary>
     public static float PixelGradientMagnitude(float gradPxX, float gradPxY)
         => MathF.Sqrt(gradPxX * gradPxX + gradPxY * gradPxY);
 
     /// <summary>
-    /// Obsolete: the densify bar is in PIXEL space. This used to multiply by width/2 and that
-    /// is exactly the bug that made Truck 7K densify runaway. Returns the pixel magnitude and
-    /// ignores <paramref name="width"/>/<paramref name="height"/>.
+    /// The quantity the reference thresholds: the pixel-space centre gradient scaled by
+    /// <c>0.5*W</c> and <c>0.5*H</c> (backward.cu <c>ddelx_dx</c>, <c>ddely_dy</c>), then its
+    /// L2 norm. CPU mirror of <c>densify_accum</c>; compare against
+    /// <see cref="GradientThreshold"/>.
     /// </summary>
     public static float PixelGradientToNdc(float gradPxX, float gradPxY, int width, int height)
-        => PixelGradientMagnitude(gradPxX, gradPxY);
+        => PixelGradientMagnitude(gradPxX * 0.5f * width, gradPxY * 0.5f * height);
 }

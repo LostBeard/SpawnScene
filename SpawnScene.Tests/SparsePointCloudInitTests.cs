@@ -276,4 +276,30 @@ public class SparsePointCloudOutlierTests
             Assert.That(fast[i], Is.EqualTo(slow).Within(1e-3f), $"point {i} at {arr[i]}");
         }
     }
+
+    [Test]
+    public void BuildPackedCapsOutlierSpacingAtTenTimesMedian()
+    {
+        // A tight cluster plus one far outlier: the outlier's 3-NN spacing is huge. Without a
+        // cap it becomes a house-sized Gaussian at init (MEASURED Truck p90/median ≈ 15).
+        var pts = new List<Vector3>();
+        for (int i = 0; i < 50; i++)
+            pts.Add(new Vector3(i * 0.1f, 0, 0));
+        pts.Add(new Vector3(1000, 0, 0));
+
+        var cloud = new PointCloud
+        {
+            Positions = pts.ToArray(),
+            Colors = pts.Select(_ => new Vector3(0.5f)).ToArray(),
+        };
+        var packed = SparsePointCloudInit.BuildPacked(cloud);
+
+        var scales = new float[pts.Count];
+        for (int i = 0; i < pts.Count; i++)
+            scales[i] = packed[i * SplatFormat.Floats + SplatFormat.OffScale];
+        Array.Sort(scales);
+        float median = scales[scales.Length / 2];
+        Assert.That(scales[^1], Is.LessThanOrEqualTo(median * 10f + 1e-5f),
+            "outlier init scale must be capped at 10x median");
+    }
 }

@@ -34,11 +34,12 @@ public partial class Studio
     /// a renderable scene behind for the measurement that follows).
     /// </summary>
     /// <summary>
-    /// Splat size ceiling as a fraction of the scene diagonal. 0.1 is the reference's PRUNE
-    /// threshold being used as a bound because nothing prunes yet; tightening it is the cheap
-    /// test of whether bloated splats are what melts the render.
+    /// Splat size ceiling as a fraction of the camera-rig radius. Kerbl's prune bar is
+    /// 0.1*extent but only after opacity reset; before that Adam alone bounds growth. 0.1 let
+    /// Truck Gaussians cover hundreds of tiles and wrap the conic i32 sum (MEASURED). 0.05
+    /// matches densify's split bar (PercentDense=0.01 is the split trigger, not the ceiling).
     /// </summary>
-    public static float MaxScaleFraction { get; set; } = 0.1f;
+    public static float MaxScaleFraction { get; set; } = 0.05f;
 
     /// <summary>Multiplier on the position learning rate, for measuring rather than guessing.</summary>
     public static float PositionLrScale { get; set; } = 1f;
@@ -48,12 +49,6 @@ public partial class Studio
     /// default; see <c>SplatTrainerGpu.SkipZeroGradientSteps</c>.
     /// </summary>
     public static bool SkipZeroGradientSteps { get; set; }
-
-    /// <summary>
-    /// Fit the fixed-point gradient scales to the scene from the measured gradients. On by
-    /// default; a knob so a run can be compared against the old fixed constants.
-    /// </summary>
-    public static bool AdaptGradientScales { get; set; } = true;
 
     /// <summary>
     /// Ceiling on the resident target stack, which holds every view as float RGB.
@@ -134,7 +129,7 @@ public partial class Studio
     /// Growth is unbounded by nature and a browser tab is not. Derived from the trainer key
     /// binding limit the same way the generator budget is, rather than picked.
     /// </summary>
-    public static int MaxDensifiedSplats { get; set; } = 1_200_000;
+    public static int MaxDensifiedSplats { get; set; } = 450_000;
 
     /// <summary>
     /// Cap every opacity every N cycles, 0 to disable. The reference does this every 3,000
@@ -318,8 +313,8 @@ public partial class Studio
                 // Ceiling must use the SAME extent densify uses (rig radius), not the AABB
                 // diagonal. Truck's SfM cloud has far outliers (aabb diag ~397) so
                 // 0.1*diag = 39.7 let Adam grow house-sized blobs; densify's prune bar is
-                // 0.1*rigRadius ≈ 0.53. Matching them stops the pre-opacity-reset growth that
-                // made the display look like soft coloured soup.
+                // 0.1*rigRadius. MaxScaleFraction 0.05 (~0.27 on Truck) is tighter so a splat
+                // cannot cover hundreds of tiles and wrap the conic i32 sum before opacity reset.
                 geo = new SplatTrainerGpu.GeometryStep(
                     PositionLr: positionLrInit,
                     LogScaleLr: 0.005f,
@@ -472,7 +467,12 @@ public partial class Studio
                 if (it < supervised.Count)
                 {
                     var st = await _trainer.ReadGradientStatsAsync(n);
-                    if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
+                    // Overflow truncates the key list; backward then disagrees with forward and
+                    // looks "dead". Do not drop the view - the next Resize from peak demand
+                    // fixes it (MEASURED Truck: 5-9/95 marked dead only on the undersized
+                    // first cycle, keys fit after re-size).
+                    if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0
+                        && !_trainer.LastOverflowed)
                         deadViews.Add(vi);
                     liveFraction[it] = (float)(st.ColourLive / (double)Math.Max(1, n));
 
@@ -486,13 +486,17 @@ public partial class Studio
                     // For a view that produced nothing, ask WHERE it was lost.
                     if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
                     {
-                        var (dl, pk, meanC, meanT) = await _trainer.ReadBackwardStagesAsync();
+                        var (dl, pk, meanC, meanT, nanKeys, nanT, fracT) =
+                            await _trainer.ReadBackwardStagesAsync();
                         Console.WriteLine(
                             $"[Train]   STAGE PROBE view {vi} {ShortName(views[vi].ImageName)}: " +
                             $"loss {loss:F4}, keys {_trainer.LastKeyCount:N0}, " +
-                            $"mean|rgb| {meanC:G4}, mean T {meanT:G4}, " +
-                            $"max|dL/dpix| {dl:G4}, max|gradPerKey| {pk:G4} -> " +
-                            (meanC <= 1e-8 ? "FORWARD rendered black (nothing for backward to credit)"
+                            $"mean|rgb| {meanC:G4}, mean T {meanT:G4} " +
+                            $"(T==1-MAX_ALPHA at {fracT:P1} of pixels, NaN T {nanT}), " +
+                            $"max|dL/dpix| {dl:G4}, max|gradPerKey| {pk:G4} (NaN keys {nanKeys}/4096 sampled)" +
+                            (_trainer.LastOverflowed ? ", OVERFLOW" : "") + " -> " +
+                            (_trainer.LastOverflowed ? "KEY OVERFLOW (not marking dead)"
+                             : meanC <= 1e-8 ? "FORWARD rendered black (nothing for backward to credit)"
                              : dl <= 0 ? "LOSS SHADER produced no pixel gradient"
                              : pk <= 0 ? "RASTER_BACKWARD dropped a live render"
                              : "SCATTER dropped it"));
@@ -503,7 +507,14 @@ public partial class Studio
                     await ReportViewSupportAsync(n);
                     ReportViewCensus(views, supervised, deadViews, liveFraction,
                         keysPerView, lossPerView);
-                    supervised = DropDeadViews(supervised, deadViews, views);
+                    // Do not drop dead views permanently: after ConicScale=2^26 geometry is live,
+                    // and ignoring end_idx in raster_backward is meant to revive them. Dropping
+                    // removed 4-9 Truck views that still contribute loss (MEASURED).
+                    if (deadViews.Count > 0)
+                        Console.WriteLine(
+                            $"[Train] keeping {deadViews.Count} dead-at-census views in the " +
+                            "supervised set (not dropping); adam skips zero-grad splats.");
+                    // supervised = DropDeadViews(supervised, deadViews, views);
                     if (PruneUnconstrainedAfterCycle)
                     {
                         var pruned = await PruneUnconstrainedAsync(packed, n);
@@ -530,10 +541,20 @@ public partial class Studio
                     // multiples of one another - a whitelist of one, in arithmetic form.
                     bool densifying = DensifyEveryIters > 0 && stillGrowing
                         && (it + 1) % DensifyEveryIters == 0;
+                    // Skip an opacity reset that leaves less than one full interval to recover.
+                    // MEASURED Truck 7K: reset at 6000 dropped held-out 16.51 -> 12.37 and
+                    // COMPARE averaged the dip; Kerbl's 30k run has 9k settle after the last
+                    // reset, a 7k run only has 1k. The reset still fires at 3000.
                     bool resetOpacity = OpacityResetEveryIters > 0 && stillGrowing
-                        && (it + 1) % OpacityResetEveryIters == 0;
+                        && (it + 1) % OpacityResetEveryIters == 0
+                        && (iterations - (it + 1)) >= OpacityResetEveryIters;
                     if (densifying || resetOpacity)
                     {
+                        // Do NOT RecalibrateGradientScales here from fixed-point stats.
+                        // TrainStep already sizes ConicScale from float grad_c before scatter;
+                        // re-fitting from post-scatter quanta at 25% target fought that and left
+                        // conic live at ~0.1% (MEASURED truck7k-initcap). Densify only grows
+                        // the model; scales stay where the last step put them.
                         var grown = await DensifyAsync(
                             packed, n, rigRadius, densifying, resetOpacity);
                         if (grown != null)
@@ -843,9 +864,8 @@ public partial class Studio
             splats = UnpackSplats(raw, n);
         }
 
-        var priorAdam = await _trainer!.ReadAdamStateAsync(n);
-        var priorSh = await _trainer.ReadShRestAsync(n);
-        var priorShAdam = await _trainer.ReadShAdamStateAsync(n);
+        // Build the plan BEFORE detaching optimizer rows - Decide is CPU-only on the packed
+        // floats (~46 MB at 800k, fine). Adam/SH banks are hundreds of MB and must stay on GPU.
         var grown = SplatDensityControl.Apply(splats, plan, out var adamSurvivors, out var featureSources);
 
         if (resetOpacity)
@@ -862,7 +882,7 @@ public partial class Studio
         if (m <= 0)
         {
             Console.WriteLine($"[{logTag}] plan would remove every splat - ignored");
-            _trainer.ResetDensifyStats();
+            _trainer!.ResetDensifyStats();
             return null;
         }
 
@@ -883,8 +903,6 @@ public partial class Studio
         next.CopyFromCPU(outRaw);
         await accel.SynchronizeAsync();
 
-        // Through the renderer, so the displayed scene and the trained scene stay the same
-        // object. Reading the buffer back out of it afterwards is what keeps that true.
         await _gpuRenderer.UploadSceneFromGpuBuffer(next, m);
         var live = _gpuRenderer.PackedSplatBuffer;
         if (live == null)
@@ -894,9 +912,7 @@ public partial class Studio
         }
         if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = m;
 
-        // Re-size on MEASURED demand, not on the last sizing decision. Densification adds
-        // splats and eats headroom; the peak over the whole window is the evidence.
-        var (w, h) = _trainer.Size;
+        var (w, h) = _trainer!.Size;
         int keys = _trainer.KeysPerSplat;
         if (_trainer.PeakKeyDemand > 0)
         {
@@ -909,19 +925,28 @@ public partial class Studio
                 keys = needed;
             }
         }
-        _trainer.Resize(w, h, m, keys);
-        _trainer.ResetPeakKeyDemand();
 
-        // Reseed derived state from the packed buffer, then put Adam moments back. Init zeroes
-        // them, so the order matters.
-        _trainer.InitOptimizerState(live, m);
-        _trainer.RestoreAdamState(priorAdam, adamSurvivors,
-            zeroSlot: resetOpacity ? SplatFormat.OffOpacity : -1);
-        // SH rest follows featureSources (parent for densified children), not adamSurvivors.
-        _trainer.RestoreShRest(priorSh, featureSources);
-        // SH Adam moments follow adamSurvivors (Kerbl: survivors keep, children start at zero).
-        // InitOptimizerState zeroed them; without this every densify wiped SH momentum.
-        _trainer.RestoreShAdamState(priorShAdam, adamSurvivors);
+        // Steal optimizer rows, Resize, Init, hybrid-remap survivors.
+        // Adam: host RemapFloatRows (GPU Adam remap killed opacity — MEASURED).
+        // SH: GPU RemapFloatRows with CopyToHost fence (full host SH OOM'd at ~780k — growhost).
+        var (priorM, priorV, priorSh, priorShM, priorShV, priorStep) =
+            _trainer.DetachOptimizerRows();
+        try
+        {
+            _trainer.Resize(w, h, m, keys);
+            _trainer.ResetPeakKeyDemand();
+            _trainer.InitOptimizerState(live, m);
+            await accel.SynchronizeAsync();
+            await _trainer.RemapOptimizerRowsHybridAsync(
+                priorM, priorV, priorSh, priorShM, priorShV, n, priorStep,
+                adamSurvivors, featureSources,
+                zeroAdamSlot: resetOpacity ? 3 : -1);
+        }
+        finally
+        {
+            priorM?.Dispose(); priorV?.Dispose();
+            priorSh?.Dispose(); priorShM?.Dispose(); priorShV?.Dispose();
+        }
         _trainer.ResetDensifyStats();
 
         Console.WriteLine($"[{logTag}] {n:N0} -> {m:N0} splats: {plan}");
@@ -1022,9 +1047,6 @@ public partial class Studio
     {
         var st = await _trainer!.ReadGradientStatsAsync(n);
 
-        float centreQuantum = 1f / _trainer!.FixedScaleFor(4);
-        float conicQuantum = 1f / _trainer!.FixedScaleFor(6);
-
         if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)
         {
             // Every splat is counted now, so this is a measurement rather than a shrug. It used
@@ -1042,6 +1064,11 @@ public partial class Studio
             $"colour {st.ColourLive * 100.0 / n:F1}% nonzero, " +
             $"centre {st.CentreLive * 100.0 / n:F1}%, conic {st.ConicLive * 100.0 / n:F1}%");
 
+        var (p10, med, p90) = await _trainer!.ReadScaleHistogramAsync(n);
+        Console.WriteLine(
+            $"[Train] scale hist (linear): p10 {p10:G4}, median {med:G4}, p90 {p90:G4} " +
+            $"(Truck points init median ~0.017)");
+
         // The premise of the stale-momentum question, as a number rather than an inference from
         // the round-robin structure. adam_geometry refuses to step a splat with no gradient;
         // adam_step does not, on the stated judgement that it is "harmless for colour".
@@ -1049,39 +1076,10 @@ public partial class Studio
             $"[Train] {st.StaleColourFraction:P1} of splats will take a colour/opacity Adam step " +
             "on a gradient of exactly zero this iteration");
 
-        double meanCentre = st.MeanCentreQuanta * centreQuantum;
-        double maxConic = st.MaxConicQuanta * conicQuantum;
-        double centreCeiling = int.MaxValue * (double)centreQuantum;
-        double conicCeiling = int.MaxValue * (double)conicQuantum;
+        // True f32 magnitudes: the accumulator is CAS-summed float, nothing to saturate or wrap.
         Console.WriteLine(
-            $"[Train] centre |grad| mean {meanCentre:G3} ({st.MeanCentreQuanta:F0} quanta, " +
-            $"saturates at {centreCeiling:G3}); " +
-            $"conic max {maxConic:G3} ({st.MaxConicQuanta:G3} quanta, " +
-            $"saturates at {conicCeiling:G3})");
-
-        // Fit the scales to what this scene actually produces.
-        //
-        // Watching was not enough. Both scales were consts and on drjohnson they were wrong in
-        // OPPOSITE directions at the same time - the centre gradient carried one quantum of 32
-        // while the conic sat at 96% of the i32 wrap - so a warning alone just reported a
-        // reconstruction that could not work.
-        if (AdaptGradientScales && _trainer.RecalibrateGradientScales(st))
-        {
-            // The scales changed, so the numbers just printed were measured at the old ones.
-            Console.WriteLine(
-                "[Train] the readings above were taken at the previous scales; the next report " +
-                "is the one to compare against.");
-        }
-
-        // The conic gradient grows with a splat's pixel AREA, so it is the one that can run out
-        // of range rather than out of precision - and an i32 atomic wraps silently rather than
-        // clamping, which would read as a wrong gradient, not as an error. Densification will
-        // create larger splats than exist today, so this needs to be watched, not assumed.
-        if (st.MaxConicQuanta > 0.1 * int.MaxValue || st.MaxCentreQuanta > 0.1 * int.MaxValue)
-            Console.WriteLine(
-                "[Train] WARNING: a fixed-point gradient is within 10% of saturating. The atomic " +
-                "WRAPS rather than clamping, so gradients past this point are wrong, not merely " +
-                "coarse. Lower the scale for that slot in SplatTrainerShaders.");
+            $"[Train] centre |grad| mean {st.MeanCentreAbs:G3}, max {st.MaxCentreAbs:G3}; " +
+            $"conic max {st.MaxConicAbs:G3}; colour max {st.MaxColourAbs:G3}");
     }
 
     /// <summary>

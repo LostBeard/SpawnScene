@@ -332,8 +332,13 @@ fn emit_keys(
     if (x1 < x0 || y1 < y0) { return; }
 
     let n = u32((x1 - x0 + 1) * (y1 - y0 + 1));
+    // Always count demand (host reports overflow from counter > capacity), but only WRITE
+    // slots that fit. Returning without a write left holes filled with the PREVIOUS frame's
+    // keys/values; sort then fed stale splat ids into raster - a plausible path to
+    // RASTER_BACKWARD all-zero grads on high-key views (STAGE PROBE: keys live, gradPerKey=0).
     let base = atomicAdd(&counter, n);
-    if (base + n > caps.x) { return; }   // overflow; host sees counter > capacity and reports
+    if (base >= caps.x) { return; }
+    let n_write = min(n, caps.x - base);
 
     // Normalised into the full 18-bit range so distinct depths get distinct keys.
     let span = max(u.depth_far - u.depth_near, 1e-6);
@@ -341,12 +346,15 @@ fn emit_keys(
     let dq = u32(dn * DEPTH_MAX);
 
     var slot = base;
+    var written = 0u;
     for (var ty = y0; ty <= y1; ty = ty + 1) {
         for (var tx = x0; tx <= x1; tx = tx + 1) {
+            if (written >= n_write) { return; }
             let tile = u32(ty) * u.tiles.x + u32(tx);
             keys[slot] = (tile << DEPTH_BITS) | dq;
             values[slot] = i;
             slot = slot + 1u;
+            written = written + 1u;
         }
     }
 }
@@ -520,8 +528,9 @@ fn raster_forward(
 @group(0) @binding(9) var<storage, read_write> grad_c : array<f32>;   // dConic a, b, c
 // Per-pixel |dL/dmean2D| for densify (AbsGS / gsplat absgrad). Signed centre cancels inside
 // the tile reduction below; abs must be reduced separately or densify never clears 2e-4.
-@group(0) @binding(10) var<storage, read_write> densify_abs : array<atomic<i32>>; // 2 per splat: max |dPx|,|dPy|
-@group(0) @binding(11) var<uniform>             densify_scale : vec4<f32>; // w = densify abs fixed-point scale
+// f32 bit patterns in a u32 atomic: for non-negative floats the IEEE bit order IS the numeric
+// order, so atomicMax on the bits is an exact float max. No fixed-point scale, no quantum.
+@group(0) @binding(10) var<storage, read_write> densify_abs : array<atomic<u32>>; // 2 per splat: max |dPx|,|dPy|
 
 // Three tile-wide reductions, plus abs centre. 256*(16+16+4+8)=11 KB against 16 KB min.
 // One pass rather than three sequential ones: the space is affordable and tripling the barrier
@@ -550,7 +559,13 @@ fn raster_backward(
     if (inside) {
         let o = py * u32(u.viewport.x) + px;
         t = final_t[o];
-        my_end = end_idx[o];
+        // Clamp end_idx into this tile's key span. A stale/overflow-corrupted end past
+        // range.y walked off the tile list; an end below range.x made reach never true
+        // (STAGE PROBE: forward+loss live, max|gradPerKey|==0 on a subset of Truck views).
+        // Forcing my_end=range.y fixed dead views (0/95) but cut supervised PSNR ~17→14
+        // (MEASURED truck7k-endidfix) via bad T recovery past the MIN_T early-out - keep the
+        // clamp. Dead views stay in the supervised set (Studio.Training) rather than dropping.
+        my_end = min(max(end_idx[o], range.x), range.y);
         dL = vec3<f32>(dL_dpix[o * 3u + 0u], dL_dpix[o * 3u + 1u], dL_dpix[o * 3u + 2u]);
     }
 
@@ -569,61 +584,57 @@ fn raster_backward(
         var geom_cc = 0.0;
         var abs_c = vec2<f32>(0.0);
 
-        // A thread only participates for splats its own pixel actually reached.
-        //
-        // Bool local, not an inline compound: a compound short-circuit in an if-body has
-        // silently dropped every thread on this project's WebGPU path before
-        // (fb-wgsl-inline-predicate-drops-all). Evaluate, then branch.
-        let participate = inside && (k < my_end);
-        if (participate) {
-            let p = project(values[k]);
-            if (p.valid) {
-                let g = splat_weight(p.conic, p.centre, pixel);
-                if (g > 0.0) {
-                    let raw_alpha = p.opacity * g;
-                    let alpha = min(MAX_ALPHA, raw_alpha);
-                    if (alpha >= MIN_ALPHA) {
-                        // Undo this splat to recover the transmittance it rendered against.
-                        t = t / (1.0 - alpha);
-                        let w = alpha * t;
+        // Gates as BOOL LOCALS, then ONE branch. Nested `if (a) { if (b) { if (c) } }` on this
+        // WebGPU path has dropped every thread with zero GPU errors before
+        // (fb-wgsl-inline-predicate-drops-all; MEASURED Truck: 4-8/95 views forward+loss live,
+        // max|gradPerKey|==0). A compound short-circuit inline is the same trap.
+        let reach = inside && (k < my_end);
+        let p = project(values[k]);
+        let g = select(0.0, splat_weight(p.conic, p.centre, pixel), reach && p.valid);
+        let raw_alpha = p.opacity * g;
+        let alpha = min(MAX_ALPHA, raw_alpha);
+        let hit = reach && p.valid && (g > 0.0) && (alpha >= MIN_ALPHA);
+        if (hit) {
+            // Undo this splat to recover the transmittance it rendered against.
+            // Floor the divisor so a 1-ulp disagreement at the MAX_ALPHA edge
+            // cannot Inf and wipe the rest of the reverse recurrence. Cap the
+            // recovered T so a long saturated reverse walk cannot NaN the tile.
+            t = clamp(t / max(1.0 - alpha, 1e-4), 0.0, 1e4);
+            let w = alpha * t;
 
-                        contrib = vec4<f32>(w * dL.x, w * dL.y, w * dL.z, 0.0);
+            contrib = vec4<f32>(w * dL.x, w * dL.y, w * dL.z, 0.0);
 
-                        let dL_dalpha =
-                            (p.colour.x - rec.x) * t * dL.x +
-                            (p.colour.y - rec.y) * t * dL.y +
-                            (p.colour.z - rec.z) * t * dL.z;
+            let dL_dalpha =
+                (p.colour.x - rec.x) * t * dL.x +
+                (p.colour.y - rec.y) * t * dL.y +
+                (p.colour.z - rec.z) * t * dL.z;
 
-                        // A CLAMPED alpha is constant in opacity, so its derivative is zero.
-                        // Dropping this guard produces a phantom gradient that drives opacity
-                        // up without bound.
-                        if (raw_alpha < MAX_ALPHA) {
-                            contrib.w = g * dL_dalpha;
+            // A CLAMPED alpha is constant in opacity, so its derivative is zero.
+            // Dropping this guard produces a phantom gradient that drives opacity
+            // up without bound. select(), not a nested if - same WebGPU trap as above.
+            let soft = raw_alpha < MAX_ALPHA;
+            contrib.w = select(0.0, g * dL_dalpha, soft);
 
-                            // Geometry, at the 2D level. The chain on to position, scale and
-                            // rotation is linear in these and depends only on the splat and the
-                            // view, so it runs ONCE PER SPLAT after the scatter - not per pixel.
-                            // Mirrors SplatRasterizer.Backward, which is finite-difference
-                            // verified, and SplatTileRasterizer.Backward, which the GPU gate
-                            // compares against.
-                            let d = pixel - p.centre;
-                            let dL_dpower = p.opacity * dL_dalpha * g;
-                            let dCx = dL_dpower * (p.conic.x * d.x + p.conic.y * d.y);
-                            let dCy = dL_dpower * (p.conic.z * d.y + p.conic.y * d.x);
-                            geom = vec4<f32>(
-                                dCx,
-                                dCy,
-                                dL_dpower * (-0.5 * d.x * d.x),
-                                dL_dpower * (-d.x * d.y));
-                            geom_cc = dL_dpower * (-0.5 * d.y * d.y);
-                            // AbsGS: take abs PER PIXEL before the tile sum. |sum| cancels.
-                            abs_c = vec2<f32>(abs(dCx), abs(dCy));
-                        }
+            // Geometry, at the 2D level. The chain on to position, scale and
+            // rotation is linear in these and depends only on the splat and the
+            // view, so it runs ONCE PER SPLAT after the scatter - not per pixel.
+            // Mirrors SplatRasterizer.Backward, which is finite-difference
+            // verified, and SplatTileRasterizer.Backward, which the GPU gate
+            // compares against.
+            let d = pixel - p.centre;
+            let dL_dpower = select(0.0, p.opacity * dL_dalpha * g, soft);
+            let dCx = dL_dpower * (p.conic.x * d.x + p.conic.y * d.y);
+            let dCy = dL_dpower * (p.conic.z * d.y + p.conic.y * d.x);
+            geom = vec4<f32>(
+                dCx,
+                dCy,
+                dL_dpower * (-0.5 * d.x * d.x),
+                dL_dpower * (-d.x * d.y));
+            geom_cc = dL_dpower * (-0.5 * d.y * d.y);
+            // AbsGS: take abs PER PIXEL before the tile sum. |sum| cancels.
+            abs_c = vec2<f32>(abs(dCx), abs(dCy));
 
-                        rec = alpha * p.colour + (1.0 - alpha) * rec;
-                    }
-                }
-            }
+            rec = alpha * p.colour + (1.0 - alpha) * rec;
         }
 
         // Reduce this contribution across the tile's 256 pixels.
@@ -660,15 +671,15 @@ fn raster_backward(
             grad_c[b3 + 1u] = redB[0].w;
             grad_c[b3 + 2u] = redC[0];
 
-            // Peak per-pixel |dCentre| into densify_abs (fixed-point). densify_scale.w is
-            // DensifyAbsScale - NOT centre Adam scale (retargets to 2^40 and overflows).
+            // Peak per-pixel |dCentre| into densify_abs as exact f32 bits. The fixed-point
+            // version at 2^20 put densifygrad=1e-6 at ONE quantum, so the densify decision was
+            // made on a value rounded to 0 or 1.
             let splat = values[k];
-            let sx = densify_scale.w;
             if (redAbs[0].x != 0.0) {
-                atomicMax(&densify_abs[splat * 2u], i32(round(redAbs[0].x * sx)));
+                atomicMax(&densify_abs[splat * 2u], bitcast<u32>(redAbs[0].x));
             }
             if (redAbs[0].y != 0.0) {
-                atomicMax(&densify_abs[splat * 2u + 1u], i32(round(redAbs[0].y * sx)));
+                atomicMax(&densify_abs[splat * 2u + 1u], bitcast<u32>(redAbs[0].y));
             }
         }
         workgroupBarrier();
@@ -680,21 +691,42 @@ fn raster_backward(
     /// Pass 6: fold per-(tile, splat) gradients into per-splat totals.
     ///
     /// This is the only place atomics are needed, and the traffic is one add per KEY rather
-    /// than one per (pixel, splat) - smaller by roughly the pixel count of a tile. Floats go
-    /// through fixed point because WebGPU only offers integer atomics.
+    /// than one per (pixel, splat) - smaller by roughly the pixel count of a tile.
+    ///
+    /// The accumulator holds IEEE f32 bit patterns and is summed with a compare-exchange loop.
+    /// WebGPU has no float atomicAdd, and the fixed-point substitute that used to live here was
+    /// the root cause of the soft Truck reconstructions: with one i32 scale per slot, either the
+    /// conic wrapped (wrong sign), rounded to zero (no scale/rotation learning), or was hard
+    /// clamped per key at +-1e5 quanta (MEASURED 2026-09-22: p50 of conic keys sat AT the
+    /// clamp). The clamp is not a uniform attenuation Adam can undo - it turns each of the three
+    /// conic components into a sign count, and adam_geometry then chains a distorted a:b:c ratio
+    /// into scale and rotation. Twelve 2K gates in one day were spent fitting that scale.
+    /// Float accumulation has no scale to fit and nothing to wrap.
     /// </summary>
     public const string ScatterGradients = @"
 @group(0) @binding(0) var<storage, read>       grad_a     : array<f32>;   // dR, dG, dB
 @group(0) @binding(1) var<storage, read>       grad_b     : array<f32>;   // dOpacity, dCentre.xy
 @group(0) @binding(2) var<storage, read>       grad_c     : array<f32>;   // dConic a, b, c
 @group(0) @binding(3) var<storage, read>       values     : array<u32>;
-@group(0) @binding(4) var<storage, read_write> grad_fixed : array<atomic<i32>>;
+@group(0) @binding(4) var<storage, read_write> grad_fixed : array<atomic<u32>>; // f32 bits, 9 per splat
 @group(0) @binding(5) var<uniform>             counts     : vec4<u32>;   // x = key count
-@group(0) @binding(6) var<uniform>             grad_scale : vec4<f32>;  // x=colour/opacity 0..3, y=centre 4..5, z=conic 6..8
 
-// Gradients here are sums over a tile's pixels of quantities around 1e-4..1e-1. 2^20 keeps
-// ~6 decimal digits while leaving headroom before a 32-bit overflow.
 const GRADS_PER_SPLAT : u32 = 9u;
+// abs(v) <= FINITE_MAX is false for NaN (unordered) and for +-Inf.
+const FINITE_MAX : f32 = 3.0e38;
+
+// Float atomic add emulated on the u32 bit pattern. The loop retries only when another key
+// landed on the same splat slot between the load and the exchange; a splat is touched by tens
+// to hundreds of keys, spread over the whole dispatch, so contention is short-lived.
+fn atomic_add_f32(idx : u32, v : f32) {
+    var old = atomicLoad(&grad_fixed[idx]);
+    loop {
+        let nw = bitcast<u32>(bitcast<f32>(old) + v);
+        let r = atomicCompareExchangeWeak(&grad_fixed[idx], old, nw);
+        if (r.exchanged) { break; }
+        old = r.old_value;
+    }
+}
 
 // 2D workgroup grid - see the note on tile_ranges.
 @compute @workgroup_size(64)
@@ -712,19 +744,19 @@ fn scatter_gradients(
 
     // Densify absgrad is accumulated in raster_backward (per-pixel |dCentre|), not here:
     // |sum over tile| still cancels opposing pixels inside one key.
+    // Zero keys are skipped so they cost no CAS traffic; most keys carry some gradient.
+    // Non-finite keys are skipped too: one NaN would otherwise poison the splat's total for
+    // this step (the i32 path dropped them by accident at i32(round(NaN))). The stage probe
+    // counts NaN keys so this cannot hide a NaN source.
     for (var c = 0u; c < 3u; c = c + 1u) {
         let va = grad_a[b3 + c];
-        if (va != 0.0) { atomicAdd(&grad_fixed[out + c], i32(round(va * grad_scale.x))); }
+        if (va != 0.0 && abs(va) <= FINITE_MAX) { atomic_add_f32(out + c, va); }
 
         let vb = grad_b[b3 + c];
-        // Slot 3 is opacity and shares the colour scale; slots 4 and 5 are the screen centre and
-        // do not - the centre is orders of magnitude smaller, which is the whole reason these
-        // are separate now.
-        let sb = select(grad_scale.y, grad_scale.x, c == 0u);
-        if (vb != 0.0) { atomicAdd(&grad_fixed[out + 3u + c], i32(round(vb * sb))); }
+        if (vb != 0.0 && abs(vb) <= FINITE_MAX) { atomic_add_f32(out + 3u + c, vb); }
 
         let vc = grad_c[b3 + c];
-        if (vc != 0.0) { atomicAdd(&grad_fixed[out + 6u + c], i32(round(vc * grad_scale.z))); }
+        if (vc != 0.0 && abs(vc) <= FINITE_MAX) { atomic_add_f32(out + 6u + c, vc); }
     }
 }
 ";
@@ -777,17 +809,16 @@ fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
     /// so the incoming gradient is chained by d(sigmoid)/d(logit) = a(1-a). Bias correction is
     /// included; without it the first steps are tiny and read as a wrong learning rate.
     ///
-    /// Gradients arrive as fixed-point integers from the scatter pass and are dequantised here.
+    /// Gradients arrive from the scatter pass as f32 bit patterns in a u32 buffer.
     /// </summary>
     public const string AdamStep = @"
 @group(0) @binding(0) var<storage, read_write> splats     : array<f32>;       // 14 per splat
-@group(0) @binding(1) var<storage, read>       grad_fixed : array<i32>;       // 9 per splat
+@group(0) @binding(1) var<storage, read>       grad_fixed : array<u32>;       // f32 bits, 9 per splat
 @group(0) @binding(2) var<storage, read_write> opacity_logit : array<f32>;    // 1 per splat
 @group(0) @binding(3) var<storage, read_write> adam_m     : array<f32>;       // 14 per splat
 @group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 14 per splat
 @group(0) @binding(5) var<uniform>             cfg        : vec4<f32>;        // x=colourLr y=opacityLr z=step w=splatCount
 @group(0) @binding(6) var<uniform>             flags      : vec4<f32>;        // x=skip zero-gradient splats
-@group(0) @binding(7) var<uniform>             grad_scale : vec4<f32>;        // x=colour/opacity 0..3
 
 const FLOATS_PER_SPLAT : u32 = 14u;
 const GRADS_PER_SPLAT : u32 = 9u;
@@ -828,12 +859,12 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
         let gz1 = grad_fixed[i * GRADS_PER_SPLAT + 1u];
         let gz2 = grad_fixed[i * GRADS_PER_SPLAT + 2u];
         let gz3 = grad_fixed[i * GRADS_PER_SPLAT + 3u];
-        if (gz0 == 0 && gz1 == 0 && gz2 == 0 && gz3 == 0) { return; }
+        if (gz0 == 0u && gz1 == 0u && gz2 == 0u && gz3 == 0u) { return; }
     }
 
     // SH DC: raster backward is w.r.t. displayed RGB; dc parameter is rgb = SH_C0*dc + sh_rest(...) + 0.5.
     for (var c = 0u; c < 3u; c = c + 1u) {
-        let g = f32(grad_fixed[i * GRADS_PER_SPLAT + c]) / grad_scale.x * SH_C0;
+        let g = bitcast<f32>(grad_fixed[i * GRADS_PER_SPLAT + c]) * SH_C0;
         var m = adam_m[i * ADAM_SLOTS + c];
         var v = adam_v[i * ADAM_SLOTS + c];
         let updated = adam(splats[o + 3u + c], g, cfg.x, step, &m, &v);
@@ -844,7 +875,7 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     // Opacity, optimised in logit space.
     let a = splats[o + 9u];
-    let g_op = f32(grad_fixed[i * GRADS_PER_SPLAT + 3u]) / grad_scale.x;
+    let g_op = bitcast<f32>(grad_fixed[i * GRADS_PER_SPLAT + 3u]);
     let g_logit = g_op * a * (1.0 - a);
     var m3 = adam_m[i * ADAM_SLOTS + 3u];
     var v3 = adam_v[i * ADAM_SLOTS + 3u];
@@ -925,7 +956,7 @@ fn eval_sse(
     /// which is a foot-gun; the read side says so too.
     /// </summary>
     public const string GradStats = @"
-@group(0) @binding(0) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(0) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
 @group(0) @binding(1) var<storage, read_write> partials   : array<f32>;   // 7 per workgroup
 @group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x = splat count
 
@@ -952,20 +983,18 @@ fn grad_stats(
     for (var i = gid.x; i < dims.x; i = i + THREADS) {
         let b = i * GRADS_PER_SPLAT;
 
-        // Slots 0..3 are colour and opacity. Their magnitude matters as much as their presence:
-        // they share a scale with the screen centre, and fitting that scale to the CENTRE alone
-        // put colour past the i32 wrap - measured, by doing exactly that.
-        let col = f32(max(max(abs(grad_fixed[b]), abs(grad_fixed[b + 1u])),
-                      max(abs(grad_fixed[b + 2u]), abs(grad_fixed[b + 3u]))));
+        // Magnitudes are the true float gradients now - no quanta, no ceiling to watch.
+        let col = max(max(abs(bitcast<f32>(grad_fixed[b])), abs(bitcast<f32>(grad_fixed[b + 1u]))),
+                      max(abs(bitcast<f32>(grad_fixed[b + 2u])), abs(bitcast<f32>(grad_fixed[b + 3u]))));
         if (col > 0.0) { colourLive = colourLive + 1.0; }
         maxColour = max(maxColour, col);
 
-        let cen = f32(max(abs(grad_fixed[b + 4u]), abs(grad_fixed[b + 5u])));
+        let cen = max(abs(bitcast<f32>(grad_fixed[b + 4u])), abs(bitcast<f32>(grad_fixed[b + 5u])));
         if (cen > 0.0) { centreLive = centreLive + 1.0; sumCentre = sumCentre + cen; }
         maxCentre = max(maxCentre, cen);
 
-        let con = f32(max(abs(grad_fixed[b + 6u]),
-                      max(abs(grad_fixed[b + 7u]), abs(grad_fixed[b + 8u]))));
+        let con = max(abs(bitcast<f32>(grad_fixed[b + 6u])),
+                      max(abs(bitcast<f32>(grad_fixed[b + 7u])), abs(bitcast<f32>(grad_fixed[b + 8u]))));
         if (con > 0.0) { conicLive = conicLive + 1.0; }
         maxConic = max(maxConic, con);
     }
@@ -1046,28 +1075,57 @@ fn max_magnitude(
 ";
 
     /// <summary>
+    /// Gather up to N strided floats for host percentile Fit. Avoids copying multi-million
+    /// grad_c buffers every TrainStep (RetargetScalesFromFloatGradsAsync).
+    /// dims: x = sample count, y = stride, z = source element count.
+    /// </summary>
+    public const string SampleStride = @"
+@group(0) @binding(0) var<storage, read>       src    : array<f32>;
+@group(0) @binding(1) var<storage, read_write> out_s  : array<f32>;
+@group(0) @binding(2) var<uniform>             dims   : vec4<u32>;
+
+@compute @workgroup_size(256)
+fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= dims.x) { return; }
+    let idx = i * dims.y;
+    out_s[i] = select(0.0, src[idx], idx < dims.z);
+}
+";
+
+    /// <summary>
     /// Accumulate AbsGS densify signal: peak per-pixel |dL/dPx|, |dL/dPy| from raster_backward
     /// (max across tiles/pixels, not sum - sum made only large footprints clear the bar).
     /// Pixel units; start at Kerbl's 2e-4 and retune from the densify signal log.
     /// </summary>
     public const string DensifyAccum = @"
-@group(0) @binding(0) var<storage, read>       densify_abs : array<i32>;  // 2 per splat max |dPx|,|dPy|
+@group(0) @binding(0) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
 @group(0) @binding(1) var<storage, read_write> accum      : array<f32>;   // 2 per splat
-@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count
-@group(0) @binding(3) var<uniform>             grad_scale : vec4<f32>;    // w = densify abs scale
+@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count y=width z=height
+
+const GRADS_PER_SPLAT : u32 = 9u;
 
 @compute @workgroup_size(256)
 fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
     let i = gid.x;
     if (i >= dims.x) { return; }
 
-    // Peak |dL/dmean2D| over pixels this view (fixed-point at DensifyAbsScale in .w).
-    let ax = densify_abs[i * 2u];
-    let ay = densify_abs[i * 2u + 1u];
-    if (ax == 0 && ay == 0) { return; }
+    // The reference criterion (Kerbl train.py add_densification_stats): the norm of this
+    // view's dL/dmean2D, which is the SIGNED sum over every pixel the splat touched - exactly
+    // what scatter_gradients has just accumulated into slots 4 and 5. The reference backward
+    // scales that gradient by 0.5*W and 0.5*H (ddelx_dx / ddely_dy in backward.cu) before the
+    // atomicAdd, so the published 2e-4 bar is in NDC units; do the same here.
+    //
+    // The peak-per-pixel |dCentre| alternative that used to feed this pass was a workaround for
+    // fixed-point centre gradients that rounded to zero or saturated. With exact f32 sums the
+    // reference quantity is available directly.
+    let b = i * GRADS_PER_SPLAT;
+    let px = bitcast<f32>(grad_fixed[b + 4u]);
+    let py = bitcast<f32>(grad_fixed[b + 5u]);
+    if (px == 0.0 && py == 0.0) { return; }
 
-    let gx = f32(ax) / grad_scale.w;
-    let gy = f32(ay) / grad_scale.w;
+    let gx = px * 0.5 * f32(dims.y);
+    let gy = py * 0.5 * f32(dims.z);
 
     accum[i * 2u] = accum[i * 2u] + sqrt(gx * gx + gy * gy);
     accum[i * 2u + 1u] = accum[i * 2u + 1u] + 1.0;
@@ -1090,7 +1148,7 @@ fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
     /// means the splat did not affect that view's render; anything else means it did.
     /// </summary>
     public const string AccumulateSupport = @"
-@group(0) @binding(0) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(0) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
 @group(0) @binding(1) var<storage, read_write> support    : array<u32>;   // 1 per splat
 @group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x = splat count
 
@@ -1104,7 +1162,7 @@ fn accumulate_support(@builtin(global_invocation_id) gid : vec3<u32>) {
     let b = i * GRADS_PER_SPLAT;
     var live = false;
     for (var c = 0u; c < GRADS_PER_SPLAT; c = c + 1u) {
-        if (grad_fixed[b + c] != 0) { live = true; }
+        if (grad_fixed[b + c] != 0u) { live = true; }
     }
 
     // One increment per CALL, and the caller calls once per view, so this counts views rather
@@ -1653,7 +1711,7 @@ fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>) {
     /// </summary>
     public const string GeometryAdam = UniformsBlock + @"
 @group(0) @binding(1) var<storage, read_write> splats     : array<f32>;   // 14 per splat
-@group(0) @binding(2) var<storage, read>       grad_fixed : array<i32>;   // 9 per splat
+@group(0) @binding(2) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
 @group(0) @binding(3) var<storage, read_write> log_scale  : array<f32>;   // 3 per splat
 @group(0) @binding(4) var<storage, read_write> adam_m     : array<f32>;   // 14 per splat
 @group(0) @binding(5) var<storage, read_write> adam_v     : array<f32>;   // 14 per splat
@@ -1667,7 +1725,6 @@ struct GeomCfg {
 // The GPU gate compares these against SplatGeometryGradients.Backward, and density control
 // will read the screen-space position gradient that feeds them.
 @group(0) @binding(7) var<storage, read_write> geom_out : array<f32>;
-@group(0) @binding(8) var<uniform> grad_scale : vec4<f32>;   // y=centre 4..5, z=conic 6..8
 
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
@@ -1688,11 +1745,11 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (i >= u32(g.limit.x)) { return; }
 
     let gb = i * GRADS_PER_SPLAT;
-    let up_cx = f32(grad_fixed[gb + 4u]) / grad_scale.y;
-    let up_cy = f32(grad_fixed[gb + 5u]) / grad_scale.y;
-    let up_ca = f32(grad_fixed[gb + 6u]) / grad_scale.z;
-    let up_cb = f32(grad_fixed[gb + 7u]) / grad_scale.z;
-    let up_cc = f32(grad_fixed[gb + 8u]) / grad_scale.z;
+    let up_cx = bitcast<f32>(grad_fixed[gb + 4u]);
+    let up_cy = bitcast<f32>(grad_fixed[gb + 5u]);
+    let up_ca = bitcast<f32>(grad_fixed[gb + 6u]);
+    let up_cb = bitcast<f32>(grad_fixed[gb + 7u]);
+    let up_cc = bitcast<f32>(grad_fixed[gb + 8u]);
 
     // A splat this view never touched has no gradient. Taking a step anyway would let stale
     // momentum drag geometry that nothing is currently constraining - harmless for colour,
@@ -1893,9 +1950,11 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     // UniformsBlock already declares FLOATS_PER_SPLAT / GRADS_PER_SPLAT; do not redeclare.
     public const string ScatterShGrad = UniformsBlock + @"
 @group(0) @binding(1) var<storage, read>       splats     : array<f32>;
-@group(0) @binding(2) var<storage, read>       grad_fixed : array<i32>;
-@group(0) @binding(3) var<storage, read_write> grad_sh    : array<atomic<i32>>;
-@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=colour scale, w=splat count
+@group(0) @binding(2) var<storage, read>       grad_fixed : array<u32>;   // f32 bits
+// Plain f32, no atomics: one thread owns one splat's 45 slots. The i32 fixed-point version
+// quantised at the colour scale for no reason - nothing else ever adds into this buffer.
+@group(0) @binding(3) var<storage, read_write> grad_sh    : array<f32>;
+@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // w=splat count
 
 const SH_REST_FLOATS : u32 = 45u;
 
@@ -1912,12 +1971,11 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
     let y = dir.y;
     let z = dir.z;
 
-    var gr = vec3<f32>(
-        f32(grad_fixed[i * GRADS_PER_SPLAT + 0u]),
-        f32(grad_fixed[i * GRADS_PER_SPLAT + 1u]),
-        f32(grad_fixed[i * GRADS_PER_SPLAT + 2u]));
+    let gr = vec3<f32>(
+        bitcast<f32>(grad_fixed[i * GRADS_PER_SPLAT + 0u]),
+        bitcast<f32>(grad_fixed[i * GRADS_PER_SPLAT + 1u]),
+        bitcast<f32>(grad_fixed[i * GRADS_PER_SPLAT + 2u]));
     if (gr.x == 0.0 && gr.y == 0.0 && gr.z == 0.0) { return; }
-    gr = gr / cfg.x; // dequantize fixed-point colour grads
 
     let out = i * SH_REST_FLOATS;
 
@@ -1928,9 +1986,9 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
         for (var c = 0u; c < 3u; c = c + 1u) {
             let gc = gr[c];
             if (gc != 0.0) {
-                atomicAdd(&grad_sh[out + 0u + c], i32(round(gc * b1 * cfg.x)));
-                atomicAdd(&grad_sh[out + 3u + c], i32(round(gc * b2 * cfg.x)));
-                atomicAdd(&grad_sh[out + 6u + c], i32(round(gc * b3 * cfg.x)));
+                grad_sh[out + 0u + c] = gc * b1;
+                grad_sh[out + 3u + c] = gc * b2;
+                grad_sh[out + 6u + c] = gc * b3;
             }
         }
     }
@@ -1952,7 +2010,7 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
             for (var c = 0u; c < 3u; c = c + 1u) {
                 let gc = gr[c];
                 if (gc != 0.0) {
-                    atomicAdd(&grad_sh[out + 9u + k * 3u + c], i32(round(gc * bk * cfg.x)));
+                    grad_sh[out + 9u + k * 3u + c] = gc * bk;
                 }
             }
         }
@@ -1977,7 +2035,7 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
             for (var c = 0u; c < 3u; c = c + 1u) {
                 let gc = gr[c];
                 if (gc != 0.0) {
-                    atomicAdd(&grad_sh[out + 24u + k * 3u + c], i32(round(gc * bk * cfg.x)));
+                    grad_sh[out + 24u + k * 3u + c] = gc * bk;
                 }
             }
         }
@@ -1987,10 +2045,10 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     public const string AdamShRest = @"
 @group(0) @binding(0) var<storage, read_write> sh_rest    : array<f32>;
-@group(0) @binding(1) var<storage, read>       grad_sh    : array<i32>;
+@group(0) @binding(1) var<storage, read>       grad_sh    : array<f32>;
 @group(0) @binding(2) var<storage, read_write> adam_m     : array<f32>;
 @group(0) @binding(3) var<storage, read_write> adam_v     : array<f32>;
-@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=lr y=scale z=step w=count
+@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=lr z=step w=count
 
 const SH_REST_FLOATS : u32 = 45u;
 const BETA1 : f32 = 0.9;
@@ -2011,16 +2069,46 @@ fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
     if (i >= u32(cfg.w)) { return; }
     let step = cfg.z;
     let lr = cfg.x;
-    let scale = cfg.y;
     let base = i * SH_REST_FLOATS;
     for (var j = 0u; j < SH_REST_FLOATS; j = j + 1u) {
-        let g = f32(grad_sh[base + j]) / scale;
+        let g = grad_sh[base + j];
         if (g == 0.0) { continue; }
         var m = adam_m[base + j];
         var v = adam_v[base + j];
         sh_rest[base + j] = adam(sh_rest[base + j], g, lr, step, &m, &v);
         adam_m[base + j] = m;
         adam_v[base + j] = v;
+    }
+}
+";
+
+    /// <summary>
+    /// Densify remap: copy float rows from prior[src] into next[i], or leave zeros when
+    /// sources[i] &lt; 0. Used for Adam moments and SH rest so densify never CopyToHost the
+    /// whole moment bank (MEASURED OOM at 831k splats on WASM via ReadAdamStateAsync).
+    /// </summary>
+    public const string RemapFloatRows = @"
+@group(0) @binding(0) var<storage, read>       prior   : array<f32>;
+@group(0) @binding(1) var<storage, read_write> next    : array<f32>;
+@group(0) @binding(2) var<storage, read>       sources : array<i32>;
+@group(0) @binding(3) var<uniform>             cfg     : vec4<u32>; // x=newCount y=stride z=oldCount w=zeroSlotOr!0
+
+@compute @workgroup_size(64)
+fn remap_float_rows(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= cfg.x) { return; }
+    let src = sources[i];
+    let stride = cfg.y;
+    let dst = i * stride;
+    if (src >= 0 && u32(src) < cfg.z) {
+        let s = u32(src) * stride;
+        for (var j = 0u; j < stride; j = j + 1u) {
+            next[dst + j] = prior[s + j];
+        }
+    }
+    // Optional: zero one slot after copy (opacity-reset kills opacity momentum).
+    if (cfg.w < stride) {
+        next[dst + cfg.w] = 0.0;
     }
 }
 ";

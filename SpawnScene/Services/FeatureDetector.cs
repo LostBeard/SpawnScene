@@ -47,8 +47,12 @@ public class FeatureDetector
         if (suppressed.Count > _maxFeatures)
             suppressed = suppressed.GetRange(0, _maxFeatures);
 
-        // Step 4: Compute BRIEF descriptors
-        ComputeDescriptors(suppressed, gray, width, height);
+        // Step 4: Compute BRIEF descriptors - on a SMOOTHED image. BRIEF's binary tests compare single
+        // pixels, so without smoothing sensor noise flips bits: the reference (Calonder et al.) smooths
+        // with a Gaussian first. Unsmoothed, true correspondences sat ~59 of 256 bits apart, at the
+        // matcher's 64-bit cutoff, and a neighbouring view matched no better than an unrelated one.
+        var smooth = GaussianBlur(gray, width, height);
+        ComputeDescriptors(suppressed, smooth, width, height);
 
         return suppressed;
     }
@@ -80,7 +84,12 @@ public class FeatureDetector
                 int brightCount = (p0 > ct ? 1 : 0) + (p4 > ct ? 1 : 0) + (p8 > ct ? 1 : 0) + (p12 > ct ? 1 : 0);
                 int darkCount = (p0 < cd ? 1 : 0) + (p4 < cd ? 1 : 0) + (p8 < cd ? 1 : 0) + (p12 < cd ? 1 : 0);
 
-                if (brightCount < 3 && darkCount < 3) continue;
+                // FAST-9: any 9 contiguous pixels of the 16 contain at least TWO of the four compass
+                // points (they sit 4 apart), so 2-of-4 is the correct quick reject. This used to be
+                // 3-of-4, the FAST-12 test, which rejects every convex 90-degree corner (exactly two
+                // compass points fall outside it) - door, frame and window corners never survived, and
+                // DrJohnson's pair matches were noise (adjacent frames matched no better than distant).
+                if (brightCount < 2 && darkCount < 2) continue;
 
                 // Full check: need 9 contiguous pixels
                 int score = ComputeCornerScore(gray, width, x, y, threshold);
@@ -184,6 +193,41 @@ public class FeatureDetector
     }
 
     /// <summary>
+    /// Separable Gaussian, sigma 2, 9 taps, clamped borders - the BRIEF paper's pre-smoothing.
+    /// </summary>
+    private static byte[] GaussianBlur(byte[] gray, int width, int height)
+    {
+        const int r = 4;
+        Span<float> k = stackalloc float[2 * r + 1];
+        float sum = 0;
+        for (int i = -r; i <= r; i++) { k[i + r] = MathF.Exp(-(i * i) / (2f * 2f * 2f)); sum += k[i + r]; }
+        for (int i = 0; i < k.Length; i++) k[i] /= sum;
+
+        var tmp = new float[width * height];
+        for (int y = 0; y < height; y++)
+        {
+            int row = y * width;
+            for (int x = 0; x < width; x++)
+            {
+                float acc = 0;
+                for (int i = -r; i <= r; i++)
+                    acc += k[i + r] * gray[row + Math.Clamp(x + i, 0, width - 1)];
+                tmp[row + x] = acc;
+            }
+        }
+        var outp = new byte[width * height];
+        for (int y = 0; y < height; y++)
+            for (int x = 0; x < width; x++)
+            {
+                float acc = 0;
+                for (int i = -r; i <= r; i++)
+                    acc += k[i + r] * tmp[Math.Clamp(y + i, 0, height - 1) * width + x];
+                outp[y * width + x] = (byte)Math.Clamp(MathF.Round(acc), 0, 255);
+            }
+        return outp;
+    }
+
+    /// <summary>
     /// Compute BRIEF-like binary descriptors for each feature.
     /// </summary>
     private void ComputeDescriptors(List<ImageFeature> features, byte[] gray, int width, int height)
@@ -227,7 +271,12 @@ public class FeatureDetector
     {
         var rng = new Random(seed);
         var pairs = new (int, int, int, int)[count];
-        int patchRadius = 12;
+        // Test offsets ~ isotropic Gaussian with sigma = S/5 over an S=31 patch (BRIEF's G II, as ORB uses),
+        // clamped to the 15 px radius ComputeDescriptors keeps clear of the border. This was sigma
+        // 12/5 = 2.4 px - the RADIUS where the paper means the patch SIZE - so every test looked at a
+        // 5x5 neighbourhood and the descriptor carried almost no structure.
+        const int patchSize = 31;
+        int patchRadius = patchSize / 2;
 
         for (int i = 0; i < count; i++)
         {
@@ -242,10 +291,10 @@ public class FeatureDetector
             double r3 = Math.Sqrt(-2 * Math.Log(Math.Max(u1, 1e-10))) * Math.Cos(2 * Math.PI * u2);
             double r4 = Math.Sqrt(-2 * Math.Log(Math.Max(u1, 1e-10))) * Math.Sin(2 * Math.PI * u2);
 
-            int dx1 = Math.Clamp((int)(r1 * patchRadius / 5), -patchRadius, patchRadius);
-            int dy1 = Math.Clamp((int)(r2 * patchRadius / 5), -patchRadius, patchRadius);
-            int dx2 = Math.Clamp((int)(r3 * patchRadius / 5), -patchRadius, patchRadius);
-            int dy2 = Math.Clamp((int)(r4 * patchRadius / 5), -patchRadius, patchRadius);
+            int dx1 = Math.Clamp((int)Math.Round(r1 * patchSize / 5.0), -patchRadius, patchRadius);
+            int dy1 = Math.Clamp((int)Math.Round(r2 * patchSize / 5.0), -patchRadius, patchRadius);
+            int dx2 = Math.Clamp((int)Math.Round(r3 * patchSize / 5.0), -patchRadius, patchRadius);
+            int dy2 = Math.Clamp((int)Math.Round(r4 * patchSize / 5.0), -patchRadius, patchRadius);
 
             pairs[i] = (dx1, dy1, dx2, dy2);
         }

@@ -230,7 +230,7 @@ public partial class Studio
 
         // SetPose writes Forward/Up exactly - a dataset pose is generally rolled, which a
         // yaw/pitch-only camera cannot represent.
-        _cameraController?.SetPose(gt.Position, gt.Forward, gt.Up);
+        _cameraController?.SetPose(gt.Position, gt.Forward, gt.Up, exact: true);
 
         // The sorted path runs its radix sort asynchronously and self-throttles to ~50ms, so the
         // first frames after a camera jump are drawn against a stale ordering.

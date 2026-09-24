@@ -127,4 +127,38 @@ public class CameraControllerTests
         Assert.That(Vector3.Dot(scene.Camera.Forward, toSubject), Is.GreaterThan(0.7f),
             "the camera must face what the photographs faced, not a constant from another dataset");
     }
+
+    /// <summary>
+    /// Parking at a PHOTO's pose must reproduce it exactly, roll included - the viewer render is compared
+    /// with that photo. MEASURED on Truck: with roll always dropped, renders at training poses sat 2-8 px off
+    /// their photos and 4.7-5.6 dB below the trainer's score for the same view.
+    /// </summary>
+    [Test]
+    public void ExactPose_KeepsItsRoll_ThroughAnInputThatDoesNotMoveTheView()
+    {
+        var (cam, scene) = Fresh();
+        var forward = Vector3.Normalize(new Vector3(0.3f, -0.12f, -0.94f));
+        var level = Vector3.Normalize(Vector3.Cross(Vector3.Cross(forward, Vector3.UnitY), forward));
+        var rolled = Vector3.Normalize(Vector3.Transform(level, Quaternion.CreateFromAxisAngle(forward, 4f * MathF.PI / 180f)));
+
+        cam.SetPose(new Vector3(0, 0, 0), forward, rolled, exact: true);
+        Assert.That(Vector3.Dot(scene.Camera.Up, rolled), Is.EqualTo(1f).Within(1e-5f), "exact pose must keep its 4 deg roll");
+        Assert.That(Vector3.Dot(scene.Camera.Forward, forward), Is.EqualTo(1f).Within(1e-5f));
+
+        cam.OnMouseMove(0, 0, isPointerLocked: true);
+        Assert.That(Vector3.Dot(scene.Camera.Up, rolled), Is.EqualTo(1f).Within(1e-5f), "a zero input must not drop it");
+    }
+
+    [Test]
+    public void ExactPose_HandsOverToLevelControl_WhenTheUserTurns()
+    {
+        var (cam, scene) = Fresh();
+        var forward = Vector3.Normalize(new Vector3(0.3f, -0.12f, -0.94f));
+        var level = Vector3.Normalize(Vector3.Cross(Vector3.Cross(forward, Vector3.UnitY), forward));
+        var rolled = Vector3.Normalize(Vector3.Transform(level, Quaternion.CreateFromAxisAngle(forward, 4f * MathF.PI / 180f)));
+        cam.SetPose(new Vector3(0, 0, 0), forward, rolled, exact: true);
+
+        cam.OnMouseMove(25, 0, isPointerLocked: true);
+        Assert.That(scene.Camera.Up, Is.EqualTo(Vector3.UnitY), "once the user turns, the yaw/pitch camera is level");
+    }
 }

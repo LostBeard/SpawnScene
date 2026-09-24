@@ -286,7 +286,21 @@ public class CameraController : IDisposable
     /// Used by the novel-view fidelity gate, and the same primitive saved viewpoints /
     /// hotspots will need (NOTES.md SuperSplat parity).
     /// </summary>
-    public void SetPose(Vector3 position, Vector3 forward, Vector3 up)
+    // Exact hold: a pose set with exact=true keeps its full orientation, roll included, until the
+    // view actually changes. A yaw/pitch camera cannot represent roll, so the moment the user moves or
+    // turns, control hands over to yaw/pitch (level) - but a photo's pose must be reproduced exactly
+    // while it is being compared with the photo. MEASURED 2026-09-24, Truck: with roll always dropped,
+    // viewer renders at training poses sat 2-8 px off their photos and 4.7-5.6 dB below the trainer's own
+    // score for the same view.
+    bool _exact;
+    Vector3 _exactPos, _exactFwd, _exactUp;
+    float _exactYaw, _exactPitch;
+
+    /// <summary>
+    /// Place the camera. With <paramref name="exact"/> the given orientation is held exactly (roll
+    /// included) until the user moves or turns; otherwise it is reduced to yaw/pitch (level) at once.
+    /// </summary>
+    public void SetPose(Vector3 position, Vector3 forward, Vector3 up, bool exact = false)
     {
         var f = Vector3.Normalize(forward);
         var u = Vector3.Normalize(up);
@@ -317,17 +331,35 @@ public class CameraController : IDisposable
         //
         // A yaw/pitch camera cannot represent roll (ForwardFromYawPitch is defined about
         // WorldUp), so promising to keep it is a lie with a one-frame delay. Say so instead.
-        float roll = Vector3.Dot(u, WorldUp);
-        if (roll < 0.98f)
-            Console.WriteLine(
-                $"[Camera] the pose has roll this controller cannot hold (up . worldUp = {roll:F3}). " +
-                "Using world up. If the scene looks tilted, it needs gravity alignment - see " +
-                "MultiViewGenerationService.AlignToGravityAsync.");
+        // ROLL, not pitch: compare up with the level up for this forward. (This used to print up . worldUp,
+        // which is cos(pitch) for a level camera - every downward-looking view "warned" and the real roll
+        // went unreported.)
+        var levelRight = Vector3.Cross(f, WorldUp);
+        float rollDeg = 0f;
+        if (levelRight.LengthSquared() > 1e-8f)
+        {
+            var levelUp = Vector3.Normalize(Vector3.Cross(Vector3.Normalize(levelRight), f));
+            rollDeg = MathF.Acos(Math.Clamp(Vector3.Dot(u, levelUp), -1f, 1f)) * 180f / MathF.PI;
+        }
 
         var camera = _sceneManager.Camera;
         camera.Position = position;
-        camera.Forward = Forward;     // from the yaw/pitch just derived, so it is reproducible
-        camera.Up = WorldUp;
+        _exact = exact;
+        if (exact)
+        {
+            camera.Forward = f;
+            camera.Up = u;
+            _exactPos = position; _exactFwd = f; _exactUp = u; _exactYaw = _yaw; _exactPitch = _pitch;
+        }
+        else
+        {
+            if (rollDeg > 1f)
+                Console.WriteLine(
+                    $"[Camera] the pose has {rollDeg:F1} deg of roll this controller cannot hold; showing it level. " +
+                    "If the scene looks tilted, it needs gravity alignment - see MultiViewGenerationService.AlignToGravityAsync.");
+            camera.Forward = Forward;     // from the yaw/pitch just derived, so it is reproducible
+            camera.Up = WorldUp;
+        }
         _sceneManager.Camera = camera;
     }
 
@@ -355,8 +387,18 @@ public class CameraController : IDisposable
     {
         var camera = _sceneManager.Camera;
         camera.Position = _position;
-        camera.Forward = Forward;
-        camera.Up = WorldUp;
+        // An exact pose survives any input that does not change the view (a zero mouse move, a key-up).
+        if (_exact && _position == _exactPos && _yaw == _exactYaw && _pitch == _exactPitch)
+        {
+            camera.Forward = _exactFwd;
+            camera.Up = _exactUp;
+        }
+        else
+        {
+            _exact = false;
+            camera.Forward = Forward;
+            camera.Up = WorldUp;
+        }
         _sceneManager.Camera = camera;
     }
 

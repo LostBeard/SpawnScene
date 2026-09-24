@@ -272,6 +272,17 @@ public partial class Studio : IAsyncDisposable
             // &bainit=0: per-view depth-shell init even when BA produced a sparse cloud (A/B).
             // &targetmb=N: the resident training-target budget (MiB). 256 shrank Truck's 126 views to 734 px.
             // &trainprofile=1: wait after each training-step phase and log the per-phase ms (diagnostic).
+            // &shdeg=N: cap the viewer's SH degree after training (the trainer-render dump uses the same).
+            if (query.TryGetValue("shdeg", out var shq) && int.TryParse(shq, out var shv))
+                ViewerShDegreeCap = Math.Max(0, shv);
+            // &cas=N: the viewer's CAS sharpening strength 0..1 (0 = none; default 0.5).
+            if (query.TryGetValue("cas", out var casq) && float.TryParse(casq,
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var casv))
+                _gpuRenderer.SharpeningStrength = casv;
+            // &lodpx=N: the viewer's screen-space LOD cull threshold in pixels (0 = draw every splat).
+            if (query.TryGetValue("lodpx", out var lpx) && float.TryParse(lpx,
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var lpxv))
+                _gpuRenderer.LodCullPixels = Math.Max(0f, lpxv);
             if (query.TryGetValue("trainprofile", out var tpv))
                 ProfileTrainPhases = tpv is "1" or "true";
             if (query.TryGetValue("targetmb", out var tmb) && int.TryParse(tmb, out var tmbi) && tmbi > 0)

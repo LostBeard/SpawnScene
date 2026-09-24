@@ -52,7 +52,19 @@ public class GpuSplatSorter : IDisposable
     /// Precision is sufficient for Gaussian splatting alpha blending.
     /// Set true for Standard/Fast presets, false for High.
     /// </summary>
-    public bool Use16BitSort { get; set; } = true;
+    /// <remarks>
+    /// Default OFF: 16-bit keys quantize depth at 500 steps/unit and clamp at 65534, so everything past 131 units
+    /// shares one key and blends in index order - Truck's background reaches ~200. With the WGSL sort 32-bit keys
+    /// are 4 passes of a ~1 ms sort.
+    /// </remarks>
+    public bool Use16BitSort { get; set; } = false;
+
+    /// <summary>
+    /// Screen-space LOD cull: splats whose largest 1-sigma radius projects below this many pixels are not
+    /// drawn. 0 draws everything. The trainer draws every splat, so any cull here is a difference between
+    /// what was optimised and what is shown.
+    /// </summary>
+    public float LodCullPixels { get; set; } = 0.3f;
 
     /// <summary>
     /// Diagnostic: skip the radix sort entirely and render in cull-kernel output order.
@@ -465,7 +477,8 @@ public class GpuSplatSorter : IDisposable
         float distScale = Use16BitSort ? 500f : 10000f;
         int distMax = Use16BitSort ? 65534 : int.MaxValue;
         float focalLength = MathF.Max(camera.FocalX, camera.FocalY);
-        var cullParams = BuildCullParams(mvp, camPos, camFwd, _splatCount, distScale, distMax, focalLength);
+        var cullParams = BuildCullParams(mvp, camPos, camFwd, _splatCount, distScale, distMax, focalLength,
+            LodCullPixels);
         _cullDistanceKernel(
             _splatCount,
             _packedDataBuf.View,

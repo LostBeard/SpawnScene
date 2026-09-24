@@ -213,6 +213,22 @@ public partial class Studio
     /// Announces the VIEW NAME so a harness reusing one page can wait for the pose it asked
     /// for rather than matching a stale marker from the previous one.
     /// </summary>
+    /// <summary>A far plane beyond every splat from <paramref name="eye"/>: the farthest AABB corner, plus margin.</summary>
+    private async Task<float> SceneFarPlaneAsync(System.Numerics.Vector3 eye)
+    {
+        var packed = _gpuRenderer.PackedSplatBuffer;
+        int n = _gpuRenderer.SplatCount;
+        if (packed == null || n <= 0) return 100f;
+        var box = await SplatBounds.ComputeAsync(_gpuService.WebGPUAccelerator, packed, n);
+        if (box is not { } b) return 100f;
+        float far = 0f;
+        foreach (float x in new[] { b.MinX, b.MaxX })
+            foreach (float y in new[] { b.MinY, b.MaxY })
+                foreach (float z in new[] { b.MinZ, b.MaxZ })
+                    far = MathF.Max(far, System.Numerics.Vector3.Distance(eye, new System.Numerics.Vector3(x, y, z)));
+        return MathF.Max(100f, far * 1.05f);
+    }
+
     private async Task ParkOnGroundTruthPoseAsync(string viewName, CameraParams gt)
     {
         var cam = _sceneManager.Camera;
@@ -225,7 +241,11 @@ public partial class Studio
         // The temple sits ~0.5 world units from the ring; the 0.1 default near plane is
         // uncomfortably close to that, so tighten it for this measurement.
         cam.Near = 0.01f;
-        cam.Far = 100f;
+        // Far from the SCENE, not a constant. It was 100, sized for TempleRing; Truck's splats reach
+        // ~200 units from the camera (aabb diagonal 397), so the viewer clipped the whole distant
+        // background that the trainer renders and scores - a trainer/viewer gap blamed on the viewer's
+        // rasteriser (MEASURED 2026-09-24, trainer-vs-viewer dumps).
+        cam.Far = await SceneFarPlaneAsync(gt.Position);
         _sceneManager.Camera = cam;
 
         // SetPose writes Forward/Up exactly - a dataset pose is generally rolled, which a

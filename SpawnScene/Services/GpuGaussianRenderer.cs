@@ -52,10 +52,16 @@ public class GpuGaussianRenderer : IDisposable
     private GPURenderPipeline? _casPipeline;
     private string _canvasFormat = "bgra8unorm";
 
+    // Sorted mode blends into this, not the canvas. Blending straight into an 8-bit target rounds after
+    // every splat, and a faint splat that moves a pixel by less than half a step moves it by NOTHING - a
+    // trained scene is full of those, and the trainer composites in f32. MEASURED 2026-09-24 on Truck
+    // 7K/1.2M: the viewer scored 0.7-3.6 dB under the trainer on the same views, growing with splat count.
+    private const string SortedTargetFormat = "rgba16float";
+
     // Gaussian vertex buffer: packed format (position f32x3 + color_alpha u8x4 + scale f16x4 + quat f16x4)
     private GPUBuffer? _splatBuffer;
     private int _splatCount;
-    private const int PackedBytesPerSplat = SplatFormat.PackedBytes; // 12 pos + 4 color/alpha + 8 scale + 8 quat
+    private const int PackedBytesPerSplat = SplatFormat.PackedBytes; // 12 pos + 8 color/alpha + 8 scale + 8 quat
 
     // Pack compute pipeline: converts Float32 sort output → packed vertex format
     private GPUComputePipeline? _packPipeline;
@@ -87,6 +93,14 @@ public class GpuGaussianRenderer : IDisposable
 
     /// <summary>The SH degree the viewer is drawing with (0 = DC only).</summary>
     public int ShDegree => _shDegree;
+
+    /// <summary>Lower the SH degree in use (diagnostic A/B); takes effect at the next pack.</summary>
+    public void CapShDegree(int degree)
+    {
+        _shDegree = Math.Clamp(Math.Min(_shDegree, degree), 0, SphericalHarmonics.MaxDegree);
+        _packBindGroup?.Dispose();
+        _packBindGroup = null;
+    }
     private GPUBuffer? _packCountBuf;  // uniform: visible count for pack dispatch guard
     private Uint32Array? _packCountJsArray; // cached JS array for WriteBuffer (no per-frame alloc)
 
@@ -213,7 +227,13 @@ public class GpuGaussianRenderer : IDisposable
     // Needed beyond taste: scoring a render against a dataset shot on black is dominated by a
     // background mismatch (61% of a TempleRing frame is near-black), and SuperSplat exposes a
     // custom background too (NOTES.md parity list).
-    private double _bgR = 0.04, _bgG = 0.04, _bgB = 0.10;
+    //
+    // Default BLACK, the background every splat scene is trained over (ours, and the reference trainer's
+    // default). This was a dark navy (0.04, 0.04, 0.10), and wherever splats do not fully cover a pixel -
+    // sky, foliage, the far background - the navy showed through as a blue tint the trainer never had.
+    // MEASURED 2026-09-24 (trainer-vs-viewer dumps, Truck): a smooth purple/blue cast over the upper frame,
+    // blue +9 levels on a held-out view, while LOD cull, blend precision, CAS and the far plane moved nothing.
+    private double _bgR = 0.0, _bgG = 0.0, _bgB = 0.0;
 
     /// <summary>Scene clear colour, linear 0..1. Alpha is always 1.</summary>
     public (double R, double G, double B) BackgroundColor
@@ -265,6 +285,13 @@ public class GpuGaussianRenderer : IDisposable
     {
         get => _sorter.Use16BitSort;
         set => _sorter.Use16BitSort = value;
+    }
+
+    /// <summary>Screen-space LOD cull threshold in pixels (0 = draw every splat). See GpuSplatSorter.</summary>
+    public float LodCullPixels
+    {
+        get => _sorter.LodCullPixels;
+        set => _sorter.LodCullPixels = value;
     }
 
     /// <summary>Diagnostic: skip radix sort entirely (render unsorted).</summary>
@@ -377,9 +404,9 @@ public class GpuGaussianRenderer : IDisposable
                         Attributes = new GPUVertexAttribute[]
                         {
                             new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },  // position (12B)
-                            new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.UNorm8x4 },   // color+alpha (4B)
-                            new() { ShaderLocation = 2, Offset = 16, Format = GPUVertexFormat.Float16x4 },  // scale sx,sy,sz (8B)
-                            new() { ShaderLocation = 3, Offset = 24, Format = GPUVertexFormat.Float16x4 },  // rotation quat (8B)
+                            new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.Float16x4 },  // color+alpha (8B)
+                            new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float16x4 },  // scale sx,sy,sz (8B)
+                            new() { ShaderLocation = 3, Offset = 28, Format = GPUVertexFormat.Float16x4 },  // rotation quat (8B)
                         }
                     }
                 }
@@ -392,7 +419,7 @@ public class GpuGaussianRenderer : IDisposable
                 {
                     new GPUColorTargetState
                     {
-                        Format = _canvasFormat,
+                        Format = SortedTargetFormat,
                         Blend = new GPUBlendState
                         {
                             Color = new GPUBlendComponent
@@ -430,9 +457,9 @@ public class GpuGaussianRenderer : IDisposable
                 Attributes = new GPUVertexAttribute[]
                 {
                     new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },
-                    new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.UNorm8x4 },
-                    new() { ShaderLocation = 2, Offset = 16, Format = GPUVertexFormat.Float16x4 },
-                    new() { ShaderLocation = 3, Offset = 24, Format = GPUVertexFormat.Float16x4 },
+                    new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.Float16x4 },
+                    new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float16x4 },
+                    new() { ShaderLocation = 3, Offset = 28, Format = GPUVertexFormat.Float16x4 },
                 }
             }
         };
@@ -624,7 +651,7 @@ public class GpuGaussianRenderer : IDisposable
         _offscreenTexture = _device!.CreateTexture(new GPUTextureDescriptor
         {
             Size = new[] { _canvasWidth, _canvasHeight },
-            Format = _canvasFormat,
+            Format = SortedTargetFormat,
             Usage = GPUTextureUsage.RenderAttachment | GPUTextureUsage.TextureBinding,
         });
         _offscreenView = _offscreenTexture.CreateView();
@@ -1163,28 +1190,17 @@ public class GpuGaussianRenderer : IDisposable
         if (sortRan && dataBuf != null && idxBuf != null)
             AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount);
 
-        bool useCas = _sharpeningStrength > 0f && !_lowResActive;
-        GPURenderPassDescriptor splatPassDesc;
-        if (useCas)
-        {
-            splatPassDesc = _splatPassDescCas!;
-        }
-        else
-        {
-            _splatColorAttachDirect!.View = colorView;
-            splatPassDesc = _splatPassDescDirect!;
-        }
-
-        using var splatPass = encoder.BeginRenderPass(splatPassDesc);
+        // Always the f32-precision path: splats blend into the rgba16float offscreen target, then the CAS
+        // pass writes the canvas. Strength 0 (or low-res motion) makes CAS an exact copy.
+        using var splatPass = encoder.BeginRenderPass(_splatPassDescCas!);
         splatPass.SetPipeline(_splatPipeline!);
         splatPass.SetBindGroup(0, _uniformBindGroupSorted!);
         splatPass.SetVertexBuffer(0, _splatBuffer!);
         splatPass.Draw(6, (uint)visibleCount, 0, 0);
         splatPass.End();
 
-        if (useCas)
         {
-            _casData[0] = _sharpeningStrength;
+            _casData[0] = _lowResActive ? 0f : _sharpeningStrength;
             _casData[1] = 1f / _canvasWidth;
             _casData[2] = 1f / _canvasHeight;
             _casData[3] = 0f;
@@ -1789,7 +1805,15 @@ struct VertexOutput {
     @location(0) color   : vec3<f32>,
     @location(1) opacity : f32,
     @location(2) uv      : vec2<f32>,      // whitened splat coordinate; unit disk = the footprint
+    @location(3) cut     : f32,            // footprint radius in sigmas (the unit disk's edge)
 };
+
+// The trainer's footprint, not a fixed ellipse: like the reference rasteriser it has NO sigma cutoff, only
+// alpha >= 1/255 (and alpha <= 0.99). A splat of opacity o therefore reaches sqrt(2 ln(255 o)) sigmas - 3.33
+// for an opaque one - and the optimiser fitted colours with those fringes present. The viewer cut every splat
+// at 3 sigma and missed them: MEASURED 2026-09-24, trainer-vs-viewer dumps on Truck differed on every edge.
+const VIEW_MIN_ALPHA : f32 = 0.00392156862;   // 1/255, SplatTrainerShaders.MIN_ALPHA
+const VIEW_MAX_ALPHA : f32 = 0.99;            // SplatTrainerShaders.MAX_ALPHA
 
 // Footprint cutoff in standard deviations. 3 sigma captures 98.9% of the mass; below ~2.5 the
 // truncation shows up as a visible hard edge on large splats.
@@ -1819,6 +1843,7 @@ fn splat_reject(uv : vec2<f32>, color : vec3<f32>) -> VertexOutput {
     out.color = color;
     out.opacity = 0.0;
     out.uv = uv;
+    out.cut = 1.0;
     return out;
 }
 
@@ -1900,8 +1925,12 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
     let elen = length(e1);
     e1 = select(vec2<f32>(1.0, 0.0), e1 / max(elen, 1e-20), elen > 1e-12);
 
-    let r1 = SIGMA_CUTOFF * sqrt(l1);
-    let r2 = SIGMA_CUTOFF * sqrt(l2);
+    // Where opacity * exp(-cut^2 / 2) falls to 1/255. Faint splats get a smaller quad than before.
+    let op = input.color_alpha.a;
+    if (op <= VIEW_MIN_ALPHA) { return splat_reject(uv, rgb); }
+    let cut = min(sqrt(2.0 * log(op / VIEW_MIN_ALPHA)), 4.0);
+    let r1 = cut * sqrt(l1);
+    let r2 = cut * sqrt(l2);
     if (r1 > MAX_AXIS_PX_FACTOR * max(u.viewport.x, u.viewport.y)) { return splat_reject(uv, rgb); }
 
     let axis_major = e1 * r1;                          // pixels
@@ -1926,6 +1955,7 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
     out.color = rgb;
     out.opacity = input.color_alpha.a;
     out.uv = uv;
+    out.cut = cut;
     return out;
 }
 ";
@@ -1936,13 +1966,13 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
     private const string SplatShaderSource = SplatVertexWgsl + @"
 @fragment
 fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
-    // uv is whitened: the unit disk IS the SIGMA_CUTOFF ellipse, so the Mahalanobis distance
-    // squared is simply SIGMA_CUTOFF^2 * dot(uv, uv). No conic, no inverse covariance.
+    // uv is whitened: the unit disk IS the cut-sigma ellipse, so the Mahalanobis distance
+    // squared is simply cut^2 * dot(uv, uv). No conic, no inverse covariance.
     let r2 = dot(input.uv, input.uv);
     if (r2 > 1.0) { discard; }
 
-    let alpha = input.opacity * exp(-0.5 * SIGMA_CUTOFF * SIGMA_CUTOFF * r2);
-    if (alpha < 0.004) { discard; }
+    let alpha = min(VIEW_MAX_ALPHA, input.opacity * exp(-0.5 * input.cut * input.cut * r2));
+    if (alpha < VIEW_MIN_ALPHA) { discard; }
 
     return vec4<f32>(input.color, alpha);
 }
@@ -2045,8 +2075,8 @@ fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
     let r2 = dot(input.uv, input.uv);
     if (r2 > 1.0) { discard; }
 
-    let alpha = input.opacity * exp(-0.5 * SIGMA_CUTOFF * SIGMA_CUTOFF * r2);
-    if (alpha < 0.002) { discard; }
+    let alpha = min(VIEW_MAX_ALPHA, input.opacity * exp(-0.5 * input.cut * input.cut * r2));
+    if (alpha < VIEW_MIN_ALPHA) { discard; }
 
     // Stochastic transparency: discard with probability (1 - effective_alpha).
     // min_alpha floor: during movement, boost survival of low-alpha edge fragments
@@ -2139,7 +2169,7 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     let i = gid.y * nwg.x * 64u + gid.x;
     if (i >= u.count) { return; }
 
-    let dstOff = i * 8u;
+    let dstOff = i * 9u;
 
     // Culled splats have idx=-1 sentinel (sorted last by DescendingInt32).
     // Write a fully-transparent vertex so the fragment shader discards it cheaply.
@@ -2153,6 +2183,7 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
         dst[dstOff + 5u] = 0u;
         dst[dstOff + 6u] = 0u;
         dst[dstOff + 7u] = 0u;
+        dst[dstOff + 8u] = 0u;
         return;
     }
 
@@ -2164,26 +2195,25 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     dst[dstOff + 1u] = bitcast<u32>(src[srcOff + 1u]);  // pos.y
     dst[dstOff + 2u] = bitcast<u32>(src[srcOff + 2u]);  // pos.z
 
-    // Colour: linear RGB, OR SH DC -> RGB when training converted the buffer.
-    // pack4x8unorm clamps to [0,1]; feeding raw DC (often outside that) made every
-    // trained scene look like washed blobs.
+    // Colour: linear RGB, OR SH DC -> RGB when training converted the buffer (feeding raw DC made every
+    // trained scene look like washed blobs). f16, unclamped above 1 like the trainer's compositing.
     var rgb = vec3<f32>(src[srcOff + 3u], src[srcOff + 4u], src[srcOff + 5u]);
     if (u.colours_are_sh_dc != 0u) {
         // Same function the trainer renders with, for the direction from this pack's camera.
         let pos = vec3<f32>(src[srcOff + 0u], src[srcOff + 1u], src[srcOff + 2u]);
         rgb = sh_view_rgb(u32(origIdx) * SH_REST_FLOATS, normalize(pos - u.cam_pos.xyz), rgb, u.sh_degree);
     }
-    let color_alpha = vec4<f32>(rgb.r, rgb.g, rgb.b, src[srcOff + 9u]);
-    dst[dstOff + 3u] = pack4x8unorm(color_alpha);
+    dst[dstOff + 3u] = pack2x16float(vec2<f32>(max(rgb.r, 0.0), max(rgb.g, 0.0)));
+    dst[dstOff + 4u] = pack2x16float(vec2<f32>(max(rgb.b, 0.0), clamp(src[srcOff + 9u], 0.0, 1.0)));
 
     // Scale: pack as Float16x4 (sx, sy, sz, 0)
-    dst[dstOff + 4u] = pack2x16float(vec2<f32>(src[srcOff + 6u], src[srcOff + 7u]));
-    dst[dstOff + 5u] = pack2x16float(vec2<f32>(src[srcOff + 8u], 0.0));
+    dst[dstOff + 5u] = pack2x16float(vec2<f32>(src[srcOff + 6u], src[srcOff + 7u]));
+    dst[dstOff + 6u] = pack2x16float(vec2<f32>(src[srcOff + 8u], 0.0));
 
     // Rotation: unit quaternion (x, y, z, w) as Float16x4. f16 carries ~3 decimal digits, which
     // on a unit quaternion is well under a tenth of a degree — invisible at any splat size.
-    dst[dstOff + 6u] = pack2x16float(vec2<f32>(src[srcOff + 10u], src[srcOff + 11u]));
-    dst[dstOff + 7u] = pack2x16float(vec2<f32>(src[srcOff + 12u], src[srcOff + 13u]));
+    dst[dstOff + 7u] = pack2x16float(vec2<f32>(src[srcOff + 10u], src[srcOff + 11u]));
+    dst[dstOff + 8u] = pack2x16float(vec2<f32>(src[srcOff + 12u], src[srcOff + 13u]));
 }
 ";
 }

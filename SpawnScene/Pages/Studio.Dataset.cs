@@ -372,6 +372,7 @@ public partial class Studio
         foreach (var (kind, i) in picks.Distinct())
         {
             var tv = scene.TrainingViews[i];
+            await StashTrainerRenderAsync($"view-{kind}-{i}", tv.Camera);
             await ParkOnGroundTruthPoseAsync($"{kind}-{i}", tv.Camera);
             Console.WriteLine(
                 $"[Dataset] READY-FOR-CAPTURE view-{kind}-{i} {tv.ImageName} {tv.Camera.Width}x{tv.Camera.Height} " +

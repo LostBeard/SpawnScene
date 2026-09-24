@@ -60,6 +60,9 @@ public partial class Studio
     /// </summary>
     public static long MaxTargetStackBytes { get; set; } = 256L * 1024 * 1024;
 
+    /// <summary><c>&amp;shdeg=N</c>: cap the viewer's SH degree after training (diagnostic A/B; the trainer dump follows).</summary>
+    public static int? ViewerShDegreeCap { get; set; }
+
     /// <summary><c>&amp;trainprofile=1</c>: per-phase GPU time of a training step, logged with each cycle line.</summary>
     public static bool ProfileTrainPhases { get; set; }
 
@@ -671,6 +674,7 @@ public partial class Studio
             // View-dependent colour: hand the viewer the SH bands the trainer learned, at the degree it reached.
             // It used to draw DC only - one colour per splat from every angle.
             _gpuRenderer.SetShRest(_trainer.CopyShRestForDisplay(n), _trainer.ActiveShDegree);
+            if (ViewerShDegreeCap is int cap) _gpuRenderer.CapShDegree(cap);
             Console.WriteLine($"[Train] viewer SH degree {_gpuRenderer.ShDegree}");
 
             // The display renderer reads a packed vertex buffer built at upload time; training

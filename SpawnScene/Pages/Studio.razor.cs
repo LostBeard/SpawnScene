@@ -270,6 +270,9 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("baiters", out var bai) && int.TryParse(bai, out var baii))
                 _multiViewService.BundleAdjustIterations = baii;
             // &bainit=0: per-view depth-shell init even when BA produced a sparse cloud (A/B).
+            // &targetmb=N: the resident training-target budget (MiB). 256 shrank Truck's 126 views to 734 px.
+            if (query.TryGetValue("targetmb", out var tmb) && int.TryParse(tmb, out var tmbi) && tmbi > 0)
+                MaxTargetStackBytes = (long)tmbi * 1024 * 1024;
             if (query.TryGetValue("badump", out var bdv))
                 _multiViewService.DumpFailedResections = bdv is "1" or "true";
             if (query.TryGetValue("bainit", out var bin))

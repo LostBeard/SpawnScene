@@ -34,6 +34,71 @@ public static class SphericalHarmonics
         -0.5900435899266435f,
     ];
 
+    /// <summary>
+    /// The ONE WGSL evaluation of view-dependent colour, shared by the trainer (SplatTrainerShaders) and the
+    /// viewer's pack pass (GpuGaussianRenderer) so the two renderers of one buffer cannot drift. Requires a
+    /// storage binding named <c>sh_rest</c> (45 floats per splat, <see cref="RestFloatsPerSplat"/> layout).
+    /// Returns display RGB: C0*dc + bands + 0.5, clamped at 0 - the same as <see cref="EvalRgb"/>.
+    /// </summary>
+    public const string WgslViewRgb = @"
+fn sh_view_rgb(base : u32, dir : vec3<f32>, dc : vec3<f32>, deg : u32) -> vec3<f32> {
+    let x = dir.x;
+    let y = dir.y;
+    let z = dir.z;
+    var result = SH_C0 * dc;
+
+    if (deg >= 1u) {
+        let sh1 = vec3<f32>(sh_rest[base + 0u], sh_rest[base + 1u], sh_rest[base + 2u]);
+        let sh2 = vec3<f32>(sh_rest[base + 3u], sh_rest[base + 4u], sh_rest[base + 5u]);
+        let sh3 = vec3<f32>(sh_rest[base + 6u], sh_rest[base + 7u], sh_rest[base + 8u]);
+        result = result + SH_C1 * (-y * sh1 + z * sh2 - x * sh3);
+    }
+    if (deg >= 2u) {
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let sh4 = vec3<f32>(sh_rest[base + 9u], sh_rest[base + 10u], sh_rest[base + 11u]);
+        let sh5 = vec3<f32>(sh_rest[base + 12u], sh_rest[base + 13u], sh_rest[base + 14u]);
+        let sh6 = vec3<f32>(sh_rest[base + 15u], sh_rest[base + 16u], sh_rest[base + 17u]);
+        let sh7 = vec3<f32>(sh_rest[base + 18u], sh_rest[base + 19u], sh_rest[base + 20u]);
+        let sh8 = vec3<f32>(sh_rest[base + 21u], sh_rest[base + 22u], sh_rest[base + 23u]);
+        result = result
+            + 1.0925484305920792 * xy * sh4
+            + (-1.0925484305920792) * yz * sh5
+            + 0.31539156525252005 * (2.0 * zz - xx - yy) * sh6
+            + (-1.0925484305920792) * xz * sh7
+            + 0.5462742152960396 * (xx - yy) * sh8;
+    }
+    if (deg >= 3u) {
+        let xx = x * x;
+        let yy = y * y;
+        let zz = z * z;
+        let xy = x * y;
+        let xz = x * z;
+        let yz = y * z;
+        let sh9 = vec3<f32>(sh_rest[base + 24u], sh_rest[base + 25u], sh_rest[base + 26u]);
+        let sh10 = vec3<f32>(sh_rest[base + 27u], sh_rest[base + 28u], sh_rest[base + 29u]);
+        let sh11 = vec3<f32>(sh_rest[base + 30u], sh_rest[base + 31u], sh_rest[base + 32u]);
+        let sh12 = vec3<f32>(sh_rest[base + 33u], sh_rest[base + 34u], sh_rest[base + 35u]);
+        let sh13 = vec3<f32>(sh_rest[base + 36u], sh_rest[base + 37u], sh_rest[base + 38u]);
+        let sh14 = vec3<f32>(sh_rest[base + 39u], sh_rest[base + 40u], sh_rest[base + 41u]);
+        let sh15 = vec3<f32>(sh_rest[base + 42u], sh_rest[base + 43u], sh_rest[base + 44u]);
+        result = result
+            + (-0.5900435899266435) * y * (3.0 * xx - yy) * sh9
+            + 2.890611442640554 * xy * z * sh10
+            + (-0.4570457994644658) * y * (4.0 * zz - xx - yy) * sh11
+            + 0.3731763325901154 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy) * sh12
+            + (-0.4570457994644658) * x * (4.0 * zz - xx - yy) * sh13
+            + 1.445305721320277 * z * (xx - yy) * sh14
+            + (-0.5900435899266435) * x * (xx - 3.0 * yy) * sh15;
+    }
+    return max(result + vec3<f32>(0.5), vec3<f32>(0.0));
+}
+";
+
     public const int MaxDegree = 3;
     public const int RestBands = 15;
     public const int RestFloatsPerSplat = RestBands * 3;

@@ -1408,6 +1408,30 @@ public sealed class SplatTrainerGpu : IDisposable
         _rgbToDcDone = true;
     }
 
+    /// <summary>
+    /// A GPU copy of the SH rest coefficients for the display renderer (caller owns it), or null when there are
+    /// none. GPU to GPU - the coefficients never cross to the CPU. Pending trainer dispatches are submitted
+    /// first so the copy sees their writes.
+    /// </summary>
+    public GPUBuffer? CopyShRestForDisplay(int splatCount)
+    {
+        if (_shRest == null || _device == null || _queue == null || splatCount <= 0) return null;
+        var src = _shRest.GetGPUBuffer();
+        if (src == null) return null;
+        ulong bytes = (ulong)splatCount * SphericalHarmonics.RestFloatsPerSplat * sizeof(float);
+        var dst = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = bytes,
+            Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
+        });
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        using var encoder = _device.CreateCommandEncoder();
+        encoder.CopyBufferToBuffer(src, 0, dst, 0, bytes);
+        using var cmd = encoder.Finish();
+        _queue.Submit(new[] { cmd });
+        return dst;
+    }
+
     public async Task<float[]> ReadShRestAsync(int splatCount)
     {
         if (_shRest == null) return System.Array.Empty<float>();

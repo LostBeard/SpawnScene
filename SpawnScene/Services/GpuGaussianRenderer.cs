@@ -62,6 +62,31 @@ public class GpuGaussianRenderer : IDisposable
     private GPUBindGroup? _packBindGroup;
     private GPUBuffer? _srcDataCached; // cached ILGPU data buffer handle for bind group invalidation
     private GPUBuffer? _srcIdxCached;  // cached ILGPU index buffer handle for bind group invalidation
+
+    // View-dependent colour. The trainer learns SH bands 1..3 per splat; the viewer used to draw DC only,
+    // i.e. one colour per splat from every angle. Owned here (a GPU copy handed over after training).
+    private GPUBuffer? _shRest;
+    private GPUBuffer? _shRestCached;
+    private GPUBuffer? _shDummy;
+    private int _shDegree;
+    private System.Numerics.Vector3 _packCameraPos;
+    private long _lastShRepack;
+
+    /// <summary>
+    /// Give the viewer the scene's SH rest coefficients (45 floats per splat, SphericalHarmonics layout) and the
+    /// active degree; the renderer takes ownership. Null / degree 0 = DC colour only.
+    /// </summary>
+    public void SetShRest(GPUBuffer? buffer, int degree)
+    {
+        if (!ReferenceEquals(_shRest, buffer)) { _shRest?.Destroy(); _shRest?.Dispose(); }
+        _shRest = buffer;
+        _shDegree = buffer == null ? 0 : Math.Clamp(degree, 0, SphericalHarmonics.MaxDegree);
+        _packBindGroup?.Dispose();
+        _packBindGroup = null;
+    }
+
+    /// <summary>The SH degree the viewer is drawing with (0 = DC only).</summary>
+    public int ShDegree => _shDegree;
     private GPUBuffer? _packCountBuf;  // uniform: visible count for pack dispatch guard
     private Uint32Array? _packCountJsArray; // cached JS array for WriteBuffer (no per-frame alloc)
 
@@ -282,8 +307,9 @@ public class GpuGaussianRenderer : IDisposable
     /// Rebuild the display vertex buffer from the packed splat data. Needed after anything
     /// mutates the splats behind the renderer's back - the optimiser does exactly that.
     /// </summary>
-    public void RepackForDisplay()
+    public void RepackForDisplay(Vector3? cameraPosition = null)
     {
+        if (cameraPosition.HasValue) _packCameraPos = cameraPosition.Value;
         PackAtUpload();
         _accumFrameCount = 0;
     }
@@ -528,12 +554,12 @@ public class GpuGaussianRenderer : IDisposable
         // Pre-allocate reusable byte buffers for direct WriteBuffer — avoids HeapView/PrimeHeap on every frame
         _uniformByteData = new byte[_uniformData.Length * sizeof(float)];
         _casByteData = new byte[_casData.Length * sizeof(float)];
-        _packCountJsArray = new Uint32Array(4);
+        _packCountJsArray = new Uint32Array(8);
 
-        // Pack uniforms (16-byte aligned): count, colours_are_sh_dc flag, pad.
+        // Pack uniforms: count, colours_are_sh_dc, sh_degree, pad | cam_pos.xyz (f32 bits), pad.
         _packCountBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
-            Size = 16,
+            Size = 32,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
 
@@ -1121,6 +1147,7 @@ public class GpuGaussianRenderer : IDisposable
     private void RenderSorted(CameraParams camera, Matrix4x4 mvp)
     {
         var (dataBuf, idxBuf, sortRan, visibleCount) = _sorter.Sort(camera, mvp);
+        if (sortRan) _packCameraPos = camera.Position;
 
         // Upload uniforms (frame_index/dilation/min_alpha not used in sorted mode)
         _uniformData[UFrameIndex] = 0f;
@@ -1188,6 +1215,18 @@ public class GpuGaussianRenderer : IDisposable
         _sorter.UpdateVelocity(camera.Position, camera.Forward);
         float velocity = _sorter.SmoothedVelocity;
         bool moving = velocity > 1e-7f;
+
+        // View-dependent colour is baked at pack time for the pack's camera. Stochastic mode packs once at
+        // upload and never sorts, so re-pack (identity indices) when the camera has moved, at most every
+        // 50 ms - otherwise SH would be evaluated for whatever camera the upload saw.
+        if (_shDegree > 0 && _shRest != null
+            && Vector3.DistanceSquared(camera.Position, _packCameraPos) > 1e-10f
+            && System.Diagnostics.Stopwatch.GetElapsedTime(_lastShRepack).TotalMilliseconds >= 50)
+        {
+            _packCameraPos = camera.Position;
+            _lastShRepack = System.Diagnostics.Stopwatch.GetTimestamp();
+            PackAtUpload();
+        }
 
         // ── Velocity-adaptive parameters ──
 
@@ -1605,16 +1644,29 @@ public class GpuGaussianRenderer : IDisposable
         // Write pack uniforms (before encoder submit, queue.writeBuffer runs first).
         _packCountJsArray![0] = (uint)visibleCount;
         _packCountJsArray[1] = ColoursAreShDc ? 1u : 0u;
-        _packCountJsArray[2] = 0u;
+        _packCountJsArray[2] = ColoursAreShDc && _shRest != null ? (uint)_shDegree : 0u;
         _packCountJsArray[3] = 0u;
+        _packCountJsArray[4] = BitConverter.SingleToUInt32Bits(_packCameraPos.X);
+        _packCountJsArray[5] = BitConverter.SingleToUInt32Bits(_packCameraPos.Y);
+        _packCountJsArray[6] = BitConverter.SingleToUInt32Bits(_packCameraPos.Z);
+        _packCountJsArray[7] = 0u;
         _queue!.WriteBuffer(_packCountBuf, 0, _packCountJsArray);
 
+        _shDummy ??= _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Storage,
+        });
+        var shBinding = _shRest ?? _shDummy;
+
         // Create or reuse pack bind group (invalidate only when GPU buffer refs change)
-        if (_packBindGroup == null || _srcDataCached != srcDataBuffer || _srcIdxCached != srcIdxBuffer)
+        if (_packBindGroup == null || _srcDataCached != srcDataBuffer || _srcIdxCached != srcIdxBuffer
+            || !ReferenceEquals(_shRestCached, shBinding))
         {
             _packBindGroup?.Dispose();
             _srcDataCached = srcDataBuffer;
             _srcIdxCached = srcIdxBuffer;
+            _shRestCached = shBinding;
 
             using var layout = _packPipeline.GetBindGroupLayout(0);
             _packBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
@@ -1626,6 +1678,7 @@ public class GpuGaussianRenderer : IDisposable
                     new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = srcIdxBuffer } },
                     new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = _splatBuffer } },
                     new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = _packCountBuf } },
+                    new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = shBinding } },
                 }
             });
         }
@@ -1652,6 +1705,8 @@ public class GpuGaussianRenderer : IDisposable
 
         _splatBuffer?.Destroy();
         _splatBuffer?.Dispose();
+        _shRest?.Destroy(); _shRest?.Dispose();
+        _shDummy?.Destroy(); _shDummy?.Dispose();
         _uniformBuffer?.Destroy();
         _uniformBuffer?.Dispose();
         _uniformBindGroup?.Dispose();
@@ -2060,16 +2115,21 @@ fn fs_accum(input : VSOutput) -> @location(0) vec4<f32> {
 struct PackUniforms {
     count             : u32,
     colours_are_sh_dc : u32,
+    sh_degree         : u32,   // 0 = DC only; 1..3 = evaluate SH bands for the view direction
     _pad0             : u32,
-    _pad1             : u32,
+    cam_pos           : vec4<f32>,   // the camera the current sort (and so this pack) is for
 }
 
 @group(0) @binding(0) var<storage, read>       src     : array<f32>;  // SplatFormat.Floats per splat
 @group(0) @binding(1) var<storage, read>       idx     : array<i32>;  // sorted indices; -1 = culled sentinel
 @group(0) @binding(2) var<storage, read_write> dst     : array<u32>;  // packed vertex output (8 u32s/splat)
 @group(0) @binding(3) var<uniform>             u       : PackUniforms;
+@group(0) @binding(4) var<storage, read>       sh_rest : array<f32>;  // 45 floats per splat (or a dummy)
 
 const SH_C0 : f32 = 0.28209479177387814;
+const SH_C1 : f32 = 0.4886025119029199;
+const SH_REST_FLOATS : u32 = 45u;
+" + SphericalHarmonics.WgslViewRgb + @"
 
 @compute @workgroup_size(64)
 fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
@@ -2109,7 +2169,9 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     // trained scene look like washed blobs.
     var rgb = vec3<f32>(src[srcOff + 3u], src[srcOff + 4u], src[srcOff + 5u]);
     if (u.colours_are_sh_dc != 0u) {
-        rgb = max(SH_C0 * rgb + vec3<f32>(0.5), vec3<f32>(0.0));
+        // Same function the trainer renders with, for the direction from this pack's camera.
+        let pos = vec3<f32>(src[srcOff + 0u], src[srcOff + 1u], src[srcOff + 2u]);
+        rgb = sh_view_rgb(u32(origIdx) * SH_REST_FLOATS, normalize(pos - u.cam_pos.xyz), rgb, u.sh_degree);
     }
     let color_alpha = vec4<f32>(rgb.r, rgb.g, rgb.b, src[srcOff + 9u]);
     dst[dstOff + 3u] = pack4x8unorm(color_alpha);

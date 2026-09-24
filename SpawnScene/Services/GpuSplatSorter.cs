@@ -95,6 +95,16 @@ public class GpuSplatSorter : IDisposable
     private Vector3 _prevFrameCameraPos;
     private Vector3 _prevFrameCameraFwd;
 
+    // The view-projection the current cull/sort was computed for. Velocity (position + forward)
+    // alone missed every change that is not a camera MOVE - a new field of view, new intrinsics, a
+    // resized canvas - and the frustum cull from before the change stayed in force: everything outside
+    // the old, narrower frustum rendered black until the camera moved. MEASURED 2026-09-24 on Truck:
+    // parking at training view 0 (same pose as the previous shot, photo intrinsics) scored 8.4 dB in
+    // the viewer against the trainer's 24.55 dB for the same view. A resize, fullscreen or entering VR
+    // hits the same path.
+    private Matrix4x4 _lastSortedMvp = new(float.NaN, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+
     // Async sort tracking — prevents GPU queue backpressure
     // _syncTask: non-null while GPU sort is in flight; polled via IsCompleted (non-blocking)
     // _lastSortTicks: Stopwatch timestamp of last sort submission (50ms min between sorts)
@@ -365,6 +375,7 @@ public class GpuSplatSorter : IDisposable
         _syncTask = null;    // Abandon any in-flight sort (buffers being disposed)
         _lastSortTicks = 0;  // Allow immediate first sort (now - 0 >> 50ms)
         _sortPending = true;
+        _lastSortedMvp.M11 = float.NaN;
         _smoothedVelocity = 0f;
     }
 
@@ -457,7 +468,7 @@ public class GpuSplatSorter : IDisposable
 
         _smoothedVelocity = _smoothedVelocity * (1f - VelocitySmoothing) + currentVelocity * VelocitySmoothing;
 
-        if (currentVelocity > 1e-8f)
+        if (SortInvalidation.NeedsResort(currentVelocity, _lastSortedMvp, mvp))
             _sortPending = true;
 
         // On the frame sort just completed: return sortRan=true so pack runs, skip new sort.
@@ -472,6 +483,7 @@ public class GpuSplatSorter : IDisposable
 
         _sortPending = false;
         _lastSortTicks = now;
+        _lastSortedMvp = mvp;
 
         var accelerator = _gpu.WebGPUAccelerator;
 

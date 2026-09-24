@@ -630,7 +630,7 @@ public partial class Studio
                     $"[Train] WARNING: {overflowed}/{iterations} iterations overflowed the key " +
                     $"buffer (keysPerSplat={_trainer.KeysPerSplat}) - those gradients are incomplete");
 
-            var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box);
+            var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box, logPerView: true);
             WarnOnEvalOverflow(fitted, views.Count);
             await ReportHeldOutCrossMatchAsync(_trainer, packed, n, views, targets, box);
 
@@ -1190,7 +1190,7 @@ public partial class Studio
         MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
         IReadOnlyList<TrainingView> views,
         MemoryBuffer1D<uint, Stride1D.Dense> targets,
-        SplatBounds.Aabb box)
+        SplatBounds.Aabb box, bool logPerView = false)
     {
         var (w, h) = trainer.Size;
         double supPsnr = 0, supSsim = 0, heldPsnr = 0, heldSsim = 0;
@@ -1211,6 +1211,14 @@ public partial class Studio
             // is of an incomplete image. Counting it here is what stops that reading as "that
             // pose is bad" rather than "that frame was truncated".
             if (trainer.LastOverflowed) overflowed++;
+
+            // Per view, so a render captured by the VIEWER at the same pose can be put next to what
+            // the TRAINER scored for it: two renderers of one buffer, and only this one is measured.
+            if (logPerView)
+                Console.WriteLine(
+                    $"[Train] final view {i} {views[i].ImageName} " +
+                    $"{(views[i].UsedForSupervision ? "sup" : "held")} PSNR {psnr:F2} SSIM {ssim:F4}" +
+                    (trainer.LastOverflowed ? " (key overflow)" : ""));
 
             if (views[i].UsedForSupervision) { supPsnr += psnr; supSsim += ssim; nSup++; }
             else { heldPsnr += psnr; heldSsim += ssim; nHeld++; }

@@ -19,6 +19,9 @@
     <Compile Include="..\SpawnScene\Models\ImageModels.cs" Link="Linked\ImageModels.cs" />
     <Compile Include="..\SpawnScene\Services\FeatureDetector.cs" Link="Linked\FeatureDetector.cs" />
     <Compile Include="..\SpawnScene\Services\FeatureMatcher.cs" Link="Linked\FeatureMatcher.cs" />
+    <Compile Include="..\SpawnScene\Services\BundleAdjuster.cs" Link="Linked\BundleAdjuster.cs" />
+    <Compile Include="..\SpawnScene\Services\SortInvalidation.cs" Link="Linked\SortInvalidation.cs" />
+    <Compile Include="..\SpawnScene\Services\EpipolarRansac.cs" Link="Linked\EpipolarRansac.cs" />
     <Compile Include="..\SpawnScene\Models\ExifReader.cs" Link="Linked\ExifReader.cs" />
     <Compile Include="..\SpawnScene\Services\WorldSpaceGeometry.cs" Link="Linked\WorldSpaceGeometry.cs" />
     <Compile Include="..\SpawnScene\Services\CameraController.cs" Link="Linked\CameraController.cs" />

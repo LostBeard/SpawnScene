@@ -294,23 +294,28 @@ public partial class Studio
             if (spread > 1e-3f) span = spread * 0.35f;
         }
 
-        // Park at real CAPTURE poses first, so the display path gets scored the same way the
-        // trainer is.
+        // Park at real CAPTURE poses first - intrinsics included - so a render can be put next to
+        // the photograph taken from that exact pose. SUPERVISED views show what the trainer fitted;
+        // HELD-OUT views were never fitted and are the honest test. TJ judges these by eye: a number
+        // alone has declared "better" on runs that looked like mush.
         //
-        // Every PSNR and SSIM number on this project comes from SplatTrainerGpu's rasteriser.
-        // What a person actually looks at comes from GpuGaussianRenderer, through stochastic
-        // sampling, temporal accumulation and CAS sharpening. Those are two renderers of one
-        // buffer, and only the first has ever been measured - so "the number went up" and "it
-        // still looks like a mess" can both be true and neither tells you which renderer to
-        // fix. A screenshot from a pose with a real photograph behind it settles it: score this
-        // against the photo and compare to what the trainer reported for the same view.
-        var gtViews = scene.TrainingCameras.Count;
-        for (int i = 0; i < gtViews; i += Math.Max(1, gtViews / 3))
+        // These used to print "READY-FOR-CAPTURE gtpose-N" with only SetPose (the viewer kept its own
+        // FOV) and the harness regex only knew "free-", so not one of them was ever saved.
+        var viewIdx = Enumerable.Range(0, scene.TrainingViews.Count).ToList();
+        var picks = new List<(string Kind, int Index)>();
+        foreach (var (kind, sel) in new[] { ("sup", true), ("held", false) })
         {
-            var cam = scene.TrainingCameras[i];
-            _cameraController.SetPose(cam.Position, cam.Forward, cam.Up);
-            await Task.Delay(1200);
-            Console.WriteLine($"[Dataset] READY-FOR-CAPTURE gtpose-{i}");
+            var pool = viewIdx.Where(i => scene.TrainingViews[i].UsedForSupervision == sel).ToList();
+            for (int k = 0; k < Math.Min(3, pool.Count); k++)
+                picks.Add((kind, pool[(int)Math.Round(k * (pool.Count - 1) / (double)Math.Max(1, Math.Min(3, pool.Count) - 1))]));
+        }
+        foreach (var (kind, i) in picks.Distinct())
+        {
+            var tv = scene.TrainingViews[i];
+            await ParkOnGroundTruthPoseAsync($"{kind}-{i}", tv.Camera);
+            Console.WriteLine(
+                $"[Dataset] READY-FOR-CAPTURE view-{kind}-{i} {tv.ImageName} {tv.Camera.Width}x{tv.Camera.Height} " +
+                $"turns={tv.QuarterTurns}");
             await Task.Delay(1800);
         }
 

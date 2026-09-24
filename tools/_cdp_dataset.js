@@ -91,6 +91,7 @@ const closeTab = (id) => new Promise(res =>
     const pend = new Map();
     let done = false, failed = null, ready = false;
     const pendingFree = [];
+    const viewMap = {};
     ws.on('message', raw => {
       const m = JSON.parse(raw.toString());
       if (m.id && pend.has(m.id)) pend.get(m.id)(m);
@@ -105,8 +106,12 @@ const closeTab = (id) => new Promise(res =>
         // was unclear. Output goes to a redirected file anyway, and grep is free; GPU minutes
         // are not. Same lesson as the pose-source whitelist, third time in one day.
         console.log(s.slice(0, 400));
+        // free-<name>: a pose nobody stood at. view-<sup|held>-<i> <photo url> <WxH>: parked at a real
+        // photo's pose and intrinsics, for a side-by-side with that photo (tools/compose_views.py).
         const free = s.match(/\[Dataset\] READY-FOR-CAPTURE free-(\w+)/);
+        const view = s.match(/\[Dataset\] READY-FOR-CAPTURE view-(\w+-\d+) (\S+) (\d+x\d+)/);
         if (free) { pendingFree.push(free[1]); }
+        else if (view) { pendingFree.push('view-' + view[1]); viewMap[view[1]] = { photo: view[2], size: view[3] }; }
         else if (/\[Dataset\] READY-FOR-CAPTURE/.test(s)) ready = true;
         if (/\[Dataset\] DONE/.test(s)) done = true;
         if (/\[Dataset\] FAIL/.test(s)) failed = s;
@@ -121,6 +126,13 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
+    // VIEWPORT=WxH: render at the dataset's photo size, dpr 1, so view-* captures are pixel-aligned with
+    // the photographs they are compared to (as _cdp_novel_view.js does for TempleRing).
+    if (process.env.VIEWPORT) {
+      const [vw, vh] = process.env.VIEWPORT.split('x').map(Number);
+      await send('Emulation.setDeviceMetricsOverride', { width: vw, height: vh, deviceScaleFactor: 1, mobile: false });
+      console.log(`[harness] viewport ${vw}x${vh} @1x`);
+    }
     const url = `${APP}/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${MAXDENSIFY}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
@@ -135,8 +147,9 @@ const closeTab = (id) => new Promise(res =>
         const png = await send('Page.captureScreenshot', { format: 'png' });
         const dir = path.join(__dirname, '..', '_shots', 'dataset');
         require('fs').mkdirSync(dir, { recursive: true });
-        const tag = process.env.RUN_TAG ? `${NAME}__${process.env.RUN_TAG}__free-${name}.png`
-                                        : `${NAME}__free-${name}.png`;
+        const kind = name.startsWith('view-') ? name : `free-${name}`;
+        const tag = process.env.RUN_TAG ? `${NAME}__${process.env.RUN_TAG}__${kind}.png`
+                                        : `${NAME}__${kind}.png`;
         require('fs').writeFileSync(path.join(dir, tag), Buffer.from(png.result.data, 'base64'));
         console.log('captured ' + tag);
       }
@@ -158,6 +171,12 @@ const closeTab = (id) => new Promise(res =>
           console.log('captured ' + tagged);
         }
       }
+    }
+    if (Object.keys(viewMap).length) {
+      const dir = path.join(__dirname, '..', '_shots', 'dataset');
+      const side = path.join(dir, `${NAME}__${process.env.RUN_TAG || 'untagged'}__views.json`);
+      require('fs').writeFileSync(side, JSON.stringify({ app: APP, views: viewMap }, null, 2));
+      console.log('wrote ' + side);
     }
     if (failed) { console.log('\nFAILED'); process.exitCode = 1; }
     else if (!done) { console.log('\nTIMED OUT'); process.exitCode = 1; }

@@ -145,10 +145,14 @@ public class MultiViewGenerationService
         var cams = new List<CameraParams>();
         foreach (int g in posed) { baIndex[g] = cams.Count; cams.Add(cameras[g]!); }
 
-        // Verify every pair's matches geometrically before they may form tracks. MEASURED on Truck: ~34
-        // chance matches on EVERY pair (adjacent frames: median 216) - unverified, they chained into
-        // inconsistent tracks and left BA 5,197 points for 126 cameras. Pairs whose cascade cameras face
-        // more than MaxPairAngleDeg apart cannot share much and are not worth a RANSAC.
+        // -- 1. Verify pairs. MEASURED on Truck: ~34 chance matches on EVERY pair (adjacent frames: median 216);
+        // unverified they chained into inconsistent tracks. A pair is a candidate if its cascade cameras face
+        // within MaxPairAngleDeg OR its raw match count is far above the noise floor - the angle alone can never
+        // pair a camera the cascade flipped (Truck views 38/41/79/83/123, 60-156 deg wrong) with its real
+        // neighbours, and a camera with no tracks cannot be moved by BA or detected as wrong.
+        var rawCounts = pairs.Select(p => p.Matches.Count).OrderBy(c => c).ToList();
+        int noiseFloor = rawCounts[rawCounts.Count / 2];
+        int strong = Math.Max(60, 2 * noiseFloor);
         float cosMax = MathF.Cos(MaxPairAngleDeg * MathF.PI / 180f);
         var verified = new List<(int, int, int, int)>();
         int considered = 0, passed = 0;
@@ -156,10 +160,11 @@ public class MultiViewGenerationService
         foreach (var p in pairs)
         {
             if (!baIndex.ContainsKey(p.ImageIndexA) || !baIndex.ContainsKey(p.ImageIndexB)) continue;
-            var ca = cameras[p.ImageIndexA]!; var cb = cameras[p.ImageIndexB]!;
-            if (System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(ca.Forward),
-                    System.Numerics.Vector3.Normalize(cb.Forward)) < cosMax) continue;
             if (p.Matches.Count < 15) continue;
+            var ca = cameras[p.ImageIndexA]!; var cb = cameras[p.ImageIndexB]!;
+            bool near = System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(ca.Forward),
+                System.Numerics.Vector3.Normalize(cb.Forward)) >= cosMax;
+            if (!near && p.Matches.Count < strong) continue;
             considered++;
             var fa = images[p.ImageIndexA].Features; var fb = images[p.ImageIndexB].Features;
             var xa = new float[p.Matches.Count * 2]; var xb = new float[p.Matches.Count * 2];
@@ -177,57 +182,143 @@ public class MultiViewGenerationService
                 if (r.Inliers[k]) verified.Add((p.ImageIndexA, p.Matches[k].IndexA, p.ImageIndexB, p.Matches[k].IndexB));
         }
         Console.WriteLine(
-            $"[BA] verification: {considered} pairs within {MaxPairAngleDeg} deg of each other, {passed} verified, " +
-            $"{verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s)");
+            $"[BA] verification: {considered} candidate pairs (within {MaxPairAngleDeg} deg, or >= {strong} raw matches; " +
+            $"noise floor {noiseFloor}), {passed} verified, {verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s)");
         var tracks = BundleAdjuster.BuildTracks(verified);
         {
             var hist = tracks.GroupBy(t => Math.Min(t.Count, 6)).OrderBy(g => g.Key)
                 .Select(g => $"{(g.Key == 6 ? "6+" : g.Key.ToString())}:{g.Count()}");
             Console.WriteLine($"[BA] track lengths (views per track) {string.Join(" ", hist)}");
         }
-
-        var points = new List<System.Numerics.Vector3>();
-        var pointTracks = new List<List<(int Image, int Feature)>>();
-        var obs = new List<BundleAdjuster.Observation>();
-        var trackObs = new List<(int Camera, float U, float V)>();
-        foreach (var track in tracks)
+        (int Camera, float U, float V) Ob((int Image, int Feature) t)
         {
-            trackObs.Clear();
-            foreach (var (img, feat) in track)
+            var f = images[t.Image].Features[t.Feature];
+            return (baIndex[t.Image], f.X, f.Y);
+        }
+
+        // -- 2. Find cameras the cascade misplaced: triangulate each camera's tracks from the OTHER cameras and
+        // reproject into it. A camera whose median miss is far above everyone else's is wrong, not noisy.
+        var bad = new HashSet<int>();
+        {
+            var medians = new double[cams.Count];
+            var counts = new int[cams.Count];
+            var errs = new List<double>[cams.Count];
+            for (int c = 0; c < cams.Count; c++) errs[c] = new List<double>();
+            var others = new List<(int Camera, float U, float V)>();
+            foreach (var track in tracks)
             {
-                var f = images[img].Features[feat];
-                trackObs.Add((baIndex[img], f.X, f.Y));
+                if (track.Count < 3) continue;
+                for (int k = 0; k < track.Count; k++)
+                {
+                    var me = Ob(track[k]);
+                    if (errs[me.Camera].Count >= 400) continue;
+                    others.Clear();
+                    for (int j = 0; j < track.Count; j++) if (j != k) others.Add(Ob(track[j]));
+                    if (!BundleAdjuster.Triangulate(cams, others, out var x)) continue;
+                    if (!WorldSpaceGeometry.Project(cams[me.Camera], x, out var u, out var v, out _)) { errs[me.Camera].Add(1e6); continue; }
+                    errs[me.Camera].Add(Math.Sqrt((u - me.U) * (u - me.U) + (v - me.V) * (v - me.V)));
+                }
             }
-            if (!BundleAdjuster.Triangulate(cams, trackObs, out var x)) continue;
-            int id = points.Count;
-            points.Add(x);
-            pointTracks.Add(track);
-            foreach (var (c, u, v) in trackObs) obs.Add(new BundleAdjuster.Observation(c, id, u, v));
-        }
-        if (points.Count < 50)
-        {
-            Console.WriteLine($"[BA] SKIPPED: only {points.Count} triangulated tracks from {tracks.Count}.");
-            return null;
+            var all = new List<double>();
+            for (int c = 0; c < cams.Count; c++)
+            {
+                counts[c] = errs[c].Count;
+                if (counts[c] == 0) { medians[c] = double.NaN; continue; }
+                errs[c].Sort();
+                medians[c] = errs[c][errs[c].Count / 2];
+                all.Add(medians[c]);
+            }
+            all.Sort();
+            double typical = all.Count > 0 ? all[all.Count / 2] : double.NaN;
+            double limit = Math.Max(MisplacedCameraPixels, 4 * typical);
+            for (int c = 0; c < cams.Count; c++)
+                if (counts[c] >= 8 && medians[c] > limit) bad.Add(c);
+            Console.WriteLine(
+                $"[BA] leave-one-out reprojection: typical camera misses by {typical:F1} px; {bad.Count} misplaced " +
+                $"(> {limit:F1} px): [{string.Join(", ", bad.Select(c => $"{posed[c]}:{medians[c]:F0}px"))}]");
         }
 
-        // One image size = one camera (a phone video, a photo set from one device): solve ONE focal with the
-        // poses instead of holding DAv3's per-frame guesses fixed. MEASURED on a synthetic rig with DAv3-like
-        // focal error (+10% bias, +-8% scatter): fixed per-view focals leave the poses at 13.8% of spread,
-        // a shared focal gets 0.033% and recovers f exactly.
         bool oneCamera = cams.Select(c => (c.Width, c.Height)).Distinct().Count() == 1;
         var focals = cams.Select(c => 0.5f * (c.FocalX + c.FocalY)).OrderBy(f => f).ToList();
-        var ba = new BundleAdjuster(cams, points, obs, sharedFocal: oneCamera);
-        var result = ba.Solve(new BundleAdjuster.Options
+
+        // -- 3. BA over the cameras that are right, then re-register the misplaced ones against its points
+        // (PnP), then one BA over everyone. A misplaced camera inside the first BA drags its neighbours.
+        var ba = SolveBundle(cams, tracks, Ob, exclude: bad, oneCamera, out var points, out var pointTracks,
+            out var result, "BA");
+        if (ba == null) return null;
+        for (int i = 0; i < cams.Count; i++) if (!bad.Contains(i)) ba.WriteCamera(i, cams[i]);
+        if (oneCamera) foreach (int c in bad) { cams[c].FocalX = (float)ba.SharedFocal; cams[c].FocalY = (float)ba.SharedFocal; }
+
+        if (bad.Count > 0)
         {
-            MaxIterations = BundleAdjustIterations,
-            RoundLog = (round, iters, rms, kept) => Console.WriteLine(
-                $"[BA]   round {round}: {iters} iterations, RMS {rms:F2} px, {kept} obs kept"),
-        });
-        for (int i = 0; i < cams.Count; i++) ba.WriteCamera(i, cams[i]);
+            // Incremental re-registration, SfM-style. The misplaced cameras come in CONTIGUOUS runs (Truck: views
+            // 33-48, 78-89, 115-125 - whole folded stretches), so a camera deep in a run sees few points from good
+            // cameras: one pass placed 5 of 37. Place the ones at the edge of the good set, grow the set,
+            // re-triangulate, repeat.
+            var good = Enumerable.Range(0, cams.Count).Where(c => !bad.Contains(c)).ToHashSet();
+            var pending = new HashSet<int>(bad);
+            var lastTry = new Dictionary<int, (int Corr, int Inl)>();
+            int registered = 0, passes = 0;
+            var obsBuf = new List<(int Camera, float U, float V)>();
+            for (; passes < 30 && pending.Count > 0; passes++)
+            {
+                var w = new Dictionary<int, List<System.Numerics.Vector3>>();
+                var px = new Dictionary<int, List<System.Numerics.Vector2>>();
+                foreach (var track in tracks)
+                {
+                    obsBuf.Clear();
+                    foreach (var t in track) { var o = Ob(t); if (good.Contains(o.Camera)) obsBuf.Add(o); }
+                    if (obsBuf.Count < 2 || !BundleAdjuster.Triangulate(cams, obsBuf, out var x)) continue;
+                    foreach (var t in track)
+                    {
+                        int c = baIndex[t.Image];
+                        if (!pending.Contains(c)) continue;
+                        var f = images[t.Image].Features[t.Feature];
+                        (w.TryGetValue(c, out var wl) ? wl : w[c] = new()).Add(x);
+                        (px.TryGetValue(c, out var pl) ? pl : px[c] = new()).Add(new System.Numerics.Vector2(f.X, f.Y));
+                    }
+                }
+                int thisPass = 0;
+                foreach (int c in w.Keys.OrderByDescending(c => w[c].Count).ToList())
+                {
+                    int n = w[c].Count;
+                    if (n < 12) { lastTry[c] = (n, 0); continue; }
+                    bool ok = CameraResection.ResectRansac(w[c], px[c], cams[c], out var placed, out int inl,
+                        thresholdPx: 8, seed: 17 + c);
+                    lastTry[c] = (n, ok ? inl : 0);
+                    if (!ok || inl < 12 || inl < 0.3 * n) continue;
+                    cams[c].Position = placed.Position; cams[c].Forward = placed.Forward; cams[c].Up = placed.Up;
+                    good.Add(c); pending.Remove(c); registered++; thisPass++;
+                    Console.WriteLine($"[BA]   pass {passes}: registered view {posed[c]} ({inl}/{n} agree)");
+                }
+                if (thisPass == 0) break;
+            }
+            foreach (int c in pending)
+            {
+                var (corr, inl) = lastTry.TryGetValue(c, out var lt) ? lt : (0, 0);
+                Console.WriteLine($"[BA]   view {posed[c]}: NOT placed ({corr} correspondences, best {inl} agree) - dropped");
+            }
+            ba = SolveBundle(cams, tracks, Ob, exclude: pending, oneCamera, out points, out pointTracks,
+                out result, "BA final");
+            if (ba == null) return null;
+            for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) ba.WriteCamera(i, cams[i]);
+            // A camera nobody could place is wrong by tens of degrees: leaving it in trains the scene against a
+            // photo from the wrong viewpoint. Drop it (the caller skips null cameras) and say so.
+            foreach (int c in pending) cameras[posed[c]] = null;
+            Console.WriteLine(
+                $"[BA] misplaced cameras: {bad.Count}; re-registered {registered} in {passes + 1} pass(es); " +
+                $"dropped {pending.Count}; then adjusted all");
+        }
+
         Console.WriteLine(
             $"[BA] focal: DAv3 per-view median {focals[focals.Count / 2]:F1} (p10 {focals[focals.Count / 10]:F1}, " +
             $"p90 {focals[focals.Count * 9 / 10]:F1})" +
             (oneCamera ? $" -> shared {ba.SharedFocal:F1}" : " (mixed image sizes: per-view focals held)"));
+        Console.WriteLine(
+            $"[BA] {cams.Count} cameras, {tracks.Count} tracks -> {points.Count} points, {result.Observations} obs " +
+            $"({result.ObservationsKept} kept), reprojection RMS {result.InitialRmsPixels:F1} -> " +
+            $"{result.FinalRmsPixels:F2} px in {result.Iterations} iterations; last solve {result.Seconds:F1}s, " +
+            $"total {sw.Elapsed.TotalSeconds:F1}s");
 
         // The adjusted points ARE a sparse SfM cloud: every one triangulated from >= 2 views and consistent
         // with the refined cameras to under a pixel. Colour = mean of the photos at its observations.
@@ -255,12 +346,54 @@ public class MultiViewGenerationService
         }
         Console.WriteLine($"[BA] sparse cloud: {pos.Count:N0} points with >= 2 surviving observations");
         return new PointCloud { Positions = pos.ToArray(), Colors = col.ToArray() };
+    }
 
-        Console.WriteLine(
-            $"[BA] {cams.Count} cameras, {tracks.Count} tracks -> {points.Count} points, {result.Observations} obs " +
-            $"({result.ObservationsKept} kept), reprojection RMS {result.InitialRmsPixels:F1} -> " +
-            $"{result.FinalRmsPixels:F2} px in {result.Iterations} iterations; solve {result.Seconds:F1}s, " +
-            $"total {sw.Elapsed.TotalSeconds:F1}s");
+    /// <summary>Median leave-one-out reprojection miss above which a camera counts as misplaced (pixels).</summary>
+    public float MisplacedCameraPixels { get; set; } = 25f;
+
+    /// <summary>Triangulate every track from the non-excluded cameras and bundle-adjust them.</summary>
+    private BundleAdjuster? SolveBundle(
+        List<CameraParams> cams, List<List<(int Image, int Feature)>> tracks,
+        Func<(int Image, int Feature), (int Camera, float U, float V)> ob, HashSet<int> exclude, bool sharedFocal,
+        out List<System.Numerics.Vector3> points, out List<List<(int Image, int Feature)>> pointTracks,
+        out BundleAdjuster.Result result, string label)
+    {
+        points = new List<System.Numerics.Vector3>();
+        pointTracks = new List<List<(int Image, int Feature)>>();
+        var obs = new List<BundleAdjuster.Observation>();
+        var trackObs = new List<(int Camera, float U, float V)>();
+        foreach (var track in tracks)
+        {
+            trackObs.Clear();
+            foreach (var t in track)
+            {
+                var o = ob(t);
+                if (!exclude.Contains(o.Camera)) trackObs.Add(o);
+            }
+            if (trackObs.Count < 2 || !BundleAdjuster.Triangulate(cams, trackObs, out var x)) continue;
+            int id = points.Count;
+            points.Add(x);
+            pointTracks.Add(track);
+            foreach (var (c, u, v) in trackObs) obs.Add(new BundleAdjuster.Observation(c, id, u, v));
+        }
+        result = new BundleAdjuster.Result(0, 0, 0, 0, 0, 0, 0);
+        if (points.Count < 50)
+        {
+            Console.WriteLine($"[{label}] SKIPPED: only {points.Count} triangulated tracks from {tracks.Count}.");
+            return null;
+        }
+        // Keep the reference camera fixed only if it takes part; otherwise fix the first one that does.
+        int fixedCam = Enumerable.Range(0, cams.Count).First(c => !exclude.Contains(c));
+        var ba = new BundleAdjuster(cams, points, obs, fixedCamera: fixedCam, sharedFocal: sharedFocal);
+        result = ba.Solve(new BundleAdjuster.Options
+        {
+            MaxIterations = BundleAdjustIterations,
+            RoundLog = (round, iters, rms, kept) => Console.WriteLine(
+                $"[{label}]   round {round}: {iters} iterations, RMS {rms:F2} px, {kept} obs kept"),
+        });
+        Console.WriteLine($"[{label}] {points.Count} points, {result.ObservationsKept}/{result.Observations} obs, " +
+            $"RMS {result.FinalRmsPixels:F2} px, {result.Seconds:F1}s");
+        return ba;
     }
 
     /// <summary>Anchor views the last chunked run used, and why they were picked.</summary>
@@ -808,6 +941,7 @@ public class MultiViewGenerationService
         }
 
         var baCloud = BundleAdjust ? RefineWithBundleAdjustment(images, poses.Cameras, posed) : null;
+        posed.RemoveAll(i => poses.Cameras[i] == null);   // views BA could not place were dropped
 
         // Initialise from the adjusted SPARSE CLOUD, as 3DGS does from COLMAP, not from per-view depth shells.
         // Depth unprojection gives one private shell per camera (drjohnson: 91.9% of splats constrained by at

@@ -271,6 +271,9 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.BundleAdjustIterations = baii;
             // &bainit=0: per-view depth-shell init even when BA produced a sparse cloud (A/B).
             // &targetmb=N: the resident training-target budget (MiB). 256 shrank Truck's 126 views to 734 px.
+            // &trainprofile=1: wait after each training-step phase and log the per-phase ms (diagnostic).
+            if (query.TryGetValue("trainprofile", out var tpv))
+                ProfileTrainPhases = tpv is "1" or "true";
             if (query.TryGetValue("targetmb", out var tmb) && int.TryParse(tmb, out var tmbi) && tmbi > 0)
                 MaxTargetStackBytes = (long)tmbi * 1024 * 1024;
             if (query.TryGetValue("badump", out var bdv))

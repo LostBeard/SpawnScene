@@ -60,6 +60,9 @@ public partial class Studio
     /// </summary>
     public static long MaxTargetStackBytes { get; set; } = 256L * 1024 * 1024;
 
+    /// <summary><c>&amp;trainprofile=1</c>: per-phase GPU time of a training step, logged with each cycle line.</summary>
+    public static bool ProfileTrainPhases { get; set; }
+
     /// <summary>
     /// Evaluate held-out PSNR every N cycles, 0 to disable. A full evaluation renders every
     /// view, so this trades run time for the shape of the curve - worth it whenever the two
@@ -261,6 +264,7 @@ public partial class Studio
             w = tw; h = th;
 
             _trainer ??= new SplatTrainerGpu(_gpuService);
+            _trainer.ProfilePhases = ProfileTrainPhases;
             _trainer.SkipZeroGradientSteps = SkipZeroGradientSteps;
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
             await _trainer.ResizeAsync(w, h, n, keysPerSplat);
@@ -605,6 +609,8 @@ public partial class Studio
                         Console.WriteLine(
                             $"[Train] cycle {cycle,4} mean loss {mean:F6} " +
                             $"({secs:F1}s, {(it + 1) / Math.Max(secs, 1e-6):F1} it/s)");
+                        if (_trainer.ProfilePhases)
+                            Console.WriteLine($"[Train] cycle {cycle,4} phases: {_trainer.TakePhaseProfile()}");
                     }
 
                     // Held-out PSNR DURING the run, not only at the ends.

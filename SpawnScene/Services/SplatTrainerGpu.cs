@@ -184,6 +184,35 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public int LastLossSteps { get; private set; }
 
+    /// <summary>
+    /// Diagnostic (off by default, <c>&amp;trainprofile=1</c>): wait for the GPU after each phase of a step and
+    /// accumulate its wall time, so a slow step names the phase. The waits it adds make the step slower -
+    /// the split is the measurement, not the total.
+    /// </summary>
+    public bool ProfilePhases { get; set; }
+    readonly Dictionary<string, double> _phaseMs = new();
+    int _phaseSteps;
+    readonly System.Diagnostics.Stopwatch _phaseClock = new();
+
+    async Task PhaseAsync(string name)
+    {
+        if (!ProfilePhases) return;
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        _phaseMs[name] = _phaseMs.GetValueOrDefault(name) + _phaseClock.Elapsed.TotalMilliseconds;
+        _phaseClock.Restart();
+    }
+
+    /// <summary>Mean ms per step for each phase since the last call, then reset. Empty when not profiling.</summary>
+    public string TakePhaseProfile()
+    {
+        if (_phaseSteps == 0) return "";
+        double total = _phaseMs.Values.Sum();
+        var parts = _phaseMs.Select(kv => $"{kv.Key} {kv.Value / _phaseSteps:F1}");
+        string line = $"{total / _phaseSteps:F1} ms/step = " + string.Join(", ", parts);
+        _phaseMs.Clear(); _phaseSteps = 0;
+        return line;
+    }
+
     // Steps added into _lossFixed since it was last read. 0 = the buffer must be cleared before the next add.
     int _lossStepsPending;
 
@@ -571,6 +600,7 @@ public sealed class SplatTrainerGpu : IDisposable
 
         WriteUniforms(cam, depthNear, depthFar, splatCount);
         WriteU32(_capsBuf!, (uint)_keyCapacity);
+        await PhaseAsync("prev");
 
         // Clear the counter and the tile ranges. Tiles with no keys are never written by the
         // ranges kernel, so stale values from a previous frame would be read as real spans.
@@ -589,6 +619,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // Submit, do not wait: the clears are recorded in ILGPU's pending encoder, the passes below go
         // straight to the queue, and a WebGPU queue runs submissions in order. Only a CPU read needs a wait.
         accel.FlushPendingCommands();
+        await PhaseAsync("clear");
 
         // ── 1. Emit (tile, depth) keys ──
         using (var enc = _device.CreateCommandEncoder())
@@ -621,6 +652,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // 4 bytes back to learn how many keys exist. A scalar, not bulk data. The readback maps behind
         // everything already submitted, so it needs no separate wait.
         int[] counted = await _counter.CopyToHostAsync<int>(0, 1);
+        await PhaseAsync("emit+count");
         int keyCount = counted[0];
         LastKeyDemand = keyCount;
         PeakKeyDemand = Math.Max(PeakKeyDemand, keyCount);
@@ -641,6 +673,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _sortPairs!(accel.DefaultStream, _keys!.View.SubView(0, LastKeyCount),
             _values!.View.SubView(0, LastKeyCount), _sortTemp!.View);
         accel.FlushPendingCommands();
+        await PhaseAsync("sort");
 
         // ── 3. Tile ranges ──
         WriteU32(_countBuf!, (uint)LastKeyCount);
@@ -694,6 +727,7 @@ public sealed class SplatTrainerGpu : IDisposable
             using var cmd = enc.Finish();
             _queue!.Submit(new[] { cmd });
         }
+        await PhaseAsync("ranges+raster");
 
         // CPU transfer: gate comparison only. Training passes readback:false and the colour
         // stays on the GPU - at 640x480 this copy is 3.7 MB, which would dwarf the iteration.
@@ -1506,6 +1540,7 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         var accel = _gpu.WebGPUAccelerator;
         var splatGpu = splatBuf.GetGPUBuffer()!;
+        if (ProfilePhases) { _phaseSteps++; _phaseClock.Restart(); }
 
         // The loss accumulates across unread steps; clear it only when a fresh sum starts. The forward's
         // flush submits this clear ahead of the loss pass.
@@ -1575,6 +1610,7 @@ public sealed class SplatTrainerGpu : IDisposable
             });
         }
 
+        await PhaseAsync("loss+ssim");
         // ── Backward: one workgroup per tile, no atomics for signed grads ──
         // densify_abs is filled HERE with peak per-pixel |dCentre| (AbsGS). Clear first so a
         // previous view cannot leak into densify_accum after this step.
@@ -1592,6 +1628,7 @@ public sealed class SplatTrainerGpu : IDisposable
             ShRestBindEntry(12),
         });
 
+        await PhaseAsync("backward");
         // Cleared here, not at the top of the step: the census and densify accum read the
         // completed step's totals after TrainStepAsync returns.
         _gradFixed!.MemSetToZero();
@@ -1606,6 +1643,7 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
         });
 
+        await PhaseAsync("scatter");
         // ── Adam ──
         _adamStepCount++;
         WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
@@ -1617,6 +1655,7 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(4, _adamV!.GetGPUBuffer()!), Buf(5, _adamCfgBuf!), Buf(6, _adamFlagsBuf!),
         });
 
+        await PhaseAsync("adam");
         if (ActiveShDegree >= 1 && _scatterShGrad != null && _adamShRest != null)
         {
             _gradShRest!.MemSetToZero();
@@ -1641,6 +1680,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // -- Geometry: the 2D gradients chained back to position, scale and rotation --
         // Separate dispatch, and optional, so a run can isolate whether a change came from
         // the colours or from the geometry moving.
+        await PhaseAsync("sh");
         if (geometry is { } geo)
         {
             WriteVec4x2(_geomCfgBuf!,
@@ -1655,7 +1695,10 @@ public sealed class SplatTrainerGpu : IDisposable
             });
         }
 
-        return await FinishLossAsync(readLoss);
+        await PhaseAsync("geometry");
+        float loss = await FinishLossAsync(readLoss);
+        await PhaseAsync("loss read");
+        return loss;
     }
 
     /// <summary>

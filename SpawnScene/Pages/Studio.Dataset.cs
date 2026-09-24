@@ -522,6 +522,17 @@ public partial class Studio
             $"pos frac median {acc.MedianPosFrac:P1} p90 {acc.P90PosFrac:P1}; " +
             $"forward err median {acc.MedianForwardDeg:F1}deg p90 {acc.P90ForwardDeg:F1}deg");
 
+        // Error along the capture order in 12 bins: smooth growth = drift (an under-constrained chain),
+        // isolated spikes = individual bad views.
+        if (posFrac.Length >= 12)
+        {
+            int bins = 12, per = (posFrac.Length + bins - 1) / bins;
+            var prof = Enumerable.Range(0, bins)
+                .Select(b => posFrac.Skip(b * per).Take(per).DefaultIfEmpty(float.NaN).Average())
+                .Select(v => $"{v:P0}");
+            Console.WriteLine($"[Dataset]   pose-vs-GT along capture order ({per} views/bin): {string.Join(" ", prof)}");
+        }
+
         // Name the worst few so a bad fold / bad view is findable in the log.
         var order = Enumerable.Range(0, posFrac.Length).OrderByDescending(i => posFrac[i]).Take(5);
         foreach (int i in order)

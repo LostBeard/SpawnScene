@@ -115,13 +115,19 @@ public class MultiViewGenerationService
     /// </summary>
     public bool BundleAdjust { get; set; } = true;
 
+    /// <summary>
+    /// Initialise splats from bundle adjustment's triangulated cloud instead of per-view depth shells
+    /// (3DGS's own recipe, with our cameras standing in for COLMAP's).
+    /// </summary>
+    public bool InitFromBundlePoints { get; set; } = true;
+
     /// <summary>Levenberg-Marquardt iterations per BA round.</summary>
     public int BundleAdjustIterations { get; set; } = 150;
 
     /// <summary>Pairs whose cascade cameras face further apart than this are not verified or used by BA.</summary>
     public float MaxPairAngleDeg { get; set; } = 45f;
 
-    private void RefineWithBundleAdjustment(
+    private PointCloud? RefineWithBundleAdjustment(
         IReadOnlyList<ImportedImage> images, CameraParams?[] cameras, IReadOnlyList<int> posed)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -131,7 +137,7 @@ public class MultiViewGenerationService
             Console.WriteLine(
                 $"[BA] SKIPPED: {pairs.Count} matched pairs for {_importService.Images.Count} imported vs " +
                 $"{images.Count} images - no feature tracks to adjust against.");
-            return;
+            return null;
         }
 
         // BA works on the posed views only; map global image index <-> BA camera index.
@@ -174,8 +180,14 @@ public class MultiViewGenerationService
             $"[BA] verification: {considered} pairs within {MaxPairAngleDeg} deg of each other, {passed} verified, " +
             $"{verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s)");
         var tracks = BundleAdjuster.BuildTracks(verified);
+        {
+            var hist = tracks.GroupBy(t => Math.Min(t.Count, 6)).OrderBy(g => g.Key)
+                .Select(g => $"{(g.Key == 6 ? "6+" : g.Key.ToString())}:{g.Count()}");
+            Console.WriteLine($"[BA] track lengths (views per track) {string.Join(" ", hist)}");
+        }
 
         var points = new List<System.Numerics.Vector3>();
+        var pointTracks = new List<List<(int Image, int Feature)>>();
         var obs = new List<BundleAdjuster.Observation>();
         var trackObs = new List<(int Camera, float U, float V)>();
         foreach (var track in tracks)
@@ -189,12 +201,13 @@ public class MultiViewGenerationService
             if (!BundleAdjuster.Triangulate(cams, trackObs, out var x)) continue;
             int id = points.Count;
             points.Add(x);
+            pointTracks.Add(track);
             foreach (var (c, u, v) in trackObs) obs.Add(new BundleAdjuster.Observation(c, id, u, v));
         }
         if (points.Count < 50)
         {
             Console.WriteLine($"[BA] SKIPPED: only {points.Count} triangulated tracks from {tracks.Count}.");
-            return;
+            return null;
         }
 
         // One image size = one camera (a phone video, a photo set from one device): solve ONE focal with the
@@ -215,6 +228,33 @@ public class MultiViewGenerationService
             $"[BA] focal: DAv3 per-view median {focals[focals.Count / 2]:F1} (p10 {focals[focals.Count / 10]:F1}, " +
             $"p90 {focals[focals.Count * 9 / 10]:F1})" +
             (oneCamera ? $" -> shared {ba.SharedFocal:F1}" : " (mixed image sizes: per-view focals held)"));
+
+        // The adjusted points ARE a sparse SfM cloud: every one triangulated from >= 2 views and consistent
+        // with the refined cameras to under a pixel. Colour = mean of the photos at its observations.
+        var kept = ba.KeptObservationsPerPoint();
+        var pos = new List<System.Numerics.Vector3>();
+        var col = new List<System.Numerics.Vector3>();
+        for (int p = 0; p < points.Count; p++)
+        {
+            if (kept[p] < 2) continue;
+            var sum = System.Numerics.Vector3.Zero;
+            int n = 0;
+            foreach (var (img, feat) in pointTracks[p])
+            {
+                var im = images[img];
+                var f = im.Features[feat];
+                int px = Math.Clamp((int)MathF.Round(f.X), 0, im.Width - 1);
+                int py = Math.Clamp((int)MathF.Round(f.Y), 0, im.Height - 1);
+                int o = (py * im.Width + px) * 4;
+                if (im.RgbaPixels.Length < o + 3) continue;
+                sum += new System.Numerics.Vector3(im.RgbaPixels[o], im.RgbaPixels[o + 1], im.RgbaPixels[o + 2]) / 255f;
+                n++;
+            }
+            pos.Add(ba.PointAt(p));
+            col.Add(n > 0 ? sum / n : new System.Numerics.Vector3(0.5f));
+        }
+        Console.WriteLine($"[BA] sparse cloud: {pos.Count:N0} points with >= 2 surviving observations");
+        return new PointCloud { Positions = pos.ToArray(), Colors = col.ToArray() };
 
         Console.WriteLine(
             $"[BA] {cams.Count} cameras, {tracks.Count} tracks -> {points.Count} points, {result.Observations} obs " +
@@ -767,7 +807,22 @@ public class MultiViewGenerationService
             return null;
         }
 
-        if (BundleAdjust) RefineWithBundleAdjustment(images, poses.Cameras, posed);
+        var baCloud = BundleAdjust ? RefineWithBundleAdjustment(images, poses.Cameras, posed) : null;
+
+        // Initialise from the adjusted SPARSE CLOUD, as 3DGS does from COLMAP, not from per-view depth shells.
+        // Depth unprojection gives one private shell per camera (drjohnson: 91.9% of splats constrained by at
+        // most one view), and after BA moves the cameras those shells are also at stale scales. MEASURED on
+        // Truck 2K: COLMAP poses + COLMAP points render held-out views as the truck; cascade + BA poses with
+        // depth-shell init stayed mush (held-out 9.8 dB).
+        if (InitFromBundlePoints && baCloud != null && baCloud.Count >= 1000)
+        {
+            LastCameras = poses.Cameras;
+            LastPoseSource = "dav3-chunked";
+            LastChunkOf = poses.ChunkOf.ToArray();
+            var packedCloud = SparsePointCloudInit.BuildPacked(baCloud);
+            Console.WriteLine($"[MultiView] init from the bundle-adjusted sparse cloud: {baCloud.Count:N0} points");
+            return await GenerateFromPointCloudAsync(packedCloud, baCloud.Count, posed.Select(i => poses.Cameras[i]!));
+        }
 
         // Depth scale composes in one order and only one. A view's raw depth is in ITS CHUNK's
         // frame, so it takes the fold's scale first; only then are the views comparable enough to

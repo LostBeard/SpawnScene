@@ -38,7 +38,7 @@ public sealed class BundleAdjuster
         public double OutlierHubers { get; init; } = 4.0;
         public int Rounds { get; init; } = 3;
         public int MaxCgIterations { get; init; } = 200;
-        public double CgTolerance { get; init; } = 1e-8;
+        public double CgTolerance { get; init; } = 1e-6;
         /// <summary>Called after each round: (round, LM iterations, inlier RMS px, observations kept).</summary>
         public Action<int, int, double, int>? RoundLog { get; init; }
     }
@@ -122,6 +122,14 @@ public sealed class BundleAdjuster
     }
 
     public Vector3 PointAt(int p) => new((float)_x[p * 3], (float)_x[p * 3 + 1], (float)_x[p * 3 + 2]);
+
+    /// <summary>Per point: how many of its observations survived the outlier rounds.</summary>
+    public int[] KeptObservationsPerPoint()
+    {
+        var n = new int[_np];
+        for (int i = 0; i < _obs.Count; i++) if (_keep[i]) n[_obs[i].Point]++;
+        return n;
+    }
 
     /// <summary>Residual (pixels) of observation <paramref name="o"/>; false if the point is behind the camera.</summary>
     bool Residual(in Observation o, double[] r, double[] c, double[] x, double f, out double ru, out double rv,
@@ -319,6 +327,10 @@ public sealed class BundleAdjuster
 
         // S = U* - sum_p W_p V*_p^-1 W_p^T ; b = -g + sum_p W_p V*_p^-1 gP_p
         var s = (double[])ne.U.Clone();
+        // Which camera blocks of S are non-zero: a camera couples to itself and to every camera it shares a
+        // point with. On a sequence that is ~20 neighbours, not all 126 - the dense matvec was the cost.
+        var neighbours = new HashSet<int>[_nc];
+        for (int ci = 0; ci < _nc; ci++) neighbours[ci] = new HashSet<int> { ci };
         var rhs = new double[n];
         for (int k = 0; k < n; k++)
         {
@@ -348,6 +360,7 @@ public sealed class BundleAdjuster
                 foreach (int j in list)
                 {
                     int cj = _obs[j].Camera;
+                    neighbours[ci].Add(cj);
                     for (int a = 0; a < Cols; a++)
                     {
                         int ga = Col(ci, a);
@@ -364,7 +377,9 @@ public sealed class BundleAdjuster
             }
         }
 
-        if (!BlockJacobiCg(s, rhs, dCam, n)) return false;
+        var cols = new int[_nc][];
+        for (int ci = 0; ci < _nc; ci++) { cols[ci] = neighbours[ci].ToArray(); Array.Sort(cols[ci]); }
+        if (!BlockJacobiCg(s, rhs, dCam, n, cols)) return false;
         for (int ci = 0; ci < _nc; ci++) if (_fixed[ci]) for (int a = 0; a < 6; a++) dCam[ci * 6 + a] = 0;
 
         // Back-substitute: dP = V*^-1 (-gP - sum W^T dC)
@@ -393,7 +408,7 @@ public sealed class BundleAdjuster
         return true;
     }
 
-    bool BlockJacobiCg(double[] s, double[] b, double[] x, int n)
+    bool BlockJacobiCg(double[] s, double[] b, double[] x, int n, int[][] cols)
     {
         // 6x6 blocks for the poses, scalar blocks for anything after them (the shared focal).
         int nb = _nc;
@@ -431,7 +446,7 @@ public sealed class BundleAdjuster
         double b2 = Math.Max(Dot(b, b), 1e-300);
         for (int it = 0; it < _opts.MaxCgIterations; it++)
         {
-            MatVec(s, p, ap, n);
+            SparseMatVec(s, p, ap, n, cols);
             double pap = Dot(p, ap);
             if (pap <= 0) break;
             double alpha = rz / pap;
@@ -445,6 +460,40 @@ public sealed class BundleAdjuster
         }
         foreach (var val in x) if (!double.IsFinite(val)) return false;
         return true;
+    }
+
+    /// <summary>
+    /// y = S x touching only the camera blocks that can be non-zero (<paramref name="cols"/>), plus the
+    /// trailing global columns/rows (the shared focal), which couple to everything.
+    /// </summary>
+    void SparseMatVec(double[] s, double[] x, double[] y, int n, int[][] cols)
+    {
+        int tail0 = _nc * 6;
+        for (int ci = 0; ci < _nc; ci++)
+        {
+            var nb = cols[ci];
+            for (int a = 0; a < 6; a++)
+            {
+                int row = (ci * 6 + a) * n;
+                double acc = 0;
+                foreach (int cj in nb)
+                {
+                    int c0 = row + cj * 6;
+                    int x0 = cj * 6;
+                    acc += s[c0] * x[x0] + s[c0 + 1] * x[x0 + 1] + s[c0 + 2] * x[x0 + 2]
+                         + s[c0 + 3] * x[x0 + 3] + s[c0 + 4] * x[x0 + 4] + s[c0 + 5] * x[x0 + 5];
+                }
+                for (int k = tail0; k < n; k++) acc += s[row + k] * x[k];
+                y[ci * 6 + a] = acc;
+            }
+        }
+        for (int k = tail0; k < n; k++)
+        {
+            double acc = 0;
+            int row = k * n;
+            for (int j = 0; j < n; j++) acc += s[row + j] * x[j];
+            y[k] = acc;
+        }
     }
 
     static void MatVec(double[] s, double[] x, double[] y, int n)

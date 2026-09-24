@@ -848,40 +848,25 @@ public sealed class SplatTrainerGpu : IDisposable
         DisposeBuffers(keepOptimizerRows: true);
         await Stage("released frame buffers");
 
-        if (_adamM != null && _adamV != null)
-        {
-            long adamLen = (long)priorCount * AdamSlots;
-            // CPU transfer: Adam m/v only (~100 MB at 900k) - the opacity-safe path.
-            var state = new AdamState(
-                await _adamM.CopyToHostAsync<float>(0, adamLen),
-                await _adamV.CopyToHostAsync<float>(0, adamLen),
-                step);
-            await Stage("read Adam m/v");
-            _adamM.Dispose(); _adamV.Dispose();
-            _adamM = accel.Allocate1D<float>((long)newCount * AdamSlots);
-            _adamV = accel.Allocate1D<float>((long)newCount * AdamSlots);
-            RestoreAdamState(state, adamSurvivors, zeroAdamSlot);
-            await Stage("restored Adam m/v");
-        }
-        else
-        {
-            // Nothing to carry (Resize never ran): the banks still have to exist at the new
-            // count, because the Resize that follows keeps whatever is here.
-            _adamM = accel.Allocate1D<float>((long)newCount * AdamSlots);
-            _adamV = accel.Allocate1D<float>((long)newCount * AdamSlots);
-        }
-
         var adamSrc = accel.Allocate1D<int>(newCount);
         adamSrc.CopyFromCPU(adamSurvivors);
         var featSrc = accel.Allocate1D<int>(newCount);
         featSrc.CopyFromCPU(featureSources);
         try
         {
-            _shRest = await CarryBankAsync(_shRest, featSrc, priorCount, newCount);
+            // All on the GPU, one bank at a time. The Adam moments used to go through the host because a
+            // GPU remap "killed opacity" (MEASURED): that remap's clear ran AFTER its gather and zeroed the
+            // moments, and zero moments under a large bias-corrected step count make Adam's next steps ~3x
+            // the learning rate. Fixed in RemapGpuFencedAsync; CarryGateAsync checks every bank.
+            _adamM = await CarryBankAsync(_adamM, adamSrc, priorCount, newCount, AdamSlots, zeroAdamSlot);
+            await Stage("carried Adam m");
+            _adamV = await CarryBankAsync(_adamV, adamSrc, priorCount, newCount, AdamSlots, zeroAdamSlot);
+            await Stage("carried Adam v");
+            _shRest = await CarryBankAsync(_shRest, featSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
             await Stage("carried SH rest");
-            _adamShM = await CarryBankAsync(_adamShM, adamSrc, priorCount, newCount);
+            _adamShM = await CarryBankAsync(_adamShM, adamSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
             await Stage("carried SH Adam m");
-            _adamShV = await CarryBankAsync(_adamShV, adamSrc, priorCount, newCount);
+            _adamShV = await CarryBankAsync(_adamShV, adamSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
             await Stage("carried SH Adam v");
         }
         finally
@@ -904,23 +889,22 @@ public sealed class SplatTrainerGpu : IDisposable
     }
 
     /// <summary>
-    /// One SH-shaped bank: allocate at the new count, gather the prior rows into it on the GPU,
+    /// One per-splat bank (Adam or SH shaped): allocate at the new count, gather the prior rows into it on the GPU,
     /// fence, dispose the prior. Peak is prior + next for THIS bank only.
     /// </summary>
     async Task<MemoryBuffer1D<float, Stride1D.Dense>?> CarryBankAsync(
         MemoryBuffer1D<float, Stride1D.Dense>? prior,
-        MemoryBuffer1D<int, Stride1D.Dense> sources, int priorCount, int newCount)
+        MemoryBuffer1D<int, Stride1D.Dense> sources, int priorCount, int newCount,
+        int stride, int zeroSlot = -1)
     {
-        var next = _gpu.WebGPUAccelerator.Allocate1D<float>(
-            (long)newCount * SphericalHarmonics.RestFloatsPerSplat);
+        var next = _gpu.WebGPUAccelerator.Allocate1D<float>((long)newCount * stride);
         if (prior == null)
         {
             // No prior bank (Resize never ran) - zeros, as Resize itself would hand out.
             next.MemSetToZero();
             return next;
         }
-        await RemapGpuFencedAsync(prior, next, sources, priorCount, newCount,
-            SphericalHarmonics.RestFloatsPerSplat);
+        await RemapGpuFencedAsync(prior, next, sources, priorCount, newCount, stride, zeroSlot);
         prior.Dispose();
         return next;
     }

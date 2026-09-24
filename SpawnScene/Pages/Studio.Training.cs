@@ -1033,8 +1033,8 @@ public partial class Studio
         // resizing on top of them held two full generations at once; that is what lost the
         // device on the first apply at 757k (Bathroom) and 912k (DrJohnson, 44/44 posed) while
         // 450k sailed through - see SplatTrainerGpu.CarryOptimizerRowsAsync for the numbers.
-        // Adam: host RemapFloatRows (GPU Adam remap killed opacity - MEASURED).
-        // SH: GPU RemapFloatRows with CopyToHost fence (full host SH OOM'd at ~780k - growhost).
+        // Adam and SH: GPU RemapFloatRows, one bank at a time (the old "GPU Adam remap killed opacity" was
+        // the remap zeroing its own output - see RemapGpuFencedAsync; CarryGateAsync checks every bank).
         await _trainer.CarryOptimizerRowsAsync(
             n, m, adamSurvivors, featureSources, zeroAdamSlot: resetOpacity ? 3 : -1);
         await _trainer.ResizeAsync(w, h, m, keys);

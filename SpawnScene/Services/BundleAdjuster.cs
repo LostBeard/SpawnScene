@@ -199,6 +199,37 @@ public sealed class BundleAdjuster
     }
 
     Options _opts = new();
+    int[][]? _cameraNeighbours;
+
+    /// <summary>
+    /// Camera blocks of S that can be non-zero: each camera and every camera it shares a point with (over all
+    /// observations, so a superset of any round's). Computed once - it was a HashSet insert per point pair per
+    /// LM attempt.
+    /// </summary>
+    int[][] CameraNeighbours()
+    {
+        var sets = new HashSet<int>[_nc];
+        for (int c = 0; c < _nc; c++) sets[c] = new HashSet<int> { c };
+        var camsOfPoint = new List<int>?[_np];
+        foreach (var o in _obs) (camsOfPoint[o.Point] ??= new List<int>()).Add(o.Camera);
+        foreach (var list in camsOfPoint)
+        {
+            if (list == null) continue;
+            foreach (int a in list) foreach (int b in list) sets[a].Add(b);
+        }
+        var cols = new int[_nc][];
+        for (int c = 0; c < _nc; c++) { cols[c] = sets[c].ToArray(); Array.Sort(cols[c]); }
+        return cols;
+    }
+    long _tBuild, _tSolve, _tCost, _tCg;
+    int _attempts;
+
+    /// <summary>Where the time went (seconds): normal equations, damped solve (Schur + CG), of which CG, cost evaluation; LM attempts.</summary>
+    public string TimingSummary()
+    {
+        double f = System.Diagnostics.Stopwatch.Frequency;
+        return $"build {_tBuild / f:F2}s, solve {_tSolve / f:F2}s (CG {_tCg / f:F2}s), cost {_tCost / f:F2}s, {_attempts} attempts";
+    }
 
     public Result Solve(Options? options = null)
     {
@@ -235,13 +266,21 @@ public sealed class BundleAdjuster
         var nx = new double[_x.Length];
         for (; it < _opts.MaxIterations; it++)
         {
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             var ne = BuildNormalEquations();
+            _tBuild += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
             bool improved = false;
             for (int attempt = 0; attempt < 10; attempt++)
             {
-                if (!SolveDamped(ne, lambda, out var dCam, out var dPt)) { lambda *= 10; continue; }
+                long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
+                bool solved = SolveDamped(ne, lambda, out var dCam, out var dPt);
+                _tSolve += System.Diagnostics.Stopwatch.GetTimestamp() - t1;
+                _attempts++;
+                if (!solved) { lambda *= 10; continue; }
                 double nf = ApplyStep(dCam, dPt, nr, nc, nx);
+                long t2 = System.Diagnostics.Stopwatch.GetTimestamp();
                 double newCost = RobustCost(nr, nc, nx, nf);
+                _tCost += System.Diagnostics.Stopwatch.GetTimestamp() - t2;
                 if (newCost < cost)
                 {
                     Array.Copy(nr, _r, _r.Length); Array.Copy(nc, _c, _c.Length); Array.Copy(nx, _x, _x.Length);
@@ -352,10 +391,6 @@ public sealed class BundleAdjuster
 
         // S = U* - sum_p W_p V*_p^-1 W_p^T ; b = -g + sum_p W_p V*_p^-1 gP_p
         var s = (double[])ne.U.Clone();
-        // Which camera blocks of S are non-zero: a camera couples to itself and to every camera it shares a
-        // point with. On a sequence that is ~20 neighbours, not all 126 - the dense matvec was the cost.
-        var neighbours = new HashSet<int>[_nc];
-        for (int ci = 0; ci < _nc; ci++) neighbours[ci] = new HashSet<int> { ci };
         var rhs = new double[n];
         for (int k = 0; k < n; k++)
         {
@@ -365,46 +400,58 @@ public sealed class BundleAdjuster
             s[k * n + k] += lambda * diag + (isFixedPose ? 1.0 : 1e-9);
         }
         Span<double> wv = stackalloc double[Cols * 3];
+        Span<int> colI = stackalloc int[Cols];
+        Span<int> colJ = stackalloc int[Cols];
         for (int p = 0; p < _np; p++)
         {
             var list = ne.ByPoint[p];
             if (list == null) continue;
             var vi = vInv.AsSpan(p * 9, 9);
-            foreach (int i in list)
+            for (int ii = 0; ii < list.Count; ii++)
             {
+                int i = list[ii];
                 int ci = _obs[i].Camera;
+                for (int a = 0; a < Cols; a++) colI[a] = Col(ci, a);
                 for (int a = 0; a < Cols; a++)
                 {
-                    int ga = Col(ci, a);
+                    int ga = colI[a];
                     if (ga < 0) continue;
                     int wbase = (i * Cols + a) * 3;
                     for (int bb = 0; bb < 3; bb++)
                         wv[a * 3 + bb] = ne.Wb[wbase] * vi[bb] + ne.Wb[wbase + 1] * vi[3 + bb] + ne.Wb[wbase + 2] * vi[6 + bb];
                     rhs[ga] += wv[a * 3] * ne.GP[p * 3] + wv[a * 3 + 1] * ne.GP[p * 3 + 1] + wv[a * 3 + 2] * ne.GP[p * 3 + 2];
                 }
-                foreach (int j in list)
+                // S is symmetric (V^-1 is): visit each unordered pair once, write the block and its transpose.
+                for (int jj = ii; jj < list.Count; jj++)
                 {
+                    int j = list[jj];
                     int cj = _obs[j].Camera;
-                    neighbours[ci].Add(cj);
+                    for (int bb = 0; bb < Cols; bb++) colJ[bb] = Col(cj, bb);
                     for (int a = 0; a < Cols; a++)
                     {
-                        int ga = Col(ci, a);
+                        int ga = colI[a];
                         if (ga < 0) continue;
+                        double w0 = wv[a * 3], w1 = wv[a * 3 + 1], w2 = wv[a * 3 + 2];
+                        int rowA = ga * n;
                         for (int bb = 0; bb < Cols; bb++)
                         {
-                            int gb = Col(cj, bb);
+                            int gb = colJ[bb];
                             if (gb < 0) continue;
                             int jb = (j * Cols + bb) * 3;
-                            s[ga * n + gb] -= wv[a * 3] * ne.Wb[jb] + wv[a * 3 + 1] * ne.Wb[jb + 1] + wv[a * 3 + 2] * ne.Wb[jb + 2];
+                            double val = w0 * ne.Wb[jb] + w1 * ne.Wb[jb + 1] + w2 * ne.Wb[jb + 2];
+                            s[rowA + gb] -= val;
+                            if (jj != ii) s[gb * n + ga] -= val;
                         }
                     }
                 }
             }
         }
 
-        var cols = new int[_nc][];
-        for (int ci = 0; ci < _nc; ci++) { cols[ci] = neighbours[ci].ToArray(); Array.Sort(cols[ci]); }
-        if (!BlockJacobiCg(s, rhs, dCam, n, cols)) return false;
+        var cols = _cameraNeighbours ??= CameraNeighbours();
+        long tc = System.Diagnostics.Stopwatch.GetTimestamp();
+        bool cgOk = BlockJacobiCg(s, rhs, dCam, n, cols);
+        _tCg += System.Diagnostics.Stopwatch.GetTimestamp() - tc;
+        if (!cgOk) return false;
         for (int ci = 0; ci < _nc; ci++) if (_fixed[ci]) for (int a = 0; a < 6; a++) dCam[ci * 6 + a] = 0;
 
         // Back-substitute: dP = V*^-1 (-gP - sum W^T dC)

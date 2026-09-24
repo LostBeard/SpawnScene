@@ -111,6 +111,7 @@ public class BundleAdjusterTests
             $"points {points.Count}, obs {result.Observations} kept {result.ObservationsKept}, iters {result.Iterations}, " +
             $"rms {result.InitialRmsPixels:F2} -> {result.FinalRmsPixels:F3} px, {result.Seconds:F2}s");
         TestContext.Out.WriteLine($"pose vs truth: before {before.pos:P2} / {before.fwd:F2} deg, after {after.pos:P3} / {after.fwd:F3} deg");
+        TestContext.Out.WriteLine($"timing: {ba.TimingSummary()}");
 
         Assert.That(before.pos, Is.GreaterThan(0.03f), "the perturbation must be DAv3-sized for the test to mean anything");
         Assert.That(after.pos, Is.LessThan(0.005f), $"position error {after.pos:P2} of spread after BA");

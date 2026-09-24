@@ -88,6 +88,9 @@ public partial class Studio
             float depthNear = MathF.Max(dist - 0.8f, 0.01f);
             float depthFar = dist + 0.8f;
 
+            // -- The sort every forward pass depends on: exact against a CPU stable sort? --
+            if (!await RadixSortGateAsync()) return;
+
             // ── GPU ──
             using var trainer = new SplatTrainerGpu(_gpuService);
             trainer.Initialize();

@@ -72,7 +72,6 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _outColour;  // 3 per pixel
     MemoryBuffer1D<float, Stride1D.Dense>? _outFinalT;  // 1 per pixel
     MemoryBuffer1D<uint, Stride1D.Dense>? _outEnd;      // 1 per pixel
-    MemoryBuffer1D<int, Stride1D.Dense>? _sortTemp;   // radix temp is int-typed
     MemoryBuffer1D<float, Stride1D.Dense>? _target;      // 3 per pixel
     MemoryBuffer1D<float, Stride1D.Dense>? _dLdPix;      // 3 per pixel
     // Three bindings of three floats per key, not one of nine: maxStorageBufferBindingSize
@@ -163,7 +162,7 @@ public sealed class SplatTrainerGpu : IDisposable
         return (At(0.10), At(0.50), At(0.90));
     }
 
-    RadixSortPairs<uint, Stride1D.Dense, uint, Stride1D.Dense>? _sortPairs;
+    GpuRadixSort? _radixSort;
 
     int _width, _height, _tilesX, _tilesY, _keyCapacity;
 
@@ -579,10 +578,9 @@ public sealed class SplatTrainerGpu : IDisposable
         _lossFixed = accel.Allocate1D<int>(1);
         _lossStepsPending = 0;
 
-        int temp = accel.ComputeRadixSortPairsTempStorageSize<uint, uint, AscendingUInt32>((Index1D)_keyCapacity);
-        _sortTemp = accel.Allocate1D<int>(Math.Max(1, temp));
-        _sortPairs = accel.CreateRadixSortPairs<uint, Stride1D.Dense, uint, Stride1D.Dense, AscendingUInt32>();
-        await stage($"sort temp {temp:N0}");
+        _radixSort ??= new GpuRadixSort(_device!, _queue!);
+        _radixSort.EnsureCapacity(_keyCapacity);
+        await stage($"sort scratch for {_keyCapacity:N0} keys");
     }
 
     /// <summary>
@@ -670,8 +668,11 @@ public sealed class SplatTrainerGpu : IDisposable
         }
 
         // ── 2. Sort by key: groups by tile AND orders front-to-back within each tile ──
-        _sortPairs!(accel.DefaultStream, _keys!.View.SubView(0, LastKeyCount),
-            _values!.View.SubView(0, LastKeyCount), _sortTemp!.View);
+        // 8 bits a pass over only the bits the key uses (tile index above DEPTH_BITS of depth), all passes
+        // in one submission. The ILGPU.Algorithms sort this replaces ran 16 two-bit passes, ~100 dispatches,
+        // and was 60-67% of a training step (MEASURED, &trainprofile=1).
+        int keyBits = 18 + Math.Max(1, System.Numerics.BitOperations.Log2((uint)Math.Max(1, _tilesX * _tilesY - 1)) + 1);
+        _radixSort!.Sort(_keys!.GetGPUBuffer()!, _values!.GetGPUBuffer()!, LastKeyCount, Math.Min(32, keyBits));
         accel.FlushPendingCommands();
         await PhaseAsync("sort");
 
@@ -1927,7 +1928,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _outColour?.Dispose(); _outColour = null;
         _outFinalT?.Dispose(); _outFinalT = null;
         _outEnd?.Dispose(); _outEnd = null;
-        _sortTemp?.Dispose(); _sortTemp = null;
+        _radixSort?.ReleaseScratch();
         _target?.Dispose(); _target = null;
         _dLdPix?.Dispose(); _dLdPix = null;
         _gradKeyA?.Dispose(); _gradKeyA = null;
@@ -1961,6 +1962,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public void Dispose()
     {
         DisposeBuffers();
+        _radixSort?.Dispose(); _radixSort = null;
         _uniformBuf?.Destroy(); _uniformBuf?.Dispose();
         _capsBuf?.Destroy(); _capsBuf?.Dispose();
         _geomCfgBuf?.Destroy(); _geomCfgBuf?.Dispose();

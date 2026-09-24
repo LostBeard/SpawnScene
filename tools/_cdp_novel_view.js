@@ -22,7 +22,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
-const { ensureChrome } = require('./_chrome_harness');
+const { ensureChrome, APP } = require('./_chrome_harness');
 
 // Repo root, derived from this file so the tool works from any clone.
 const ROOT = path.resolve(__dirname, '..').replace(/\\/g, '/');
@@ -174,7 +174,7 @@ const imagesOnDisk = () =>
     console.log(`
 === boot + generate (${firstView}) ===`);
     await send('Page.navigate',
-      { url: `http://127.0.0.1:8080/studio?autotest=novel-view&view=${firstView}${EXTRA}&cb=${Date.now()}` });
+      { url: `${APP}/studio?autotest=novel-view&view=${firstView}${EXTRA}&cb=${Date.now()}` });
     await waitReady(firstView, 900000, 0);
 
     // What the app actually SUPERVISED on. The depth-init picks are not the same set: once

@@ -1,3 +1,4 @@
+const { APP } = require('./_chrome_harness');
 const http = require('http');
 const WebSocket = require('ws');
 
@@ -42,7 +43,7 @@ function get(u) {
 
   // Try fetch from page context
   const fet = await send('Runtime.evaluate', {
-    expression: `(async()=>{ try { const r=await fetch('http://127.0.0.1:8080/'); return 'ok '+r.status+' '+ (await r.text()).length; } catch(e){ return 'err '+e.message; } })()`,
+    expression: `(async()=>{ try { const r=await fetch('${APP}/'); return 'ok '+r.status+' '+ (await r.text()).length; } catch(e){ return 'err '+e.message; } })()`,
     awaitPromise: true,
     returnByValue: true,
   });
@@ -61,7 +62,7 @@ function get(u) {
     }
   });
 
-  await send('Page.navigate', { url: 'http://127.0.0.1:8080/studio' });
+  await send('Page.navigate', { url: APP + '/studio' });
   await new Promise((r) => setTimeout(r, 5000));
   console.log('fails', fails.length);
 

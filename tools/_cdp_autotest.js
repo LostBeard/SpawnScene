@@ -8,7 +8,7 @@
 
 const http = require('http');
 const WebSocket = require('ws');
-const { ensureChrome } = require('./_chrome_harness');
+const { ensureChrome, APP } = require('./_chrome_harness');
 
 const QUERY = process.argv[2] || 'autotest=dav3-pose';
 const PREFIX = process.argv[3] || 'Dav3Pose';
@@ -69,7 +69,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?${QUERY}&cb=${Date.now()}`;
+    const url = `${APP}/studio?${QUERY}&cb=${Date.now()}`;
     console.log(`\n=== ${QUERY} ===\n${url}\n`);
     await send('Page.navigate', { url });
 

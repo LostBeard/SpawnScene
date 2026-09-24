@@ -1,3 +1,4 @@
+const { APP } = require('./_chrome_harness');
 const http = require('http');
 const WebSocket = require('ws');
 
@@ -24,7 +25,7 @@ function getJson(url) {
     console.log('opening new tab via browser');
     const bws = new WebSocket(version.webSocketDebuggerUrl);
     await new Promise((r) => bws.on('open', r));
-    bws.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'http://127.0.0.1:8080/studio' } }));
+    bws.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: APP + '/studio' } }));
     await new Promise((r) => setTimeout(r, 2000));
     bws.close();
     pages = await getJson('http://127.0.0.1:9222/json/list');
@@ -84,7 +85,7 @@ function getJson(url) {
   await send('Network.setCacheDisabled', { cacheDisabled: true }).catch(() => {});
 
   console.log('Navigate...');
-  await send('Page.navigate', { url: 'http://127.0.0.1:8080/studio' });
+  await send('Page.navigate', { url: APP + '/studio' });
 
   // Wait for Blazor / TempleRing button
   let ready = false;

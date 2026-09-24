@@ -13,7 +13,7 @@
 const http = require('http');
 const path = require('path');
 const WebSocket = require('ws');
-const { ensureChrome } = require('./_chrome_harness');
+const { ensureChrome, APP } = require('./_chrome_harness');
 
 const NAME = process.argv[2] || 'Bathroom';
 const TRAIN = parseInt(process.argv[3] || '1600', 10);
@@ -121,7 +121,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${MAXDENSIFY}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${EXTRA}&cb=${Date.now()}`;
+    const url = `${APP}/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${MAXDENSIFY}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

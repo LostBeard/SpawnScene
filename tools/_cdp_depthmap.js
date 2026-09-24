@@ -10,7 +10,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
-const { ensureChrome } = require('./_chrome_harness');
+const { ensureChrome, APP } = require('./_chrome_harness');
 
 const TAG = process.argv[2] || 'depth';
 const IMG = process.argv[3] || 'samples/living-room-hd-2.jpg';
@@ -65,7 +65,7 @@ const closeTab = (id) => new Promise(res =>
 
     await send('Runtime.enable');
     await send('Page.enable');
-    const url = `http://127.0.0.1:8080/studio?autotest=depthmap&img=${encodeURIComponent(IMG)}`
+    const url = `${APP}/studio?autotest=depthmap&img=${encodeURIComponent(IMG)}`
               + `&patches=${PATCHES}${DISP}&cb=${Date.now()}`;
     console.log(`\n=== ${TAG}: ${IMG} @ ${PATCHES}x${PATCHES} patches ===`);
     await send('Page.navigate', { url });

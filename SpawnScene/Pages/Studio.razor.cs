@@ -180,6 +180,18 @@ public partial class Studio : IAsyncDisposable
         if (!query.TryGetValue("autotest", out var mode))
             return;
 
+        // &resize=native|letterbox - A/B the depth preprocessing on one build.
+        if (query.TryGetValue("resize", out var resize))
+        {
+            DepthEstimationService.ResizeMode = resize.ToLowerInvariant() switch
+            {
+                "native" or "nativeaspect" => SpawnDev.ILGPU.ML.Pipelines.DepthResizeMode.NativeAspect,
+                "letterbox" => SpawnDev.ILGPU.ML.Pipelines.DepthResizeMode.Letterbox,
+                _ => throw new ArgumentException($"resize={resize}: expected native or letterbox"),
+            };
+        }
+        Console.WriteLine($"[Autotest] depth resize mode {DepthEstimationService.ResizeMode}");
+
         if (mode == "trainer-gate")
         {
             await RunTrainerGateAsync();

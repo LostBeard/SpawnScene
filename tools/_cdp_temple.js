@@ -1,3 +1,4 @@
+const { APP } = require('./_chrome_harness');
 const http = require('http');
 const WebSocket = require('ws');
 
@@ -74,7 +75,7 @@ function getJson(url) {
   });
   console.log('URL', urlEval.result?.result?.value);
   if (!(urlEval.result?.result?.value || '').includes('/studio')) {
-    await send('Page.navigate', { url: 'http://127.0.0.1:8080/studio' });
+    await send('Page.navigate', { url: APP + '/studio' });
     await new Promise((r) => setTimeout(r, 8000));
   }
 

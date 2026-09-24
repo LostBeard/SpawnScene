@@ -1,3 +1,4 @@
+const { APP } = require('./_chrome_harness');
 const http = require('http');
 const WebSocket = require('ws');
 const fs = require('fs');
@@ -20,7 +21,7 @@ function get(u) {
     const ver = await get('http://127.0.0.1:9222/json/version');
     const bws = new WebSocket(ver.webSocketDebuggerUrl);
     await new Promise((r) => bws.on('open', r));
-    bws.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'http://127.0.0.1:8080/studio' } }));
+    bws.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: APP + '/studio' } }));
     await new Promise((r) => setTimeout(r, 2500));
     bws.close();
     const pages2 = await get('http://127.0.0.1:9222/json/list');
@@ -77,7 +78,7 @@ function get(u) {
   }
 
   console.log('navigate');
-  await send('Page.navigate', { url: 'http://127.0.0.1:8080/studio?cb=' + Date.now() });
+  await send('Page.navigate', { url: APP + '/studio?cb=' + Date.now() });
   await new Promise((r) => setTimeout(r, 14000));
   logs.length = 0; // drop prior-page console noise
   await shot('_t1.png');

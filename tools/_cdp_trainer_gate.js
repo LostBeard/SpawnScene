@@ -3,7 +3,7 @@
 const http = require('http');
 const path = require('path');
 const WebSocket = require('ws');
-const { ensureChrome } = require('./_chrome_harness');
+const { ensureChrome, APP } = require('./_chrome_harness');
 
 let CDP = 9223;
 const cdp = p => `http://127.0.0.1:${CDP}${p}`;
@@ -52,7 +52,7 @@ const get = u => new Promise((res, rej) =>
     await send('Runtime.enable');
     await send('Log.enable').catch(() => {});
     await send('Page.enable');
-    await send('Page.navigate', { url: `http://127.0.0.1:8080/studio?autotest=trainer-gate&cb=${Date.now()}` });
+    await send('Page.navigate', { url: `${APP}/studio?autotest=trainer-gate&cb=${Date.now()}` });
 
     const deadline = Date.now() + 240000;
     while (Date.now() < deadline) {

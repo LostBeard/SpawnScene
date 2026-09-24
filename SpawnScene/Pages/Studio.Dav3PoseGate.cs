@@ -151,6 +151,7 @@ public partial class Studio
         IReadOnlyList<(string url, string filename, CameraParams camera)> available, int[] pick)
     {
         var images = new List<ImportedImage>();
+        var gtScaled = new List<CameraParams>();
         foreach (int i in pick)
         {
             var (url, filename, gtCam) = available[i];
@@ -172,8 +173,12 @@ public partial class Studio
             // (RecordTrainingViews poseFrameHasGravity=false). Rotating the photo here while
             // reporting against the un-rotated GT was a bookkeeping bug waiting to happen, and
             // on a walk-through the "up" from COLMAP is not a reliable gravity signal anyway.
+            // GT intrinsics in the DECODED pixel grid (the manifest may describe the full capture). This
+            // used to overwrite Width/Height in place first, which made the ScaledTo check below dead
+            // code and left GT focal in manifest pixels - invisible while the gate compared positions only.
             var cam = available[i].camera;
-            cam.Width = w; cam.Height = h;
+            if (cam.Width != w || cam.Height != h)
+                cam = cam.ScaledTo(w, h);
             bool upright = filename.StartsWith("templeR", StringComparison.OrdinalIgnoreCase);
             int turns = upright ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
             if (turns != 0)
@@ -182,14 +187,38 @@ public partial class Studio
                 cam = ImageOrientation.Rotate(cam, turns);
                 (w, h) = (cam.Width, cam.Height);
             }
-            // Intrinsics must match the decoded pixel size (manifest may be the full capture).
-            if (cam.Width != w || cam.Height != h)
-                cam = cam.ScaledTo(w, h);
+            gtScaled.Add(cam);
             images.Add(new ImportedImage { FileName = filename, Width = w, Height = h, RgbaPixels = rgba });
         }
 
         using var mv = await _depthService.EstimateDepthMultiViewAsync(images, maxViews: pick.Length);
         if (mv?.Extrinsics == null) return null;
+
+        // Intrinsics against GT. Production copies K straight into the camera it unprojects depth with,
+        // so a K in the wrong units is a wrong field of view for every splat of that view.
+        if (mv.Intrinsics != null)
+        {
+            var errs = new List<float>();
+            for (int slot = 0; slot < pick.Length && slot < mv.Intrinsics.Length; slot++)
+            {
+                var k = mv.Intrinsics[slot];
+                var gt = gtScaled[slot];
+                if (k == null || k.Length < 9 || gt.FocalX <= 0) continue;
+                float fErr = (k[0] + k[4]) / (gt.FocalX + gt.FocalY) - 1f;
+                errs.Add(MathF.Abs(fErr));
+                Console.WriteLine(
+                    $"[Dav3Pose]   K[{slot}] {images[slot].FileName} {images[slot].Width}x{images[slot].Height}: " +
+                    $"f={k[0]:F1},{k[4]:F1} c={k[2]:F1},{k[5]:F1} vs GT f={gt.FocalX:F1},{gt.FocalY:F1} " +
+                    $"c={gt.CenterX:F1},{gt.CenterY:F1} (focal {fErr:+0.0%;-0.0%})");
+            }
+            if (errs.Count > 0)
+            {
+                errs.Sort();
+                Console.WriteLine(
+                    $"[Dav3Pose] focal vs GROUND TRUTH ({DepthEstimationService.ResizeMode}): median |err| " +
+                    $"{errs[errs.Count / 2]:P1}, worst {errs[^1]:P1} over {errs.Count} views");
+            }
+        }
 
         var cams = new CameraParams?[pick.Length];
         for (int slot = 0; slot < pick.Length && slot < mv.Extrinsics.Length; slot++)

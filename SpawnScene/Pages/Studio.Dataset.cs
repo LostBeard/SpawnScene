@@ -90,20 +90,14 @@ public partial class Studio
                 $"[Dataset] {images.Count} images in {(DateTime.UtcNow - t0).TotalSeconds:F1}s, " +
                 $"first {images[0].Width}x{images[0].Height} ({images[0].SourceUrl})");
 
-            // MEASURED WORSE - left off by default.
+            // Bind a SQUARE; its side is the letterbox size and NativeAspect's long side.
             //
-            // An aspect-matched input looked like a free win: a square spends part of its patch
-            // budget on letterbox padding, and 32x43 patches costs the same as 37x37. On
-            // Bathroom it cost 4 dB (held out 8.57 -> 4.34) and changed which views survived
-            // the consistency screen.
-            //
-            // The likely reason is that this ONNX export's position embeddings are tuned for
-            // the 37x37 grid it was exported at. DA3 itself interpolates them for other sizes;
-            // an export pinned to one grid need not. So the patch budget is only worth raising
-            // in SQUARE steps until that is confirmed, and the letterbox - which measured
-            // BETTER - is what handles aspect.
-            // Square, always: the grid ASPECT is the variable that measured 4 dB worse, while
-            // scaling a square grid is what recovered the detail in the living-room maps.
+            // CORRECTED 2026-09-24: the 2026-09-20 "aspect-matched 32x43 grid measured 4 dB worse
+            // (Bathroom held out 8.57 -> 4.34)" never fed the model a non-square tensor. The ML
+            // pipeline read a non-square binding as its WIDTH and letterboxed into 448x448 - a
+            // SMALLER square with fewer picture patches. The position-embedding theory built on it
+            // was never tested. The pipeline now refuses a non-square binding, and the real
+            // aspect-preserving path is DepthEstimationService.ResizeMode = NativeAspect.
             DepthEstimationService.SetSquareInput(depthPatchesPerSide);
 
             // -- 2. Poses + depth init, through the ordinary cascade --

@@ -63,11 +63,18 @@ public class DepthEstimationService : IAsyncDisposable
     public const int PatchSize = 14;
 
     /// <summary>
-    /// Input width and height bound at load, both multiples of <see cref="PatchSize"/>.
-    /// Defaults to the familiar 518x518. Set <see cref="MatchAspect"/> before loading to have
-    /// this follow the source images instead.
+    /// Input width and height bound at load, both multiples of <see cref="PatchSize"/>. Always a
+    /// square (<see cref="SetSquareInput"/>).
     /// </summary>
     public static (int Width, int Height) InputShape { get; private set; } = (48 * PatchSize, 48 * PatchSize);
+
+    /// <summary>
+    /// How a picture becomes the model's input tensor. <see cref="DepthResizeMode.Letterbox"/> pads it into the
+    /// bound square; <see cref="DepthResizeMode.NativeAspect"/> is Depth Anything 3's own preprocessing (long side
+    /// = the bound square's side, aspect kept, no pad). Applied on every call, so an autotest can A/B it
+    /// (<c>&amp;resize=native|letterbox</c>) without reloading the model.
+    /// </summary>
+    public static DepthResizeMode ResizeMode { get; set; } = DepthResizeMode.Letterbox;
 
     /// <summary>
     /// Patch grid that joint multi-view inference has been shown to survive.
@@ -92,31 +99,12 @@ public class DepthEstimationService : IAsyncDisposable
     public const int SafeMultiViewPatches = 48;
 
     /// <summary>
-    /// Choose an input shape with the same aspect as <paramref name="srcW"/> x
-    /// <paramref name="srcH"/> and about the same number of patches as the square default, so
-    /// the cost is unchanged and no budget is spent on padding. Rounds to
-    /// <see cref="PatchSize"/> and clamps to at least 4 patches a side.
-    ///
-    /// Has no effect on an already-loaded model - the shape is bound at session creation.
-    /// </summary>
-    public static void MatchAspect(int srcW, int srcH, int patchBudget = 37 * 37)
-    {
-        if (srcW <= 0 || srcH <= 0) { InputShape = (518, 518); return; }
-
-        double aspect = (double)srcW / srcH;
-        // pw * ph ~= budget with pw/ph == aspect
-        int ph = Math.Max(4, (int)Math.Round(Math.Sqrt(patchBudget / aspect)));
-        int pw = Math.Max(4, (int)Math.Round(patchBudget / (double)ph));
-        InputShape = (pw * PatchSize, ph * PatchSize);
-    }
-
-    /// <summary>
     /// Bind a SQUARE input of <paramref name="patchesPerSide"/> x <paramref name="patchesPerSide"/>
     /// ViT patches. 37 is the familiar 518.
     ///
-    /// This is the safe axis to push for detail. Changing the grid's ASPECT measured 4 dB worse,
-    /// most likely because this export's position embeddings are tuned for the square grid it
-    /// was exported at; keeping it square and only scaling should interpolate far more gracefully.
+    /// This is the axis to push for detail. It is also the long side NativeAspect resizes to (see
+    /// <see cref="ResizeMode"/>) - an aspect-preserving tensor comes from that mode, not from a
+    /// non-square binding, which the pipeline refuses.
     /// Cost grows with the square of this, and attention with its fourth power.
     /// </summary>
     public static void SetSquareInput(int patchesPerSide)
@@ -158,10 +146,10 @@ public class DepthEstimationService : IAsyncDisposable
             // Native DAv3 shape: 5-D [batch, num_images, 3, H, W]. External weights via default
             // onnx/model.onnx_data (do NOT pass externalDataFile: "" — that is the DAv2 single-file path).
             //
-            // 518x518 is not a model limit, it is a shape WE bind at load. DA3 pads to the ViT
-            // patch size and crops back, so any multiple of 14 is valid - and a SQUARE input
-            // spends its token budget on letterbox padding. An aspect-matched shape costs the
-            // same and carries more picture: 448x602 is 1,376 patches against 518x518's 1,369.
+            // 518x518 is not a model limit, it is a shape WE bind at load; any multiple of 14 is
+            // valid. The binding is always SQUARE (the pipeline refuses anything else): Letterbox
+            // pads into it, NativeAspect resizes to its side on the long axis and feeds the model a
+            // non-square tensor that follows the picture (see ResizeMode).
             var (inW, inH) = InputShape;
             Console.WriteLine($"[Depth] binding pixel_values to [1,1,3,{inH},{inW}] " +
                 $"({inW / PatchSize}x{inH / PatchSize} patches)");
@@ -170,6 +158,7 @@ public class DepthEstimationService : IAsyncDisposable
                 inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, inH, inW } });
             // One-shot photo path: capture/replay warmup is for video.
             _pipe.EnableGraphCapture = false;
+            _pipe.ResizeMode = ResizeMode;
 
             LoadedModelId = modelId;
             LoadedModelName = model.Name;
@@ -237,6 +226,15 @@ public class DepthEstimationService : IAsyncDisposable
     /// DAv3 <c>predicted_depth</c> is relative/direct depth (high = far), not DAv2 disparity.
     /// Unprojection kernels consume it as direct depth (no invert / no FlipDepthKernel).
     /// </summary>
+    private void ApplyResizeMode()
+    {
+        if (_pipe != null && _pipe.ResizeMode != ResizeMode)
+        {
+            Console.WriteLine($"[Depth] resize mode {_pipe.ResizeMode} -> {ResizeMode}");
+            _pipe.ResizeMode = ResizeMode;
+        }
+    }
+
     private async Task<DepthResult?> RunPipelineAsync(
         Func<Task<(MemoryBuffer1D<float, Stride1D.Dense> RawDepth, float MinDepth, float MaxDepth, int Width, int Height)>> run)
     {
@@ -245,6 +243,7 @@ public class DepthEstimationService : IAsyncDisposable
             Status = "Model not loaded. Load a model first.";
             return null;
         }
+        ApplyResizeMode();
 
         Status = "Running depth inference...";
         OnStateChanged?.Invoke();
@@ -399,6 +398,7 @@ public class DepthEstimationService : IAsyncDisposable
             return null;
         }
         if (images.Count == 0) return null;
+        ApplyResizeMode();
 
         int cap = maxViews > 0 ? maxViews : MaxMultiViewImages;
         int n = Math.Min(images.Count, cap);

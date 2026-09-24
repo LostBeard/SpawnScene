@@ -388,6 +388,6 @@ FodyWeavers.xsd
 _shots/
 
 # Agent publish slots and run logs (see Research/handoff-*.md)
-_pub_trip*/
+_pub_*/
 _runs/
 

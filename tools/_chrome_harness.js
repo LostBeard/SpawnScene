@@ -23,6 +23,10 @@ const PORT = parseInt(process.env.SPAWNSCENE_CDP_PORT || '9223', 10);
 // Opt-in only. Default is launch-our-own: attaching to "whatever is on 9223" is how Trip and
 // Tuvok ended up driving the same Chrome (and blaming each other when it died).
 const ATTACH = process.env.SPAWNSCENE_CDP_ATTACH === '1';
+// The static app server. Same agent split as the CDP port: a second agent's server on 8080 is
+// not yours to kill, so serve your own publish on another port and point the tools at it.
+const APP_PORT = parseInt(process.env.SPAWNSCENE_APP_PORT || '8080', 10);
+const APP = `http://127.0.0.1:${APP_PORT}`;
 
 function probe(port) {
   return new Promise((res) => {
@@ -105,4 +109,4 @@ async function ensureChrome({ headless = false } = {}) {
   throw new Error(`Chrome did not expose CDP on ${PORT} within 30s`);
 }
 
-module.exports = { ensureChrome, probe, PORT };
+module.exports = { ensureChrome, probe, PORT, APP, APP_PORT };

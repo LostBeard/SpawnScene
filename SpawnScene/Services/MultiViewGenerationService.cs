@@ -286,6 +286,16 @@ public class MultiViewGenerationService
                     bool ok = CameraResection.ResectRansac(w[c], px[c], cams[c], out var placed, out int inl,
                         thresholdPx: 8, seed: 17 + c);
                     lastTry[c] = (n, ok ? inl : 0);
+                    // Diagnostic: a rich view that no hypothesis survives is a resection failure mode, not a
+                    // hopeless view. Dump its correspondences (one per line; the harness clips at 400 chars) so
+                    // it can become a unit test.
+                    if (!ok && n >= 50 && DumpFailedResections && _dumpedResections++ < 2)
+                    {
+                        var k = cams[c];
+                        Console.WriteLine($"[BA-DUMP] view {posed[c]} n {n} K {k.FocalX} {k.FocalY} {k.CenterX} {k.CenterY} {k.Width} {k.Height}");
+                        for (int i = 0; i < n; i++)
+                            Console.WriteLine($"[BA-DUMP] {posed[c]} {w[c][i].X:R} {w[c][i].Y:R} {w[c][i].Z:R} {px[c][i].X:R} {px[c][i].Y:R}");
+                    }
                     if (!ok || inl < 12 || inl < 0.3 * n) continue;
                     cams[c].Position = placed.Position; cams[c].Forward = placed.Forward; cams[c].Up = placed.Up;
                     good.Add(c); pending.Remove(c); registered++; thisPass++;
@@ -347,6 +357,10 @@ public class MultiViewGenerationService
         Console.WriteLine($"[BA] sparse cloud: {pos.Count:N0} points with >= 2 surviving observations");
         return new PointCloud { Positions = pos.ToArray(), Colors = col.ToArray() };
     }
+
+    /// <summary>Log the correspondences of the first two rich views resection could not place (diagnostic).</summary>
+    public bool DumpFailedResections { get; set; }
+    private int _dumpedResections;
 
     /// <summary>Median leave-one-out reprojection miss above which a camera counts as misplaced (pixels).</summary>
     public float MisplacedCameraPixels { get; set; } = 25f;

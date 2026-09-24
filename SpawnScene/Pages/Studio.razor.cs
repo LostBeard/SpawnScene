@@ -270,6 +270,8 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("baiters", out var bai) && int.TryParse(bai, out var baii))
                 _multiViewService.BundleAdjustIterations = baii;
             // &bainit=0: per-view depth-shell init even when BA produced a sparse cloud (A/B).
+            if (query.TryGetValue("badump", out var bdv))
+                _multiViewService.DumpFailedResections = bdv is "1" or "true";
             if (query.TryGetValue("bainit", out var bin))
                 _multiViewService.InitFromBundlePoints = bin is not ("0" or "false");
             // ?n=N views per joint forward. The default is a starting point, not a measured

@@ -54,15 +54,22 @@ def main():
         if not os.path.exists(p):
             sys.exit(f'missing {p} - was the run made with the view-* capture harness?')
         sides.append(json.load(open(p)))
-    keys = [k for k in sides[0]['views'] if all(k in s['views'] for s in sides)]
-    keys.sort(key=lambda k: (k.split('-')[0] != 'held', int(k.split('-')[1])))
+    # Pair runs by PHOTO, not by view number: a run that drops views renumbers the rest, and "view 62" then
+    # names a different photograph in each run.
+    by_photo = []
+    for sd in sides:
+        by_photo.append({v['photo']: k for k, v in sd['views'].items()})
+    photos = [ph for ph in by_photo[0] if all(ph in bp for bp in by_photo)]
+    photos.sort(key=lambda ph: (by_photo[0][ph].split('-')[0] != 'held', ph))
+    if not photos:
+        sys.exit('no photo was captured by every run - pass the same &capture= list to each')
 
     rows = []
-    for k in keys:
+    for ph in photos:
         cells = []
-        v = sides[0]['views'][k]
-        photo = fetch(sides[0]['app'].rstrip('/') + '/' + v['photo'].lstrip('/'))
-        for tag in tags:
+        photo = fetch(sides[0]['app'].rstrip('/') + '/' + ph.lstrip('/'))
+        for ti, tag in enumerate(tags):
+            k = by_photo[ti][ph]
             shot = os.path.join(SHOTS, f'{name}__{tag}__view-{k}.png')
             img = Image.open(shot).convert('RGB') if os.path.exists(shot) else Image.new('RGB', (CELL_W, 360))
             kind = 'HELD-OUT (never trained on)' if k.startswith('held') else 'supervised'
@@ -71,7 +78,7 @@ def main():
             mse = np.mean((np.asarray(img, dtype=np.float64) - ref) ** 2)
             psnr = 10 * np.log10(255.0 ** 2 / max(mse, 1e-12))
             cells.append(label(fit(img, CELL_W), f'{tag}  {kind}  view {k.split("-")[1]}  viewer {psnr:.1f} dB'))
-        cells.append(label(fit(photo, CELL_W), f'PHOTO  {os.path.basename(v["photo"])}'))
+        cells.append(label(fit(photo, CELL_W), f'PHOTO  {os.path.basename(ph)}'))
         h = max(c.height for c in cells)
         row = Image.new('RGB', (CELL_W * len(cells) + 8 * (len(cells) - 1), h), (40, 40, 40))
         for i, c in enumerate(cells):

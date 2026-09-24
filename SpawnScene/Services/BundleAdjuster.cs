@@ -55,11 +55,23 @@ public sealed class BundleAdjuster
     readonly bool[] _keep;
     readonly int _nc, _np;
 
+    // Shared focal length (one camera, many frames): fx = fy = _f for every view, solved with the poses.
+    // DAv3 predicts a different focal per frame; with those held fixed, BA bends the geometry to absorb
+    // them - MEASURED on Truck: 1.51 px self-consistent and still 5.5% (median) off COLMAP.
+    readonly bool _sharedFocal;
+    double _f;
+
+    // Parameter layout: camera ci pose at [ci*6, ci*6+6); the shared focal (if any) at index _nc*6.
+    int ParamCount => _nc * 6 + (_sharedFocal ? 1 : 0);
+    int FocalIndex => _nc * 6;
+    const int Cols = 7; // per observation: 6 pose + focal
+
     public int CameraCount => _nc;
     public int PointCount => _np;
+    public double SharedFocal => _f;
 
     public BundleAdjuster(IReadOnlyList<CameraParams> cameras, IReadOnlyList<Vector3> points,
-        IReadOnlyList<Observation> observations, int fixedCamera = 0)
+        IReadOnlyList<Observation> observations, int fixedCamera = 0, bool sharedFocal = false)
     {
         _nc = cameras.Count;
         _np = points.Count;
@@ -68,6 +80,7 @@ public sealed class BundleAdjuster
         _k = new double[_nc * 4];
         _fixed = new bool[_nc];
         if (fixedCamera >= 0 && fixedCamera < _nc) _fixed[fixedCamera] = true;
+        var focals = new List<double>();
         for (int i = 0; i < _nc; i++)
         {
             WorldSpaceGeometry.GetOpenCvAxes(cameras[i], out var right, out var down, out var fwd);
@@ -75,7 +88,11 @@ public sealed class BundleAdjuster
             _c[i * 3] = cameras[i].Position.X; _c[i * 3 + 1] = cameras[i].Position.Y; _c[i * 3 + 2] = cameras[i].Position.Z;
             _k[i * 4] = cameras[i].FocalX; _k[i * 4 + 1] = cameras[i].FocalY;
             _k[i * 4 + 2] = cameras[i].CenterX; _k[i * 4 + 3] = cameras[i].CenterY;
+            focals.Add(0.5 * (cameras[i].FocalX + cameras[i].FocalY));
         }
+        _sharedFocal = sharedFocal;
+        focals.Sort();
+        _f = focals.Count > 0 ? focals[focals.Count / 2] : 1;
         _x = new double[_np * 3];
         for (int p = 0; p < _np; p++) { _x[p * 3] = points[p].X; _x[p * 3 + 1] = points[p].Y; _x[p * 3 + 2] = points[p].Z; }
         _obs = observations.ToList();
@@ -88,7 +105,10 @@ public sealed class BundleAdjuster
         r[cam * 9 + row * 3] = v.X; r[cam * 9 + row * 3 + 1] = v.Y; r[cam * 9 + row * 3 + 2] = v.Z;
     }
 
-    /// <summary>Write the refined pose of camera <paramref name="i"/> into <paramref name="cam"/> (intrinsics untouched).</summary>
+    double Fx(int ci, double f) => _sharedFocal ? f : _k[ci * 4];
+    double Fy(int ci, double f) => _sharedFocal ? f : _k[ci * 4 + 1];
+
+    /// <summary>Write the refined pose (and, with a shared focal, the focal) of camera <paramref name="i"/>.</summary>
     public void WriteCamera(int i, CameraParams cam)
     {
         var down = new Vector3((float)_r[i * 9 + 3], (float)_r[i * 9 + 4], (float)_r[i * 9 + 5]);
@@ -96,12 +116,13 @@ public sealed class BundleAdjuster
         cam.Forward = Vector3.Normalize(fwd);
         cam.Up = Vector3.Normalize(-down);
         cam.Position = new Vector3((float)_c[i * 3], (float)_c[i * 3 + 1], (float)_c[i * 3 + 2]);
+        if (_sharedFocal) { cam.FocalX = (float)_f; cam.FocalY = (float)_f; }
     }
 
     public Vector3 PointAt(int p) => new((float)_x[p * 3], (float)_x[p * 3 + 1], (float)_x[p * 3 + 2]);
 
     /// <summary>Residual (pixels) of observation <paramref name="o"/>; false if the point is behind the camera.</summary>
-    bool Residual(in Observation o, double[] r, double[] c, double[] x, out double ru, out double rv,
+    bool Residual(in Observation o, double[] r, double[] c, double[] x, double f, out double ru, out double rv,
         out double xc, out double yc, out double zc)
     {
         int ci = o.Camera, pi = o.Point;
@@ -111,19 +132,19 @@ public sealed class BundleAdjuster
         yc = r[b + 3] * dx + r[b + 4] * dy + r[b + 5] * dz;
         zc = r[b + 6] * dx + r[b + 7] * dy + r[b + 8] * dz;
         if (zc <= 1e-9) { ru = rv = 0; return false; }
-        ru = _k[ci * 4] * xc / zc + _k[ci * 4 + 2] - o.U;
-        rv = _k[ci * 4 + 1] * yc / zc + _k[ci * 4 + 3] - o.V;
+        ru = Fx(ci, f) * xc / zc + _k[ci * 4 + 2] - o.U;
+        rv = Fy(ci, f) * yc / zc + _k[ci * 4 + 3] - o.V;
         return true;
     }
 
-    double RobustCost(double[] r, double[] c, double[] x, out int behind)
+    double RobustCost(double[] r, double[] c, double[] x, double f)
     {
-        double cost = 0; behind = 0;
+        double cost = 0;
         double d = _opts.HuberPixels;
         for (int i = 0; i < _obs.Count; i++)
         {
             if (!_keep[i]) continue;
-            if (!Residual(_obs[i], r, c, x, out var ru, out var rv, out _, out _, out _)) { behind++; cost += 1e6; continue; }
+            if (!Residual(_obs[i], r, c, x, f, out var ru, out var rv, out _, out _, out _)) { cost += 1e6; continue; }
             double e = Math.Sqrt(ru * ru + rv * rv);
             cost += e <= d ? 0.5 * e * e : d * (e - 0.5 * d);
         }
@@ -136,7 +157,7 @@ public sealed class BundleAdjuster
         for (int i = 0; i < _obs.Count; i++)
         {
             if (!_keep[i]) continue;
-            if (!Residual(_obs[i], _r, _c, _x, out var ru, out var rv, out _, out _, out _)) continue;
+            if (!Residual(_obs[i], _r, _c, _x, _f, out var ru, out var rv, out _, out _, out _)) continue;
             s += ru * ru + rv * rv; n++;
         }
         return n == 0 ? double.NaN : Math.Sqrt(s / n);
@@ -159,7 +180,7 @@ public sealed class BundleAdjuster
             for (int i = 0; i < _obs.Count; i++)
             {
                 if (!_keep[i]) continue;
-                if (!Residual(_obs[i], _r, _c, _x, out var ru, out var rv, out _, out _, out _)
+                if (!Residual(_obs[i], _r, _c, _x, _f, out var ru, out var rv, out _, out _, out _)
                     || ru * ru + rv * rv > limit * limit) { _keep[i] = false; dropped++; }
             }
             if (dropped == 0) break;
@@ -170,23 +191,24 @@ public sealed class BundleAdjuster
     int RunLevenbergMarquardt()
     {
         double lambda = 1e-3;
-        double cost = RobustCost(_r, _c, _x, out _);
+        double cost = RobustCost(_r, _c, _x, _f);
         int it = 0;
         var nr = new double[_r.Length];
         var nc = new double[_c.Length];
         var nx = new double[_x.Length];
         for (; it < _opts.MaxIterations; it++)
         {
-            BuildNormalEquations(out var u, out var gC, out var v, out var gP, out var wBlocks);
+            var ne = BuildNormalEquations();
             bool improved = false;
             for (int attempt = 0; attempt < 10; attempt++)
             {
-                if (!SolveDamped(u, gC, v, gP, wBlocks, lambda, out var dCam, out var dPt)) { lambda *= 10; continue; }
-                ApplyStep(dCam, dPt, nr, nc, nx);
-                double newCost = RobustCost(nr, nc, nx, out _);
+                if (!SolveDamped(ne, lambda, out var dCam, out var dPt)) { lambda *= 10; continue; }
+                double nf = ApplyStep(dCam, dPt, nr, nc, nx);
+                double newCost = RobustCost(nr, nc, nx, nf);
                 if (newCost < cost)
                 {
                     Array.Copy(nr, _r, _r.Length); Array.Copy(nc, _c, _c.Length); Array.Copy(nx, _x, _x.Length);
+                    _f = nf;
                     double rel = (cost - newCost) / Math.Max(cost, 1e-30);
                     cost = newCost;
                     lambda = Math.Max(lambda / 3, 1e-9);
@@ -201,56 +223,70 @@ public sealed class BundleAdjuster
         return it;
     }
 
-    // W block of an observation: 6x3 (camera params x point coords), keyed by observation index.
-    void BuildNormalEquations(out double[] u, out double[] gC, out double[] v, out double[] gP, out double[] wBlocks)
+    sealed class NormalEquations
     {
-        u = new double[_nc * 36];
-        gC = new double[_nc * 6];
-        v = new double[_np * 9];
-        gP = new double[_np * 3];
-        wBlocks = new double[_obs.Count * 18];
-        Span<double> jc = stackalloc double[12]; // 2x6
-        Span<double> jp = stackalloc double[6];  // 2x3
+        public required double[] U;       // dense ParamCount^2: camera-side J^T W J (pose blocks + focal couplings)
+        public required double[] G;       // ParamCount
+        public required double[] V;       // 9 per point
+        public required double[] GP;      // 3 per point
+        public required double[] Wb;      // Cols x 3 per observation
+        public required List<int>?[] ByPoint;
+    }
+
+    /// <summary>Global parameter index of column <paramref name="a"/> (0..6) of an observation in camera <paramref name="ci"/>; -1 if fixed/absent.</summary>
+    int Col(int ci, int a) => a < 6 ? (_fixed[ci] ? -1 : ci * 6 + a) : (_sharedFocal ? FocalIndex : -1);
+
+    NormalEquations BuildNormalEquations()
+    {
+        int n = ParamCount;
+        var u = new double[n * n];
+        var g = new double[n];
+        var v = new double[_np * 9];
+        var gP = new double[_np * 3];
+        var wb = new double[_obs.Count * Cols * 3];
+        var byPoint = new List<int>?[_np];
+        Span<double> jc = stackalloc double[2 * Cols]; // row 0 = du, row 1 = dv
+        Span<double> jp = stackalloc double[6];
+        Span<int> col = stackalloc int[Cols];
         double d = _opts.HuberPixels;
         for (int i = 0; i < _obs.Count; i++)
         {
             if (!_keep[i]) continue;
             var o = _obs[i];
-            if (!Residual(o, _r, _c, _x, out var ru, out var rv, out var xc, out var yc, out var zc)) continue;
+            if (!Residual(o, _r, _c, _x, _f, out var ru, out var rv, out var xc, out var yc, out var zc)) continue;
+            (byPoint[o.Point] ??= new List<int>()).Add(i);
             double e = Math.Sqrt(ru * ru + rv * rv);
             double w = e <= d ? 1.0 : d / e; // Huber IRLS weight
             int ci = o.Camera, pi = o.Point;
-            double fx = _k[ci * 4], fy = _k[ci * 4 + 1];
+            double fx = Fx(ci, _f), fy = Fy(ci, _f);
             double iz = 1.0 / zc, iz2 = iz * iz;
-            // d(u,v)/dXc
             double a0 = fx * iz, a2 = -fx * xc * iz2;
             double b1 = fy * iz, b2 = -fy * yc * iz2;
-            // dXc/dX = R ; dXc/dC = -R ; dXc/domega = -[Xc]x  (R' = exp([w]x) R)
             int rb = ci * 9;
             for (int k = 0; k < 3; k++)
             {
                 double r0 = _r[rb + k], r1 = _r[rb + 3 + k], r2 = _r[rb + 6 + k];
-                jp[k] = a0 * r0 + a2 * r2;          // du/dX_k
-                jp[3 + k] = b1 * r1 + b2 * r2;      // dv/dX_k
+                jp[k] = a0 * r0 + a2 * r2;
+                jp[3 + k] = b1 * r1 + b2 * r2;
             }
-            // -[Xc]x = [[0, zc, -yc], [-zc, 0, xc], [yc, -xc, 0]]
-            // du/domega = a0 * row0 + a2 * row2 of -[Xc]x ; dv/domega = b1 * row1 + b2 * row2
+            // d/domega = -[Xc]x  (R' = exp([w]x) R); d/dC = -d/dX; d/df = (x/z, y/z)
             jc[0] = a2 * yc; jc[1] = a0 * zc + a2 * -xc; jc[2] = -a0 * yc;
-            jc[6] = -b1 * zc + b2 * yc; jc[7] = b2 * -xc; jc[8] = b1 * xc;
-            for (int k = 0; k < 3; k++) { jc[3 + k] = -jp[k]; jc[9 + k] = -jp[3 + k]; } // d/dC = -d/dX
+            jc[Cols + 0] = -b1 * zc + b2 * yc; jc[Cols + 1] = b2 * -xc; jc[Cols + 2] = b1 * xc;
+            for (int k = 0; k < 3; k++) { jc[3 + k] = -jp[k]; jc[Cols + 3 + k] = -jp[3 + k]; }
+            jc[6] = xc * iz; jc[Cols + 6] = yc * iz;
 
-            bool fixedCam = _fixed[ci];
-            if (!fixedCam)
+            for (int a = 0; a < Cols; a++) col[a] = Col(ci, a);
+            for (int a = 0; a < Cols; a++)
             {
-                for (int a = 0; a < 6; a++)
+                if (col[a] < 0) continue;
+                g[col[a]] += w * (jc[a] * ru + jc[Cols + a] * rv);
+                for (int bb = 0; bb < Cols; bb++)
                 {
-                    gC[ci * 6 + a] += w * (jc[a] * ru + jc[6 + a] * rv);
-                    for (int bb = 0; bb < 6; bb++)
-                        u[ci * 36 + a * 6 + bb] += w * (jc[a] * jc[bb] + jc[6 + a] * jc[6 + bb]);
+                    if (col[bb] < 0) continue;
+                    u[col[a] * n + col[bb]] += w * (jc[a] * jc[bb] + jc[Cols + a] * jc[Cols + bb]);
                 }
-                for (int a = 0; a < 6; a++)
-                    for (int bb = 0; bb < 3; bb++)
-                        wBlocks[i * 18 + a * 3 + bb] = w * (jc[a] * jp[bb] + jc[6 + a] * jp[3 + bb]);
+                for (int bb = 0; bb < 3; bb++)
+                    wb[(i * Cols + a) * 3 + bb] = w * (jc[a] * jp[bb] + jc[Cols + a] * jp[3 + bb]);
             }
             for (int a = 0; a < 3; a++)
             {
@@ -259,95 +295,90 @@ public sealed class BundleAdjuster
                     v[pi * 9 + a * 3 + bb] += w * (jp[a] * jp[bb] + jp[3 + a] * jp[3 + bb]);
             }
         }
+        return new NormalEquations { U = u, G = g, V = v, GP = gP, Wb = wb, ByPoint = byPoint };
     }
 
-    bool SolveDamped(double[] u, double[] gC, double[] v, double[] gP, double[] wBlocks, double lambda,
-        out double[] dCam, out double[] dPt)
+    bool SolveDamped(NormalEquations ne, double lambda, out double[] dCam, out double[] dPt)
     {
-        int nParam = _nc * 6;
-        dCam = new double[nParam];
+        int n = ParamCount;
+        dCam = new double[n];
         dPt = new double[_np * 3];
 
-        // V* = V + lambda diag(V) (+ epsilon), inverted per point.
         var vInv = new double[_np * 9];
         Span<double> m = stackalloc double[9];
         for (int p = 0; p < _np; p++)
         {
-            for (int a = 0; a < 9; a++) m[a] = v[p * 9 + a];
+            for (int a = 0; a < 9; a++) m[a] = ne.V[p * 9 + a];
             for (int a = 0; a < 3; a++) m[a * 4] += lambda * m[a * 4] + 1e-9;
             if (!Invert3(m, vInv.AsSpan(p * 9, 9))) return false;
         }
 
-        // Group observations by point for the Schur complement.
-        var byPoint = new List<int>[_np];
-        for (int i = 0; i < _obs.Count; i++)
+        // S = U* - sum_p W_p V*_p^-1 W_p^T ; b = -g + sum_p W_p V*_p^-1 gP_p
+        var s = (double[])ne.U.Clone();
+        var rhs = new double[n];
+        for (int k = 0; k < n; k++)
         {
-            if (!_keep[i]) continue;
-            (byPoint[_obs[i].Point] ??= new List<int>()).Add(i);
+            rhs[k] = -ne.G[k];
+            double diag = ne.U[k * n + k];
+            bool isFixedPose = k < _nc * 6 && _fixed[k / 6];
+            s[k * n + k] += lambda * diag + (isFixedPose ? 1.0 : 1e-9);
         }
-
-        // S = U* - sum_p W_p V*_p^-1 W_p^T ; b = -gC + sum_p W_p V*_p^-1 gP_p   (dense, 6C x 6C)
-        var s = new double[nParam * nParam];
-        var rhs = new double[nParam];
-        for (int ci = 0; ci < _nc; ci++)
-        {
-            for (int a = 0; a < 6; a++)
-            {
-                rhs[ci * 6 + a] = -gC[ci * 6 + a];
-                for (int bb = 0; bb < 6; bb++)
-                    s[(ci * 6 + a) * nParam + ci * 6 + bb] = u[ci * 36 + a * 6 + bb];
-                double diag = u[ci * 36 + a * 7];
-                s[(ci * 6 + a) * nParam + ci * 6 + a] += lambda * diag + (_fixed[ci] ? 1.0 : 1e-9);
-            }
-        }
-        Span<double> wv = stackalloc double[18]; // W_i V^-1 (6x3)
+        Span<double> wv = stackalloc double[Cols * 3];
         for (int p = 0; p < _np; p++)
         {
-            var list = byPoint[p];
+            var list = ne.ByPoint[p];
             if (list == null) continue;
             var vi = vInv.AsSpan(p * 9, 9);
             foreach (int i in list)
             {
                 int ci = _obs[i].Camera;
-                if (_fixed[ci]) continue;
-                for (int a = 0; a < 6; a++)
+                for (int a = 0; a < Cols; a++)
+                {
+                    int ga = Col(ci, a);
+                    if (ga < 0) continue;
+                    int wbase = (i * Cols + a) * 3;
                     for (int bb = 0; bb < 3; bb++)
-                        wv[a * 3 + bb] = wBlocks[i * 18 + a * 3] * vi[bb] + wBlocks[i * 18 + a * 3 + 1] * vi[3 + bb]
-                                       + wBlocks[i * 18 + a * 3 + 2] * vi[6 + bb];
-                for (int a = 0; a < 6; a++)
-                    rhs[ci * 6 + a] += wv[a * 3] * gP[p * 3] + wv[a * 3 + 1] * gP[p * 3 + 1] + wv[a * 3 + 2] * gP[p * 3 + 2];
+                        wv[a * 3 + bb] = ne.Wb[wbase] * vi[bb] + ne.Wb[wbase + 1] * vi[3 + bb] + ne.Wb[wbase + 2] * vi[6 + bb];
+                    rhs[ga] += wv[a * 3] * ne.GP[p * 3] + wv[a * 3 + 1] * ne.GP[p * 3 + 1] + wv[a * 3 + 2] * ne.GP[p * 3 + 2];
+                }
                 foreach (int j in list)
                 {
                     int cj = _obs[j].Camera;
-                    if (_fixed[cj]) continue;
-                    for (int a = 0; a < 6; a++)
-                        for (int bb = 0; bb < 6; bb++)
-                            s[(ci * 6 + a) * nParam + cj * 6 + bb] -=
-                                wv[a * 3] * wBlocks[j * 18 + bb * 3] + wv[a * 3 + 1] * wBlocks[j * 18 + bb * 3 + 1]
-                              + wv[a * 3 + 2] * wBlocks[j * 18 + bb * 3 + 2];
+                    for (int a = 0; a < Cols; a++)
+                    {
+                        int ga = Col(ci, a);
+                        if (ga < 0) continue;
+                        for (int bb = 0; bb < Cols; bb++)
+                        {
+                            int gb = Col(cj, bb);
+                            if (gb < 0) continue;
+                            int jb = (j * Cols + bb) * 3;
+                            s[ga * n + gb] -= wv[a * 3] * ne.Wb[jb] + wv[a * 3 + 1] * ne.Wb[jb + 1] + wv[a * 3 + 2] * ne.Wb[jb + 2];
+                        }
+                    }
                 }
             }
         }
 
-        if (!BlockJacobiCg(s, rhs, dCam, nParam)) return false;
+        if (!BlockJacobiCg(s, rhs, dCam, n)) return false;
         for (int ci = 0; ci < _nc; ci++) if (_fixed[ci]) for (int a = 0; a < 6; a++) dCam[ci * 6 + a] = 0;
 
         // Back-substitute: dP = V*^-1 (-gP - sum W^T dC)
         for (int p = 0; p < _np; p++)
         {
-            double t0 = -gP[p * 3], t1 = -gP[p * 3 + 1], t2 = -gP[p * 3 + 2];
-            var list = byPoint[p];
+            double t0 = -ne.GP[p * 3], t1 = -ne.GP[p * 3 + 1], t2 = -ne.GP[p * 3 + 2];
+            var list = ne.ByPoint[p];
             if (list != null)
                 foreach (int i in list)
                 {
                     int ci = _obs[i].Camera;
-                    if (_fixed[ci]) continue;
-                    for (int a = 0; a < 6; a++)
+                    for (int a = 0; a < Cols; a++)
                     {
-                        double dc = dCam[ci * 6 + a];
-                        t0 -= wBlocks[i * 18 + a * 3] * dc;
-                        t1 -= wBlocks[i * 18 + a * 3 + 1] * dc;
-                        t2 -= wBlocks[i * 18 + a * 3 + 2] * dc;
+                        int ga = Col(ci, a);
+                        if (ga < 0) continue;
+                        double dc = dCam[ga];
+                        int wbase = (i * Cols + a) * 3;
+                        t0 -= ne.Wb[wbase] * dc; t1 -= ne.Wb[wbase + 1] * dc; t2 -= ne.Wb[wbase + 2] * dc;
                     }
                 }
             var vi = vInv.AsSpan(p * 9, 9);
@@ -360,7 +391,8 @@ public sealed class BundleAdjuster
 
     bool BlockJacobiCg(double[] s, double[] b, double[] x, int n)
     {
-        int nb = n / 6;
+        // 6x6 blocks for the poses, scalar blocks for anything after them (the shared focal).
+        int nb = _nc;
         var pre = new double[nb * 36];
         Span<double> blk = stackalloc double[36];
         for (int k = 0; k < nb; k++)
@@ -370,9 +402,25 @@ public sealed class BundleAdjuster
                     blk[a * 6 + c] = s[(k * 6 + a) * n + k * 6 + c];
             if (!InvertSpd(blk, pre.AsSpan(k * 36, 36), 6)) return false;
         }
+        int tail0 = nb * 6;
+        var tailInv = new double[n - tail0];
+        for (int k = tail0; k < n; k++) tailInv[k - tail0] = s[k * n + k] > 0 ? 1 / s[k * n + k] : 0;
+
+        void Pre(double[] r, double[] z)
+        {
+            for (int k = 0; k < nb; k++)
+                for (int a = 0; a < 6; a++)
+                {
+                    double acc = 0;
+                    for (int c = 0; c < 6; c++) acc += pre[k * 36 + a * 6 + c] * r[k * 6 + c];
+                    z[k * 6 + a] = acc;
+                }
+            for (int k = tail0; k < n; k++) z[k] = tailInv[k - tail0] * r[k];
+        }
+
         var r = (double[])b.Clone();
         var z = new double[n];
-        ApplyPre(pre, r, z, nb);
+        Pre(r, z);
         var p = (double[])z.Clone();
         var ap = new double[n];
         double rz = Dot(r, z);
@@ -385,7 +433,7 @@ public sealed class BundleAdjuster
             double alpha = rz / pap;
             for (int i = 0; i < n; i++) { x[i] += alpha * p[i]; r[i] -= alpha * ap[i]; }
             if (Dot(r, r) / b2 < _opts.CgTolerance) break;
-            ApplyPre(pre, r, z, nb);
+            Pre(r, z);
             double rzNew = Dot(r, z);
             double beta = rzNew / rz;
             rz = rzNew;
@@ -393,17 +441,6 @@ public sealed class BundleAdjuster
         }
         foreach (var val in x) if (!double.IsFinite(val)) return false;
         return true;
-    }
-
-    static void ApplyPre(double[] pre, double[] r, double[] z, int nb)
-    {
-        for (int k = 0; k < nb; k++)
-            for (int a = 0; a < 6; a++)
-            {
-                double acc = 0;
-                for (int c = 0; c < 6; c++) acc += pre[k * 36 + a * 6 + c] * r[k * 6 + c];
-                z[k * 6 + a] = acc;
-            }
     }
 
     static void MatVec(double[] s, double[] x, double[] y, int n)
@@ -424,16 +461,16 @@ public sealed class BundleAdjuster
         return s;
     }
 
-    void ApplyStep(double[] dCam, double[] dPt, double[] nr, double[] nc, double[] nx)
+    /// <summary>Candidate state after a step; returns the candidate shared focal.</summary>
+    double ApplyStep(double[] dCam, double[] dPt, double[] nr, double[] nc, double[] nx)
     {
         Array.Copy(_r, nr, _r.Length);
         Array.Copy(_c, nc, _c.Length);
+        Span<double> e = stackalloc double[9];
         for (int ci = 0; ci < _nc; ci++)
         {
             if (_fixed[ci]) continue;
-            double wx = dCam[ci * 6], wy = dCam[ci * 6 + 1], wz = dCam[ci * 6 + 2];
-            Span<double> e = stackalloc double[9];
-            Rodrigues(wx, wy, wz, e);
+            Rodrigues(dCam[ci * 6], dCam[ci * 6 + 1], dCam[ci * 6 + 2], e);
             // R' = exp([w]x) R
             for (int a = 0; a < 3; a++)
                 for (int bb = 0; bb < 3; bb++)
@@ -441,6 +478,7 @@ public sealed class BundleAdjuster
             for (int a = 0; a < 3; a++) nc[ci * 3 + a] = _c[ci * 3 + a] + dCam[ci * 6 + 3 + a];
         }
         for (int i = 0; i < _x.Length; i++) nx[i] = _x[i] + dPt[i];
+        return _sharedFocal ? Math.Max(1e-3, _f + dCam[FocalIndex]) : _f;
     }
 
     static void Rodrigues(double wx, double wy, double wz, Span<double> r)

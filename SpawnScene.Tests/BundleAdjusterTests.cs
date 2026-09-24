@@ -118,6 +118,67 @@ public class BundleAdjusterTests
         Assert.That(result.FinalRmsPixels, Is.LessThan(1.0), "inlier reprojection RMS should reach the 0.5 px noise level");
     }
 
+    /// <summary>
+    /// One camera, many frames, and DAv3 guessing the focal per frame (here +10% bias, +-8% scatter). Held
+    /// fixed, the wrong focals bend the geometry; solved as ONE shared focal, BA recovers it and the poses.
+    /// </summary>
+    [Test]
+    public void SharedFocal_RecoversTheCameraAndThePoses()
+    {
+        var rng = new Random(21);
+        var (truth, pts) = Rig(cams: 40, points: 3000, seed: 4);
+        const float trueF = 900;
+        var perPoint = new List<(int Camera, float U, float V)>[pts.Count];
+        for (int p = 0; p < pts.Count; p++)
+        {
+            perPoint[p] = new();
+            for (int c = 0; c < truth.Count; c++)
+            {
+                if (!WorldSpaceGeometry.Project(truth[c], pts[p], out var u, out var v, out _)) continue;
+                if (u < 0 || v < 0 || u >= W || v >= H || rng.NextDouble() < 0.6) continue;
+                perPoint[p].Add((c, u + 0.5f * Gauss(rng), v + 0.5f * Gauss(rng)));
+            }
+        }
+        List<CameraParams> Start(Random r)
+        {
+            var init = new List<CameraParams> { Copy(truth[0]) };
+            for (int c = 1; c < truth.Count; c++) init.Add(Perturb(truth[c], r, 0.08f * 9f / 1.7f, 3f));
+            foreach (var cam in init)
+            {
+                float f = trueF * 1.10f * (1 + 0.08f * Gauss(r));
+                cam.FocalX = f; cam.FocalY = f;
+            }
+            return init;
+        }
+
+        (float pos, float fwd, double f) Run(bool shared)
+        {
+            var init = Start(new Random(77));
+            var points = new List<Vector3>();
+            var obs = new List<BundleAdjuster.Observation>();
+            foreach (var track in perPoint)
+            {
+                if (track.Count < 2 || !BundleAdjuster.Triangulate(init, track, out var x)) continue;
+                int id = points.Count;
+                points.Add(x);
+                foreach (var (c, u, v) in track) obs.Add(new BundleAdjuster.Observation(c, id, u, v));
+            }
+            var ba = new BundleAdjuster(init, points, obs, sharedFocal: shared);
+            ba.Solve();
+            for (int c = 0; c < init.Count; c++) ba.WriteCamera(c, init[c]);
+            var (pos, fwd) = Accuracy(init, truth);
+            return (pos, fwd, ba.SharedFocal);
+        }
+
+        var fixedF = Run(shared: false);
+        var sharedF = Run(shared: true);
+        TestContext.Out.WriteLine($"per-view fixed focal: {fixedF.pos:P3} / {fixedF.fwd:F3} deg");
+        TestContext.Out.WriteLine($"shared focal: {sharedF.pos:P3} / {sharedF.fwd:F3} deg, f {sharedF.f:F1} (true {trueF})");
+        Assert.That(Math.Abs(sharedF.f - trueF) / trueF, Is.LessThan(0.005), "shared focal within 0.5%");
+        Assert.That(sharedF.pos, Is.LessThan(0.005f), "poses SfM-grade with the focal solved");
+        Assert.That(fixedF.pos, Is.GreaterThan(2 * sharedF.pos), "wrong fixed focals must visibly bend the solution (negative control)");
+    }
+
     static (float pos, float fwd) Accuracy(IReadOnlyList<CameraParams> est, IReadOnlyList<CameraParams> truth)
     {
         Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(

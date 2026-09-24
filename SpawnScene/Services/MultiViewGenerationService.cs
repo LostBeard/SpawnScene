@@ -296,12 +296,20 @@ public class MultiViewGenerationService
                         for (int i = 0; i < n; i++)
                             Console.WriteLine($"[BA-DUMP] {posed[c]} {w[c][i].X:R} {w[c][i].Y:R} {w[c][i].Z:R} {px[c][i].X:R} {px[c][i].Y:R}");
                     }
-                    if (!ok || inl < 12 || inl < 0.3 * n) continue;
+                    if (!ok || inl < 20 || inl < 0.5 * n) continue;
                     cams[c].Position = placed.Position; cams[c].Forward = placed.Forward; cams[c].Up = placed.Up;
                     good.Add(c); pending.Remove(c); registered++; thisPass++;
                     Console.WriteLine($"[BA]   pass {passes}: registered view {posed[c]} ({inl}/{n} agree)");
                 }
                 if (thisPass == 0) break;
+
+                // Refine what is placed before placing the next ring. Without this each pass triangulated from
+                // the previous pass's raw PnP poses and error accumulated along a stretch (Truck 115 -> 117 ended
+                // 11-12% off although each agreed with 78-89% of its correspondences).
+                var passBa = SolveBundle(cams, tracks, Ob, exclude: pending, oneCamera, out _, out _, out _,
+                    $"BA pass {passes}", maxIterations: 40, rounds: 1);
+                if (passBa != null)
+                    for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) passBa.WriteCamera(i, cams[i]);
             }
             foreach (int c in pending)
             {
@@ -311,13 +319,41 @@ public class MultiViewGenerationService
             ba = SolveBundle(cams, tracks, Ob, exclude: pending, oneCamera, out points, out pointTracks,
                 out result, "BA final");
             if (ba == null) return null;
+
+            // Verify, then prune and re-adjust. P3P finds a consensus even for a camera it places WRONG, and one
+            // wrong camera in the final BA bends everyone: MEASURED on Truck, 125 placed at median 3.3% of
+            // spread vs 110 at 0.2% before those acceptances. A camera the solution disagrees with (most of its
+            // observations rejected, or a high median residual) is dropped and the rest re-adjusted.
+            for (int verify = 0; verify < 4; verify++)
+            {
+                var stats = ba.CameraStats();
+                var reject = new List<int>();
+                for (int c = 0; c < cams.Count; c++)
+                {
+                    if (pending.Contains(c) || stats[c].Total == 0) continue;
+                    bool fewKept = stats[c].Kept < 0.6 * stats[c].Total;
+                    bool highError = stats[c].MedianError > VerifiedCameraPixels;
+                    if (fewKept || highError) reject.Add(c);
+                }
+                if (reject.Count == 0) break;
+                foreach (int c in reject)
+                {
+                    pending.Add(c);
+                    Console.WriteLine(
+                        $"[BA]   verify {verify}: view {posed[c]} disagrees with the solution " +
+                        $"({stats[c].Kept}/{stats[c].Total} kept, median {stats[c].MedianError:F1} px) - dropped");
+                }
+                ba = SolveBundle(cams, tracks, Ob, exclude: pending, oneCamera, out points, out pointTracks,
+                    out result, $"BA verify {verify}");
+                if (ba == null) return null;
+            }
             for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) ba.WriteCamera(i, cams[i]);
             // A camera nobody could place is wrong by tens of degrees: leaving it in trains the scene against a
             // photo from the wrong viewpoint. Drop it (the caller skips null cameras) and say so.
             foreach (int c in pending) cameras[posed[c]] = null;
             Console.WriteLine(
                 $"[BA] misplaced cameras: {bad.Count}; re-registered {registered} in {passes + 1} pass(es); " +
-                $"dropped {pending.Count}; then adjusted all");
+                $"dropped {pending.Count} (incl. any failing verification); adjusted the rest");
         }
 
         Console.WriteLine(
@@ -362,6 +398,9 @@ public class MultiViewGenerationService
     public bool DumpFailedResections { get; set; }
     private int _dumpedResections;
 
+    /// <summary>After the final BA, a camera whose median reprojection error exceeds this is dropped (pixels).</summary>
+    public float VerifiedCameraPixels { get; set; } = 3f;
+
     /// <summary>Median leave-one-out reprojection miss above which a camera counts as misplaced (pixels).</summary>
     public float MisplacedCameraPixels { get; set; } = 25f;
 
@@ -370,7 +409,7 @@ public class MultiViewGenerationService
         List<CameraParams> cams, List<List<(int Image, int Feature)>> tracks,
         Func<(int Image, int Feature), (int Camera, float U, float V)> ob, HashSet<int> exclude, bool sharedFocal,
         out List<System.Numerics.Vector3> points, out List<List<(int Image, int Feature)>> pointTracks,
-        out BundleAdjuster.Result result, string label)
+        out BundleAdjuster.Result result, string label, int maxIterations = 0, int rounds = 3)
     {
         points = new List<System.Numerics.Vector3>();
         pointTracks = new List<List<(int Image, int Feature)>>();
@@ -401,7 +440,8 @@ public class MultiViewGenerationService
         var ba = new BundleAdjuster(cams, points, obs, fixedCamera: fixedCam, sharedFocal: sharedFocal);
         result = ba.Solve(new BundleAdjuster.Options
         {
-            MaxIterations = BundleAdjustIterations,
+            MaxIterations = maxIterations > 0 ? maxIterations : BundleAdjustIterations,
+            Rounds = rounds,
             RoundLog = (round, iters, rms, kept) => Console.WriteLine(
                 $"[{label}]   round {round}: {iters} iterations, RMS {rms:F2} px, {kept} obs kept"),
         });

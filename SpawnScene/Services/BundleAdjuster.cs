@@ -123,6 +123,31 @@ public sealed class BundleAdjuster
 
     public Vector3 PointAt(int p) => new((float)_x[p * 3], (float)_x[p * 3 + 1], (float)_x[p * 3 + 2]);
 
+    /// <summary>
+    /// Per camera: observations given, observations surviving the outlier rounds, and the median reprojection
+    /// error of ALL its observations (px; a misplaced camera's median is large even when its few kept ones fit).
+    /// </summary>
+    public (int Total, int Kept, double MedianError)[] CameraStats()
+    {
+        var errs = new List<double>[_nc];
+        var kept = new int[_nc];
+        for (int c = 0; c < _nc; c++) errs[c] = new List<double>();
+        for (int i = 0; i < _obs.Count; i++)
+        {
+            var o = _obs[i];
+            if (_keep[i]) kept[o.Camera]++;
+            errs[o.Camera].Add(Residual(o, _r, _c, _x, _f, out var ru, out var rv, out _, out _, out _)
+                ? Math.Sqrt(ru * ru + rv * rv) : 1e6);
+        }
+        var stats = new (int, int, double)[_nc];
+        for (int c = 0; c < _nc; c++)
+        {
+            errs[c].Sort();
+            stats[c] = (errs[c].Count, kept[c], errs[c].Count == 0 ? double.NaN : errs[c][errs[c].Count / 2]);
+        }
+        return stats;
+    }
+
     /// <summary>Per point: how many of its observations survived the outlier rounds.</summary>
     public int[] KeptObservationsPerPoint()
     {

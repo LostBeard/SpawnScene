@@ -494,6 +494,18 @@ var<workgroup> redB : array<vec4<f32>, 256>;   // dCentreX, dCentreY, dConicA, d
 var<workgroup> redC : array<f32, 256>;         // dConicC
 var<workgroup> redAbs : array<vec2<f32>, 256>; // |dCentreX|, |dCentreY| per pixel
 
+// One batch of splats projected ONCE for the whole tile, as the forward does. Every thread used to
+// call project() for every key - covariance, conic and SH colour 256 times over for one splat.
+// 64 x (8 + 16 + 16 + 4) = 2.8 KB on top of the 11 KB above, inside the 16 KB minimum.
+const BWD_BATCH : u32 = 64u;
+var<workgroup> sb_centre : array<vec2<f32>, 64>;
+var<workgroup> sb_conic  : array<vec3<f32>, 64>;
+var<workgroup> sb_colour : array<vec3<f32>, 64>;
+var<workgroup> sb_opacity: array<f32, 64>;   // 0 for an invalid projection: alpha 0 never hits
+// The furthest key any pixel of this tile reached (max end_idx). Keys behind it touch no pixel.
+var<workgroup> tile_end_atomic : atomic<u32>;
+var<workgroup> tile_end_plain : u32;
+
 @compute @workgroup_size(16, 16, 1)
 fn raster_backward(
     @builtin(workgroup_id) wg : vec3<u32>,
@@ -526,12 +538,41 @@ fn raster_backward(
     // Colour accumulated by everything BEHIND the splat currently being processed.
     var rec = vec3<f32>(0.0);
 
-    // Back to front, in lockstep. range.x/range.y are uniform, so every barrier below is
-    // reached by every invocation.
-    var k = range.y;
+    // Keys at or past every pixel's end were never applied by the forward: their gradients are
+    // exactly zero. Write the zeros and start the walk at the furthest end instead of range.y.
+    if (li == 0u) { atomicStore(&tile_end_atomic, range.x); }
+    workgroupBarrier();
+    if (inside) { atomicMax(&tile_end_atomic, my_end); }
+    workgroupBarrier();
+    if (li == 0u) { tile_end_plain = atomicLoad(&tile_end_atomic); }
+    let tile_end = workgroupUniformLoad(&tile_end_plain);
+    for (var z = tile_end + li; z < range.y; z = z + 256u) {
+        grad_a[z * 3u + 0u] = 0.0; grad_a[z * 3u + 1u] = 0.0; grad_a[z * 3u + 2u] = 0.0;
+        grad_b[z * 3u + 0u] = 0.0; grad_b[z * 3u + 1u] = 0.0; grad_b[z * 3u + 2u] = 0.0;
+        grad_c[z * 3u + 0u] = 0.0; grad_c[z * 3u + 1u] = 0.0; grad_c[z * 3u + 2u] = 0.0;
+    }
+
+    // Back to front, in lockstep, a batch at a time. tile_end and range.x are uniform, so every
+    // barrier below is reached by every invocation.
+    var hi = tile_end;
     loop {
-        if (k <= range.x) { break; }
+        if (hi <= range.x) { break; }
+        let lo = max(range.x, select(0u, hi - BWD_BATCH, hi >= BWD_BATCH));
+        let count = hi - lo;
+        if (li < count) {
+            let q = project(values[lo + li]);
+            sb_centre[li] = q.centre;
+            sb_conic[li] = q.conic;
+            sb_colour[li] = q.colour;
+            sb_opacity[li] = select(0.0, q.opacity, q.valid);
+        }
+        workgroupBarrier();
+
+    var k = hi;
+    loop {
+        if (k <= lo) { break; }
         k = k - 1u;
+        let s = k - lo;
 
         var contrib = vec4<f32>(0.0);
         var geom = vec4<f32>(0.0);
@@ -543,7 +584,12 @@ fn raster_backward(
         // (fb-wgsl-inline-predicate-drops-all; MEASURED Truck: 4-8/95 views forward+loss live,
         // max|gradPerKey|==0). A compound short-circuit inline is the same trap.
         let reach = inside && (k < my_end);
-        let p = project(values[k]);
+        var p : Projected;
+        p.centre = sb_centre[s];
+        p.conic = sb_conic[s];
+        p.colour = sb_colour[s];
+        p.opacity = sb_opacity[s];
+        p.valid = p.opacity > 0.0;
         let g = select(0.0, splat_weight(p.conic, p.centre, pixel), reach && p.valid);
         let raw_alpha = p.opacity * g;
         let alpha = min(MAX_ALPHA, raw_alpha);
@@ -637,6 +683,8 @@ fn raster_backward(
             }
         }
         workgroupBarrier();
+    }
+        hi = lo;
     }
 }
 ";

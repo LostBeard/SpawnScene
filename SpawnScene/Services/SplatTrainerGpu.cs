@@ -177,6 +177,20 @@ public sealed class SplatTrainerGpu : IDisposable
     /// <summary>Keys emitted by the last render. Exceeding capacity is reported, never silent.</summary>
     public int LastKeyCount { get; private set; }
 
+    /// <summary>
+    /// How many training steps the last non-NaN <see cref="TrainStepAsync"/> loss is the mean of. The loss
+    /// accumulates on the GPU across steps that do not read it, so a caller summing a cycle's loss weights
+    /// the returned mean by this.
+    /// </summary>
+    public int LastLossSteps { get; private set; }
+
+    // Steps added into _lossFixed since it was last read. 0 = the buffer must be cleared before the next add.
+    int _lossStepsPending;
+
+    // The accumulator is fixed point, 2^20 per unit of per-step loss, in an int32: 2,048 steps of loss 1.0
+    // would overflow it. Real losses are 0.02-0.3, so reading at least this often leaves a wide margin.
+    const int MaxLossStepsBetweenReads = 1024;
+
     /// <summary>True when the last render overflowed the key buffer and is therefore incomplete.</summary>
     public bool LastOverflowed { get; private set; }
 
@@ -534,6 +548,7 @@ public sealed class SplatTrainerGpu : IDisposable
             await stage("adam+sh");
         }
         _lossFixed = accel.Allocate1D<int>(1);
+        _lossStepsPending = 0;
 
         int temp = accel.ComputeRadixSortPairsTempStorageSize<uint, uint, AscendingUInt32>((Index1D)_keyCapacity);
         _sortTemp = accel.Allocate1D<int>(Math.Max(1, temp));
@@ -571,7 +586,9 @@ public sealed class SplatTrainerGpu : IDisposable
         _outEnd!.MemSetToZero();
         _keys!.MemSetToZero();
         _values!.MemSetToZero();
-        await accel.SynchronizeAsync();
+        // Submit, do not wait: the clears are recorded in ILGPU's pending encoder, the passes below go
+        // straight to the queue, and a WebGPU queue runs submissions in order. Only a CPU read needs a wait.
+        accel.FlushPendingCommands();
 
         // ── 1. Emit (tile, depth) keys ──
         using (var enc = _device.CreateCommandEncoder())
@@ -600,9 +617,9 @@ public sealed class SplatTrainerGpu : IDisposable
             using var cmd = enc.Finish();
             _queue!.Submit(new[] { cmd });
         }
-        await accel.SynchronizeAsync();
 
-        // 4 bytes back to learn how many keys exist. A scalar, not bulk data.
+        // 4 bytes back to learn how many keys exist. A scalar, not bulk data. The readback maps behind
+        // everything already submitted, so it needs no separate wait.
         int[] counted = await _counter.CopyToHostAsync<int>(0, 1);
         int keyCount = counted[0];
         LastKeyDemand = keyCount;
@@ -623,7 +640,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // ── 2. Sort by key: groups by tile AND orders front-to-back within each tile ──
         _sortPairs!(accel.DefaultStream, _keys!.View.SubView(0, LastKeyCount),
             _values!.View.SubView(0, LastKeyCount), _sortTemp!.View);
-        await accel.SynchronizeAsync();
+        accel.FlushPendingCommands();
 
         // ── 3. Tile ranges ──
         WriteU32(_countBuf!, (uint)LastKeyCount);
@@ -677,7 +694,6 @@ public sealed class SplatTrainerGpu : IDisposable
             using var cmd = enc.Finish();
             _queue!.Submit(new[] { cmd });
         }
-        await accel.SynchronizeAsync();
 
         // CPU transfer: gate comparison only. Training passes readback:false and the colour
         // stays on the GPU - at 640x480 this copy is 3.7 MB, which would dwarf the iteration.
@@ -920,6 +936,10 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         if (prior == null || next == null || _remapFloatRows == null) return;
         next.MemSetToZero();
+        // The clear sits in ILGPU's pending encoder and the gather below goes straight to the queue.
+        // Unflushed, the clear was submitted by the fence's readback AFTER the gather and zeroed the whole
+        // bank: every densify wiped all SH bands and their moments (CarryGateAsync, 11,160/11,160 floats).
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
         uint z = zeroSlot >= 0 && zeroSlot < stride ? (uint)zeroSlot : uint.MaxValue;
         WriteU32x4(_dimsBuf!, (uint)newCount, (uint)stride, (uint)priorCount, z);
         Dispatch(_remapFloatRows!, (newCount + 63) / 64, 1, new[]
@@ -1071,7 +1091,12 @@ public sealed class SplatTrainerGpu : IDisposable
     }
 
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
-    public void ResetDensifyStats() => _densifyStats!.MemSetToZero();
+    public void ResetDensifyStats()
+    {
+        _densifyStats!.MemSetToZero();
+        // Submit now: the accumulate is a raw dispatch, and an unflushed clear would land after it.
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+    }
 
     /// <summary>
     /// Fold the step that just finished into the densification statistics. One dispatch, no sync.
@@ -1139,6 +1164,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public void ResetViewSupport(int splatCount)
     {
         _viewSupport!.MemSetToZero();
+        _gpu.WebGPUAccelerator.FlushPendingCommands(); // ahead of the raw accumulate dispatches
         _supportViewsAccumulated = 0;
     }
 
@@ -1377,6 +1403,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _adamV!.MemSetToZero();
         _adamShM?.MemSetToZero();
         _adamShV?.MemSetToZero();
+        _gpu.WebGPUAccelerator.FlushPendingCommands(); // ahead of the raw Adam dispatches
         _adamStepCount = 0;
     }
 
@@ -1490,10 +1517,15 @@ public sealed class SplatTrainerGpu : IDisposable
         CameraParams cam, float depthNear, float depthFar,
         float colourLr = SplatOptimizer.DefaultColourLr,
         float opacityLr = SplatOptimizer.DefaultOpacityLr,
-        GeometryStep? geometry = null)
+        GeometryStep? geometry = null,
+        bool readLoss = true)
     {
         var accel = _gpu.WebGPUAccelerator;
         var splatGpu = splatBuf.GetGPUBuffer()!;
+
+        // The loss accumulates across unread steps; clear it only when a fresh sum starts. The forward's
+        // flush submits this clear ahead of the loss pass.
+        if (_lossStepsPending == 0) _lossFixed!.MemSetToZero();
 
         // Forward also refreshes the tile binning for this view.
         await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false);
@@ -1504,14 +1536,14 @@ public sealed class SplatTrainerGpu : IDisposable
             // made a zero-key view look live (Sonnet audit 2026-09-21).
             _gradFixed!.MemSetToZero();
             _densifyAbs!.MemSetToZero();
-            return 0f;
+            accel.FlushPendingCommands();
+            // Counts as a step of loss 0, as it always has: it adds nothing to the sum.
+            return await FinishLossAsync(readLoss);
         }
 
         int pixels = _width * _height;
 
         // ── Loss and dL/d(pixel): 0.8 L1 + 0.2 D-SSIM, matching the reference ──
-        _lossFixed!.MemSetToZero();
-        await accel.SynchronizeAsync();
         WriteU32(_dimsBuf!, (uint)pixels);
         WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaL1, ImageQuality.LambdaDssim, 0f, 0f);
         Dispatch(_lossL1!, (pixels + 63) / 64, 1, new[]
@@ -1563,7 +1595,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // densify_abs is filled HERE with peak per-pixel |dCentre| (AbsGS). Clear first so a
         // previous view cannot leak into densify_accum after this step.
         _densifyAbs!.MemSetToZero();
-        await accel.SynchronizeAsync();
+        accel.FlushPendingCommands();
         // grad_per_key is written for every key this frame, so stale values cannot leak in.
         Dispatch(_rasterBackward!, _tilesX, _tilesY, new[]
         {
@@ -1579,7 +1611,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // Cleared here, not at the top of the step: the census and densify accum read the
         // completed step's totals after TrainStepAsync returns.
         _gradFixed!.MemSetToZero();
-        await accel.SynchronizeAsync();
+        accel.FlushPendingCommands();
 
         // ── Scatter per-key gradients into per-splat totals (f32 CAS add) ──
         WriteU32(_countBuf!, (uint)LastKeyCount);
@@ -1604,7 +1636,7 @@ public sealed class SplatTrainerGpu : IDisposable
         if (ActiveShDegree >= 1 && _scatterShGrad != null && _adamShRest != null)
         {
             _gradShRest!.MemSetToZero();
-            await accel.SynchronizeAsync();
+            accel.FlushPendingCommands();
             // Scatter cfg: .w = splat count (matches shader).
             WriteVec4(_adamCfgBuf!, 0f, 0f, 0f, splatCount);
             Dispatch(_scatterShGrad, (splatCount + 63) / 64, 1, new[]
@@ -1639,10 +1671,24 @@ public sealed class SplatTrainerGpu : IDisposable
             });
         }
 
-        await accel.SynchronizeAsync();
+        return await FinishLossAsync(readLoss);
+    }
 
+    /// <summary>
+    /// Count this step into the GPU loss sum and, when asked (or when the int32 sum is due), read it back:
+    /// the mean loss per step since the last read, with <see cref="LastLossSteps"/> saying how many.
+    /// Unread steps return NaN and cost no CPU-GPU round trip - the readback is the step's only wait.
+    /// </summary>
+    async Task<float> FinishLossAsync(bool readLoss)
+    {
+        _lossStepsPending++;
+        if (!readLoss && _lossStepsPending < MaxLossStepsBetweenReads) return float.NaN;
+
+        // CPU transfer: 4 bytes, the loss sum. Maps behind all the step's submitted work.
         int[] lossRaw = await _lossFixed!.CopyToHostAsync<int>(0, 1);
-        return lossRaw[0] / 1048576f;
+        LastLossSteps = _lossStepsPending;
+        _lossStepsPending = 0;
+        return lossRaw[0] / 1048576f / LastLossSteps;
     }
 
     /// <summary>

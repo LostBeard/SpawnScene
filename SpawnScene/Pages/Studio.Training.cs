@@ -454,7 +454,13 @@ public partial class Studio
                 var (near, far) = SplatBounds.DepthRangeFor(box, cam);
 
                 _trainer.SetTargetFrom(targets, vi);
-                float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo);
+                // The loss is read only where it is used: every census step (per-view loss), each cycle's
+                // end (the cycle mean), and the last step. In between it sums on the GPU, so those steps
+                // cost no CPU-GPU round trip; NaN = not read this step.
+                bool readLoss = it < supervised.Count || it % supervised.Count == supervised.Count - 1
+                    || it == iterations - 1;
+                float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo,
+                    readLoss: readLoss);
 
                 // How much of the gradient survives the fixed-point atomic? Gradients cross it
                 // as scaled integers, and dL/d(pixel) is 1/(3*W*H) - about 1e-6 at this
@@ -581,8 +587,12 @@ public partial class Studio
                     await ReportGradientHealthAsync(n, vi);
                 if (_trainer.LastOverflowed) overflowed++;
 
-                cycleSum += loss;
-                cycleN++;
+                if (!float.IsNaN(loss))
+                {
+                    // loss is the mean over LastLossSteps steps, so this sums the same per-step losses.
+                    cycleSum += (double)loss * _trainer.LastLossSteps;
+                    cycleN += _trainer.LastLossSteps;
+                }
                 if (it % supervised.Count == supervised.Count - 1)
                 {
                     double mean = cycleSum / cycleN;

@@ -220,6 +220,9 @@ public partial class Studio
             // -- Gradients: do the shaders compute what the verified CPU oracles compute? --
             if (!await GradientGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
 
+            // -- Densify carry: does every optimizer row land where the CPU oracle puts it? --
+            if (!await CarryGateAsync(n)) return;
+
             Console.WriteLine("[TrainerGate] PASS");
         }
         catch (Exception ex)

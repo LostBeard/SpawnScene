@@ -184,7 +184,11 @@ public partial class Studio
             {
                 var gtForCompare = await LoadGroundTruthCamerasAsync(datasetName, images);
                 if (gtForCompare != null)
+                {
                     ReportPoseAccuracyVsGroundTruth(_multiViewService.LastCameras, gtForCompare);
+                    ReportChunkAccuracyVsGroundTruth(
+                        _multiViewService.LastCameras, _multiViewService.LastChunkOf, gtForCompare);
+                }
             }
 
             _renderService.SetActiveSceneGpuLoaded(scene);
@@ -388,6 +392,44 @@ public partial class Studio
         {
             Console.WriteLine($"[Dataset] could not read {manifest.Poses}: {ex.Message}");
             return null;
+        }
+    }
+
+    /// <summary>
+    /// dav3-chunked: per joint pass, two ground-truth fits. ALONE = that pass's views by themselves (its own
+    /// accuracy; a similarity absorbs the fold). WITH REF = that pass plus the reference pass 0 in the world
+    /// frame (the pass AND its fold). Alone good + with-ref bad names the fold; alone bad names the pass.
+    /// </summary>
+    static void ReportChunkAccuracyVsGroundTruth(
+        CameraParams?[] estimated, int[] chunkOf, IReadOnlyList<CameraParams> groundTruth)
+    {
+        if (chunkOf.Length != estimated.Length || chunkOf.Length != groundTruth.Count) return;
+        int chunks = chunkOf.Length == 0 ? 0 : chunkOf.Max() + 1;
+
+        string Fit(Func<int, bool> member)
+        {
+            var est = new CameraParams?[estimated.Length];
+            var gt = new CameraParams?[estimated.Length];
+            int n = 0;
+            for (int i = 0; i < estimated.Length; i++)
+            {
+                if (!member(i) || estimated[i] == null) continue;
+                est[i] = estimated[i]; gt[i] = groundTruth[i]; n++;
+            }
+            if (n < 3 || !WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, gt, out var acc, out _, out _))
+                return $"n={n} (no fit)";
+            return $"n={n} {(acc.Spread > 0 ? acc.PositionRms / acc.Spread : float.NaN):P1} of spread, " +
+                   $"fwd {acc.MedianForwardDeg:F1}deg";
+        }
+
+        for (int k = 0; k < chunks; k++)
+        {
+            int kk = k;
+            Console.WriteLine(
+                $"[Dataset]   pose-vs-GT chunk {k} " +
+                $"[{string.Join(",", Enumerable.Range(0, chunkOf.Length).Where(i => chunkOf[i] == kk))}]: " +
+                $"alone {Fit(i => chunkOf[i] == kk)}" +
+                (k == 0 ? "" : $" | with ref {Fit(i => chunkOf[i] == kk || chunkOf[i] == 0)}"));
         }
     }
 

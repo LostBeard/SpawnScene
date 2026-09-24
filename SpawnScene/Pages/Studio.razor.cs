@@ -205,7 +205,10 @@ public partial class Studio : IAsyncDisposable
             int posePatches = query.TryGetValue("patches", out var pq) && int.TryParse(pq, out var pqi)
                 ? pqi : DepthEstimationService.SafeMultiViewPatches;
             query.TryGetValue("dataset", out var poseDataset);
-            await RunDav3PoseGateAsync(poseN, posePatches, poseDataset ?? "TempleRing");
+            int[]? poseViews = query.TryGetValue("views", out var pv)
+                ? pv.Split(',', StringSplitOptions.RemoveEmptyEntries).Select(int.Parse).ToArray()
+                : null;
+            await RunDav3PoseGateAsync(poseN, posePatches, poseDataset ?? "TempleRing", poseViews);
             return;
         }
 

@@ -36,7 +36,7 @@ namespace SpawnScene.Pages;
 /// </summary>
 public partial class Studio
 {
-    private async Task RunDav3PoseGateAsync(int n, int patchesPerSide, string dataset)
+    private async Task RunDav3PoseGateAsync(int n, int patchesPerSide, string dataset, int[]? views = null)
     {
         DepthEstimationService.SetSquareInput(patchesPerSide);
         Console.WriteLine(
@@ -53,6 +53,18 @@ public partial class Studio
 
             if (!_depthService.IsReady)
                 await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+
+            // &views=a,b,c,...: one pass over exactly those views (e.g. a production chunk named by the
+            // dataset gate's per-chunk report), so a bad chunk can be re-measured in isolation.
+            if (views != null)
+            {
+                Console.WriteLine($"[Dav3Pose] explicit views=[{string.Join(",", views)}]");
+                var runV = await RunDav3OnAsync(available, views);
+                if (runV == null) { Console.WriteLine("[Dav3Pose] FAIL: the pass produced no poses"); return; }
+                ReportAgainstGroundTruth("V", available, views, runV);
+                Console.WriteLine("[Dav3Pose] DONE");
+                return;
+            }
 
             // Two batches sharing the first three views. Batch A is the reference; batch B keeps
             // the shared three and replaces the rest, which is exactly the chunk arrangement.

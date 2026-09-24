@@ -40,6 +40,13 @@ public class MultiViewGenerationService
     public string LastPoseSource { get; private set; } = "none";
 
     /// <summary>
+    /// dav3-chunked only: the joint pass each of <see cref="LastCameras"/> was adopted from (-1 = unposed;
+    /// 0 = the reference pass, which also holds the shared anchors). Empty for every other pose source.
+    /// Lets a ground-truth report separate a pass's own error from the error its fold added.
+    /// </summary>
+    public int[] LastChunkOf { get; private set; } = [];
+
+    /// <summary>
     /// Publish cameras that came from outside the pose cascade, so everything downstream sees
     /// them the same way it sees recovered ones.
     ///
@@ -52,6 +59,7 @@ public class MultiViewGenerationService
     {
         LastCameras = cameras;
         LastPoseSource = source;
+        LastChunkOf = [];
     }
 
     /// <summary>
@@ -520,6 +528,7 @@ public class MultiViewGenerationService
         int totalSplats = 0;
         LastCameras = allPoses;
         LastPoseSource = poseSource;
+        LastChunkOf = [];
 
         bool useWorld = poseSource != "fallback";
         int nonRefIn = 0, nonRefKept = 0;
@@ -759,6 +768,7 @@ public class MultiViewGenerationService
 
         LastCameras = poses.Cameras;
         LastPoseSource = "dav3-chunked";
+        LastChunkOf = poses.ChunkOf.ToArray();
 
         Console.WriteLine(
             $"[MultiView] Total: {actualTotal:N0} splats from {posed.Count}/{images.Count} views " +

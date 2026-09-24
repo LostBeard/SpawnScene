@@ -821,7 +821,8 @@ public class MultiViewGenerationService
             LastChunkOf = poses.ChunkOf.ToArray();
             var packedCloud = SparsePointCloudInit.BuildPacked(baCloud);
             Console.WriteLine($"[MultiView] init from the bundle-adjusted sparse cloud: {baCloud.Count:N0} points");
-            return await GenerateFromPointCloudAsync(packedCloud, baCloud.Count, posed.Select(i => poses.Cameras[i]!));
+            return await GenerateFromPointCloudAsync(packedCloud, baCloud.Count, posed.Select(i => poses.Cameras[i]!),
+                poseSource: "dav3-chunked");
         }
 
         // Depth scale composes in one order and only one. A view's raw depth is in ITS CHUNK's
@@ -1327,7 +1328,8 @@ public class MultiViewGenerationService
     /// splats.
     /// </summary>
     public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
-        GenerateFromPointCloudAsync(float[] packed, int splatCount, IEnumerable<CameraParams> cameras)
+        GenerateFromPointCloudAsync(float[] packed, int splatCount, IEnumerable<CameraParams> cameras,
+            string poseSource = "colmap")
     {
         if (splatCount <= 0) return null;
         var accelerator = _gpu.Accelerator!;
@@ -1339,7 +1341,9 @@ public class MultiViewGenerationService
 
         await AlignToGravityAsync(buf, splatCount, cameras);
 
-        LastPoseSource = "colmap";
+        // The CALLER knows where the poses came from. This used to hard-code "colmap", so the bundle-adjusted
+        // DAv3 path was logged as COLMAP and its ground-truth pose report skipped.
+        LastPoseSource = poseSource;
         SetStatus($"Sparse-cloud init complete: {splatCount:N0} splats");
         return (buf, splatCount);
     }

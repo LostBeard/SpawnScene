@@ -108,6 +108,121 @@ public class MultiViewGenerationService
     /// </summary>
     public bool OverlapAnchors { get; set; } = true;
 
+    /// <summary>
+    /// Refine the chunked cascade's cameras with bundle adjustment over the import's feature matches
+    /// (<see cref="BundleAdjuster"/>). The cascade alone measured median 7.8% / p90 27% of the camera
+    /// spread on Truck, and those poses shred a splat scene that COLMAP poses render cleanly.
+    /// </summary>
+    public bool BundleAdjust { get; set; } = true;
+
+    /// <summary>Levenberg-Marquardt iterations per BA round.</summary>
+    public int BundleAdjustIterations { get; set; } = 150;
+
+    /// <summary>Pairs whose cascade cameras face further apart than this are not verified or used by BA.</summary>
+    public float MaxPairAngleDeg { get; set; } = 45f;
+
+    private void RefineWithBundleAdjustment(
+        IReadOnlyList<ImportedImage> images, CameraParams?[] cameras, IReadOnlyList<int> posed)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var pairs = _importService.MatchedPairs;
+        if (pairs.Count == 0 || _importService.Images.Count != images.Count)
+        {
+            Console.WriteLine(
+                $"[BA] SKIPPED: {pairs.Count} matched pairs for {_importService.Images.Count} imported vs " +
+                $"{images.Count} images - no feature tracks to adjust against.");
+            return;
+        }
+
+        // BA works on the posed views only; map global image index <-> BA camera index.
+        var baIndex = new Dictionary<int, int>();
+        var cams = new List<CameraParams>();
+        foreach (int g in posed) { baIndex[g] = cams.Count; cams.Add(cameras[g]!); }
+
+        // Verify every pair's matches geometrically before they may form tracks. MEASURED on Truck: ~34
+        // chance matches on EVERY pair (adjacent frames: median 216) - unverified, they chained into
+        // inconsistent tracks and left BA 5,197 points for 126 cameras. Pairs whose cascade cameras face
+        // more than MaxPairAngleDeg apart cannot share much and are not worth a RANSAC.
+        float cosMax = MathF.Cos(MaxPairAngleDeg * MathF.PI / 180f);
+        var verified = new List<(int, int, int, int)>();
+        int considered = 0, passed = 0;
+        var tv = System.Diagnostics.Stopwatch.StartNew();
+        foreach (var p in pairs)
+        {
+            if (!baIndex.ContainsKey(p.ImageIndexA) || !baIndex.ContainsKey(p.ImageIndexB)) continue;
+            var ca = cameras[p.ImageIndexA]!; var cb = cameras[p.ImageIndexB]!;
+            if (System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(ca.Forward),
+                    System.Numerics.Vector3.Normalize(cb.Forward)) < cosMax) continue;
+            if (p.Matches.Count < 15) continue;
+            considered++;
+            var fa = images[p.ImageIndexA].Features; var fb = images[p.ImageIndexB].Features;
+            var xa = new float[p.Matches.Count * 2]; var xb = new float[p.Matches.Count * 2];
+            for (int k = 0; k < p.Matches.Count; k++)
+            {
+                var m = p.Matches[k];
+                xa[k * 2] = fa[m.IndexA].X; xa[k * 2 + 1] = fa[m.IndexA].Y;
+                xb[k * 2] = fb[m.IndexB].X; xb[k * 2 + 1] = fb[m.IndexB].Y;
+            }
+            var r = EpipolarRansac.Estimate(xa, xb, thresholdPx: 2.0, minInliers: 15,
+                seed: p.ImageIndexA * 7919 + p.ImageIndexB);
+            if (r == null) continue;
+            passed++;
+            for (int k = 0; k < p.Matches.Count; k++)
+                if (r.Inliers[k]) verified.Add((p.ImageIndexA, p.Matches[k].IndexA, p.ImageIndexB, p.Matches[k].IndexB));
+        }
+        Console.WriteLine(
+            $"[BA] verification: {considered} pairs within {MaxPairAngleDeg} deg of each other, {passed} verified, " +
+            $"{verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s)");
+        var tracks = BundleAdjuster.BuildTracks(verified);
+
+        var points = new List<System.Numerics.Vector3>();
+        var obs = new List<BundleAdjuster.Observation>();
+        var trackObs = new List<(int Camera, float U, float V)>();
+        foreach (var track in tracks)
+        {
+            trackObs.Clear();
+            foreach (var (img, feat) in track)
+            {
+                var f = images[img].Features[feat];
+                trackObs.Add((baIndex[img], f.X, f.Y));
+            }
+            if (!BundleAdjuster.Triangulate(cams, trackObs, out var x)) continue;
+            int id = points.Count;
+            points.Add(x);
+            foreach (var (c, u, v) in trackObs) obs.Add(new BundleAdjuster.Observation(c, id, u, v));
+        }
+        if (points.Count < 50)
+        {
+            Console.WriteLine($"[BA] SKIPPED: only {points.Count} triangulated tracks from {tracks.Count}.");
+            return;
+        }
+
+        // One image size = one camera (a phone video, a photo set from one device): solve ONE focal with the
+        // poses instead of holding DAv3's per-frame guesses fixed. MEASURED on a synthetic rig with DAv3-like
+        // focal error (+10% bias, +-8% scatter): fixed per-view focals leave the poses at 13.8% of spread,
+        // a shared focal gets 0.033% and recovers f exactly.
+        bool oneCamera = cams.Select(c => (c.Width, c.Height)).Distinct().Count() == 1;
+        var focals = cams.Select(c => 0.5f * (c.FocalX + c.FocalY)).OrderBy(f => f).ToList();
+        var ba = new BundleAdjuster(cams, points, obs, sharedFocal: oneCamera);
+        var result = ba.Solve(new BundleAdjuster.Options
+        {
+            MaxIterations = BundleAdjustIterations,
+            RoundLog = (round, iters, rms, kept) => Console.WriteLine(
+                $"[BA]   round {round}: {iters} iterations, RMS {rms:F2} px, {kept} obs kept"),
+        });
+        for (int i = 0; i < cams.Count; i++) ba.WriteCamera(i, cams[i]);
+        Console.WriteLine(
+            $"[BA] focal: DAv3 per-view median {focals[focals.Count / 2]:F1} (p10 {focals[focals.Count / 10]:F1}, " +
+            $"p90 {focals[focals.Count * 9 / 10]:F1})" +
+            (oneCamera ? $" -> shared {ba.SharedFocal:F1}" : " (mixed image sizes: per-view focals held)"));
+
+        Console.WriteLine(
+            $"[BA] {cams.Count} cameras, {tracks.Count} tracks -> {points.Count} points, {result.Observations} obs " +
+            $"({result.ObservationsKept} kept), reprojection RMS {result.InitialRmsPixels:F1} -> " +
+            $"{result.FinalRmsPixels:F2} px in {result.Iterations} iterations; solve {result.Seconds:F1}s, " +
+            $"total {sw.Elapsed.TotalSeconds:F1}s");
+    }
+
     /// <summary>Anchor views the last chunked run used, and why they were picked.</summary>
     public string LastAnchorSource { get; private set; } = "none";
 
@@ -651,6 +766,8 @@ public class MultiViewGenerationService
             SetStatus("Error: posed views have no depth maps.");
             return null;
         }
+
+        if (BundleAdjust) RefineWithBundleAdjustment(images, poses.Cameras, posed);
 
         // Depth scale composes in one order and only one. A view's raw depth is in ITS CHUNK's
         // frame, so it takes the fold's scale first; only then are the views comparable enough to

@@ -264,6 +264,11 @@ public partial class Studio : IAsyncDisposable
             // can DETECT a bad anchor and five the fewest that can identify which.
             if (query.TryGetValue("anchors", out var an) && int.TryParse(an, out var ani))
                 _multiViewService.ChunkAnchorCount = ani;
+            // &ba=0 skips bundle adjustment; &baiters=N sets LM iterations per round.
+            if (query.TryGetValue("ba", out var bav))
+                _multiViewService.BundleAdjust = bav is not ("0" or "false");
+            if (query.TryGetValue("baiters", out var bai) && int.TryParse(bai, out var baii))
+                _multiViewService.BundleAdjustIterations = baii;
             // ?n=N views per joint forward. The default is a starting point, not a measured
             // limit; the first pass proves whatever is asked for on this device and backs off.
             if (query.TryGetValue("n", out var nn) && int.TryParse(nn, out var nni))

@@ -39,6 +39,8 @@ public sealed class BundleAdjuster
         public int Rounds { get; init; } = 3;
         public int MaxCgIterations { get; init; } = 200;
         public double CgTolerance { get; init; } = 1e-8;
+        /// <summary>Called after each round: (round, LM iterations, inlier RMS px, observations kept).</summary>
+        public Action<int, int, double, int>? RoundLog { get; init; }
     }
 
     public sealed record Result(
@@ -173,7 +175,9 @@ public sealed class BundleAdjuster
         int iters = 0;
         for (int round = 0; round < _opts.Rounds; round++)
         {
-            iters += RunLevenbergMarquardt();
+            int roundIters = RunLevenbergMarquardt();
+            iters += roundIters;
+            _opts.RoundLog?.Invoke(round, roundIters, RmsPixels(), _keep.Count(k => k));
             // Drop what the fit says is a mismatch, then refit without it.
             double limit = _opts.OutlierHubers * _opts.HuberPixels;
             int dropped = 0;

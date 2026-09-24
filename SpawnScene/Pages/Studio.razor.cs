@@ -8,8 +8,10 @@ using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnScene.Models;
 using SpawnScene.Services;
-using SpawnScene.UI;
-using SpawnScene.UI.Elements;
+using SpawnDev.GameUI;
+using SpawnDev.GameUI.Elements;
+using SpawnDev.GameUI.Input;
+using SpawnDev.GameUI.Rendering;
 
 namespace SpawnScene.Pages;
 
@@ -28,6 +30,7 @@ public partial class Studio : IAsyncDisposable
     [Inject] private MultiViewGenerationService _multiViewService { get; set; } = default!;
     // The dataset autotest loads unposed captures through the ordinary import path.
     [Inject] private ImageImportService _importService { get; set; } = default!;
+    [Inject] private GameUIService _gameUI { get; set; } = default!;
     [Inject] private SpawnJSRuntime _js { get; set; } = default!;
     [Inject] private GpuDepthColorizer _depthColorizer { get; set; } = default!;
     // SpawnDev.ILGPU.ML — created on-demand after GPU init (not injected)
@@ -58,18 +61,25 @@ public partial class Studio : IAsyncDisposable
     private bool _xrCasEnabled; // CAS sharpening in XR — off by default
     private bool _xrActive; // true while XR session is active (pauses canvas RAF)
 
-    // WebGPU UI system
-    private FontAtlas? _fontAtlas;
-    private UIRenderer? _uiRenderer;
-    private InputManager? _inputManager;
+    // GameUI root (screen-space overlay). Rebuilt per StudioState.
     private UIElement _uiRoot = new();
+    private readonly HashSet<string> _prevKeysDown = new();
 
     // App state
-    private enum StudioState { ProjectBrowser, ProjectDetail, SceneViewer }
+    private enum StudioState { ProjectBrowser, ProjectDetail, SceneViewer, Testing }
+
     private StudioState _state = StudioState.ProjectBrowser;
     private List<Project>? _projects;
     private Project? _activeProject;
     private string? _statusMessage;
+    private bool _pipelineBusy;
+    private int _uiTrainIters = 500;
+    private bool _uiTrainGeom = true;
+    private string _uiDataset = "Bathroom";
+    // Testing pose path: false = DAv3 cascade (product default). true = COLMAP/poses.par when
+    // the dataset ships them. Bathroom has none - GT is DrJohnson/Truck/TempleRing only.
+    private bool _uiUseGtPoses;
+    private bool _uiInitFromCloud;
 
     // Thumbnail cache: key → (GPUTexture, GPUTextureView)
     private readonly Dictionary<string, (GPUTexture tex, GPUTextureView view)> _thumbnailCache = new();
@@ -86,6 +96,7 @@ public partial class Studio : IAsyncDisposable
     // Dynamic HUD labels (updated each frame)
     private UILabel? _hudSplatLabel;
     private UILabel? _hudFpsLabel;
+    private UILabel? _statusLabel;
     private UIPanel? _settingsPanel;
     private bool _showSettings;
 
@@ -126,15 +137,9 @@ public partial class Studio : IAsyncDisposable
         if (gpu is not null)
             _canvasFormat = gpu.GetPreferredCanvasFormat();
 
-        // Initialize WebGPU UI system
-        _fontAtlas = new FontAtlas();
-        _fontAtlas.Init(_device, _queue);
-
-        _uiRenderer = new UIRenderer();
-        _uiRenderer.Init(_device, _queue, _fontAtlas, _canvasFormat);
-
-        _inputManager = new InputManager();
-        _inputManager.Attach(_canvasRef);
+        // Initialize SpawnDev.GameUI (WebGPU overlay, SDF fonts, unified input)
+        _gameUI.Init(_device, _queue, _canvasFormat, _canvasRef, _canvasWidth, _canvasHeight);
+        UITheme.Current = UITheme.Dark;
 
         // Load projects from OPFS and build initial UI
         _projects = await _projectService.ListProjectsAsync();
@@ -414,9 +419,7 @@ public partial class Studio : IAsyncDisposable
         _xrBlit?.Dispose();
         _xrBlit = null;
 
-        _inputManager?.Dispose();
-        _uiRenderer?.Dispose();
-        _fontAtlas?.Dispose();
+        _gameUI.Dispose();
         _rafCallback?.Dispose();
 
         // Clean up thumbnail textures

@@ -27,6 +27,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly" Version="10.0.5" />
+		<PackageReference Include="SpawnDev.GameUI" Version="0.1.0-rc.4" />
 		<PackageReference Include="SpawnDev.ILGPU.ML" Version="5.2.21-local.1" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.5" PrivateAssets="all" />
 		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="2.1.18" />
@@ -40,4 +41,10 @@
 		<TrimmerRootAssembly Include="SpawnDev.ILGPU" />
 	</ItemGroup>
 
+
+	<!-- Local UI/ superseded by SpawnDev.GameUI; keep files for history, do not compile. -->
+	<ItemGroup>
+		<Compile Remove="UI/**/*.cs" />
+		<None Include="UI/**/*.cs" />
+	</ItemGroup>
 </Project>

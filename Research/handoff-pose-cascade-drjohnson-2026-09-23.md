@@ -181,8 +181,12 @@ It is no longer "stuck because train died." Commit of the SpawnScene tree still 
 - Harness: `SPAWNSCENE_CHROME_LOG` + VRAM sampler are how the next silent GPU death gets named.
 - Next: ~~TempleRing `?autotest=dav3-pose`~~ DONE (`_runs/dav3-pose-temple.log`): single-pass
   N=6 vs GT residual **5.4% / 4.5% of spread**, batch dependence **0.4%**. Extrinsics decode is
-  correct. The DrJohnson 110% RMS is the **chunked cascade on a walk-through**, not `[R|t]` unpack.
-  Next measurement: same single-pass gate on a DrJohnson 6-view subset vs COLMAP.
+  correct on an object turntable.
+- ~~DrJohnson N=6 single-pass~~ DONE (`_runs/dav3-pose-drjohnson.log`, no upright - matches
+  production): residual **52.7% / 94.5% of spread**, forward median **76 / 140 deg**, batch
+  dependence on shared views **46%** (fold limit is 15%). So DAv3's joint poses on this indoor
+  walk-through do not match COLMAP even before chunking; the cascade is stacking a weak signal.
+  Object-capture TempleRing is fine; room walk-throughs need a different pose path (or GT).
 
 ## Harness notes
 

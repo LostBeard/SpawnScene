@@ -36,25 +36,15 @@ namespace SpawnScene.Pages;
 /// </summary>
 public partial class Studio
 {
-    private async Task RunDav3PoseGateAsync(int n, int patchesPerSide)
+    private async Task RunDav3PoseGateAsync(int n, int patchesPerSide, string dataset)
     {
         DepthEstimationService.SetSquareInput(patchesPerSide);
-        Console.WriteLine($"[Dav3Pose] starting n={n} patches={patchesPerSide}x{patchesPerSide}");
+        Console.WriteLine(
+            $"[Dav3Pose] starting dataset={dataset} n={n} patches={patchesPerSide}x{patchesPerSide}");
         try
         {
-            var parText = await _http.GetStringAsync("datasets/TempleRing/templeR_par.txt");
-            var gtAll = WorldSpaceGeometry.ParseMiddleburyParams(parText, 640, 480);
-            Console.WriteLine($"[Dav3Pose] {gtAll.Count} ground-truth poses on disk");
-
-            // Only the images actually present.
-            var available = new List<(string filename, CameraParams camera)>();
-            foreach (var entry in gtAll)
-            {
-                using var resp = await _http.GetAsync($"datasets/TempleRing/{entry.filename}",
-                    HttpCompletionOption.ResponseHeadersRead);
-                if (resp.IsSuccessStatusCode) available.Add(entry);
-            }
-            Console.WriteLine($"[Dav3Pose] {available.Count} images on disk");
+            var available = await LoadDav3PoseAvailableAsync(dataset);
+            Console.WriteLine($"[Dav3Pose] {available.Count} images with ground-truth poses on disk");
             if (available.Count < n + 2)
             {
                 Console.WriteLine($"[Dav3Pose] FAIL: need at least {n + 2} images");
@@ -113,16 +103,61 @@ public partial class Studio
         }
     }
 
+    /// <summary>
+    /// Images that both exist on disk and have a ground-truth pose. TempleRing uses its Middlebury
+    /// par file; every other dataset uses the COLMAP-converted <c>poses.par</c> via the manifest.
+    /// </summary>
+    private async Task<List<(string url, string filename, CameraParams camera)>> LoadDav3PoseAvailableAsync(
+        string dataset)
+    {
+        if (string.Equals(dataset, "TempleRing", StringComparison.OrdinalIgnoreCase))
+        {
+            var parText = await _http.GetStringAsync("datasets/TempleRing/templeR_par.txt");
+            var gtAll = WorldSpaceGeometry.ParseMiddleburyParams(parText, 640, 480);
+            Console.WriteLine($"[Dav3Pose] {gtAll.Count} ground-truth poses in templeR_par.txt");
+            var available = new List<(string, string, CameraParams)>();
+            foreach (var entry in gtAll)
+            {
+                string url = $"datasets/TempleRing/{entry.filename}";
+                using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+                if (resp.IsSuccessStatusCode)
+                    available.Add((url, entry.filename, entry.camera));
+            }
+            return available;
+        }
+
+        var manifest = await _importService.TryLoadManifestAsync(dataset)
+            ?? throw new InvalidOperationException($"dataset '{dataset}' has no manifest");
+        if (string.IsNullOrEmpty(manifest.Poses))
+            throw new InvalidOperationException($"dataset '{dataset}' ships no poses");
+        var text = await _http.GetStringAsync($"datasets/{dataset}/{manifest.Poses}");
+        var parsed = WorldSpaceGeometry.ParseMiddleburyParams(text, manifest.Width, manifest.Height);
+        Console.WriteLine($"[Dav3Pose] {parsed.Count} ground-truth poses in {manifest.Poses}");
+        var byName = parsed.ToDictionary(e => e.filename, e => e.camera, StringComparer.OrdinalIgnoreCase);
+        var list = new List<(string, string, CameraParams)>();
+        foreach (var name in manifest.Images)
+        {
+            if (!byName.TryGetValue(name, out var cam)) continue;
+            string url = $"datasets/{dataset}/{manifest.ImageDir}/{name}";
+            using var resp = await _http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            if (!resp.IsSuccessStatusCode) continue;
+            list.Add((url, name, cam));
+        }
+        return list;
+    }
+
     /// <summary>One joint pass over the given indices; returns a camera per slot, or null.</summary>
     private async Task<CameraParams?[]?> RunDav3OnAsync(
-        IReadOnlyList<(string filename, CameraParams camera)> available, int[] pick)
+        IReadOnlyList<(string url, string filename, CameraParams camera)> available, int[] pick)
     {
         var images = new List<ImportedImage>();
         foreach (int i in pick)
         {
-            var (filename, gtCam) = available[i];
-            byte[] bytes = await _http.GetByteArrayAsync($"datasets/TempleRing/{filename}");
-            using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/png" });
+            var (url, filename, gtCam) = available[i];
+            byte[] bytes = await _http.GetByteArrayAsync(url);
+            string mime = filename.EndsWith(".png", StringComparison.OrdinalIgnoreCase)
+                ? "image/png" : "image/jpeg";
+            using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = mime });
             using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
             int w = (int)bitmap.Width, h = (int)bitmap.Height;
             using var osc = new OffscreenCanvas(w, h);
@@ -132,17 +167,24 @@ public partial class Studio
             using var dataArray = imageData.Data;
             var rgba = dataArray.ReadBytes();
 
-            // Upright, as the real path does: the depth model wants standing photographs, and
-            // TempleRing ships gravity in its calibration so the turn is well defined here.
+            // Upright only when the calibration frame has gravity (TempleRing). DrJohnson COLMAP
+            // poses are already in the photograph's orientation; production keeps them that way
+            // (RecordTrainingViews poseFrameHasGravity=false). Rotating the photo here while
+            // reporting against the un-rotated GT was a bookkeeping bug waiting to happen, and
+            // on a walk-through the "up" from COLMAP is not a reliable gravity signal anyway.
             var cam = available[i].camera;
             cam.Width = w; cam.Height = h;
-            int turns = ImageOrientation.QuarterTurnsToUpright(cam);
+            bool upright = filename.StartsWith("templeR", StringComparison.OrdinalIgnoreCase);
+            int turns = upright ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
             if (turns != 0)
             {
                 rgba = ImageOrientation.RotateRgba(rgba, w, h, turns);
                 cam = ImageOrientation.Rotate(cam, turns);
                 (w, h) = (cam.Width, cam.Height);
             }
+            // Intrinsics must match the decoded pixel size (manifest may be the full capture).
+            if (cam.Width != w || cam.Height != h)
+                cam = cam.ScaledTo(w, h);
             images.Add(new ImportedImage { FileName = filename, Width = w, Height = h, RgbaPixels = rgba });
         }
 
@@ -168,43 +210,47 @@ public partial class Studio
     }
 
     private void ReportAgainstGroundTruth(
-        string label, IReadOnlyList<(string filename, CameraParams camera)> available,
+        string label, IReadOnlyList<(string url, string filename, CameraParams camera)> available,
         int[] pick, CameraParams?[] got)
     {
-        var src = new List<Vector3>();
-        var dst = new List<Vector3>();
+        var est = new CameraParams?[pick.Length];
+        var reference = new CameraParams?[pick.Length];
         for (int slot = 0; slot < pick.Length; slot++)
         {
-            if (got[slot] == null) continue;
-            src.Add(got[slot]!.Position);
-            dst.Add(available[pick[slot]].camera.Position);
+            est[slot] = got[slot];
+            reference[slot] = available[pick[slot]].camera;
         }
-        Console.WriteLine($"[Dav3Pose] batch {label}: {src.Count}/{pick.Length} views returned a pose");
-        if (src.Count < 3) return;
-
-        if (!WorldSpaceGeometry.TryUmeyamaSimilarity(
-                src, dst, out float s, out var R, out var t, out float rms))
+        Console.WriteLine(
+            $"[Dav3Pose] batch {label}: {est.Count(c => c != null)}/{pick.Length} views returned a pose");
+        if (!WorldSpaceGeometry.TryMeasureCameraSetAccuracy(
+                est, reference, out var acc, out var posFrac, out var fwdDeg))
         {
             Console.WriteLine($"[Dav3Pose] batch {label}: similarity fit failed outright");
             return;
         }
 
-        float spread = MeanSpread(dst);
         Console.WriteLine(
-            $"[Dav3Pose] batch {label} vs GROUND TRUTH: scale {s:F4}, residual {rms:F4} on a " +
-            $"spread of {spread:F4} ({(spread > 0 ? rms / spread : float.NaN):P1} of it)");
+            $"[Dav3Pose] batch {label} vs GROUND TRUTH: scale {acc.Scale:F4}, " +
+            $"residual {acc.PositionRms:F4} on a spread of {acc.Spread:F4} " +
+            $"({(acc.Spread > 0 ? acc.PositionRms / acc.Spread : float.NaN):P1} of it); " +
+            $"forward median {acc.MedianForwardDeg:F1}deg p90 {acc.P90ForwardDeg:F1}deg");
 
-        // Per-camera error after the best possible alignment: which views are wrong, not just
-        // how wrong the set is on average.
-        for (int i = 0; i < src.Count; i++)
+        for (int i = 0; i < posFrac.Length; i++)
         {
-            var p = WorldSpaceGeometry.ApplySimilarity(src[i], s, R, t);
             Console.WriteLine(
                 $"[Dav3Pose]   {label}[{i}] {available[pick[i]].filename}: " +
-                $"off by {Vector3.Distance(p, dst[i]):F4} " +
-                $"({(spread > 0 ? Vector3.Distance(p, dst[i]) / spread : float.NaN):P1} of spread)");
+                $"off by {posFrac[i] * acc.Spread:F4} ({posFrac[i]:P1} of spread), " +
+                $"forward {fwdDeg[i]:F1}deg");
         }
 
+        var src = new List<Vector3>();
+        var dst = new List<Vector3>();
+        for (int i = 0; i < pick.Length; i++)
+        {
+            if (got[i] == null) continue;
+            src.Add(got[i]!.Position);
+            dst.Add(available[pick[i]].camera.Position);
+        }
         ReportTriangle($"batch {label} vs GT", src, dst);
     }
 
@@ -223,32 +269,26 @@ public partial class Studio
                 float da = Vector3.Distance(a[i], a[j]);
                 float db = Vector3.Distance(b[i], b[j]);
                 if (!(db > 1e-6f)) continue;
-                ratios.Add(da / db);
-                if (parts.Count < 10) parts.Add($"{i}-{j}={da / db:F3}");
+                float r = da / db;
+                ratios.Add(r);
+                if (parts.Count < 10) parts.Add($"{i}-{j}={r:F3}");
             }
-        if (ratios.Count < 2) return;
-
-        // Summarise ROBUSTLY. (max-min)/mean is decided entirely by the single worst pair, which
-        // on six views means one pair out of fifteen: it called TempleRing's ratios - clustered
-        // between 1.59 and 1.74 - a 25.7% disagreement, and "no similarity can absorb this",
-        // when the batch-to-batch fold on the same data was in fact exact to 0.4%. A statistic
-        // that a lone outlier can swing is not one to put a verdict on.
-        var sorted = ratios.OrderBy(r => r).ToList();
+        if (ratios.Count == 0) return;
+        var sorted = ratios.OrderBy(x => x).ToList();
         float median = sorted[sorted.Count / 2];
-        var deviations = sorted.Select(r => Math.Abs(r - median)).OrderBy(d => d).ToList();
-        float mad = deviations[deviations.Count / 2];          // median absolute deviation
-        float relMad = median > 1e-6f ? mad / median : float.NaN;
-        float worst = Math.Max(
-            Math.Abs(sorted[^1] - median), Math.Abs(sorted[0] - median)) / Math.Max(median, 1e-6f);
-
+        var dev = sorted.Select(r => MathF.Abs(r - median)).OrderBy(d => d).ToList();
+        float mad = median > 1e-6f ? dev[dev.Count / 2] / median : float.NaN;
+        float worst = MathF.Max(MathF.Abs(sorted[^1] - median), MathF.Abs(sorted[0] - median))
+                      / MathF.Max(median, 1e-6f);
         Console.WriteLine(
             $"[Dav3Pose] {label} distance ratios: {string.Join(" ", parts)} " +
-            $"({ratios.Count} pairs; median {median:F3}, typical deviation {relMad:P1}, " +
+            $"({ratios.Count} pairs; median {median:F3}, typical deviation {mad:P1}, " +
             $"worst pair {worst:P1})");
     }
 
     private static float MeanSpread(IReadOnlyList<Vector3> pts)
     {
+        if (pts.Count == 0) return 0;
         var c = Vector3.Zero;
         foreach (var p in pts) c += p;
         c /= pts.Count;

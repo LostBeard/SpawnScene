@@ -1,188 +1,200 @@
+using System.Drawing;
+using SpawnDev.GameUI;
+using SpawnDev.GameUI.Elements;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Models;
 using SpawnScene.Services;
-using SpawnScene.UI;
-using SpawnScene.UI.Elements;
 
 namespace SpawnScene.Pages;
 
-// All WebGPU UI building methods
+// WebGPU UI building via SpawnDev.GameUI
 public partial class Studio
 {
+    private static Color AccentSelected => Color.FromArgb(255, 36, 120, 140);
+    private static Color AccentDanger => Color.FromArgb(255, 150, 50, 50);
+    private static Color AccentDangerHover => Color.FromArgb(255, 180, 60, 60);
+    private static Color AccentMuted => Color.FromArgb(255, 50, 70, 90);
+
     private void BuildProjectBrowserUI()
     {
         _uiRoot.ClearChildren();
+        _statusLabel = null;
 
-        float margin = 40;
+        float margin = 32;
         float panelW = _canvasWidth - margin * 2;
         float panelH = _canvasHeight - margin * 2;
 
-        var mainPanel = _uiRoot.AddChild(new UIPanel
+        var shell = _uiRoot.AddChild(new UIPanel
         {
             X = margin, Y = margin,
             Width = panelW, Height = panelH,
-            BackgroundColor = System.Drawing.Color.FromArgb(220, 15, 15, 25),
         });
 
-        // Home button (top-right)
-        mainPanel.AddChild(new UIButton
+        // Header
+        shell.AddChild(new UILabel
         {
-            X = panelW - 110, Y = 15,
-            Width = 95, Height = 30,
+            X = 28, Y = 22,
+            Text = "SpawnScene",
+            FontSize = FontSize.Title,
+            Color = UITheme.Current.TextPrimary,
+        });
+        shell.AddChild(new UILabel
+        {
+            X = 28, Y = 60,
+            Text = "Studio - Gaussian splat projects",
+            FontSize = FontSize.Body,
+            Color = UITheme.Current.TextSecondary,
+        });
+
+        shell.AddChild(new UIButton
+        {
+            X = panelW - 110, Y = 20,
+            Width = 90, Height = 32,
             Text = "Home",
             FontSize = FontSize.Caption,
-            NormalColor = System.Drawing.Color.FromArgb(255, 50, 50, 65),
-            HoverColor = System.Drawing.Color.FromArgb(255, 70, 70, 85),
-            PressedColor = System.Drawing.Color.FromArgb(255, 40, 40, 55),
             OnClick = () => _nav.NavigateTo(""),
         });
 
-        // Header row
-        mainPanel.AddChild(new UILabel
+        shell.AddChild(new UIButton
         {
-            X = 30, Y = 20,
-            Text = "SpawnScene Studio",
-            FontSize = FontSize.Title,
-            Color = System.Drawing.Color.White,
+            X = panelW - 220, Y = 20,
+            Width = 100, Height = 32,
+            Text = "Testing",
+            FontSize = FontSize.Caption,
+            NormalColor = AccentMuted,
+            OnClick = () =>
+            {
+                _state = StudioState.Testing;
+                BuildTestingUI();
+            },
         });
 
-        mainPanel.AddChild(new UILabel
+        shell.AddChild(new UIButton
         {
-            X = 30, Y = 60,
-            Text = "Gaussian Splat Projects",
-            FontSize = FontSize.Body,
-            Color = System.Drawing.Color.FromArgb(255, 180, 180, 200),
-        });
-
-        // New Project button
-        mainPanel.AddChild(new UIButton
-        {
-            X = 30, Y = 100,
-            Width = 200, Height = 40,
+            X = 28, Y = 100,
+            Width = 180, Height = 38,
             Text = "+ New Project",
             OnClick = OnNewProjectClicked,
         });
 
-        // Project list
-        float cardY = 160;
-        float cardW = Math.Min(panelW - 60, 550);
+        float listTop = 156;
+        float cardW = Math.Min(panelW - 56, 560);
         float cardH = 110;
         float thumbW = 160;
         float thumbH = cardH - 10;
 
+        var list = shell.AddChild(new UIScrollView
+        {
+            X = 0, Y = listTop,
+            Width = panelW, Height = panelH - listTop,
+            Padding = 0,
+            BackgroundColor = Color.Transparent,
+            BorderWidth = 0,
+        });
+
         if (_projects == null || _projects.Count == 0)
         {
-            mainPanel.AddChild(new UILabel
+            list.AddChild(new UILabel
             {
-                X = 30, Y = cardY,
-                Text = "No projects yet. Create one to get started.",
+                X = 28, Y = 8,
+                Text = "No projects yet. Create one to get started, or open Testing for sample datasets.",
                 FontSize = FontSize.Caption,
-                Color = System.Drawing.Color.Gray,
+                Color = UITheme.Current.TextMuted,
             });
+            return;
         }
-        else
+
+        float cardY = 8;
+        foreach (var project in _projects)
         {
-            foreach (var project in _projects)
+            var card = list.AddChild(new UIPanel
             {
-                var card = mainPanel.AddChild(new UIPanel
-                {
-                    X = 30, Y = cardY,
-                    Width = cardW, Height = cardH,
-                    BackgroundColor = System.Drawing.Color.FromArgb(180, 30, 30, 45),
-                    BorderWidth = 1,
-                    BorderColor = System.Drawing.Color.FromArgb(40, 255, 255, 255),
-                });
+                X = 28, Y = cardY,
+                Width = cardW, Height = cardH,
+                BackgroundColor = Color.FromArgb(200, 24, 28, 36),
+            });
 
-                // Project thumbnail: use latest scene thumbnail, or placeholder
-                GPUTextureView? projThumbView = null;
-                var latestScene = project.Scenes.LastOrDefault();
-                if (latestScene != null)
-                {
-                    string thumbKey = $"scene:{latestScene.Id}";
-                    if (_thumbnailCache.TryGetValue(thumbKey, out var cached))
-                        projThumbView = cached.view;
-                    else
-                        LoadSceneThumbnailAsync(project.Id, latestScene.Id);
-                }
-
-                card.AddChild(new UIImage
-                {
-                    X = 5, Y = 5,
-                    Width = thumbW, Height = thumbH,
-                    TextureView = projThumbView,
-                    PlaceholderColor = System.Drawing.Color.FromArgb(255, 30, 30, 45),
-                });
-
-                // Placeholder label when no scene exists
-                if (latestScene == null)
-                {
-                    card.AddChild(new UILabel
-                    {
-                        X = 5 + thumbW / 2 - 30, Y = 5 + thumbH / 2 - 8,
-                        Text = "No scenes",
-                        FontSize = FontSize.Caption,
-                        Color = System.Drawing.Color.FromArgb(255, 80, 80, 100),
-                    });
-                }
-
-                float textX = thumbW + 15;
-
-                card.AddChild(new UILabel
-                {
-                    X = textX, Y = 10,
-                    Text = project.Name,
-                    FontSize = FontSize.Heading,
-                    Color = System.Drawing.Color.White,
-                });
-
-                long sizeBytes = _projectService.GetProjectSize(project);
-                string sizeStr = sizeBytes < 1024 * 1024
-                    ? $"{sizeBytes / 1024.0:F0} KB"
-                    : $"{sizeBytes / (1024.0 * 1024.0):F1} MB";
-                string info = $"{project.Sources.Count} source(s) · {project.Scenes.Count} scene(s) · {sizeStr}";
-
-                card.AddChild(new UILabel
-                {
-                    X = textX, Y = 40,
-                    Text = info,
-                    FontSize = FontSize.Caption,
-                    Color = System.Drawing.Color.FromArgb(255, 150, 150, 170),
-                });
-
-                // Open button
-                var p = project;
-                card.AddChild(new UIButton
-                {
-                    X = textX, Y = 65,
-                    Width = 90, Height = 32,
-                    Text = "Open",
-                    FontSize = FontSize.Caption,
-                    OnClick = () => OnOpenProject(p),
-                });
-
-                // Delete button
-                card.AddChild(new UIButton
-                {
-                    X = textX + 100, Y = 65,
-                    Width = 90, Height = 32,
-                    Text = "Delete",
-                    FontSize = FontSize.Caption,
-                    NormalColor = System.Drawing.Color.FromArgb(255, 150, 50, 50),
-                    HoverColor = System.Drawing.Color.FromArgb(255, 180, 60, 60),
-                    PressedColor = System.Drawing.Color.FromArgb(255, 120, 40, 40),
-                    OnClick = () => _ = OnDeleteProject(p),
-                });
-
-                cardY += cardH + 10;
+            GPUTextureView? projThumbView = null;
+            var latestScene = project.Scenes.LastOrDefault();
+            if (latestScene != null)
+            {
+                string thumbKey = $"scene:{latestScene.Id}";
+                if (_thumbnailCache.TryGetValue(thumbKey, out var cached))
+                    projThumbView = cached.view;
+                else
+                    LoadSceneThumbnailAsync(project.Id, latestScene.Id);
             }
+
+            card.AddChild(new UIImage
+            {
+                X = 5, Y = 5,
+                Width = thumbW, Height = thumbH,
+                TextureView = projThumbView,
+                PlaceholderColor = Color.FromArgb(255, 28, 32, 40),
+            });
+
+            if (latestScene == null)
+            {
+                card.AddChild(new UILabel
+                {
+                    X = 5 + thumbW / 2 - 30, Y = 5 + thumbH / 2 - 8,
+                    Text = "No scenes",
+                    FontSize = FontSize.Caption,
+                    Color = UITheme.Current.TextMuted,
+                });
+            }
+
+            float textX = thumbW + 15;
+            card.AddChild(new UILabel
+            {
+                X = textX, Y = 10,
+                Text = project.Name,
+                FontSize = FontSize.Heading,
+                Color = UITheme.Current.TextPrimary,
+            });
+
+            long sizeBytes = _projectService.GetProjectSize(project);
+            string sizeStr = sizeBytes < 1024 * 1024
+                ? $"{sizeBytes / 1024.0:F0} KB"
+                : $"{sizeBytes / (1024.0 * 1024.0):F1} MB";
+            card.AddChild(new UILabel
+            {
+                X = textX, Y = 42,
+                Text = $"{project.Sources.Count} source(s) · {project.Scenes.Count} scene(s) · {sizeStr}",
+                FontSize = FontSize.Caption,
+                Color = UITheme.Current.TextSecondary,
+            });
+
+            var p = project;
+            card.AddChild(new UIButton
+            {
+                X = textX, Y = 68,
+                Width = 90, Height = 30,
+                Text = "Open",
+                FontSize = FontSize.Caption,
+                OnClick = () => OnOpenProject(p),
+            });
+            card.AddChild(new UIButton
+            {
+                X = textX + 100, Y = 68,
+                Width = 90, Height = 30,
+                Text = "Delete",
+                FontSize = FontSize.Caption,
+                NormalColor = AccentDanger,
+                HoverColor = AccentDangerHover,
+                PressedColor = Color.FromArgb(255, 120, 40, 40),
+                OnClick = () => _ = OnDeleteProject(p),
+            });
+
+            cardY += cardH + 12;
         }
     }
 
     private void BuildViewerHudUI()
     {
         _uiRoot.ClearChildren();
+        _statusLabel = null;
 
-        // Depth map overlay — rendered first so HUD/buttons appear on top
         if (_showDepthMap && _depthMapView != null)
         {
             float aspect = (float)_depthMapW / Math.Max(1, _depthMapH);
@@ -199,42 +211,38 @@ public partial class Studio
             });
         }
 
-        // HUD panel (bottom-left)
         var hud = _uiRoot.AddChild(new UIPanel
         {
-            X = 10, Y = _canvasHeight - 90,
-            Width = 260, Height = 80,
-            BackgroundColor = System.Drawing.Color.FromArgb(160, 10, 10, 20),
+            X = 12, Y = _canvasHeight - 88,
+            Width = 280, Height = 76,
+            BackgroundColor = Color.FromArgb(180, 12, 16, 22),
         });
 
         _hudSplatLabel = hud.AddChild(new UILabel
         {
-            X = 10, Y = 8,
+            X = 12, Y = 10,
             Text = "",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.White,
+            Color = UITheme.Current.TextPrimary,
         });
-
         _hudFpsLabel = hud.AddChild(new UILabel
         {
-            X = 10, Y = 28,
+            X = 12, Y = 30,
             Text = "",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.White,
+            Color = UITheme.Current.TextPrimary,
         });
-
         hud.AddChild(new UILabel
         {
-            X = 10, Y = 48,
-            Text = "Click to look · WASD move · ESC release",
+            X = 12, Y = 50,
+            Text = "Click scene to look · WASD move · ESC release",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.Gray,
+            Color = UITheme.Current.TextMuted,
         });
 
-        // Back button (top-left)
         _uiRoot.AddChild(new UIButton
         {
-            X = 10, Y = 10,
+            X = 12, Y = 12,
             Width = 100, Height = 32,
             Text = "< Back",
             FontSize = FontSize.Caption,
@@ -258,20 +266,15 @@ public partial class Studio
             },
         });
 
-        // Top-right button row
-        float btnRight = _canvasWidth - 10;
+        float btnRight = _canvasWidth - 12;
 
-        // Settings
         btnRight -= 110;
         _uiRoot.AddChild(new UIButton
         {
-            X = btnRight, Y = 10,
-            Width = 110, Height = 32,
+            X = btnRight, Y = 12,
+            Width = 100, Height = 32,
             Text = "Settings",
             FontSize = FontSize.Caption,
-            NormalColor = System.Drawing.Color.FromArgb(200, 50, 50, 65),
-            HoverColor = System.Drawing.Color.FromArgb(220, 70, 70, 85),
-            PressedColor = System.Drawing.Color.FromArgb(200, 40, 40, 55),
             OnClick = () =>
             {
                 _showSettings = !_showSettings;
@@ -279,132 +282,110 @@ public partial class Studio
             },
         });
 
-        // Depth map toggle button (only shown when a depth map has been captured)
         if (_depthMapView != null)
         {
             btnRight -= 80;
             _uiRoot.AddChild(new UIButton
             {
-                X = btnRight, Y = 10,
-                Width = 75, Height = 32,
+                X = btnRight, Y = 12,
+                Width = 72, Height = 32,
                 Text = _showDepthMap ? "Scene" : "Depth",
                 FontSize = FontSize.Caption,
-                NormalColor = _showDepthMap
-                    ? System.Drawing.Color.FromArgb(255, 40, 140, 60)
-                    : System.Drawing.Color.FromArgb(200, 50, 50, 65),
-                HoverColor = System.Drawing.Color.FromArgb(220, 70, 100, 85),
-                PressedColor = System.Drawing.Color.FromArgb(200, 30, 80, 50),
+                NormalColor = _showDepthMap ? AccentSelected : UITheme.Current.ButtonNormal,
                 OnClick = () => { _showDepthMap = !_showDepthMap; BuildViewerHudUI(); },
             });
         }
 
-        // Enter VR button
-        btnRight -= 80;
+        btnRight -= 76;
         _uiRoot.AddChild(new UIButton
         {
-            X = btnRight, Y = 10,
-            Width = 75, Height = 32,
+            X = btnRight, Y = 12,
+            Width = 68, Height = 32,
             Text = "VR",
             FontSize = FontSize.Caption,
-            NormalColor = System.Drawing.Color.FromArgb(255, 40, 100, 180),
-            HoverColor = System.Drawing.Color.FromArgb(255, 50, 120, 210),
-            PressedColor = System.Drawing.Color.FromArgb(255, 30, 80, 150),
+            NormalColor = Color.FromArgb(255, 40, 100, 180),
+            HoverColor = Color.FromArgb(255, 50, 120, 210),
             OnClick = () => _ = EnterXRAsync("immersive-vr"),
         });
 
-        // Enter AR button
-        btnRight -= 75;
+        btnRight -= 70;
         _uiRoot.AddChild(new UIButton
         {
-            X = btnRight, Y = 10,
-            Width = 70, Height = 32,
+            X = btnRight, Y = 12,
+            Width = 64, Height = 32,
             Text = "AR",
             FontSize = FontSize.Caption,
-            NormalColor = System.Drawing.Color.FromArgb(255, 40, 150, 100),
-            HoverColor = System.Drawing.Color.FromArgb(255, 50, 180, 120),
-            PressedColor = System.Drawing.Color.FromArgb(255, 30, 120, 80),
+            NormalColor = Color.FromArgb(255, 40, 150, 100),
+            HoverColor = Color.FromArgb(255, 50, 180, 120),
             OnClick = () => _ = EnterXRAsync("immersive-ar"),
         });
 
-        // Build settings panel if visible
         if (_showSettings)
             BuildSettingsPanel();
     }
 
     private void BuildSettingsPanel()
     {
-        // Remove old settings panel if it exists
         if (_settingsPanel != null)
         {
             _uiRoot.RemoveChild(_settingsPanel);
             _settingsPanel = null;
         }
-
         if (!_showSettings) return;
 
         _settingsPanel = _uiRoot.AddChild(new UIPanel
         {
-            X = _canvasWidth - 280, Y = 50,
-            Width = 270, Height = 260,
-            BackgroundColor = System.Drawing.Color.FromArgb(230, 20, 20, 30),
-            BorderWidth = 1,
-            BorderColor = System.Drawing.Color.FromArgb(40, 255, 255, 255),
+            X = _canvasWidth - 292, Y = 52,
+            Width = 280, Height = 270,
         });
 
         _settingsPanel.AddChild(new UILabel
         {
-            X = 12, Y = 8,
+            X = 14, Y = 12,
             Text = "Render Settings",
             FontSize = FontSize.Body,
-            Color = System.Drawing.Color.White,
+            Color = UITheme.Current.TextPrimary,
         });
 
-        // Sharpening slider
         _settingsPanel.AddChild(new UISlider
         {
-            X = 12, Y = 38,
-            Width = 245, Height = 40,
+            X = 14, Y = 44,
+            Width = 250, Height = 40,
             Label = "Sharpening",
             MinValue = 0f, MaxValue = 1f,
             Value = _renderService.SharpeningStrength,
             OnChanged = v => _renderService.SharpeningStrength = v,
         });
 
-        // Render mode toggle
         _settingsPanel.AddChild(new UILabel
         {
-            X = 12, Y = 88,
+            X = 14, Y = 92,
             Text = "Render Mode",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.FromArgb(255, 200, 200, 220),
+            Color = UITheme.Current.TextSecondary,
         });
 
         bool isStochastic = _gpuRenderer.RenderMode == SplatRenderMode.Stochastic;
         _settingsPanel.AddChild(new UIButton
         {
-            X = 12, Y = 108,
+            X = 14, Y = 112,
             Width = 120, Height = 30,
             Text = "Stochastic",
             FontSize = FontSize.Caption,
-            NormalColor = isStochastic
-                ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                : System.Drawing.Color.FromArgb(255, 50, 50, 65),
+            NormalColor = isStochastic ? AccentSelected : UITheme.Current.ButtonNormal,
             OnClick = () =>
             {
                 _gpuRenderer.RenderMode = SplatRenderMode.Stochastic;
                 BuildSettingsPanel();
             },
         });
-
         _settingsPanel.AddChild(new UIButton
         {
-            X = 140, Y = 108,
+            X = 142, Y = 112,
             Width = 120, Height = 30,
             Text = "Sorted",
             FontSize = FontSize.Caption,
-            NormalColor = !isStochastic
-                ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                : System.Drawing.Color.FromArgb(255, 50, 50, 65),
+            NormalColor = !isStochastic ? AccentSelected : UITheme.Current.ButtonNormal,
             OnClick = () =>
             {
                 _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
@@ -412,68 +393,43 @@ public partial class Studio
             },
         });
 
-        // Resolution mode
         _settingsPanel.AddChild(new UILabel
         {
-            X = 12, Y = 148,
+            X = 14, Y = 152,
             Text = "Resolution",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.FromArgb(255, 200, 200, 220),
+            Color = UITheme.Current.TextSecondary,
         });
 
         var resMode = _gpuRenderer.AdaptiveResMode;
-        _settingsPanel.AddChild(new UIButton
-        {
-            X = 12, Y = 168,
-            Width = 80, Height = 26,
-            Text = "Auto",
-            FontSize = FontSize.Caption,
-            NormalColor = resMode == AdaptiveResMode.Auto
-                ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                : System.Drawing.Color.FromArgb(255, 50, 50, 65),
-            OnClick = () => { _gpuRenderer.AdaptiveResMode = AdaptiveResMode.Auto; BuildSettingsPanel(); },
-        });
-        _settingsPanel.AddChild(new UIButton
-        {
-            X = 98, Y = 168,
-            Width = 80, Height = 26,
-            Text = "Full",
-            FontSize = FontSize.Caption,
-            NormalColor = resMode == AdaptiveResMode.ForceFull
-                ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                : System.Drawing.Color.FromArgb(255, 50, 50, 65),
-            OnClick = () => { _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull; BuildSettingsPanel(); },
-        });
-        _settingsPanel.AddChild(new UIButton
-        {
-            X = 184, Y = 168,
-            Width = 80, Height = 26,
-            Text = "Half",
-            FontSize = FontSize.Caption,
-            NormalColor = resMode == AdaptiveResMode.ForceHalf
-                ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                : System.Drawing.Color.FromArgb(255, 50, 50, 65),
-            OnClick = () => { _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceHalf; BuildSettingsPanel(); },
-        });
+        AddToggleChip(_settingsPanel, 14, 172, 80, "Auto", resMode == AdaptiveResMode.Auto,
+            () => { _gpuRenderer.AdaptiveResMode = AdaptiveResMode.Auto; BuildSettingsPanel(); });
+        AddToggleChip(_settingsPanel, 100, 172, 80, "Full", resMode == AdaptiveResMode.ForceFull,
+            () => { _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull; BuildSettingsPanel(); });
+        AddToggleChip(_settingsPanel, 186, 172, 80, "Half", resMode == AdaptiveResMode.ForceHalf,
+            () => { _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceHalf; BuildSettingsPanel(); });
 
-        // XR sharpening toggle
         _settingsPanel.AddChild(new UILabel
         {
-            X = 12, Y = 204,
+            X = 14, Y = 210,
             Text = "XR Sharpening",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.FromArgb(255, 200, 200, 220),
+            Color = UITheme.Current.TextSecondary,
         });
-        _settingsPanel.AddChild(new UIButton
+        AddToggleChip(_settingsPanel, 14, 230, 80, _xrCasEnabled ? "On" : "Off", _xrCasEnabled,
+            () => { _xrCasEnabled = !_xrCasEnabled; BuildSettingsPanel(); });
+    }
+
+    private static void AddToggleChip(UIPanel parent, float x, float y, float w, string text, bool on, Action click)
+    {
+        parent.AddChild(new UIButton
         {
-            X = 12, Y = 224,
-            Width = 80, Height = 26,
-            Text = _xrCasEnabled ? "On" : "Off",
+            X = x, Y = y,
+            Width = w, Height = 26,
+            Text = text,
             FontSize = FontSize.Caption,
-            NormalColor = _xrCasEnabled
-                ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                : System.Drawing.Color.FromArgb(255, 50, 50, 65),
-            OnClick = () => { _xrCasEnabled = !_xrCasEnabled; BuildSettingsPanel(); },
+            NormalColor = on ? AccentSelected : UITheme.Current.ButtonNormal,
+            OnClick = click,
         });
     }
 
@@ -490,27 +446,23 @@ public partial class Studio
         _uiRoot.ClearChildren();
         if (_activeProject == null) return;
 
-        float margin = 40;
+        float margin = 28;
         float panelW = _canvasWidth - margin * 2;
         float panelH = _canvasHeight - margin * 2;
 
-        var mainPanel = _uiRoot.AddChild(new UIPanel
+        var shell = _uiRoot.AddChild(new UIPanel
         {
             X = margin, Y = margin,
             Width = panelW, Height = panelH,
-            BackgroundColor = System.Drawing.Color.FromArgb(220, 15, 15, 25),
         });
 
-        // Back button
-        mainPanel.AddChild(new UIButton
+        // Fixed header
+        shell.AddChild(new UIButton
         {
-            X = 15, Y = 15,
+            X = 16, Y = 14,
             Width = 90, Height = 32,
             Text = "< Back",
             FontSize = FontSize.Caption,
-            NormalColor = System.Drawing.Color.FromArgb(255, 60, 60, 75),
-            HoverColor = System.Drawing.Color.FromArgb(255, 80, 80, 95),
-            PressedColor = System.Drawing.Color.FromArgb(255, 45, 45, 60),
             OnClick = async () =>
             {
                 _projects = await _projectService.ListProjectsAsync();
@@ -520,202 +472,189 @@ public partial class Studio
             },
         });
 
-        // Project name
-        mainPanel.AddChild(new UILabel
+        shell.AddChild(new UILabel
         {
             X = 120, Y = 18,
             Text = _activeProject.Name,
             FontSize = FontSize.Heading,
-            Color = System.Drawing.Color.White,
+            Color = UITheme.Current.TextPrimary,
         });
 
-        // Project info
         long sizeBytes = _projectService.GetProjectSize(_activeProject);
         string sizeStr = sizeBytes < 1024 * 1024
             ? $"{sizeBytes / 1024.0:F0} KB" : $"{sizeBytes / (1024.0 * 1024.0):F1} MB";
-        mainPanel.AddChild(new UILabel
+        shell.AddChild(new UILabel
         {
-            X = 30, Y = 55,
-            Text = $"{_activeProject.Sources.Count} source image(s) · {_activeProject.Scenes.Count} scene(s) · {sizeStr}",
+            X = 120, Y = 48,
+            Text = $"{_activeProject.Sources.Count} source(s) · {_activeProject.Scenes.Count} scene(s) · {sizeStr}",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.FromArgb(255, 150, 150, 170),
+            Color = UITheme.Current.TextSecondary,
         });
 
-        // ── Source Images Section ──
-        float sectionY = 90;
-
-        mainPanel.AddChild(new UILabel
+        // Scrollable body under header; leave room for status bar
+        float bodyTop = 78;
+        float statusH = 36;
+        var scroll = shell.AddChild(new UIScrollView
         {
-            X = 30, Y = sectionY,
+            X = 0, Y = bodyTop,
+            Width = panelW, Height = panelH - bodyTop - statusH,
+            Padding = 0,
+            BackgroundColor = Color.Transparent,
+            BorderWidth = 0,
+        });
+
+        float y = 8;
+        float contentW = panelW - 40;
+
+        // ── Source Images ──
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
             Text = "Source Images",
             FontSize = FontSize.Body,
-            Color = System.Drawing.Color.White,
+            Color = UITheme.Current.TextPrimary,
         });
-
-        mainPanel.AddChild(new UIButton
+        scroll.AddChild(new UIButton
         {
-            X = 200, Y = sectionY - 4,
-            Width = 160, Height = 30,
+            X = 180, Y = y - 4,
+            Width = 140, Height = 30,
             Text = "+ Add Images",
             FontSize = FontSize.Caption,
+            Enabled = !_pipelineBusy,
             OnClick = OnAddImagesClicked,
         });
+        y += 34;
 
-        sectionY += 35;
-
-        // Sample image buttons (only show if no sources yet)
         if (_activeProject.Sources.Count == 0)
         {
-            mainPanel.AddChild(new UILabel
+            scroll.AddChild(new UILabel
             {
-                X = 30, Y = sectionY,
-                Text = "Or load a sample:",
+                X = 20, Y = y,
+                Text = "Or load a single-image sample:",
                 FontSize = FontSize.Caption,
-                Color = System.Drawing.Color.Gray,
+                Color = UITheme.Current.TextMuted,
             });
-            sectionY += 22;
+            y += 22;
 
             var samples = new[] {
                 ("Room", "samples/room.png"),
                 ("Garden", "samples/garden.png"),
                 ("Living Room HD", "samples/living_room_hd.png"),
                 ("Garden HD", "samples/garden_hd.png"),
-                ("Living Room 5K", "samples/living-room-hd-2.jpg"),
             };
 
-            float btnX = 30;
+            float btnX = 20;
             foreach (var (name, path) in samples)
             {
                 float btnW = Math.Max(80, name.Length * 8 + 20);
                 var samplePath = path;
-                mainPanel.AddChild(new UIButton
+                scroll.AddChild(new UIButton
                 {
-                    X = btnX, Y = sectionY,
+                    X = btnX, Y = y,
                     Width = btnW, Height = 26,
                     Text = name,
                     FontSize = FontSize.Caption,
-                    NormalColor = System.Drawing.Color.FromArgb(255, 50, 70, 90),
-                    HoverColor = System.Drawing.Color.FromArgb(255, 60, 85, 110),
-                    PressedColor = System.Drawing.Color.FromArgb(255, 40, 55, 75),
+                    NormalColor = AccentMuted,
+                    Enabled = !_pipelineBusy,
                     OnClick = () => _ = LoadSampleImage(name, samplePath),
                 });
                 btnX += btnW + 6;
-                if (btnX > panelW - 100) { btnX = 30; sectionY += 32; }
+                if (btnX > contentW - 40) { btnX = 20; y += 32; }
             }
-            sectionY += 35;
+            y += 36;
 
-            // Multi-view test datasets
-            mainPanel.AddChild(new UILabel
+            scroll.AddChild(new UIButton
             {
-                X = 30, Y = sectionY,
-                Text = "Multi-view test (ground truth cameras):",
+                X = 20, Y = y,
+                Width = 180, Height = 28,
+                Text = "TempleRing (GT cameras)",
                 FontSize = FontSize.Caption,
-                Color = System.Drawing.Color.Gray,
-            });
-            sectionY += 22;
-
-            mainPanel.AddChild(new UIButton
-            {
-                X = 30, Y = sectionY,
-                Width = 140, Height = 26,
-                Text = "TempleRing (4 views)",
-                FontSize = FontSize.Caption,
-                NormalColor = System.Drawing.Color.FromArgb(255, 90, 50, 70),
-                HoverColor = System.Drawing.Color.FromArgb(255, 110, 60, 85),
-                PressedColor = System.Drawing.Color.FromArgb(255, 70, 40, 55),
+                NormalColor = Color.FromArgb(255, 90, 50, 70),
+                Enabled = !_pipelineBusy,
                 OnClick = () => _ = GenerateFromTempleRingAsync(),
             });
-            sectionY += 35;
+            y += 40;
         }
         else
         {
             foreach (var src in _activeProject.Sources)
             {
-                float cardH = 120;
-
-                // Thumbnail
+                float cardH = 100;
                 string srcKey = $"source:{src.FileName}";
                 var thumbView = _thumbnailCache.TryGetValue(srcKey, out var cached) ? cached.view : null;
-                mainPanel.AddChild(new UIImage
+                scroll.AddChild(new UIImage
                 {
-                    X = 30, Y = sectionY,
-                    Width = 160, Height = cardH - 6,
+                    X = 20, Y = y,
+                    Width = 140, Height = cardH - 6,
                     TextureView = thumbView,
                 });
-
                 if (thumbView == null)
                     LoadThumbnailAsync(_activeProject.Id, src.FileName);
 
-                // Info text
-                mainPanel.AddChild(new UILabel
+                scroll.AddChild(new UILabel
                 {
-                    X = 200, Y = sectionY + 8,
+                    X = 176, Y = y + 6,
                     Text = src.FileName,
                     FontSize = FontSize.Body,
-                    Color = System.Drawing.Color.White,
+                    Color = UITheme.Current.TextPrimary,
                 });
-                string sizeInfo = $"{src.Width}x{src.Height} · {src.SizeBytes / 1024}KB";
-                mainPanel.AddChild(new UILabel
+                scroll.AddChild(new UILabel
                 {
-                    X = 200, Y = sectionY + 30,
-                    Text = sizeInfo,
+                    X = 176, Y = y + 30,
+                    Text = $"{src.Width}x{src.Height} · {src.SizeBytes / 1024}KB",
                     FontSize = FontSize.Caption,
-                    Color = System.Drawing.Color.FromArgb(255, 150, 150, 170),
+                    Color = UITheme.Current.TextSecondary,
                 });
 
-                // Remove button
                 var srcRef = src;
-                mainPanel.AddChild(new UIButton
+                scroll.AddChild(new UIButton
                 {
-                    X = 200, Y = sectionY + 52,
+                    X = 176, Y = y + 56,
                     Width = 80, Height = 26,
                     Text = "Remove",
                     FontSize = FontSize.Caption,
-                    NormalColor = System.Drawing.Color.FromArgb(255, 120, 50, 50),
-                    HoverColor = System.Drawing.Color.FromArgb(255, 160, 60, 60),
-                    PressedColor = System.Drawing.Color.FromArgb(255, 90, 40, 40),
+                    NormalColor = AccentDanger,
+                    HoverColor = AccentDangerHover,
+                    Enabled = !_pipelineBusy,
                     OnClick = () => _ = OnRemoveSource(srcRef),
                 });
 
-                sectionY += cardH + 4;
+                y += cardH + 8;
             }
         }
 
-        // ── Generate Scene Section ──
-        sectionY += 15;
-        mainPanel.AddChild(new UILabel
+        // ── Generate Scene ──
+        y += 8;
+        scroll.AddChild(new UILabel
         {
-            X = 30, Y = sectionY,
+            X = 20, Y = y,
             Text = "Scene Generation",
             FontSize = FontSize.Body,
-            Color = System.Drawing.Color.White,
+            Color = UITheme.Current.TextPrimary,
         });
-        sectionY += 28;
+        y += 28;
 
-        // Quality presets
-        mainPanel.AddChild(new UILabel
+        scroll.AddChild(new UILabel
         {
-            X = 30, Y = sectionY,
-            Text = "Quality:",
+            X = 20, Y = y,
+            Text = "Quality",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.FromArgb(255, 180, 180, 200),
+            Color = UITheme.Current.TextSecondary,
         });
-
         var presets = new[] { ("Fast", 4, 0f), ("Standard", 2, 0.3f), ("High", 1, 0.3f) };
-        float presetX = 100;
+        float presetX = 90;
         foreach (var (presetName, sub, edge) in presets)
         {
             bool active = _activeProject.Settings.QualityPreset == presetName;
             var pn = presetName; var ps = sub; var pe = edge;
-            mainPanel.AddChild(new UIButton
+            scroll.AddChild(new UIButton
             {
-                X = presetX, Y = sectionY - 3,
+                X = presetX, Y = y - 3,
                 Width = 90, Height = 26,
                 Text = presetName,
                 FontSize = FontSize.Caption,
-                NormalColor = active
-                    ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                    : System.Drawing.Color.FromArgb(255, 50, 50, 65),
+                NormalColor = active ? AccentSelected : UITheme.Current.ButtonNormal,
+                Enabled = !_pipelineBusy,
                 OnClick = () =>
                 {
                     _activeProject.Settings.QualityPreset = pn;
@@ -727,32 +666,29 @@ public partial class Studio
             });
             presetX += 96;
         }
-        sectionY += 35;
+        y += 34;
 
-        // Depth model selector
-        mainPanel.AddChild(new UILabel
+        scroll.AddChild(new UILabel
         {
-            X = 30, Y = sectionY,
-            Text = "Depth Model:",
+            X = 20, Y = y,
+            Text = "Depth Model",
             FontSize = FontSize.Caption,
-            Color = System.Drawing.Color.FromArgb(255, 180, 180, 200),
+            Color = UITheme.Current.TextSecondary,
         });
-
-        float modelX = 140;
+        float modelX = 120;
         foreach (var model in DepthEstimationService.AvailableModels)
         {
             bool active = _activeProject.Settings.DepthModel == model.Id;
             var modelId = model.Id;
             float btnW = Math.Max(90, model.Name.Length * 7 + 16);
-            mainPanel.AddChild(new UIButton
+            scroll.AddChild(new UIButton
             {
-                X = modelX, Y = sectionY - 3,
+                X = modelX, Y = y - 3,
                 Width = btnW, Height = 26,
                 Text = model.Name,
                 FontSize = FontSize.Caption,
-                NormalColor = active
-                    ? System.Drawing.Color.FromArgb(255, 108, 92, 231)
-                    : System.Drawing.Color.FromArgb(255, 50, 50, 65),
+                NormalColor = active ? AccentSelected : UITheme.Current.ButtonNormal,
+                Enabled = !_pipelineBusy,
                 OnClick = () =>
                 {
                     _activeProject.Settings.DepthModel = modelId;
@@ -762,51 +698,49 @@ public partial class Studio
             });
             modelX += btnW + 6;
         }
-        sectionY += 35;
+        y += 36;
 
-        bool canGenerate = _activeProject.Sources.Count > 0;
-        mainPanel.AddChild(new UIButton
+        bool canGenerate = _activeProject.Sources.Count > 0 && !_pipelineBusy;
+        scroll.AddChild(new UIButton
         {
-            X = 30, Y = sectionY,
+            X = 20, Y = y,
             Width = 200, Height = 40,
             Text = "Generate Scene",
             Enabled = canGenerate,
             OnClick = canGenerate ? OnGenerateSceneClicked : null,
         });
-        sectionY += 55;
+        y += 56;
 
-        // ── Generated Scenes Section ──
         if (_activeProject.Scenes.Count > 0)
         {
-            mainPanel.AddChild(new UILabel
+            scroll.AddChild(new UILabel
             {
-                X = 30, Y = sectionY,
+                X = 20, Y = y,
                 Text = "Generated Scenes",
                 FontSize = FontSize.Body,
-                Color = System.Drawing.Color.White,
+                Color = UITheme.Current.TextPrimary,
             });
-            sectionY += 30;
+            y += 28;
 
             foreach (var scene in _activeProject.Scenes)
             {
                 string sceneSizeStr = scene.SizeBytes < 1024 * 1024
                     ? $"{scene.SizeBytes / 1024.0:F0} KB" : $"{scene.SizeBytes / (1024.0 * 1024.0):F1} MB";
 
-                float sceneCardH = 120;
-                var sceneCard = mainPanel.AddChild(new UIPanel
+                float sceneCardH = 108;
+                var sceneCard = scroll.AddChild(new UIPanel
                 {
-                    X = 30, Y = sectionY,
-                    Width = Math.Min(panelW - 60, 550), Height = sceneCardH,
-                    BackgroundColor = System.Drawing.Color.FromArgb(180, 30, 30, 45),
+                    X = 20, Y = y,
+                    Width = Math.Min(contentW, 540), Height = sceneCardH,
+                    BackgroundColor = Color.FromArgb(180, 24, 28, 36),
                 });
 
-                // Scene thumbnail
                 string sceneThumbKey = $"scene:{scene.Id}";
                 var sceneThumbView = _thumbnailCache.TryGetValue(sceneThumbKey, out var sceneCached) ? sceneCached.view : null;
                 sceneCard.AddChild(new UIImage
                 {
                     X = 5, Y = 5,
-                    Width = 180, Height = sceneCardH - 10,
+                    Width = 160, Height = sceneCardH - 10,
                     TextureView = sceneThumbView,
                 });
                 if (sceneThumbView == null)
@@ -814,56 +748,281 @@ public partial class Studio
 
                 sceneCard.AddChild(new UILabel
                 {
-                    X = 195, Y = 10,
+                    X = 178, Y = 12,
                     Text = $"{scene.SplatCount:N0} splats · {scene.QualityPreset} · {sceneSizeStr}",
                     FontSize = FontSize.Body,
-                    Color = System.Drawing.Color.FromArgb(255, 200, 200, 220),
+                    Color = UITheme.Current.TextPrimary,
                 });
-
                 sceneCard.AddChild(new UILabel
                 {
-                    X = 195, Y = 35,
+                    X = 178, Y = 38,
                     Text = $"Created {scene.CreatedAt:g}",
                     FontSize = FontSize.Caption,
-                    Color = System.Drawing.Color.Gray,
+                    Color = UITheme.Current.TextMuted,
                 });
 
                 var sceneRef = scene;
                 sceneCard.AddChild(new UIButton
                 {
-                    X = 195, Y = 60,
-                    Width = 70, Height = 30,
+                    X = 178, Y = 64,
+                    Width = 70, Height = 28,
                     Text = "View",
                     FontSize = FontSize.Caption,
+                    Enabled = !_pipelineBusy,
                     OnClick = () => OnViewScene(sceneRef),
                 });
-
                 sceneCard.AddChild(new UIButton
                 {
-                    X = 280, Y = 60,
-                    Width = 70, Height = 30,
+                    X = 258, Y = 64,
+                    Width = 70, Height = 28,
                     Text = "Delete",
                     FontSize = FontSize.Caption,
-                    NormalColor = System.Drawing.Color.FromArgb(255, 150, 50, 50),
-                    HoverColor = System.Drawing.Color.FromArgb(255, 180, 60, 60),
-                    PressedColor = System.Drawing.Color.FromArgb(255, 120, 40, 40),
+                    NormalColor = AccentDanger,
+                    HoverColor = AccentDangerHover,
+                    Enabled = !_pipelineBusy,
                     OnClick = () => _ = OnDeleteScene(sceneRef),
                 });
 
-                sectionY += sceneCardH + 8;
+                y += sceneCardH + 10;
             }
         }
 
-        // Status message
-        if (!string.IsNullOrEmpty(_statusMessage))
+        // Status bar (fixed)
+        _statusLabel = shell.AddChild(new UILabel
         {
-            mainPanel.AddChild(new UILabel
+            X = 20, Y = panelH - statusH + 8,
+            Width = panelW - 40,
+            Text = string.IsNullOrEmpty(_statusMessage) ? "Ready" : _statusMessage,
+            FontSize = FontSize.Caption,
+            Color = Color.FromArgb(255, 80, 210, 220),
+        });
+    }
+
+    private void BuildTestingUI()
+    {
+        _uiRoot.ClearChildren();
+
+        float margin = 28;
+        float panelW = _canvasWidth - margin * 2;
+        float panelH = _canvasHeight - margin * 2;
+
+        var shell = _uiRoot.AddChild(new UIPanel
+        {
+            X = margin, Y = margin,
+            Width = panelW, Height = panelH,
+        });
+
+        shell.AddChild(new UIButton
+        {
+            X = 16, Y = 14,
+            Width = 90, Height = 32,
+            Text = "< Back",
+            FontSize = FontSize.Caption,
+            OnClick = () =>
             {
-                X = 30, Y = panelH - 40,
-                Text = _statusMessage,
+                _state = StudioState.ProjectBrowser;
+                BuildProjectBrowserUI();
+            },
+        });
+
+        shell.AddChild(new UILabel
+        {
+            X = 120, Y = 18,
+            Text = "Testing",
+            FontSize = FontSize.Heading,
+            Color = UITheme.Current.TextPrimary,
+        });
+        shell.AddChild(new UILabel
+        {
+            X = 120, Y = 48,
+            Text = "Sample datasets — pose, generate, and train without query strings.",
+            FontSize = FontSize.Caption,
+            Color = UITheme.Current.TextSecondary,
+        });
+
+        float bodyTop = 78;
+        float statusH = 36;
+        var scroll = shell.AddChild(new UIScrollView
+        {
+            X = 0, Y = bodyTop,
+            Width = panelW, Height = panelH - bodyTop - statusH,
+            Padding = 0,
+            BackgroundColor = Color.Transparent,
+            BorderWidth = 0,
+        });
+
+        float y = 8;
+
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Text = "Dataset",
+            FontSize = FontSize.Body,
+            Color = UITheme.Current.TextPrimary,
+        });
+        y += 28;
+
+        foreach (var name in new[] { "Bathroom", "DrJohnson", "TempleRing" })
+        {
+            bool sel = string.Equals(_uiDataset, name, StringComparison.OrdinalIgnoreCase);
+            var n = name;
+            scroll.AddChild(new UIButton
+            {
+                X = 20 + (name switch { "Bathroom" => 0, "DrJohnson" => 118, _ => 236 }),
+                Y = y,
+                Width = 110, Height = 32,
+                Text = name,
                 FontSize = FontSize.Caption,
-                Color = System.Drawing.Color.FromArgb(255, 0, 206, 201),
+                NormalColor = sel ? AccentSelected : AccentMuted,
+                Enabled = !_pipelineBusy,
+                OnClick = () =>
+                {
+                    _uiDataset = n;
+                    // Bathroom ships no poses.par - GT toggle would silently no-op then recover
+                    // poses and look like "COLMAP failed" when it never ran.
+                    if (string.Equals(n, "Bathroom", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _uiUseGtPoses = false;
+                        _uiInitFromCloud = false;
+                    }
+                    BuildTestingUI();
+                },
             });
         }
+        y += 44;
+
+        bool datasetHasGt = !string.Equals(_uiDataset, "Bathroom", StringComparison.OrdinalIgnoreCase);
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Text = "Poses",
+            FontSize = FontSize.Caption,
+            Color = UITheme.Current.TextSecondary,
+        });
+        y += 22;
+        scroll.AddChild(new UIButton
+        {
+            X = 20, Y = y,
+            Width = 110, Height = 28,
+            Text = "DAv3",
+            FontSize = FontSize.Caption,
+            NormalColor = !_uiUseGtPoses ? AccentSelected : UITheme.Current.ButtonNormal,
+            Enabled = !_pipelineBusy,
+            OnClick = () => { _uiUseGtPoses = false; _uiInitFromCloud = false; BuildTestingUI(); },
+        });
+        scroll.AddChild(new UIButton
+        {
+            X = 138, Y = y,
+            Width = 140, Height = 28,
+            Text = "COLMAP GT",
+            FontSize = FontSize.Caption,
+            NormalColor = _uiUseGtPoses ? AccentSelected : UITheme.Current.ButtonNormal,
+            Enabled = !_pipelineBusy && datasetHasGt,
+            OnClick = () => { _uiUseGtPoses = true; BuildTestingUI(); },
+        });
+        y += 36;
+
+        if (_uiUseGtPoses)
+        {
+            scroll.AddChild(new UIButton
+            {
+                X = 20, Y = y,
+                Width = 160, Height = 28,
+                Text = _uiInitFromCloud ? "Init: SfM points" : "Init: depth",
+                FontSize = FontSize.Caption,
+                NormalColor = AccentMuted,
+                Enabled = !_pipelineBusy,
+                OnClick = () => { _uiInitFromCloud = !_uiInitFromCloud; BuildTestingUI(); },
+            });
+            y += 36;
+        }
+
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Width = panelW - 60,
+            Text = datasetHasGt
+                ? (_uiUseGtPoses
+                    ? "COLMAP cameras (oracle). If this looks right and DAv3 looks wrong, poses are the cliff."
+                    : "DAv3 joint poses. MEASURED weak on room walk-throughs vs COLMAP (~60deg+ forward error).")
+                : "Bathroom has no ground-truth poses. Alignment is entirely DAv3 - same room-pose cliff as DrJohnson.",
+            FontSize = FontSize.Caption,
+            Color = UITheme.Current.TextMuted,
+        });
+        y += 40;
+
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Text = $"Train iters: {_uiTrainIters}",
+            FontSize = FontSize.Caption,
+            Color = UITheme.Current.TextSecondary,
+        });
+        y += 24;
+        foreach (var (label, iters, ox) in new[] { ("0", 0, 0), ("200", 200, 70), ("500", 500, 140), ("1600", 1600, 210) })
+        {
+            bool sel = _uiTrainIters == iters;
+            var iv = iters;
+            scroll.AddChild(new UIButton
+            {
+                X = 20 + ox, Y = y,
+                Width = 64, Height = 28,
+                Text = label,
+                FontSize = FontSize.Caption,
+                NormalColor = sel ? AccentSelected : UITheme.Current.ButtonNormal,
+                Enabled = !_pipelineBusy,
+                OnClick = () => { _uiTrainIters = iv; BuildTestingUI(); },
+            });
+        }
+        y += 40;
+
+        scroll.AddChild(new UIButton
+        {
+            X = 20, Y = y,
+            Width = 140, Height = 32,
+            Text = _uiTrainGeom ? "Geometry: On" : "Geometry: Off",
+            FontSize = FontSize.Caption,
+            NormalColor = _uiTrainGeom ? AccentSelected : UITheme.Current.ButtonNormal,
+            Enabled = !_pipelineBusy,
+            OnClick = () => { _uiTrainGeom = !_uiTrainGeom; BuildTestingUI(); },
+        });
+
+        scroll.AddChild(new UIButton
+        {
+            X = 172, Y = y,
+            Width = 220, Height = 40,
+            Text = _pipelineBusy ? "Running…" : $"Run {_uiDataset}",
+            Enabled = !_pipelineBusy,
+            OnClick = () => _ = OnRunDatasetFromUiAsync(),
+        });
+        y += 56;
+
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Text = "Runs the same pipeline as ?autotest=dataset. Results open in the viewer.",
+            FontSize = FontSize.Caption,
+            Color = UITheme.Current.TextMuted,
+        });
+
+        _statusLabel = shell.AddChild(new UILabel
+        {
+            X = 20, Y = panelH - statusH + 8,
+            Width = panelW - 40,
+            Text = string.IsNullOrEmpty(_statusMessage) ? "Ready" : _statusMessage,
+            FontSize = FontSize.Caption,
+            Color = Color.FromArgb(255, 80, 210, 220),
+        });
+    }
+
+    private void SetUiStatus(string message)
+    {
+        _statusMessage = message;
+        if (_statusLabel != null)
+            _statusLabel.Text = message;
+        else if (_state == StudioState.Testing)
+            BuildTestingUI();
+        else if (_state == StudioState.ProjectDetail)
+            BuildProjectDetailUI();
     }
 }

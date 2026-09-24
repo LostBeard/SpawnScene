@@ -62,14 +62,48 @@ public partial class Studio
         return packed;
     }
 
+    /// <summary>
+    /// Testing UI entry: run the selected dataset with train settings from the Testing panel.
+    /// Skips harness capture delays so generate+train can be driven from the UI.
+    /// </summary>
+    private async Task OnRunDatasetFromUiAsync()
+    {
+        if (_pipelineBusy) return;
+        _pipelineBusy = true;
+        SetUiStatus($"Running {_uiDataset}…");
+        BuildTestingUI();
+        try
+        {
+            await RunDatasetAutotestAsync(
+                _uiDataset, _uiTrainIters, _uiTrainGeom, maxTrainDimension: 1024,
+                useGroundTruthPoses: _uiUseGtPoses, initFromPointCloud: _uiInitFromCloud,
+                forUi: true);
+        }
+        finally
+        {
+            _pipelineBusy = false;
+            if (_state == StudioState.SceneViewer)
+                BuildViewerHudUI();
+            else
+            {
+                if (string.IsNullOrEmpty(_statusMessage))
+                    SetUiStatus("Ready");
+                if (_state == StudioState.Testing)
+                    BuildTestingUI();
+            }
+        }
+    }
+
     private async Task RunDatasetAutotestAsync(
         string datasetName, int trainIters, bool optimiseGeometry, int maxTrainDimension,
         string posePreference = "dav3", int depthPatchesPerSide = DepthEstimationService.SafeMultiViewPatches,
-        bool useGroundTruthPoses = false, bool initFromPointCloud = false)
+        bool useGroundTruthPoses = false, bool initFromPointCloud = false, bool forUi = false)
     {
         Console.WriteLine(
             $"[Dataset] starting name={datasetName} train={trainIters} geom={optimiseGeometry} " +
             $"maxDim={maxTrainDimension} poses={posePreference} patches={depthPatchesPerSide}");
+        if (forUi)
+            SetUiStatus($"Loading {datasetName}…");
         try
         {
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
@@ -84,12 +118,14 @@ public partial class Studio
             if (images.Count < 2)
             {
                 Console.WriteLine($"[Dataset] FAIL: {datasetName} gave {images.Count} image(s)");
+                if (forUi) SetUiStatus($"Error: {datasetName} gave {images.Count} image(s)");
                 return;
             }
             Console.WriteLine(
                 $"[Dataset] {images.Count} images in {(DateTime.UtcNow - t0).TotalSeconds:F1}s, " +
                 $"first {images[0].Width}x{images[0].Height} ({images[0].SourceUrl})");
-
+            if (forUi)
+                SetUiStatus($"{datasetName}: {images.Count} images — posing…");
             // MEASURED WORSE - left off by default.
             //
             // An aspect-matched input looked like a free win: a square spends part of its patch
@@ -107,7 +143,11 @@ public partial class Studio
             DepthEstimationService.SetSquareInput(depthPatchesPerSide);
 
             // -- 2. Poses + depth init, through the ordinary cascade --
-            void OnStatus() => Console.WriteLine($"[Dataset] {_multiViewService.Status}");
+            void OnStatus()
+            {
+                Console.WriteLine($"[Dataset] {_multiViewService.Status}");
+                if (forUi) SetUiStatus(_multiViewService.Status);
+            }
             _multiViewService.OnStatusChanged += OnStatus;
             (ILGPU.Runtime.MemoryBuffer1D<float, ILGPU.Stride1D.Dense> buf, int count)? result;
             try
@@ -164,12 +204,15 @@ public partial class Studio
             if (result == null)
             {
                 Console.WriteLine($"[Dataset] FAIL: generation returned nothing - {_multiViewService.Status}");
+                if (forUi) SetUiStatus($"Error: {_multiViewService.Status}");
                 return;
             }
             var (packedBuf, splatCount) = result.Value;
             Console.WriteLine(
                 $"[Dataset] {splatCount:N0} splats in {(DateTime.UtcNow - t0).TotalSeconds:F1}s, " +
                 $"pose source = {_multiViewService.LastPoseSource}");
+            if (forUi)
+                SetUiStatus($"Uploading {splatCount:N0} splats…");
 
             await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
 
@@ -198,6 +241,8 @@ public partial class Studio
             _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
             _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
             _state = StudioState.SceneViewer;
+            if (forUi)
+                BuildViewerHudUI();
 
             // Stand the viewer where one of the photographs was actually taken.
             //
@@ -230,39 +275,53 @@ public partial class Studio
                 // run that hit it had 242,440 splats - and a finding with no picture beside it is
                 // how three runs got scored and committed while the viewer was blank. The
                 // question about any reconstruction is what it LOOKS like, especially this one.
-                _hideUiOverlay = true;
-                await Task.Delay(1500);
-                Console.WriteLine("[Dataset] READY-FOR-CAPTURE");
-                await Task.Delay(2500);
+                if (!forUi)
+                {
+                    _hideUiOverlay = true;
+                    await Task.Delay(1500);
+                    Console.WriteLine("[Dataset] READY-FOR-CAPTURE");
+                    await Task.Delay(2500);
+                }
                 Console.WriteLine(
                     "[Dataset] DONE (no optimisation): the cascade produced no usable poses. " +
                     "That is the finding, not a failure of this test.");
+                if (forUi)
+                    SetUiStatus("Done — no usable poses for training. Explore the init scene.");
                 return;
             }
 
             // -- 3. Optimise --
             if (trainIters > 0)
+            {
+                if (forUi) SetUiStatus($"Training {trainIters} iters…");
                 await TrainOnTrainingViewsAsync(
                     trainIters, optimiseGeometry: optimiseGeometry,
                     maxTrainDimension: maxTrainDimension);
+            }
 
-            // Announce before DONE so the harness can capture a frame of the finished scene.
-            _hideUiOverlay = true;
-            await Task.Delay(1500);
-            Console.WriteLine("[Dataset] READY-FOR-CAPTURE");
-            await Task.Delay(2500);
+            if (!forUi)
+            {
+                // Announce before DONE so the harness can capture a frame of the finished scene.
+                _hideUiOverlay = true;
+                await Task.Delay(1500);
+                Console.WriteLine("[Dataset] READY-FOR-CAPTURE");
+                await Task.Delay(2500);
 
-            // Then LOOK AROUND. A capture-pose render is close to a re-projection of the photo
-            // it was taken from, so it flatters any reconstruction; the question a room has to
-            // answer is what it looks like from somewhere nobody stood. TJ found the scene
-            // rotated and tumbling this way while every number said it was fine.
-            await CaptureFreeViewsAsync(scene);
+                // Then LOOK AROUND. A capture-pose render is close to a re-projection of the photo
+                // it was taken from, so it flatters any reconstruction; the question a room has to
+                // answer is what it looks like from somewhere nobody stood. TJ found the scene
+                // rotated and tumbling this way while every number said it was fine.
+                await CaptureFreeViewsAsync(scene);
+            }
 
             Console.WriteLine("[Dataset] DONE");
+            if (forUi)
+                SetUiStatus($"Done — {splatCount:N0} splats. Click canvas to look around.");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Dataset] FAIL: {ex}");
+            if (forUi) SetUiStatus($"Error: {ex.Message}");
         }
     }
 

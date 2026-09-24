@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 using SpawnDev.ILGPU.ML.Hub;
 using SpawnDev.SpawnJS;
+using SpawnDev.GameUI;
 using SpawnScene;
 using SpawnScene.Services;
 
@@ -12,6 +13,7 @@ using SpawnScene.Services;
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 // SpawnDev.SpawnJS runtime
 builder.Services.AddSpawnJSRuntime(out var JS);
+builder.Services.AddGameUI(UITheme.Dark);
 
 SpawnJSRuntime.EnableIDisposableWatcher = false;
 

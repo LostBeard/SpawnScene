@@ -1,3 +1,4 @@
+using System.Numerics;
 using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Services;
@@ -30,21 +31,35 @@ public partial class Studio
         _lastFrameTime = timestamp;
         dt = Math.Min(dt, 0.1f);
 
-        // Poll input
-        _inputManager?.Poll();
-
-        // Bridge InputManager keyboard to CameraController (it tracks its own key set)
-        if (_inputManager != null && _cameraController != null && _state == StudioState.SceneViewer)
+        if (!_gameUI.IsInitialized)
         {
-            foreach (var key in _inputManager.FrameKeysPressed)
-                _cameraController.OnKeyDown(key);
-            foreach (var key in _inputManager.FrameKeysReleased)
-                _cameraController.OnKeyUp(key);
+            RequestFrame();
+            return;
+        }
 
-            // Request pointer lock on left click — but only if no UI element was hit
-            if (_inputManager.WasMousePressed(0) && !_isPointerLocked)
+        // Poll unified input (mouse/keyboard/touch/XR)
+        _gameUI.Input.Poll();
+        var input = _gameUI.Input;
+
+        // Bridge keyboard to CameraController
+        if (_cameraController != null && _state == StudioState.SceneViewer)
+        {
+            foreach (var key in input.Keyboard.KeysPressed)
+                _cameraController.OnKeyDown(key);
+            foreach (var key in _prevKeysDown)
             {
-                var hit = _uiRoot.HitTest(_inputManager.MousePosition);
+                if (!input.Keyboard.IsKeyDown(key))
+                    _cameraController.OnKeyUp(key);
+            }
+            _prevKeysDown.Clear();
+            foreach (var key in input.Keyboard.KeysDown)
+                _prevKeysDown.Add(key);
+
+            var primary = input.PrimaryPointer;
+            if (primary != null && primary.WasPressed && !_isPointerLocked)
+            {
+                var pos = primary.ScreenPosition ?? Vector2.Zero;
+                var hit = _uiRoot.HitTest(pos);
                 if (hit == null)
                 {
                     using var canvas = _canvasRef.As<HTMLCanvasElement>();
@@ -52,29 +67,24 @@ public partial class Studio
                 }
             }
 
-            // Scroll → zoom
-            if (_isPointerLocked && MathF.Abs(_inputManager.ScrollDelta) > 0.1f)
-                _cameraController.OnWheel(_inputManager.ScrollDelta);
+            if (_isPointerLocked && primary != null && MathF.Abs(primary.ScrollDelta) > 0.1f)
+                _cameraController.OnWheel(primary.ScrollDelta);
         }
 
-        // Update UI (only when not pointer-locked, so clicks go to UI not camera)
-        if (_inputManager != null && !_isPointerLocked)
-            _uiRoot.Update(_inputManager, dt);
+        // Update UI when not pointer-locked (clicks go to UI, not camera)
+        if (!_isPointerLocked)
+            _uiRoot.Update(input, dt);
 
-        // Camera movement (only in viewer state with pointer lock)
         if (_state == StudioState.SceneViewer && _isPointerLocked)
             _cameraController?.Tick(dt);
 
-        // Update dynamic HUD labels
         if (_state == StudioState.SceneViewer)
             UpdateViewerHud();
 
-        // Render 3D scene (if active)
         if (_state == StudioState.SceneViewer && _sceneManager.HasScene)
         {
             _renderService.RenderFrame();
 
-            // Capture scene thumbnail after delay (allows scene to converge)
             if (_pendingThumbnailSceneId != null)
             {
                 _thumbnailDelayFrames--;
@@ -89,22 +99,19 @@ public partial class Studio
             }
         }
 
-        // Render UI overlay on top of scene (or as full-screen UI)
         RenderUIOverlay();
-
         RequestFrame();
     }
 
     private void RenderUIOverlay()
     {
-        if (_uiRenderer == null || _context == null || _device == null) return;
+        if (!_gameUI.IsInitialized || _context == null || _device == null) return;
         // Novel-view measurement captures the canvas; the HUD would be scored as scene content.
         if (_hideUiOverlay) return;
 
-        _uiRenderer.Begin(_canvasWidth, _canvasHeight);
-        _uiRoot.Draw(_uiRenderer);
+        _gameUI.BeginRender(_canvasWidth, _canvasHeight);
+        _uiRoot.Draw(_gameUI.Renderer);
 
-        // Get swapchain texture for UI overlay
         using var colorTexture = _context.GetCurrentTexture();
         using var colorView = colorTexture.CreateView();
         using var encoder = _device.CreateCommandEncoder();
@@ -117,7 +124,7 @@ public partial class Studio
                 View = colorView,
                 LoadOp = GPULoadOp.Clear,
                 StoreOp = GPUStoreOp.Store,
-                ClearValue = new GPUColorDict { R = 0.04, G = 0.04, B = 0.08, A = 1.0 },
+                ClearValue = new GPUColorDict { R = 0.05, G = 0.06, B = 0.08, A = 1.0 },
             };
             using var clearPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
             {
@@ -126,7 +133,7 @@ public partial class Studio
             clearPass.End();
         }
 
-        _uiRenderer.End(encoder, colorView);
+        _gameUI.EndRender(encoder, colorView);
 
         using var cmdBuf = encoder.Finish();
         _queue!.Submit(new[] { cmdBuf });
@@ -143,53 +150,47 @@ public partial class Studio
 
         float dpr = _js.Get<float>("devicePixelRatio");
         if (dpr < 1f) dpr = 1f;
-        if (dpr > 2f) dpr = 2f;
+        _canvasWidth = Math.Max(1, (int)(cssWidth * dpr));
+        _canvasHeight = Math.Max(1, (int)(cssHeight * dpr));
 
-        _canvasWidth = (int)(cssWidth * dpr);
-        _canvasHeight = (int)(cssHeight * dpr);
-        _lastResizeWidth = cssWidth;
-        _lastResizeHeight = cssHeight;
+        using var canvas = _canvasRef.As<HTMLCanvasElement>();
+        canvas.Width = _canvasWidth;
+        canvas.Height = _canvasHeight;
+        canvas.Style.SetProperty("width", $"{cssWidth}px");
+        canvas.Style.SetProperty("height", $"{cssHeight}px");
+
+        if (_gameUI.IsInitialized)
+            _gameUI.SetViewport(_canvasWidth, _canvasHeight);
     }
 
     private async void OnWindowResize(UIEvent e)
     {
         try
         {
-            using var container = _containerRef.As<HTMLElement>();
-            int cssWidth = container.ClientWidth;
-            int cssHeight = container.ClientHeight;
-            if (cssWidth == _lastResizeWidth && cssHeight == _lastResizeHeight) return;
-            _lastResizeWidth = cssWidth;
-            _lastResizeHeight = cssHeight;
-
-            float dpr = _js.Get<float>("devicePixelRatio");
-            if (dpr < 1f) dpr = 1f;
-            if (dpr > 2f) dpr = 2f;
-
-            int newWidth = (int)(cssWidth * dpr);
-            int newHeight = (int)(cssHeight * dpr);
-            if (newWidth == _canvasWidth && newHeight == _canvasHeight) return;
-
-            _canvasWidth = newWidth;
-            _canvasHeight = newHeight;
+            int prevW = _canvasWidth, prevH = _canvasHeight;
+            UpdateCanvasSize();
+            if (_canvasWidth == prevW && _canvasHeight == prevH) return;
 
             _renderService.HandleResize(_canvasWidth, _canvasHeight);
-
-            // Rebuild UI for new dimensions
-            if (_state == StudioState.ProjectBrowser)
-                BuildProjectBrowserUI();
-            else
-                BuildViewerHudUI();
-
-            await InvokeAsync(StateHasChanged);
+            RebuildCurrentUI();
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[Studio] Resize error: {ex.Message}");
+            Console.WriteLine($"[Studio] resize failed: {ex.Message}");
         }
+        await Task.CompletedTask;
     }
 
-    // ─── Pointer Lock (for FPS camera in viewer mode) ───
+    private void RebuildCurrentUI()
+    {
+        switch (_state)
+        {
+            case StudioState.ProjectBrowser: BuildProjectBrowserUI(); break;
+            case StudioState.ProjectDetail: BuildProjectDetailUI(); break;
+            case StudioState.SceneViewer: BuildViewerHudUI(); break;
+            case StudioState.Testing: BuildTestingUI(); break;
+        }
+    }
 
     private void OnPointerLockChange()
     {
@@ -207,8 +208,6 @@ public partial class Studio
         if (_isPointerLocked)
             _document?.ExitPointerLock();
     }
-
-    // ─── Scene Events ───
 
     private void OnSceneChanged()
     {

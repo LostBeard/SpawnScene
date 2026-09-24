@@ -222,12 +222,27 @@ public class CameraController : IDisposable
 
     public void OnKeyDown(string key)
     {
-        _heldKeys.Add(key.ToLowerInvariant());
+        _heldKeys.Add(NormalizeMovementKey(key));
     }
 
     public void OnKeyUp(string key)
     {
-        _heldKeys.Remove(key.ToLowerInvariant());
+        _heldKeys.Remove(NormalizeMovementKey(key));
+    }
+
+    /// <summary>
+    /// Map GameUI <c>KeyboardEvent.code</c> strings (KeyW, ShiftLeft) and legacy
+    /// <c>KeyboardEvent.key</c> strings (w, Shift) onto the short labels Tick checks.
+    /// Without this, GameUI's KeyW lands as "keyw" and WASD never matches.
+    /// </summary>
+    private static string NormalizeMovementKey(string key)
+    {
+        var k = key.ToLowerInvariant();
+        if (k.Length == 4 && k.StartsWith("key", StringComparison.Ordinal))
+            return k[3..]; // KeyW -> w
+        if (k is "shiftleft" or "shiftright")
+            return "shift";
+        return k;
     }
 
     /// <summary>

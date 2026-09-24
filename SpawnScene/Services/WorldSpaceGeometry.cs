@@ -19,9 +19,11 @@ public static class WorldSpaceGeometry
         forward = Vector3.Normalize(cam.Forward);
         var up = Vector3.Normalize(cam.Up); // Y-up
         right = Vector3.Normalize(Vector3.Cross(forward, up));
-        down = -up; // OpenCV Y-down
-        // Re-orthogonalize right against (down, forward) if needed
-        right = Vector3.Normalize(Vector3.Cross(down, forward));
+        // OpenCV Y-down, made exactly orthogonal to forward. This used to be `down = -up`, which is only a
+        // rotation when Up is perpendicular to Forward - a camera whose Up is world-up while it looks down
+        // (the controller does that to rolled poses) projected through a skewed, non-rigid basis. Equal to
+        // -up whenever up is already perpendicular; right x down = forward (right-handed).
+        down = Vector3.Cross(forward, right);
     }
 
     /// <summary>

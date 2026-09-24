@@ -11,38 +11,16 @@ using System.Runtime.CompilerServices;
 
 namespace SpawnScene.Services;
 
-// ═══════════════════════════════════════════════════════════
-//  16-bit RadixSort operation — half as many passes as DescendingInt32.
-//  Uses the lower 16 bits of the DescendingInt32 transform.
-//  Requires depth keys in [0..65534]; int.MinValue sentinel works.
-//  Halves sort GPU time for Standard/Fast quality modes.
-// ═══════════════════════════════════════════════════════════
-public readonly struct DescendingInt16As32 : IRadixSortOperation<int>
-{
-    public int NumBits => 16;  // Half the passes of NumBits=32
-    public int DefaultValue => 0;
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public int ExtractRadixBits(int value, int shift, int bitMask)
-    {
-        // Identical to DescendingInt32 — only the lower 16 bits are examined (NumBits=16).
-        // Correct for depths in [0..65534]; int.MinValue (culled) sorts last. ✓
-        AscendingInt32 operation = default;
-        return (~operation.ExtractRadixBits(value, shift, bitMask)) & bitMask;
-    }
-}
-
 /// <summary>
-/// GPU-based radix sort for Gaussian splats using ILGPU.Algorithms.
+/// GPU-based radix sort for Gaussian splats (<see cref="GpuRadixSort"/>, WGSL, 8 bits a pass).
 /// Zero CPU readback per frame — all data stays on GPU.
 ///
 /// Pipeline per sort frame:
-///   1. CullAndDistanceKernel: writes int32 depth key to each of N slots.
-///      Visible splats → quantized depth + original index.
-///      Culled splats  → int.MinValue + -1 (sentinel, sorts LAST).
-///   2. RadixSort on ALL N pairs — visible (≥0) before culled (int.MinValue).
-///      High quality: DescendingInt32 (8 passes, 32-bit precision).
-///      Standard/Fast: DescendingInt16As32 (4 passes, 16-bit precision).
+///   1. CullAndDistanceKernel: writes a sort key to each of N slots.
+///      Visible splats → DistMax - quantized depth (far = small) + original index.
+///      Culled splats  → -1 (0xFFFFFFFF, sorts LAST) + index -1.
+///   2. Ascending radix sort on ALL N pairs → back to front, culled last.
+///      High quality: 32-bit keys (4 passes). Standard/Fast: 16-bit keys (2 passes).
 ///   3. Pack shader checks idx &lt; 0 → writes transparent vertex, fragment shader discards.
 /// </summary>
 public class GpuSplatSorter : IDisposable
@@ -54,7 +32,6 @@ public class GpuSplatSorter : IDisposable
     private MemoryBuffer1D<float, Stride1D.Dense>? _packedDataBuf;
     private MemoryBuffer1D<int, Stride1D.Dense>? _distanceBuf;   // int32 depth keys (int.MinValue = culled)
     private MemoryBuffer1D<int, Stride1D.Dense>? _indicesBuf;    // splat indices (-1 = culled sentinel)
-    private MemoryBuffer1D<int, Stride1D.Dense>? _tempBuf;       // radix sort temp storage
 
     private int _splatCount;
     private int _lastSortVisibleCount; // count from last sort (for non-sort frames)
@@ -66,9 +43,9 @@ public class GpuSplatSorter : IDisposable
         ArrayView1D<int, Stride1D.Dense>,    // outIndices
         CullParams>? _cullDistanceKernel;
 
-    // Radix sort delegates — 32-bit (8 passes, High quality) and 16-bit (4 passes, Standard/Fast)
-    private RadixSortPairs<int, Stride1D.Dense, int, Stride1D.Dense>? _radixSortPairs32;
-    private RadixSortPairs<int, Stride1D.Dense, int, Stride1D.Dense>? _radixSortPairs16;
+    // WGSL radix sort (8 bits a pass, one submission): 16-bit keys = 2 passes, 32-bit = 4. The
+    // ILGPU.Algorithms sort it replaces ran 2 bits a pass, ~100 dispatches (MEASURED 10x slower in the trainer).
+    private GpuRadixSort? _radixSort;
 
     /// <summary>
     /// When true, uses 16-bit depth sort (4 GPU passes instead of 8).
@@ -160,9 +137,9 @@ public class GpuSplatSorter : IDisposable
     /// <summary>
     /// GPU kernel: frustum-cull splats and assign int32 depth keys.
     /// Writes to ALL N slots (indexed by splat index, no compaction):
-    ///   Visible: outDistances[i] = quantized depth (≥ 0), outIndices[i] = i
-    ///   Culled:  outDistances[i] = int.MinValue (-1 sentinel), outIndices[i] = -1
-    /// After DescendingInt32 sort: visible splats (depth ≥ 0) come first, culled (int.MinValue) last.
+    ///   Visible: outDistances[i] = DistMax - quantized depth (≥ 0), outIndices[i] = i
+    ///   Culled:  outDistances[i] = -1 (0xFFFFFFFF), outIndices[i] = -1
+    /// After the ascending sort: visible splats back to front, culled last.
     /// The pack shader checks outIndices[i] &lt; 0 to skip culled slots.
     /// Includes screen-space LOD culling: sub-pixel splats are treated as culled.
     /// </summary>
@@ -211,16 +188,17 @@ public class GpuSplatSorter : IDisposable
             // Projected size ≈ splatScale * focalLength / distance.
             if (dist > 0f && splatScale * p.FocalLength / dist >= p.MinScreenSize)
             {
+                // Sort key: ASCENDING = back to front, so far splats get small keys.
                 int qDist = (int)(dist * p.DistScale);
-                outDistances[i] = qDist > p.DistMax ? p.DistMax : qDist;
+                outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
                 outIndices[i] = i;
                 return;
             }
         }
 
-        // Sentinel: int.MinValue sorts LAST in DescendingInt32.
-        // Pack shader skips idx < 0 → no wasted vertex/fragment work.
-        outDistances[i] = int.MinValue;
+        // Sentinel: -1 = 0xFFFFFFFF sorts LAST ascending, and its low 16 bits (0xFFFF) are above every
+        // visible 16-bit key (<= 65534). Pack shader skips idx < 0 -> no wasted vertex/fragment work.
+        outDistances[i] = -1;
         outIndices[i] = -1;
     }
 
@@ -300,12 +278,7 @@ public class GpuSplatSorter : IDisposable
         _indicesBuf = accelerator.Allocate1D<int>(_splatCount);
         _distanceBuf = accelerator.Allocate1D<int>(_splatCount);
 
-        var tempSize32 = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>((Index1D)_splatCount);
-        var tempSize16 = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt16As32>((Index1D)_splatCount);
-        _tempBuf = accelerator.Allocate1D<int>(Math.Max(tempSize32, tempSize16));
-
-        _radixSortPairs32 = accelerator.CreateRadixSortPairs<int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
-        _radixSortPairs16 = accelerator.CreateRadixSortPairs<int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt16As32>();
+        EnsureRadixSort(accelerator, _splatCount);
 
         await accelerator.SynchronizeAsync();
 
@@ -353,19 +326,13 @@ public class GpuSplatSorter : IDisposable
         _indicesBuf = accelerator.Allocate1D<int>(_splatCount);
         _distanceBuf = accelerator.Allocate1D<int>(_splatCount);
 
-        var tempSize32 = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>((Index1D)_splatCount);
-        var tempSize16 = accelerator.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt16As32>((Index1D)_splatCount);
-        int tempSize = Math.Max(tempSize32, tempSize16);
-        _tempBuf = accelerator.Allocate1D<int>(tempSize);
-
-        _radixSortPairs32 = accelerator.CreateRadixSortPairs<int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
-        _radixSortPairs16 = accelerator.CreateRadixSortPairs<int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt16As32>();
+        EnsureRadixSort(accelerator, _splatCount);
 
         await accelerator.SynchronizeAsync();
 
         _lastSortVisibleCount = _splatCount;
         ResetSortState();
-        Console.WriteLine($"[GpuSorter] Uploaded {_splatCount:N0} splats, {tempSize * 4 / 1024}KB radix temp");
+        Console.WriteLine($"[GpuSorter] Uploaded {_splatCount:N0} splats");
     }
 
     private void ResetSortState()
@@ -425,7 +392,7 @@ public class GpuSplatSorter : IDisposable
     /// sortRan=true means the vertex buffer must be repacked this frame.
     /// sortRan=false means the caller can skip pack (vertex buffer is still valid from last sort).
     /// visibleCount = _splatCount (all slots, culled sentinels are discarded by pack/vert shaders).
-    /// Culled splats get sentinel keys (int.MinValue / idx=-1) and sort LAST in DescendingInt32.
+    /// Culled splats get sentinel keys (-1 / idx=-1) and sort LAST.
     /// </summary>
     public (MemoryBuffer1D<float, Stride1D.Dense>?, MemoryBuffer1D<int, Stride1D.Dense>?, bool sortRan, int visibleCount)
         Sort(CameraParams camera, Matrix4x4 mvp)
@@ -507,9 +474,8 @@ public class GpuSplatSorter : IDisposable
             cullParams);
 
         // ── Step 2: Radix sort ALL N pairs ──
-        // High: DescendingInt32 (8 passes) — full 32-bit depth precision.
-        // Standard/Fast: DescendingInt16As32 (4 passes) — 16-bit precision, 2x faster.
-        // Visible depths (≥ 0) sort before int.MinValue sentinels → back-to-front, culled last.
+        // High: 32-bit keys (4 passes). Standard/Fast: 16-bit keys (2 passes).
+        // Keys ascend back to front; the -1 sentinels (culled) sort last.
         if (SkipSort)
         {
             // Diagnostic: skip sort, render in cull-kernel output order (unsorted).
@@ -520,10 +486,14 @@ public class GpuSplatSorter : IDisposable
                 _skipSortLogged = true;
             }
         }
-        else if (Use16BitSort)
-            _radixSortPairs16!(accelerator.DefaultStream, _distanceBuf.View, _indicesBuf.View, _tempBuf!.View);
         else
-            _radixSortPairs32!(accelerator.DefaultStream, _distanceBuf.View, _indicesBuf.View, _tempBuf!.View);
+        {
+            // The cull kernel is in ILGPU's pending encoder and the sort is a raw submission: submit the
+            // cull first or the sort runs on last frame's keys (see RemapGpuFencedAsync for that bug).
+            accelerator.FlushPendingCommands();
+            _radixSort!.Sort(_distanceBuf.GetGPUBuffer()!, _indicesBuf.GetGPUBuffer()!, _splatCount,
+                Use16BitSort ? 16 : 32);
+        }
 
         // ── Diagnostic: one-time async readback to validate sort output ──
         if (!_sortValidated && !SkipSort)
@@ -577,11 +547,12 @@ public class GpuSplatSorter : IDisposable
             for (int i = Math.Max(0, _splatCount - 20); i < _splatCount; i++) sb.Append($"{distances[i]} ");
             Console.WriteLine(sb.ToString());
 
-            // Check 3: count sort-order violations
+            // Check 3: count sort-order violations. Keys ascend (back to front) on the sorted bits.
+            uint mask = Use16BitSort ? 0xFFFFu : 0xFFFFFFFFu;
             int violations = 0;
             for (int i = 1; i < _splatCount && violations < 100; i++)
-                if (distances[i] > distances[i - 1]) violations++;
-            Console.WriteLine($"[SortValidation] Sort-order violations (desc): {violations}");
+                if (((uint)distances[i] & mask) < ((uint)distances[i - 1] & mask)) violations++;
+            Console.WriteLine($"[SortValidation] Sort-order violations (asc): {violations}");
         }
         catch (Exception ex)
         {
@@ -594,11 +565,16 @@ public class GpuSplatSorter : IDisposable
         _packedDataBuf?.Dispose(); _packedDataBuf = null;
         _distanceBuf?.Dispose(); _distanceBuf = null;
         _indicesBuf?.Dispose(); _indicesBuf = null;
-        _tempBuf?.Dispose(); _tempBuf = null;
-        _radixSortPairs32 = null;
-        _radixSortPairs16 = null;
+        _radixSort?.Dispose(); _radixSort = null;
         _lastSortVisibleCount = 0;
     }
 
     public void Dispose() => DisposeBuffers();
+
+    void EnsureRadixSort(WebGPUAccelerator accelerator, int count)
+    {
+        var native = accelerator.NativeAccelerator;
+        _radixSort ??= new GpuRadixSort(native.NativeDevice!, native.Queue!);
+        _radixSort.EnsureCapacity(count);
+    }
 }

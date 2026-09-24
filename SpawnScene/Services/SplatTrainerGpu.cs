@@ -94,6 +94,8 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _fitSample; // stride gather for the scale histogram
     const int FitSampleCount = 4096;
     MemoryBuffer1D<float, Stride1D.Dense>? _densifyStats;   // 2 per splat: pixel grad sum, visible count
+    MemoryBuffer1D<float, Stride1D.Dense>? _screenRadius;   // 1 per splat: this view's 3-sigma radius, px
+    MemoryBuffer1D<float, Stride1D.Dense>? _maxRadius;      // 1 per splat: max of that over the window
     MemoryBuffer1D<uint, Stride1D.Dense>? _viewSupport;        // views that ever moved each splat
     MemoryBuffer1D<float, Stride1D.Dense>? _supportPartials;   // 6 per workgroup, 256 workgroups
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
@@ -544,6 +546,9 @@ public sealed class SplatTrainerGpu : IDisposable
         _gradStatsPartials = accel.Allocate1D<float>(GradStatsWorkgroups * GradStatsSlots);
         _fitSample = accel.Allocate1D<float>(FitSampleCount);
         _densifyStats = accel.Allocate1D<float>((long)splatCount * 2);
+        _screenRadius = accel.Allocate1D<float>(splatCount);
+        _maxRadius = accel.Allocate1D<float>(splatCount);
+        _maxRadius.MemSetToZero();
         _viewSupport = accel.Allocate1D<uint>(splatCount);
         _supportPartials = accel.Allocate1D<float>(SupportWorkgroups * SupportSlots);
         await stage("per-splat");
@@ -636,6 +641,7 @@ public sealed class SplatTrainerGpu : IDisposable
                     new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = _values!.GetGPUBuffer()! } },
                     new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = _counter!.GetGPUBuffer()! } },
                     new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _capsBuf! } },
+                    new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _screenRadius!.GetGPUBuffer()! } },
                     ShRestBindEntry(12),
                 },
             });
@@ -1113,6 +1119,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public void ResetDensifyStats()
     {
         _densifyStats!.MemSetToZero();
+        _maxRadius!.MemSetToZero();
         // Submit now: the accumulate is a raw dispatch, and an unflushed clear would land after it.
         _gpu.WebGPUAccelerator.FlushPendingCommands();
     }
@@ -1129,7 +1136,7 @@ public sealed class SplatTrainerGpu : IDisposable
         Dispatch(_densifyAccum!, (splatCount + 255) / 256, 1, new[]
         {
             Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
-            Buf(2, _dimsBuf!),
+            Buf(2, _dimsBuf!), Buf(3, _screenRadius!.GetGPUBuffer()!), Buf(4, _maxRadius!.GetGPUBuffer()!),
         });
     }
 
@@ -1145,6 +1152,10 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
         float[] raw = await _densifyStats!.CopyToHostAsync<float>(0, (long)splatCount * 2);
+        // The largest screen radius each splat reached. Nothing used to fill this, so the reference's
+        // max_screen_size prune (SplatDensityControl.MaxScreenRadiusPx) never fired: "0 bloated", every
+        // densify, on every run - and a floater parked in front of a camera could never be removed.
+        float[] radius = await _maxRadius!.CopyToHostAsync<float>(0, splatCount);
 
         var stats = new SplatDensityControl.Accumulator[splatCount];
         for (int i = 0; i < splatCount; i++)
@@ -1152,6 +1163,7 @@ public sealed class SplatTrainerGpu : IDisposable
             {
                 GradientSum = raw[i * 2],
                 VisibleCount = (int)raw[i * 2 + 1],
+                MaxScreenRadiusPx = radius[i],
             };
         return stats;
     }
@@ -1947,6 +1959,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _gradStatsPartials?.Dispose(); _gradStatsPartials = null;
         _fitSample?.Dispose(); _fitSample = null;
         _densifyStats?.Dispose(); _densifyStats = null;
+        _screenRadius?.Dispose(); _screenRadius = null;
+        _maxRadius?.Dispose(); _maxRadius = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
         _gradShRest?.Dispose(); _gradShRest = null;

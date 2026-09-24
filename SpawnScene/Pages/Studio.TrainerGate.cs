@@ -226,6 +226,9 @@ public partial class Studio
             // -- Densify carry: does every optimizer row land where the CPU oracle puts it? --
             if (!await CarryGateAsync(n)) return;
 
+            // -- Densify radius: the max_screen_size prune input, vs the CPU projection --
+            if (!await DensifyRadiusGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
             Console.WriteLine("[TrainerGate] PASS");
         }
         catch (Exception ex)

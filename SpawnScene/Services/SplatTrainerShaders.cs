@@ -257,6 +257,9 @@ fn splat_weight(conic : vec3<f32>, centre : vec2<f32>, pixel : vec2<f32>) -> f32
 @group(0) @binding(3) var<storage, read_write> values  : array<u32>;
 @group(0) @binding(4) var<storage, read_write> counter : atomic<u32>;
 @group(0) @binding(5) var<uniform>             caps    : vec4<u32>;   // x = key capacity
+// This view's 3-sigma screen radius per splat, written for every splat that emits keys. The densify
+// accumulate folds it into a running max - the reference's max_screen_size prune reads that.
+@group(0) @binding(6) var<storage, read_write> screen_radius : array<f32>;
 
 // Depth occupies the low bits; the tile id sits above it. 18 bits of depth leaves 14 for the
 // tile, i.e. up to 16384 tiles - 2048x2048 pixels at 16px tiles.
@@ -284,6 +287,7 @@ fn emit_keys(
     let x1 = min(hi.x, i32(u.tiles.x) - 1);
     let y1 = min(hi.y, i32(u.tiles.y) - 1);
     if (x1 < x0 || y1 < y0) { return; }
+    screen_radius[i] = p.extent.x;
 
     let n = u32((x1 - x0 + 1) * (y1 - y0 + 1));
     // Always count demand (host reports overflow from counter > capacity), but only WRITE
@@ -295,8 +299,13 @@ fn emit_keys(
     let n_write = min(n, caps.x - base);
 
     // Normalised into the full 18-bit range so distinct depths get distinct keys.
-    let span = max(u.depth_far - u.depth_near, 1e-6);
-    let dn = clamp((p.depth - u.depth_near) / span, 0.0, 1.0);
+    // LOG depth across [near, far], not linear. Linear 18 bits over Truck's ~400-unit range is 1.5 mm a
+    // step: overlapping splats on one surface share a key and composite in index order, not depth order -
+    // noise in every gradient, and an order the viewer (0.1 mm keys) does not reproduce. Log spacing keeps
+    // the same 18 bits at a relative 2.6e-5: 0.13 mm at 5 units, coarse only where it cannot matter.
+    let ln_near = log(max(u.depth_near, NEAR_PLANE));
+    let ln_far = max(log(max(u.depth_far, NEAR_PLANE)), ln_near + 1e-6);
+    let dn = clamp((log(max(p.depth, NEAR_PLANE)) - ln_near) / (ln_far - ln_near), 0.0, 1.0);
     let dq = u32(dn * DEPTH_MAX);
 
     var slot = base;
@@ -1104,6 +1113,8 @@ fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(0) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
 @group(0) @binding(1) var<storage, read_write> accum      : array<f32>;   // 2 per splat
 @group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count y=width z=height
+@group(0) @binding(3) var<storage, read>       screen_radius : array<f32>; // this view, from emit_keys
+@group(0) @binding(4) var<storage, read_write> max_radius : array<f32>;   // running max over the window
 
 const GRADS_PER_SPLAT : u32 = 9u;
 
@@ -1125,6 +1136,8 @@ fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
     let px = bitcast<f32>(grad_fixed[b + 4u]);
     let py = bitcast<f32>(grad_fixed[b + 5u]);
     if (px == 0.0 && py == 0.0) { return; }
+    // Contributed this step, so it emitted keys this step and screen_radius[i] is this view's.
+    max_radius[i] = max(max_radius[i], screen_radius[i]);
 
     let gx = px * 0.5 * f32(dims.y);
     let gy = py * 0.5 * f32(dims.z);

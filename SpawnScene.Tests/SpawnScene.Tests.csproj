@@ -47,4 +47,7 @@
     <Compile Include="..\SpawnScene\Services\MvsFusionGpu.cs" Link="Linked\MvsFusionGpu.cs" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="Data\**\*.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

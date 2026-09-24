@@ -70,4 +70,28 @@ public class CameraResectionTests
         Assert.That(Vector3.Distance(Vector3.Cross(r, d), f), Is.LessThan(1e-6f), "right-handed: right x down = forward");
         Assert.That(Vector3.Dot(d, Vector3.UnitY), Is.LessThan(0f), "down still points down");
     }
+
+    /// <summary>
+    /// Real Truck data (views 79 and 34, dumped by &amp;badump=1): OpenCV's solvePnPRansac places them with
+    /// 80/87 and 27/51 correspondences agreeing at 8 px; this resection returned nothing, and the pipeline
+    /// dropped the views. The points are tightly clustered relative to their distance (near-affine).
+    /// </summary>
+    [TestCase("truck_resection_view79.txt", 75)]
+    [TestCase("truck_resection_view34.txt", 24)]
+    public void RealTruckViews_AreRegistered_LikeOpenCv(string file, int minInliers)
+    {
+        var world = new List<Vector3>();
+        var px = new List<Vector2>();
+        foreach (var line in File.ReadAllLines(Path.Combine(TestContext.CurrentContext.TestDirectory, "Data", file)))
+        {
+            var v = line.Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(t => float.Parse(t, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            world.Add(new Vector3(v[0], v[1], v[2]));
+            px.Add(new Vector2(v[3], v[4]));
+        }
+        var k = new CameraParams { Width = 979, Height = 546, FocalX = 582.6043f, FocalY = 582.6043f, CenterX = 489.5f, CenterY = 273f };
+        bool ok = CameraResection.ResectRansac(world, px, k, out var cam, out int inl, thresholdPx: 8, iterations: 500, seed: 3);
+        TestContext.Out.WriteLine($"{file}: ok {ok}, inliers {inl}/{world.Count}");
+        Assert.That(ok, Is.True);
+        Assert.That(inl, Is.GreaterThanOrEqualTo(minInliers));
+    }
 }

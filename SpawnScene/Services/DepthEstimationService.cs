@@ -74,7 +74,12 @@ public class DepthEstimationService : IAsyncDisposable
     /// = the bound square's side, aspect kept, no pad). Applied on every call, so an autotest can A/B it
     /// (<c>&amp;resize=native|letterbox</c>) without reloading the model.
     /// </summary>
-    public static DepthResizeMode ResizeMode { get; set; } = DepthResizeMode.Letterbox;
+    ///
+    /// NativeAspect by default, MEASURED 2026-09-24 (logs _runs/tuvok-*): DAv3 pose gate on DrJohnson N=6, position
+    /// residual 3.4% of camera spread vs Letterbox 52.7%, focal error 2.4% vs 41%; TempleRing 8.1% vs 5.4% (both fine).
+    /// DrJohnson 2K end-to-end: held out 13.65 dB last / 13.95 mean vs 12.32 / 12.55, SSIM 0.305 vs 0.253, and the
+    /// untrained init already 15.29 vs 13.84. Letterbox renders its dominant surfaces sharper but with heavy floaters.
+    public static DepthResizeMode ResizeMode { get; set; } = DepthResizeMode.NativeAspect;
 
     /// <summary>
     /// Patch grid that joint multi-view inference has been shown to survive.

@@ -1150,9 +1150,14 @@ public sealed class SplatTrainerGpu : IDisposable
     /// <summary>
     /// Densify average denominator. false: steps where the splat got a centre gradient. true: the reference's
     /// <c>visibility_filter</c> (<c>radii &gt; 0</c>), every step it projected onto the screen, occluded or not,
-    /// so a splat hidden half the time averages half as high. <c>&amp;densifydenom=frustum</c>.
+    /// so a splat hidden half the time averages half as high. Default true; <c>&amp;densifydenom=contrib</c> for the old.
     /// </summary>
-    public static bool DensifyDenominatorFrustum { get; set; }
+    /// <remarks>
+    /// MEASURED 2026-09-25, Truck 7K / 3M cap / GT poses, same build (tuvok-b2-base vs -denom): held-out captures
+    /// 22.52 vs 22.67 dB, SSIM .813 vs .811, sharpness .68 vs .67 (within run noise) with 2.17M -> 1.52M splats
+    /// (-30%) and 13.8 -> 16.7 it/s (+21%).
+    /// </remarks>
+    public static bool DensifyDenominatorFrustum { get; set; } = true;
 
     /// <summary>
     /// Geometry Adam steps every splat every iteration, as torch Adam (the reference's default optimiser) does:

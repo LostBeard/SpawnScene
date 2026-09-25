@@ -257,8 +257,9 @@ fn splat_weight(conic : vec3<f32>, centre : vec2<f32>, pixel : vec2<f32>) -> f32
 @group(0) @binding(3) var<storage, read_write> values  : array<u32>;
 @group(0) @binding(4) var<storage, read_write> counter : atomic<u32>;
 @group(0) @binding(5) var<uniform>             caps    : vec4<u32>;   // x = key capacity
-// This view's 3-sigma screen radius per splat, written for every splat that emits keys. The densify
-// accumulate folds it into a running max - the reference's max_screen_size prune reads that.
+// This view's 3-sigma screen radius per splat: 0 unless it emits keys this step, so it is also the
+// reference's `radii > 0` visibility (in frustum and on screen, occluded or not). The densify accumulate
+// folds it into a running max, and in frustum mode counts the step as visible.
 @group(0) @binding(6) var<storage, read_write> screen_radius : array<f32>;
 
 // Depth occupies the low bits; the tile id sits above it. 18 bits of depth leaves 14 for the
@@ -276,6 +277,8 @@ fn emit_keys(
     let gid = vec3<u32>((wg_.y * nwg_.x + wg_.x) * 64u + li_, 0u, 0u);
     let i = gid.x;
     if (i >= u.splat_count) { return; }
+    // Cleared every step before any early return: a stale radius from an earlier view would read as visible.
+    screen_radius[i] = 0.0;
 
     let p = project(i);
     if (!p.valid) { return; }
@@ -1112,8 +1115,8 @@ fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>) {
     public const string DensifyAccum = @"
 @group(0) @binding(0) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
 @group(0) @binding(1) var<storage, read_write> accum      : array<f32>;   // 2 per splat
-@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count y=width z=height
-@group(0) @binding(3) var<storage, read>       screen_radius : array<f32>; // this view, from emit_keys
+@group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count y=width z=height w=denominator mode
+@group(0) @binding(3) var<storage, read>       screen_radius : array<f32>; // this view, from emit_keys (0 = not emitted)
 @group(0) @binding(4) var<storage, read_write> max_radius : array<f32>;   // running max over the window
 
 const GRADS_PER_SPLAT : u32 = 9u;
@@ -1135,8 +1138,14 @@ fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
     let b = i * GRADS_PER_SPLAT;
     let px = bitcast<f32>(grad_fixed[b + 4u]);
     let py = bitcast<f32>(grad_fixed[b + 5u]);
-    if (px == 0.0 && py == 0.0) { return; }
-    // Contributed this step, so it emitted keys this step and screen_radius[i] is this view's.
+    // Which steps count toward the average (the denominator):
+    //   w = 0: steps where the splat received a centre gradient (contributed to a pixel).
+    //   w = 1: the reference's visibility_filter, radii > 0 - emitted keys this step, even if fully
+    //          occluded (a zero gradient then lowers its average, as in add_densification_stats).
+    if (dims.w == 1u) {
+        if (screen_radius[i] <= 0.0) { return; }
+    } else if (px == 0.0 && py == 0.0) { return; }
+    // Contributed or emitted this step, so screen_radius[i] is this view's.
     max_radius[i] = max(max_radius[i], screen_radius[i]);
 
     let gx = px * 0.5 * f32(dims.y);

@@ -352,6 +352,9 @@ public partial class Studio : IAsyncDisposable
             // ?poslrdecay=N is how far the position rate falls over PositionLrMaxSteps; 1 = off.
             if (query.TryGetValue("poslrdecay", out var pdq) && float.TryParse(pdq, out var pdf))
                 PositionLrDecay = pdf;
+            // ?densifydenom=frustum averages the densify gradient over every step a splat projected on screen
+            // (the reference's radii > 0), not only the steps it received a gradient.
+            if (query.TryGetValue("densifydenom", out var ddq)) SplatTrainerGpu.DensifyDenominatorFrustum = ddq == "frustum";
             // ?shuffleviews=1 trains each epoch's views in a fresh random order (the reference); ?shuffleseed=N.
             if (query.TryGetValue("shuffleviews", out var svq)) ShuffleViews = svq == "1" || svq == "true";
             if (query.TryGetValue("shuffleseed", out var ssq) && int.TryParse(ssq, out var ssi)) ShuffleViewsSeed = ssi;

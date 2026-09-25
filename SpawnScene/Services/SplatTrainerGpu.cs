@@ -1147,6 +1147,13 @@ public sealed class SplatTrainerGpu : IDisposable
         return m;
     }
 
+    /// <summary>
+    /// Densify average denominator. false: steps where the splat got a centre gradient. true: the reference's
+    /// <c>visibility_filter</c> (<c>radii &gt; 0</c>), every step it projected onto the screen, occluded or not,
+    /// so a splat hidden half the time averages half as high. <c>&amp;densifydenom=frustum</c>.
+    /// </summary>
+    public static bool DensifyDenominatorFrustum { get; set; }
+
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
     public void ResetDensifyStats()
     {
@@ -1164,7 +1171,7 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public void AccumulateDensifyStats(int splatCount)
     {
-        WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height, 0);
+        WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height, DensifyDenominatorFrustum ? 1u : 0u);
         Dispatch(_densifyAccum!, (splatCount + 255) / 256, 1, new[]
         {
             Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),

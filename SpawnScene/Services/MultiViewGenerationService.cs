@@ -446,7 +446,7 @@ public class MultiViewGenerationService
                 $"[{label}]   round {round}: {iters} iterations, RMS {rms:F2} px, {kept} obs kept"),
         });
         Console.WriteLine($"[{label}] {points.Count} points, {result.ObservationsKept}/{result.Observations} obs, " +
-            $"RMS {result.FinalRmsPixels:F2} px, {result.Seconds:F1}s");
+            $"RMS {result.FinalRmsPixels:F2} px, {result.Seconds:F1}s ({ba.TimingSummary()})");
         return ba;
     }
 

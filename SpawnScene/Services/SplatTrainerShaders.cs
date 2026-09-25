@@ -1742,7 +1742,7 @@ fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>) {
 
 struct GeomCfg {
     lr    : vec4<f32>,   // x = position, y = log-scale, z = rotation, w = Adam step number
-    limit : vec4<f32>,   // x = splat count, y = max scale, z = min scale, w unused
+    limit : vec4<f32>,   // x = splat count, y = max scale, z = min scale, w = 1: dense Adam (step untouched splats)
 };
 @group(0) @binding(6) var<uniform> g : GeomCfg;
 // 10 per splat: dL/d(pos xyz, scale xyz, quat xyzw), written before the step.
@@ -1764,6 +1764,47 @@ fn adam(value : f32, grad : f32, lr : f32, step : f32,
     return value - lr * m_hat / (sqrt(v_hat) + EPS);
 }
 
+// Dense Adam for a splat with no gradient this step: m and v decay and the parameter moves by the momentum
+// it still carries, exactly as a zero gradient does in torch Adam. Same clamps and renormalisation as a
+// real step.
+fn dense_zero_step(i : u32, o : u32) {
+    let step = g.lr.w;
+    let ab = i * ADAM_SLOTS;
+    let gb_out = i * 10u;
+    for (var k = 0u; k < 10u; k = k + 1u) { geom_out[gb_out + k] = 0.0; }
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        var m = adam_m[ab + ADAM_POS + c];
+        var v = adam_v[ab + ADAM_POS + c];
+        splats[o + c] = adam(splats[o + c], 0.0, g.lr.x, step, &m, &v);
+        adam_m[ab + ADAM_POS + c] = m;
+        adam_v[ab + ADAM_POS + c] = v;
+    }
+    for (var c = 0u; c < 3u; c = c + 1u) {
+        var m = adam_m[ab + ADAM_SCALE + c];
+        var v = adam_v[ab + ADAM_SCALE + c];
+        let updated = adam(log_scale[i * 3u + c], 0.0, g.lr.y, step, &m, &v);
+        adam_m[ab + ADAM_SCALE + c] = m;
+        adam_v[ab + ADAM_SCALE + c] = v;
+        let bounded = clamp(updated, log(g.limit.z), log(g.limit.y));
+        log_scale[i * 3u + c] = bounded;
+        splats[o + 6u + c] = exp(bounded);
+    }
+    var qn = vec4<f32>(0.0);
+    for (var c = 0u; c < 4u; c = c + 1u) {
+        var m = adam_m[ab + ADAM_QUAT + c];
+        var v = adam_v[ab + ADAM_QUAT + c];
+        qn[c] = adam(splats[o + 10u + c], 0.0, g.lr.z, step, &m, &v);
+        adam_m[ab + ADAM_QUAT + c] = m;
+        adam_v[ab + ADAM_QUAT + c] = v;
+    }
+    let ql = length(qn);
+    let qout = select(vec4<f32>(0.0, 0.0, 0.0, 1.0), qn / ql, ql > 1e-12);
+    splats[o + 10u] = qout.x;
+    splats[o + 11u] = qout.y;
+    splats[o + 12u] = qout.z;
+    splats[o + 13u] = qout.w;
+}
+
 @compute @workgroup_size(64)
 fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     let i = gid.x;
@@ -1776,12 +1817,17 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     let up_cb = bitcast<f32>(grad_fixed[gb + 7u]);
     let up_cc = bitcast<f32>(grad_fixed[gb + 8u]);
 
-    // A splat this view never touched has no gradient. Taking a step anyway would let stale
-    // momentum drag geometry that nothing is currently constraining - harmless for colour,
-    // but for position it sends invisible splats travelling.
-    if (up_cx == 0.0 && up_cy == 0.0 && up_ca == 0.0 && up_cb == 0.0 && up_cc == 0.0) { return; }
-
+    // A splat this view never touched has no gradient. By default it takes no step: stale momentum would
+    // drag geometry that nothing is currently constraining. The reference's default optimiser is torch
+    // Adam, which steps EVERY parameter every iteration (m and v decay, the parameter keeps moving by
+    // m_hat / sqrt(v_hat)); g.limit.w = 1 does that, so the two can be measured against each other.
     let o = i * FLOATS_PER_SPLAT;
+    if (up_cx == 0.0 && up_cy == 0.0 && up_ca == 0.0 && up_cb == 0.0 && up_cc == 0.0) {
+        if (g.limit.w == 0.0) { return; }
+        dense_zero_step(i, o);
+        return;
+    }
+
     let pos = vec3<f32>(splats[o + 0u], splats[o + 1u], splats[o + 2u]);
     let s_raw = vec3<f32>(splats[o + 6u], splats[o + 7u], splats[o + 8u]);
     let q_raw = vec4<f32>(splats[o + 10u], splats[o + 11u], splats[o + 12u], splats[o + 13u]);

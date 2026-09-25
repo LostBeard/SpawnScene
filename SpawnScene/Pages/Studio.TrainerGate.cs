@@ -229,6 +229,9 @@ public partial class Studio
             // -- Densify radius: the max_screen_size prune input, vs the CPU projection --
             if (!await DensifyRadiusGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
+            // -- Dense geometry Adam: a silent splat takes torch Adam's zero-gradient step, or none when off --
+            if (!await DenseAdamGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
             Console.WriteLine("[TrainerGate] PASS");
         }
         catch (Exception ex)

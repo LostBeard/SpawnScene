@@ -352,6 +352,8 @@ public partial class Studio : IAsyncDisposable
             // ?poslrdecay=N is how far the position rate falls over PositionLrMaxSteps; 1 = off.
             if (query.TryGetValue("poslrdecay", out var pdq) && float.TryParse(pdq, out var pdf))
                 PositionLrDecay = pdf;
+            // ?denseadam=1 steps geometry Adam for splats with no gradient too (torch Adam, the reference).
+            if (query.TryGetValue("denseadam", out var daq)) SplatTrainerGpu.DenseGeometryAdam = daq == "1" || daq == "true";
             // ?densifydenom=frustum averages the densify gradient over every step a splat projected on screen
             // (the reference's radii > 0), not only the steps it received a gradient.
             if (query.TryGetValue("densifydenom", out var ddq)) SplatTrainerGpu.DensifyDenominatorFrustum = ddq == "frustum";

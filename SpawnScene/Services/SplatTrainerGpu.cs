@@ -119,7 +119,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public const int GradsPerSplat = SplatTileRasterizer.GradsPerKey;
 
     /// <summary>Adam moment slots per splat: 3 colour, 1 opacity, 3 position, 3 scale, 4 quaternion.</summary>
-    const int AdamSlots = 14;
+    public const int AdamSlots = 14;
     /// <summary>Adam layout: RGB(0..2), opacity(3), pos(4..6), log-scale(7..9), quat(10..13).</summary>
     const int AdamOpacitySlot = 3;
 
@@ -1154,6 +1154,13 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public static bool DensifyDenominatorFrustum { get; set; }
 
+    /// <summary>
+    /// Geometry Adam steps every splat every iteration, as torch Adam (the reference's default optimiser) does:
+    /// a splat with no gradient this view still decays its moments and moves by the momentum it carries.
+    /// Default false: such a splat is not stepped at all. <c>&amp;denseadam=1</c>.
+    /// </summary>
+    public static bool DenseGeometryAdam { get; set; }
+
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
     public void ResetDensifyStats()
     {
@@ -1737,7 +1744,7 @@ public sealed class SplatTrainerGpu : IDisposable
         {
             WriteVec4x2(_geomCfgBuf!,
                 geo.PositionLr, geo.LogScaleLr, geo.RotationLr, _adamStepCount,
-                splatCount, geo.MaxScale, geo.MinScale, 0f);
+                splatCount, geo.MaxScale, geo.MinScale, DenseGeometryAdam ? 1f : 0f);
             Dispatch(_adamGeometry!, (splatCount + 63) / 64, 1, new[]
             {
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),

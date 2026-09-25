@@ -878,6 +878,32 @@ public sealed class SplatTrainerGpu : IDisposable
             throw new ArgumentException(
                 $"carry {priorCount:N0} -> {newCount:N0} needs one survivor and one feature " +
                 $"source per new splat (got {adamSurvivors.Length:N0} / {featureSources.Length:N0})");
+        var gpu = _gpu.WebGPUAccelerator;
+        using var adamSrc = gpu.Allocate1D<int>(newCount);
+        adamSrc.CopyFromCPU(adamSurvivors);
+        using var featSrc = gpu.Allocate1D<int>(newCount);
+        featSrc.CopyFromCPU(featureSources);
+        await CarryOptimizerRowsAsync(priorCount, newCount, adamSrc, featSrc, zeroAdamSlot);
+    }
+
+    /// <summary>The per-splat densify accumulator (2 per splat: pixel-gradient sum, visible count), for <see cref="GpuDensify"/>.</summary>
+    public ArrayView<float> DensifyStatsView => _densifyStats!.View;
+
+    /// <summary>The per-splat max 3-sigma screen radius over the densify window, for <see cref="GpuDensify"/>.</summary>
+    public ArrayView<float> MaxRadiusView => _maxRadius!.View;
+
+    /// <summary>
+    /// The same carry with the source maps already on the device (<see cref="GpuDensify.Result"/>): the maps
+    /// never cross to the host. The caller keeps ownership of them.
+    /// </summary>
+    public async Task CarryOptimizerRowsAsync(
+        int priorCount, int newCount,
+        MemoryBuffer1D<int, Stride1D.Dense> adamSrc, MemoryBuffer1D<int, Stride1D.Dense> featSrc,
+        int zeroAdamSlot = -1)
+    {
+        if (priorCount <= 0 || newCount <= 0 || adamSrc.Length < newCount || featSrc.Length < newCount)
+            throw new ArgumentException(
+                $"carry {priorCount:N0} -> {newCount:N0} needs one survivor and one feature source per new splat");
 
         var accel = _gpu.WebGPUAccelerator;
         await accel.SynchronizeAsync();
@@ -889,11 +915,6 @@ public sealed class SplatTrainerGpu : IDisposable
         DisposeBuffers(keepOptimizerRows: true);
         await Stage("released frame buffers");
 
-        var adamSrc = accel.Allocate1D<int>(newCount);
-        adamSrc.CopyFromCPU(adamSurvivors);
-        var featSrc = accel.Allocate1D<int>(newCount);
-        featSrc.CopyFromCPU(featureSources);
-        try
         {
             // All on the GPU, one bank at a time. The Adam moments used to go through the host because a
             // GPU remap "killed opacity" (MEASURED): that remap's clear ran AFTER its gather and zeroed the
@@ -909,11 +930,6 @@ public sealed class SplatTrainerGpu : IDisposable
             await Stage("carried SH Adam m");
             _adamShV = await CarryBankAsync(_adamShV, adamSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
             await Stage("carried SH Adam v");
-        }
-        finally
-        {
-            adamSrc.Dispose();
-            featSrc.Dispose();
         }
 
         _adamStepCount = step;

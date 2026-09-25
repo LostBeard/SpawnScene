@@ -41,6 +41,8 @@ public partial class Studio
     /// </summary>
     public static float MaxScaleFraction { get; set; } = 0.05f;
 
+    GpuDensify? _gpuDensify;
+
     /// <summary>Multiplier on the position learning rate, for measuring rather than guessing.</summary>
     public static float PositionLrScale { get; set; } = 1f;
 
@@ -805,62 +807,32 @@ public partial class Studio
         (IReadOnlyList<TrainingView> views, MemoryBuffer1D<uint, Stride1D.Dense> targets,
          SplatBounds.Aabb box, IReadOnlyList<int> supervised)? probe = null)
     {
-        var stats = await _trainer!.ReadDensifyStatsAsync(n);
-        float[] raw = await packed.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
-        var splats = UnpackSplats(raw, n);
-
-        // Split children are drawn from their parent's own ellipsoid, so this needs normal
-        // deviates. Seeded per step so a run reproduces; Box-Muller because there is no
-        // Gaussian in the BCL and an approximation here biases where geometry appears.
-        var rng = new Random(1234 + n);
-        float NextNormal()
-        {
-            double u1 = 1.0 - rng.NextDouble();
-            double u2 = rng.NextDouble();
-            return (float)(Math.Sqrt(-2.0 * Math.Log(u1)) * Math.Cos(2.0 * Math.PI * u2));
-        }
-
-        // Never grow past what the trainer can actually hold. Resize clamps keysPerSplat down
-        // to fit the binding, and a clamped budget overflows - so splats beyond this point do
-        // not buy detail, they buy frames rendered from an incomplete key list.
-        int budget = Math.Min(MaxDensifiedSplats, _trainer.MaxTrainableSplats(_trainer.KeysPerSplat));
-
-        // The size prunes are unlocked by the first opacity reset, exactly as in the reference.
-        // Before it, a large Gaussian may simply not have been given the chance to shrink; after
-        // it, one that is still large and still faint is not going to earn its place.
-        var plan = densify && !DensifyNoOp
-            ? SplatDensityControl.Decide(
-                splats, stats, sceneExtent, _hadOpacityReset, NextNormal, budget)
-            : new SplatDensityControl.Plan();
+        // On the device (GpuDensify): the host path read the whole scene back every densify, unpacked,
+        // rebuilt and repacked it - four copies in the wasm heap - and threw OutOfMemoryException at ~2.0M
+        // splats on Truck (MEASURED 2026-09-24). Only counters and an 8 KiB histogram cross now.
+        int budget = Math.Min(MaxDensifiedSplats, _trainer!.MaxTrainableSplats(_trainer.KeysPerSplat));
+        _gpuDensify ??= new GpuDensify(_gpuService.WebGPUAccelerator);
+        var r = await _gpuDensify.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
+            new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity,
+                Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify));
 
         // Always report, including - especially including - when the answer is "nothing".
-        //
-        // The first run of this decided nothing NINE times and printed not one line, so there
-        // was no way to tell "the scene does not need densifying" from "the signal never
-        // arrived". A step that declines to do the main work has to say why, and the why here
-        // is a distribution against a threshold, not a boolean.
-        var avg = new float[n];
-        int visible = 0;
-        for (int i = 0; i < n; i++)
-        {
-            avg[i] = stats[i].AverageGradient;
-            if (stats[i].VisibleCount > 0) visible++;
-        }
-        System.Array.Sort(avg);
-        float sizeSplit = SplatDensityControl.PercentDense * sceneExtent;
-        int big = 0;
-        foreach (var sp in splats) if (sp.MaxScale > sizeSplit) big++;
-
         Console.WriteLine(
-            $"[Densify] signal: {visible * 100.0 / n:F1}% of {n:N0} splats visible, " +
-            $"avg |grad| median {avg[n / 2]:G3} p90 {avg[n * 9 / 10]:G3} max {avg[n - 1]:G3} " +
-            $"vs threshold {SplatDensityControl.GradientThreshold:G3}; " +
-            $"{big:N0} splats above the {sizeSplit:G3} split size; plan: {plan}");
+            $"[Densify] signal: {r.Visible * 100.0 / n:F1}% of {n:N0} splats visible, {r.Candidates:N0} over the " +
+            $"{SplatDensityControl.GradientThreshold:G3} gradient bar; plan: {r}");
 
-        if (plan.Add.Count == 0 && plan.Remove.Count == 0 && !resetOpacity && !DensifyNoOp)
+        if (r.Added == 0 && r.Removed == 0 && !resetOpacity && !DensifyNoOp)
         {
+            r.Packed.Dispose(); r.AdamSources.Dispose(); r.FeatureSources.Dispose();
             _trainer.ResetDensifyStats();
             return null;
+        }
+        if (resetOpacity)
+        {
+            _hadOpacityReset = true;
+            Console.WriteLine(
+                $"[Densify] opacity reset to at most {SplatDensityControl.OpacityResetTo} " +
+                "- every Gaussian now has to re-earn its place, and the size prunes are live");
         }
 
         // Score a few supervised views on either side of the apply. A clone renders as the same
@@ -870,8 +842,17 @@ public partial class Studio
             ? await ProbeViewsAsync(_trainer, packed, n, probe.Value.views, probe.Value.targets,
                 probe.Value.box, probe.Value.supervised)
             : "";
-        var result = await ApplySplatPlanAsync(packed, n, plan, resetOpacity, logTag: "Densify",
-            preloaded: (splats, raw));
+        (MemoryBuffer1D<float, Stride1D.Dense> packed, int n)? result;
+        try
+        {
+            result = await InstallGrownSetAsync(r.Packed, n, r.Count, resetOpacity, "Densify", r.ToString(),
+                (prior, grown, zeroSlot) => _trainer.CarryOptimizerRowsAsync(prior, grown, r.AdamSources, r.FeatureSources, zeroSlot));
+        }
+        finally
+        {
+            r.AdamSources.Dispose();
+            r.FeatureSources.Dispose();
+        }
         if (probe != null && result != null)
         {
             string after = await ProbeViewsAsync(_trainer, result.Value.packed, result.Value.n,
@@ -1015,6 +996,20 @@ public partial class Studio
         next.CopyFromCPU(outRaw);
         await accel.SynchronizeAsync();
 
+        return await InstallGrownSetAsync(next, n, m, resetOpacity, logTag, plan.ToString(),
+            (prior, grown, zeroSlot) => _trainer!.CarryOptimizerRowsAsync(prior, grown, adamSurvivors, featureSources, zeroSlot));
+    }
+
+    /// <summary>
+    /// Hand a grown splat buffer to the renderer and the trainer: upload, carry the optimizer rows with
+    /// <paramref name="carry"/>, resize, re-seed logits, restart the densify window. Shared by the host plan path
+    /// and the device path (<see cref="GpuDensify"/>).
+    /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> InstallGrownSetAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> next, int n, int m, bool resetOpacity, string logTag, string planText,
+        Func<int, int, int, Task> carry)
+    {
+        var accel = _gpuService.WebGPUAccelerator;
         await _gpuRenderer.UploadSceneFromGpuBuffer(next, m);
         var live = _gpuRenderer.PackedSplatBuffer;
         if (live == null)
@@ -1045,8 +1040,7 @@ public partial class Studio
         // 450k sailed through - see SplatTrainerGpu.CarryOptimizerRowsAsync for the numbers.
         // Adam and SH: GPU RemapFloatRows, one bank at a time (the old "GPU Adam remap killed opacity" was
         // the remap zeroing its own output - see RemapGpuFencedAsync; CarryGateAsync checks every bank).
-        await _trainer.CarryOptimizerRowsAsync(
-            n, m, adamSurvivors, featureSources, zeroAdamSlot: resetOpacity ? 3 : -1);
+        await carry(n, m, resetOpacity ? 3 : -1);
         await _trainer.ResizeAsync(w, h, m, keys);
         // Wait for the device after Resize on its own, so a loss caused by the allocations is
         // reported here and not blamed on the first dispatch that follows.
@@ -1059,7 +1053,7 @@ public partial class Studio
         await accel.SynchronizeAsync();
         _trainer.ResetDensifyStats();
 
-        Console.WriteLine($"[{logTag}] {n:N0} -> {m:N0} splats: {plan}");
+        Console.WriteLine($"[{logTag}] {n:N0} -> {m:N0} splats: {planText}");
         return (live, m);
     }
 

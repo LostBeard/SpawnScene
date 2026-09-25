@@ -45,6 +45,7 @@
     <Compile Include="..\SpawnScene\Services\SplatTileRasterizer.cs" Link="Linked\SplatTileRasterizer.cs" />
     <Compile Include="..\SpawnScene\Services\MvsGeometricFusion.cs" Link="Linked\MvsGeometricFusion.cs" />
     <Compile Include="..\SpawnScene\Services\MvsFusionGpu.cs" Link="Linked\MvsFusionGpu.cs" />
+    <Compile Include="..\SpawnScene\Services\GpuDensify.cs" Link="Linked\GpuDensify.cs" />
   </ItemGroup>
 
   <ItemGroup>

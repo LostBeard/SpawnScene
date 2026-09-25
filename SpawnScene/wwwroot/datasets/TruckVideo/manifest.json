@@ -1,0 +1,11 @@
+{
+  "name": "TruckVideo",
+  "video": "truck.mp4",
+  "videoFrames": 126,
+  "videoCandidates": 3,
+  "images": [],
+  "width": 978,
+  "height": 546,
+  "poses": "poses.par",
+  "_note": "Frame k of truck.mp4 is Truck image k (10 fps, one image per frame), so Truck COLMAP poses are ground truth for pose-vs-GT only - not used for training unless gtposes=1."
+}

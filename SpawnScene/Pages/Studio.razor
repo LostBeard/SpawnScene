@@ -16,6 +16,6 @@
             width="@_canvasWidth" height="@_canvasHeight"
             style="width:100%;height:100%;display:block;"></canvas>
     @* Hidden file input — browser security requires a real HTML element for file picking *@
-    <InputFile @ref="_fileInput" OnChange="OnFileSelected" accept="image/*" multiple
+    <InputFile @ref="_fileInput" OnChange="OnFileSelected" accept="image/*,video/*" multiple
                style="position:absolute;top:-9999px;left:-9999px;opacity:0;" />
 </div>

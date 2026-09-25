@@ -154,6 +154,7 @@ public class MultiViewGenerationService
         int noiseFloor = rawCounts[rawCounts.Count / 2];
         int strong = Math.Max(60, 2 * noiseFloor);
         float cosMax = MathF.Cos(MaxPairAngleDeg * MathF.PI / 180f);
+        Console.WriteLine($"[BA] entering refine: {ImageImportService.HeapReport()}");
         var verified = new List<(int, int, int, int)>();
         int considered = 0, passed = 0;
         var tv = System.Diagnostics.Stopwatch.StartNew();
@@ -1425,7 +1426,7 @@ public class MultiViewGenerationService
             "(an anchor is in every chunk; each upload is a full RGBA frame)");
         Console.WriteLine(
             $"[MultiView] chunked poses done: {result.PosedCount}/{images.Count} views posed in one " +
-            $"frame, {result.ChunksRejected} chunk(s) rejected");
+            $"frame, {result.ChunksRejected} chunk(s) rejected; {ImageImportService.HeapReport()}");
         // Depth is finished for this generate; training is next on the same GPU. Without this the
         // session keeps its entire activation arena (MEASURED 3.9 GB after 14 DAv3 N=6 passes) and
         // the trainer's first densify resize is what finally tips Chrome over.

@@ -19,10 +19,13 @@ public class ImageImportService : IDisposable
     private readonly List<ImportedImage> _images = [];
     private readonly List<ImagePair> _pairs = [];
 
-    public ImageImportService(GpuFeatureMatcher gpuMatcher, GpuService gpu, HttpClient http)
+    private readonly VideoFrameExtractor _video;
+
+    public ImageImportService(GpuFeatureMatcher gpuMatcher, GpuService gpu, HttpClient http, VideoFrameExtractor video)
     {
         _gpuMatcher = gpuMatcher;
         _gpu = gpu;
+        _video = video;
         _http = http;
     }
 
@@ -440,12 +443,23 @@ public class ImageImportService : IDisposable
                 NotifyChanged();
                 await Task.Yield();
             });
-        Console.WriteLine($"[Import] matched {totalPairs} pairs in {sw.Elapsed.TotalSeconds:F1}s ({_pairs.Count} with >= 8 matches)");
+        Console.WriteLine($"[Import] matched {totalPairs} pairs in {sw.Elapsed.TotalSeconds:F1}s ({_pairs.Count} with >= 8 matches); {HeapReport()}");
 
         NotifyChanged();
     }
 
     private void NotifyChanged() => OnStateChanged?.Invoke();
+
+    /// <summary>Managed heap now: in use, committed, and what the runtime says is available. For finding an OOM.</summary>
+    public static string HeapReport()
+    {
+        long before = GC.GetTotalMemory(false);
+        long live = GC.GetTotalMemory(true);   // after a full collection: what is actually still referenced
+        var gi = GC.GetGCMemoryInfo();
+        return $"heap {before / (1024 * 1024)} MB in use, {live / (1024 * 1024)} MB live after full GC, " +
+            $"{gi.TotalCommittedBytes / (1024 * 1024)} MB committed, pinned {gi.PinnedObjectsCount}, " +
+            $"fragmented {gi.FragmentedBytes / (1024 * 1024)} MB, {gi.TotalAvailableMemoryBytes / (1024 * 1024)} MB available";
+    }
 
     /// <summary>
     /// Clear all imported images and matches.
@@ -502,7 +516,30 @@ public class ImageImportService : IDisposable
             // static server reads the same file to mount the images from wherever they actually
             // live rather than copying 168 MB into wwwroot.
             var manifest = await TryLoadManifestAsync(datasetName);
-            if (manifest != null)
+            List<VideoFrameExtractor.Frame>? videoFrames = null;
+            if (manifest != null && !string.IsNullOrEmpty(manifest.Video))
+            {
+                // A video dataset: the frames are chosen and decoded in the browser, then go through exactly the
+                // same decode / feature / match path as photographs.
+                basePath = VideoFrameStore.Prefix;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                int want = manifest.VideoFrames > 0 ? manifest.VideoFrames : 120;
+                Status = $"Extracting {want} frames from {manifest.Video}...";
+                NotifyChanged();
+                videoFrames = await _video.ExtractAsync($"datasets/{datasetName}/{manifest.Video}", want,
+                    manifest.VideoCandidates > 0 ? manifest.VideoCandidates : 3, 1600);
+                foreach (var f in videoFrames)
+                {
+                    VideoFrameStore.Put(f.Name, f.Jpeg);
+                    imageNames.Add(f.Name);
+                }
+                Console.WriteLine(
+                    $"[Import] {datasetName}: {videoFrames.Count} frames from {manifest.Video} in " +
+                    $"{sw.Elapsed.TotalSeconds:F1}s (sharpest of {Math.Max(1, manifest.VideoCandidates > 0 ? manifest.VideoCandidates : 3)} per slot; " +
+                    $"times {string.Join(" ", videoFrames.Take(4).Select(f => f.TimeSeconds.ToString("F2")))} ...)");
+                Console.WriteLine($"[Import] after extraction ({videoFrames.Sum(f => (long)f.Jpeg.Length) / (1024 * 1024)} MB of JPEG): {HeapReport()}");
+            }
+            else if (manifest != null)
             {
                 basePath = $"datasets/{datasetName}/{manifest.ImageDir}/";
                 imageNames.AddRange(manifest.Images);
@@ -593,7 +630,7 @@ public class ImageImportService : IDisposable
                 byte[] bytes;
                 try
                 {
-                    bytes = await _http.GetByteArrayAsync(basePath + fileName);
+                    bytes = videoFrames != null ? videoFrames[fi].Jpeg : await _http.GetByteArrayAsync(basePath + fileName);
                 }
                 catch (Exception ex)
                 {
@@ -657,6 +694,7 @@ public class ImageImportService : IDisposable
                 await Task.Yield();
             }
 
+            Console.WriteLine($"[Import] {_images.Count} images decoded + features: {HeapReport()}");
             if (_images.Count >= 2 && !SkipPairMatching)
                 await MatchAllPairsAsync();
 
@@ -702,6 +740,15 @@ public class ImageImportService : IDisposable
 
         /// <summary>Points in <see cref="Points"/>, for reporting before the file is fetched.</summary>
         public int PointCount { get; set; }
+
+        /// <summary>A video file in the dataset folder to take the images from, instead of <see cref="Images"/>.</summary>
+        public string Video { get; set; } = "";
+
+        /// <summary>Frames to take from <see cref="Video"/> (evenly spaced slots). 0 = 120.</summary>
+        public int VideoFrames { get; set; }
+
+        /// <summary>Candidate frames scored per slot; the sharpest is kept. 0 = 3.</summary>
+        public int VideoCandidates { get; set; }
     }
 
     /// <summary>
@@ -739,7 +786,7 @@ public class ImageImportService : IDisposable
                 {
                     PropertyNameCaseInsensitive = true,
                 });
-            return m is { Images.Count: > 0 } ? m : null;
+            return m is { Images.Count: > 0 } || !string.IsNullOrEmpty(m?.Video) ? m : null;
         }
         catch (Exception ex)
         {

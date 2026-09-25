@@ -34,7 +34,7 @@ for (const dsRoot of [path.join(root, 'datasets'),
 }
 for (const m of mounts) console.log(`mounted ${m.prefix} -> ${m.dir}`);
 const port = +process.argv[3] || 8080;
-const mime = { ".html":"text/html",".js":"text/javascript",".mjs":"text/javascript",".css":"text/css",".wasm":"application/wasm",".json":"application/json",".png":"image/png",".svg":"image/svg+xml",".woff2":"font/woff2",".dll":"application/octet-stream",".dat":"application/octet-stream",".pdb":"application/octet-stream",".map":"application/json" };
+const mime = { ".html":"text/html",".js":"text/javascript",".mjs":"text/javascript",".css":"text/css",".wasm":"application/wasm",".json":"application/json",".png":"image/png",".svg":"image/svg+xml",".woff2":"font/woff2",".dll":"application/octet-stream",".dat":"application/octet-stream",".pdb":"application/octet-stream",".map":"application/json",".mp4":"video/mp4",".webm":"video/webm",".mov":"video/quicktime",".jpg":"image/jpeg",".jpeg":"image/jpeg" };
 http.createServer((req,res)=>{
   let url = decodeURIComponent((req.url||"/").split("?")[0]);
   if (url === "/") url = "/index.html";

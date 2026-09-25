@@ -362,6 +362,9 @@ public sealed class SplatTrainerGpu : IDisposable
     /// clamped budget overflows - so growing beyond this does not buy splats, it buys frames
     /// trained on incomplete renders.
     /// </summary>
+    /// <summary>Total key capacity allowed across all key-indexed buffers (~52 bytes a key). See ResizeCoreAsync.</summary>
+    public static long MaxTotalKeys { get; set; } = 40_000_000;
+
     public int MaxTrainableSplats(int keysPerSplat) =>
         (int)Math.Max(1, MaxStorageBindingBytes() / (3 * sizeof(float)) / Math.Max(1, keysPerSplat));
 
@@ -495,6 +498,19 @@ public sealed class SplatTrainerGpu : IDisposable
                 $"would need {(long)splatCount * requested * bytesPerKey / (1024 * 1024)} MiB for " +
                 $"one binding, over the {MaxBindingBytes / (1024 * 1024)} MiB this device allows. " +
                 "A tighter budget can overflow, which is reported per frame, not hidden.");
+        }
+
+        // And a TOTAL budget. Each binding fitting is not the device fitting: key-indexed buffers are ~52 bytes a
+        // key across keys, values, sort scratch and the three gradient bindings. MEASURED 2026-09-24: 673k splats
+        // at 115 keys each (77.4M keys, ~4 GB) lost the device inside Resize; 2.0M splats at 17 (34M keys) ran.
+        if ((long)splatCount * keysPerSplat > MaxTotalKeys)
+        {
+            int before = keysPerSplat;
+            keysPerSplat = Math.Max(1, (int)(MaxTotalKeys / Math.Max(1, splatCount)));
+            Console.WriteLine(
+                $"[Trainer] keysPerSplat {before} -> {keysPerSplat}: {splatCount:N0} splats would need " +
+                $"{(long)splatCount * before:N0} keys, over the {MaxTotalKeys:N0}-key device budget. Frames over it " +
+                "overflow (reported); the next window re-measures demand.");
         }
 
         KeysPerSplat = keysPerSplat;

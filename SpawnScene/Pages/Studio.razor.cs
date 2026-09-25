@@ -32,6 +32,7 @@ public partial class Studio : IAsyncDisposable
     [Inject] private ImageImportService _importService { get; set; } = default!;
     [Inject] private GameUIService _gameUI { get; set; } = default!;
     [Inject] private SpawnJSRuntime _js { get; set; } = default!;
+    [Inject] private VideoFrameExtractor _videoExtractor { get; set; } = default!;
     [Inject] private GpuDepthColorizer _depthColorizer { get; set; } = default!;
     // SpawnDev.ILGPU.ML — created on-demand after GPU init (not injected)
 

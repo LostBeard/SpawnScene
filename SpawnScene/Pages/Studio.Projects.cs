@@ -794,9 +794,14 @@ public partial class Studio
 
         try
         {
-            foreach (var file in e.GetMultipleFiles(20))
+            foreach (var file in e.GetMultipleFiles(2000))
             {
                 var name = file.Name;
+                if (file.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase))
+                {
+                    await AddVideoSourcesAsync(file.Name);
+                    continue;
+                }
                 _statusMessage = $"Loading {name}...";
                 BuildProjectDetailUI();
 
@@ -836,6 +841,43 @@ public partial class Studio
             _statusMessage = $"Error: {ex.Message}";
             BuildProjectDetailUI();
             Console.WriteLine($"[Studio] Error loading images: {ex}");
+        }
+    }
+
+    /// <summary>Frames taken from a picked video (<c>&amp;videoframes=N</c>, default 120).</summary>
+    public static int VideoFrameCount { get; set; } = 120;
+
+    /// <summary>
+    /// A picked video becomes <see cref="VideoFrameCount"/> sharp, evenly spaced frames, each saved as an ordinary
+    /// project source - from there a video is a photo set to generation, training and the viewer.
+    /// </summary>
+    private async Task AddVideoSourcesAsync(string fileName)
+    {
+        if (_activeProject == null) return;
+        string url = await _videoExtractor.UrlForPickedFileAsync(fileName);
+        if (string.IsNullOrEmpty(url))
+        {
+            Console.WriteLine($"[Studio] {fileName}: picked video not found on the page");
+            return;
+        }
+        try
+        {
+            _statusMessage = $"Extracting {VideoFrameCount} frames from {fileName}...";
+            BuildProjectDetailUI();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var frames = await _videoExtractor.ExtractAsync(url, VideoFrameCount, progress: (i, n) =>
+            {
+                _statusMessage = $"Extracting frames from {fileName}: {i}/{n}";
+                BuildProjectDetailUI();
+            });
+            string stem = System.IO.Path.GetFileNameWithoutExtension(fileName);
+            foreach (var f in frames)
+                await _projectService.AddSourceAsync(_activeProject.Id, $"{stem}_{f.Name}", f.Jpeg, f.Width, f.Height);
+            Console.WriteLine($"[Studio] {fileName}: {frames.Count} frames saved as sources in {sw.Elapsed.TotalSeconds:F1}s");
+        }
+        finally
+        {
+            await _videoExtractor.RevokeAsync(url);
         }
     }
 

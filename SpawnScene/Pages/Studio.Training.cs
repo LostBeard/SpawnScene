@@ -1023,8 +1023,11 @@ public partial class Studio
         int keys = _trainer.KeysPerSplat;
         if (_trainer.PeakKeyDemand > 0)
         {
-            int needed = (int)Math.Ceiling(_trainer.PeakKeyDemand * 1.25 / Math.Max(1, n));
-            if (needed > keys)
+            // From THIS window's measured demand, up or down. It used to only ever grow: a sparse start (21k
+            // large splats from the BA cloud, ~80 tiles each) set ~100 per splat, and that was then applied to the
+            // densified set, whose splats are far smaller (MEASURED: 673k x 115 keys lost the device).
+            int needed = Math.Max(8, (int)Math.Ceiling(_trainer.PeakKeyDemand * 1.25 / Math.Max(1, n)));
+            if (needed != keys)
             {
                 Console.WriteLine(
                     $"[{logTag}] keysPerSplat {keys} -> {needed}: peak demand was " +
@@ -1276,6 +1279,15 @@ public partial class Studio
                     Console.WriteLine($"[Train] project source {url} is missing");
                     return false;
                 }
+            }
+            else if (url.StartsWith(VideoFrameStore.Prefix, StringComparison.Ordinal))
+            {
+                if (!VideoFrameStore.TryGet(url, out var frame))
+                {
+                    Console.WriteLine($"[Train] video frame {url} is not in the frame store");
+                    return false;
+                }
+                bytes = frame;
             }
             else
             {

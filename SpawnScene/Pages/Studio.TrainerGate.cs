@@ -220,14 +220,15 @@ public partial class Studio
             if (!recovered) { Console.WriteLine("[TrainerGate] FAIL: colours did not move toward truth"); return; }
             Console.WriteLine("[TrainerGate] colour/opacity PASS");
 
-            // -- Gradients: do the shaders compute what the verified CPU oracles compute? --
-            if (!await GradientGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
-
-            // -- The same gradients with the per-channel D-SSIM loss (&ssimrgb=1) vs its CPU oracle --
+            // -- Gradients: do the shaders compute what the verified CPU oracles compute? Both D-SSIM forms,
+            //    luma (&ssimrgb=0) and per-channel (the default), each against its own CPU oracle. --
             bool ssimWas = SplatTrainerGpu.SsimPerChannel;
-            SplatTrainerGpu.SsimPerChannel = true;
             try
             {
+                SplatTrainerGpu.SsimPerChannel = false;
+                if (!await GradientGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
+                Console.WriteLine("[TrainerGate] gradients (luma D-SSIM) PASS");
+                SplatTrainerGpu.SsimPerChannel = true;
                 if (!await GradientGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
                 Console.WriteLine("[TrainerGate] gradients (per-channel D-SSIM) PASS");
             }

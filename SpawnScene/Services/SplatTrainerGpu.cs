@@ -1164,14 +1164,23 @@ public sealed class SplatTrainerGpu : IDisposable
     /// a splat with no gradient this view still decays its moments and moves by the momentum it carries.
     /// Default false: such a splat is not stepped at all. <c>&amp;denseadam=1</c>.
     /// </summary>
-    public static bool DenseGeometryAdam { get; set; }
+    /// <remarks>
+    /// MEASURED 2026-09-25, Truck 7K / 3M / GT poses, two batches on two builds: final held-out captures +0.18 dB
+    /// (22.70 vs 22.52, tuvok-b2-dense) and +0.30 dB (22.62 vs 22.32, tuvok-b3-dense), SSIM up both times; run-to-run
+    /// noise on that mean is 0.1-0.2 dB (tuvok-b3-base vs -seed2). ~9% more splats. Default on; &amp;denseadam=0.
+    /// </remarks>
+    public static bool DenseGeometryAdam { get; set; } = true;
 
     /// <summary>
     /// D-SSIM in the training loss per RGB channel, averaged (<see cref="ImageQuality.MeanSsimRgb"/>): the reference's
     /// loss_utils.ssim. false: SSIM on Rec.601 luma, which hands blue 0.114 of one shared structural gradient and
     /// none to an edge that differs only in colour. Scoring SSIM stays on luma either way. <c>&amp;ssimrgb=1</c>.
     /// </summary>
-    public static bool SsimPerChannel { get; set; }
+    /// <remarks>
+    /// MEASURED 2026-09-25 (tuvok-b3-ssimrgb vs -base/-seed2): held-out captures 22.58 vs 22.32 / 22.36 dB, curve
+    /// 18.96 vs 18.86 / 18.71 (best of the batch), SSIM .813 vs .811 / .807. Default on; &amp;ssimrgb=0 for luma.
+    /// </remarks>
+    public static bool SsimPerChannel { get; set; } = true;
 
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
     public void ResetDensifyStats()

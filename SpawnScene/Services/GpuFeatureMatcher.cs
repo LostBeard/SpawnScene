@@ -41,6 +41,20 @@ public class GpuFeatureMatcher
     }
 
     /// <summary>
+    /// Every listed pair at once (<see cref="GpuPairMatcher"/>): identical matches to <see cref="MatchAsync"/>
+    /// pair by pair, without a CPU round trip per pair.
+    /// </summary>
+    public async Task MatchPairsAsync(
+        IReadOnlyList<IReadOnlyList<ImageFeature>> images, IReadOnlyList<(int A, int B)> pairs,
+        Action<int, List<FeatureMatch>> onPair, Func<int, Task>? onBatch = null)
+    {
+        _pairMatcher ??= new GpuPairMatcher(_gpu.Accelerator, _ratioThreshold, _maxDistance);
+        await _pairMatcher.MatchPairsAsync(images, pairs, onPair, onBatch);
+    }
+
+    private GpuPairMatcher? _pairMatcher;
+
+    /// <summary>
     /// GPU-accelerated matching implementation.
     /// </summary>
     private async Task<List<FeatureMatch>> MatchGpuAsync(List<ImageFeature> featuresA, List<ImageFeature> featuresB)

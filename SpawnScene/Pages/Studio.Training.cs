@@ -119,9 +119,15 @@ public partial class Studio
 
     /// <summary>
     /// Train the supervised views in a fresh random order every epoch, as the reference does
-    /// (<see cref="TrainingSchedule.ShuffleEpoch"/>), instead of file order. <c>&amp;shuffleviews=1</c>.
+    /// (<see cref="TrainingSchedule.ShuffleEpoch"/>), instead of file order. <c>&amp;shuffleviews=0</c> for file order.
     /// </summary>
-    public static bool ShuffleViews { get; set; }
+    /// <remarks>
+    /// MEASURED 2026-09-25, Truck 7K / 3M cap / GT poses, same build (tuvok-truck7k-order vs -shuffle): held-out
+    /// captures 21.88 -> 22.50 dB, SSIM .807 -> .814, sharpness .67 -> .69, held-out curve SSIM .726 -> .746. Biggest
+    /// at the end of the capture path (held-123 20.71 -> 22.60 dB, its smeared front end crisp by eye): in file
+    /// order those views always closed the epoch, next to a wrap back to the other end of the path.
+    /// </remarks>
+    public static bool ShuffleViews { get; set; } = true;
 
     /// <summary>Seed of the per-epoch view shuffle, so a run is reproducible. <c>&amp;shuffleseed=N</c>.</summary>
     public static int ShuffleViewsSeed { get; set; } = 1;

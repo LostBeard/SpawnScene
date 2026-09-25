@@ -357,8 +357,8 @@ public partial class Studio : IAsyncDisposable
             // ?densifydenom=frustum averages the densify gradient over every step a splat projected on screen
             // (the reference's radii > 0), not only the steps it received a gradient.
             if (query.TryGetValue("densifydenom", out var ddq)) SplatTrainerGpu.DensifyDenominatorFrustum = ddq == "frustum";
-            // ?shuffleviews=1 trains each epoch's views in a fresh random order (the reference); ?shuffleseed=N.
-            if (query.TryGetValue("shuffleviews", out var svq)) ShuffleViews = svq == "1" || svq == "true";
+            // Each epoch's views train in a fresh random order (the reference); ?shuffleviews=0 = file order; ?shuffleseed=N.
+            if (query.TryGetValue("shuffleviews", out var svq)) ShuffleViews = !(svq == "0" || svq == "false");
             if (query.TryGetValue("shuffleseed", out var ssq) && int.TryParse(ssq, out var ssi)) ShuffleViewsSeed = ssi;
             // ?fitone=N trains against view N alone - a ceiling on what the rasteriser and its
             // gradients can express, independent of supervision or scheduling.

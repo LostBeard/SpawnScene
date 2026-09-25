@@ -1884,13 +1884,18 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
     let A = transpose(mat3x3<f32>(u.cam_right.xyz, u.cam_up.xyz, u.cam_fwd.xyz));
     let sc = A * sigma_world * transpose(A);
 
-    // -- Perspective Jacobian of (u, v) = (fx * x / z, fy * y / z) at the centre --
+    // -- Perspective Jacobian of (u, v) = (fx * x / z, fy * y / z) at the centre, x/z and y/z clamped to
+    //    1.3 x tan(fov/2) exactly as the trainer (and the reference's computeCov2D) do. Without it the viewer drew
+    //    far-off-axis splats as the same huge smears the trainer did - differently, since it culls by world margin. --
     let invz = 1.0 / cz;
     let invz2 = invz * invz;
+    let lim = 1.3 * 0.5 * u.viewport / u.focal;
+    let cxc = clamp(cx * invz, -lim.x, lim.x) * cz;
+    let cyc = clamp(cy * invz, -lim.y, lim.y) * cz;
     let j00 = u.focal.x * invz;
-    let j02 = -u.focal.x * cx * invz2;
+    let j02 = -u.focal.x * cxc * invz2;
     let j11 = u.focal.y * invz;
-    let j12 = -u.focal.y * cy * invz2;
+    let j12 = -u.focal.y * cyc * invz2;
 
     // mat[col][row]; sigma_cam is symmetric so the order does not matter.
     let s00 = sc[0][0]; let s01 = sc[1][0]; let s02 = sc[2][0];

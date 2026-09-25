@@ -186,13 +186,19 @@ fn project(i : u32) -> Projected {
     let A = transpose(mat3x3<f32>(u.cam_right.xyz, u.cam_up.xyz, u.cam_fwd.xyz));
     let sc = A * sigma_world * transpose(A);
 
-    // Perspective Jacobian of (fx*x/z, fy*y/z).
+    // Perspective Jacobian of (fx*x/z, fy*y/z), evaluated at the reference's clamped (x/z, y/z) (forward.cu
+    // computeCov2D, 1.3 x tan(fov/2)): unclamped, a splat far outside the frustum projects to a frame-covering
+    // smear (MEASURED 2026-09-25: the whole trainer/viewer brightness gap came from those splats). The centre's own
+    // projection is not clamped. SplatCovariance.ProjectCov2D(..., limX, limY) is the CPU twin.
     let invz = 1.0 / cz;
     let invz2 = invz * invz;
+    let lim = 1.3 * 0.5 * u.viewport / u.focal;
+    let cxc = clamp(cx * invz, -lim.x, lim.x) * cz;
+    let cyc = clamp(cy * invz, -lim.y, lim.y) * cz;
     let j00 = u.focal.x * invz;
-    let j02 = -u.focal.x * cx * invz2;
+    let j02 = -u.focal.x * cxc * invz2;
     let j11 = u.focal.y * invz;
-    let j12 = -u.focal.y * cy * invz2;
+    let j12 = -u.focal.y * cyc * invz2;
 
     let s00 = sc[0][0]; let s01 = sc[1][0]; let s02 = sc[2][0];
     let s11 = sc[1][1]; let s12 = sc[2][1]; let s22 = sc[2][2];
@@ -1869,10 +1875,16 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
 
     let invz = 1.0 / tz;
     let invz2 = invz * invz;
+    // Same Jacobian clamp as project(); see SplatGeometryGradients.Backward for the derivative it implies.
+    let lim = 1.3 * 0.5 * u.viewport / u.focal;
+    let clamp_x = abs(tx * invz) > lim.x;
+    let clamp_y = abs(ty * invz) > lim.y;
+    let txc = clamp(tx * invz, -lim.x, lim.x) * tz;
+    let tyc = clamp(ty * invz, -lim.y, lim.y) * tz;
     let j00 = u.focal.x * invz;
-    let j02 = -u.focal.x * tx * invz2;
+    let j02 = -u.focal.x * txc * invz2;
     let j11 = u.focal.y * invz;
-    let j12 = -u.focal.y * ty * invz2;
+    let j12 = -u.focal.y * tyc * invz2;
 
     let cov_a = j00 * j00 * S00 + 2.0 * j00 * j02 * S02 + j02 * j02 * S22 + EWA_FILTER_PX2;
     let cov_b = j00 * j11 * S01 + j00 * j12 * S02 + j02 * j11 * S12 + j02 * j12 * S22;
@@ -1947,13 +1959,14 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
         up_cy * (-u.focal.y * invz),
         up_cx * (-u.focal.x * tx * invz2) + up_cy * (u.focal.y * ty * invz2));
 
-    gt.x = gt.x + gj02 * (-u.focal.x * invz2);
-    gt.y = gt.y + gj12 * (-u.focal.y * invz2);
+    // Clamped: J02 no longer depends on tx, and its z derivative halves (it is -fx * (+-lim) / z).
+    if (!clamp_x) { gt.x = gt.x + gj02 * (-u.focal.x * invz2); }
+    if (!clamp_y) { gt.y = gt.y + gj12 * (-u.focal.y * invz2); }
     gt.z = gt.z
          + gj00 * (-u.focal.x * invz2)
-         + gj02 * (2.0 * u.focal.x * tx * invz2 * invz)
+         + gj02 * (select(2.0, 1.0, clamp_x) * u.focal.x * txc * invz2 * invz)
          + gj11 * (-u.focal.y * invz2)
-         + gj12 * (2.0 * u.focal.y * ty * invz2 * invz);
+         + gj12 * (select(2.0, 1.0, clamp_y) * u.focal.y * tyc * invz2 * invz);
 
     let gpos = u.cam_right.xyz * gt.x + u.cam_up.xyz * gt.y + u.cam_fwd.xyz * gt.z;
 

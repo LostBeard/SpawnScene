@@ -183,10 +183,31 @@ public static class SplatCovariance
     }
 
     /// <summary>
+    /// The reference's EWA Jacobian clamp limit (graphdeco-inria forward.cu computeCov2D): 1.3 x tan(fov / 2) on one
+    /// axis, with tan(fov / 2) = size / (2 focal).
+    /// </summary>
+    public static float JacobianClampLimit(float sizePx, float focalPx) => 1.3f * sizePx / (2f * focalPx);
+
+    /// <summary>
+    /// <see cref="ProjectCov2D(Cov3, float, float, float, float, float)"/> with the reference's clamp: the Jacobian is
+    /// evaluated at (clamp(x/z, +-limX) z, clamp(y/z, +-limY) z). The centre's own projection is not clamped - only
+    /// the linearisation, which for a splat far outside the frustum stretches its footprint without bound
+    /// (MEASURED 2026-09-25: 3-sigma radii of 100-300 thousand px on Truck; frame-covering veils in the trainer).
+    /// </summary>
+    public static Cov2 ProjectCov2D(Cov3 camCov, float camX, float camY, float camZ, float fx, float fy,
+        float limX, float limY)
+    {
+        float cx = Math.Clamp(camX / camZ, -limX, limX) * camZ;
+        float cy = Math.Clamp(camY / camZ, -limY, limY) * camZ;
+        return ProjectCov2D(camCov, cx, cy, camZ, fx, fy);
+    }
+
+    /// <summary>
     /// Perspective-project a camera-space covariance to pixels: Sigma_2D = J * Sigma_cam * J^T,
     /// with J the Jacobian of (u, v) = (fx * x / z, fy * y / z) at the splat centre
     /// (<paramref name="camX"/>, <paramref name="camY"/>, <paramref name="camZ"/>).
-    /// The EWA prefilter is added here, so the result is ready to decompose.
+    /// The EWA prefilter is added here, so the result is ready to decompose. UNCLAMPED: the trainer and the viewer
+    /// use the clamped overload; this form is the legacy CPU renderer's.
     /// </summary>
     public static Cov2 ProjectCov2D(Cov3 camCov, float camX, float camY, float camZ, float fx, float fy)
     {

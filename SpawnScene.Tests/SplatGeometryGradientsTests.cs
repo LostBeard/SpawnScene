@@ -42,6 +42,8 @@ public class SplatGeometryGradientsTests
             Fx3 = fx, Fy3 = fy, Fz3 = fz,
             FocalX = 1520.4f, FocalY = 1525.9f,
             CenterX = 302.32f, CenterY = 246.87f,
+            LimX = SplatCovariance.JacobianClampLimit(2 * 302.32f, 1520.4f),
+            LimY = SplatCovariance.JacobianClampLimit(2 * 246.87f, 1525.9f),
         };
     }
 
@@ -209,6 +211,45 @@ public class SplatGeometryGradientsTests
     }
 
     [Test]
+    public void Gradients_MatchFiniteDifference_BeyondTheJacobianClamp()
+    {
+        // Outside the reference's 1.3 x half-FOV on BOTH axes, where the Jacobian is clamped: dL/dtx and dL/dty lose
+        // their J terms and d/dtz changes. Far from the clamp boundary (x/z = 0.55, y/z = 0.45 against limits of
+        // ~0.26 / ~0.21), so central differences never straddle the kink.
+        var v = Camera(0.4f, 0.25f, 1.2f);
+        var g = AtCamera(v, 0.66f, 0.54f, 1.2f, 0.020f, 0.014f, 0.006f, 0.13f, -0.24f, 0.08f, 0.96f);
+        Assert.That(0.66f / 1.2f, Is.GreaterThan(v.LimX * 1.5f), "fixture is not beyond the x clamp");
+        Assert.That(0.54f / 1.2f, Is.GreaterThan(v.LimY * 1.5f), "fixture is not beyond the y clamp");
+        Assert.That(SplatGeometryGradients.Project(g, v).Valid, Is.True);
+        CheckAll(g, v, "clamped");
+        // A mild splat's clamped J terms sit under the tolerance floor (red-check: a factor-2 d/dz error passed it).
+        // Anisotropic covariances make them dominant: flat, and elongated.
+        CheckAll(AtCamera(v, 0.66f, 0.54f, 1.2f, 0.030f, 0.028f, 0.0015f, -0.41f, 0.32f, 0.17f, 0.83f), v, "clamped-flat");
+        CheckAll(AtCamera(v, -0.70f, 0.50f, 1.1f, 0.003f, 0.004f, 0.060f, 0.13f, -0.24f, 0.08f, 0.96f), v, "clamped-long");
+    }
+
+    [Test]
+    public void JacobianClamp_BoundsTheFootprintOfAFarOffAxisSplat()
+    {
+        // The reason for the clamp: unclamped, a near splat far outside the frustum projects to an enormous
+        // ellipse (the Truck probe measured 100-300 thousand px). Clamped, its footprint is what it would be at
+        // the clamp boundary.
+        var cam = new SplatCovariance.Cov3 { M00 = 1e-4f, M11 = 1e-4f, M22 = 1e-4f };
+        float fx = 580f, fy = 580f, z = 0.3f, x = 3.0f;           // x/z = 10, limit ~1.1
+        float lim = SplatCovariance.JacobianClampLimit(979f, fx);
+        var un = SplatCovariance.ProjectCov2D(cam, x, 0f, z, fx, fy);
+        var cl = SplatCovariance.ProjectCov2D(cam, x, 0f, z, fx, fy, lim, lim);
+        var edge = SplatCovariance.ProjectCov2D(cam, lim * z, 0f, z, fx, fy);
+        // Isotropic: A ~ (fx/z)^2 s (1 + (x/z)^2), so the ratio is (1 + 10^2) / (1 + 1.19^2) ~ 42.
+        Assert.That(un.A, Is.GreaterThan(30f * cl.A), "unclamped footprint should be vastly larger");
+        Assert.That(cl.A, Is.EqualTo(edge.A).Within(1e-3f * edge.A), "clamped = the footprint at the clamp boundary");
+        // Inside the limits the clamp is the identity.
+        var inside = SplatCovariance.ProjectCov2D(cam, 0.5f * lim * z, 0f, z, fx, fy, lim, lim);
+        var inside0 = SplatCovariance.ProjectCov2D(cam, 0.5f * lim * z, 0f, z, fx, fy);
+        Assert.That(inside.A, Is.EqualTo(inside0.A));
+    }
+
+    [Test]
     public void Gradients_MatchFiniteDifference_HighlyAnisotropic()
     {
         // A near-flat splat: the covariance is close to singular, which is where the conic
@@ -335,7 +376,7 @@ public class SplatGeometryGradientsTests
         var cov3 = SplatCovariance.Cov3DFromScaleQuat(g.ScaleX, g.ScaleY, g.ScaleZ, q);
         var camCov = SplatCovariance.RotateToCamera(cov3,
             v.Rx, v.Ry, v.Rz, v.Ux, v.Uy, v.Uz, v.Fx3, v.Fy3, v.Fz3);
-        var cov2 = SplatCovariance.ProjectCov2D(camCov, tx, ty, tz, v.FocalX, v.FocalY);
+        var cov2 = SplatCovariance.ProjectCov2D(camCov, tx, ty, tz, v.FocalX, v.FocalY, v.LimX, v.LimY);
         float invDet = 1f / (cov2.A * cov2.C - cov2.B * cov2.B);
 
         Assert.That(p.ScreenX, Is.EqualTo(v.FocalX * tx / tz + v.CenterX).Within(1e-3f));

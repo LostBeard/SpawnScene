@@ -234,6 +234,9 @@ public partial class Studio
             }
             finally { SplatTrainerGpu.SsimPerChannel = ssimWas; }
 
+            // -- The same gradients on a scene WITH splats beyond the EWA Jacobian clamp --
+            if (!await JacobianClampGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
+
             // -- Densify carry: does every optimizer row land where the CPU oracle puts it? --
             if (!await CarryGateAsync(n)) return;
 
@@ -573,7 +576,9 @@ public partial class Studio
                 right.X, right.Y, right.Z, up.X, up.Y, up.Z, fwd.X, fwd.Y, fwd.Z);
             var cov2 = SplatCovariance.ProjectCov2D(camCov,
                 Vector3.Dot(right, rel), Vector3.Dot(up, rel), Vector3.Dot(fwd, rel),
-                cam.FocalX, cam.FocalY);
+                cam.FocalX, cam.FocalY,
+                SplatCovariance.JacobianClampLimit(cam.Width, cam.FocalX),
+                SplatCovariance.JacobianClampLimit(cam.Height, cam.FocalY));
             if (!(cov2.A * cov2.C - cov2.B * cov2.B > 1e-20f)) continue;
 
             map[i] = next++;
@@ -592,6 +597,8 @@ public partial class Studio
             Fx3 = f.X, Fy3 = f.Y, Fz3 = f.Z,
             FocalX = cam.FocalX, FocalY = cam.FocalY,
             CenterX = cam.CenterX, CenterY = cam.CenterY,
+            LimX = SplatCovariance.JacobianClampLimit(cam.Width, cam.FocalX),
+            LimY = SplatCovariance.JacobianClampLimit(cam.Height, cam.FocalY),
         };
     }
 
@@ -629,7 +636,9 @@ public partial class Studio
                 MathF.Max(packed[o + 6], 1e-9f), MathF.Max(packed[o + 7], 1e-9f), MathF.Max(packed[o + 8], 1e-9f), q);
             var camCov = SplatCovariance.RotateToCamera(cov3,
                 right.X, right.Y, right.Z, up.X, up.Y, up.Z, fwd.X, fwd.Y, fwd.Z);
-            var cov2 = SplatCovariance.ProjectCov2D(camCov, cx, cy, cz, cam.FocalX, cam.FocalY);
+            var cov2 = SplatCovariance.ProjectCov2D(camCov, cx, cy, cz, cam.FocalX, cam.FocalY,
+                SplatCovariance.JacobianClampLimit(cam.Width, cam.FocalX),
+                SplatCovariance.JacobianClampLimit(cam.Height, cam.FocalY));
 
             float det = cov2.A * cov2.C - cov2.B * cov2.B;
             if (!(det > 1e-20f)) continue;

@@ -37,6 +37,8 @@ public static class SplatGeometryGradients
         public float Fx3, Fy3, Fz3;    // forward
         public float FocalX, FocalY;
         public float CenterX, CenterY;
+        /// <summary>EWA Jacobian clamp limits on x/z and y/z (<see cref="SplatCovariance.JacobianClampLimit"/>). Required.</summary>
+        public float LimX, LimY;
     }
 
     /// <summary>A splat's geometry in world space. The quaternion need not be normalised.</summary>
@@ -103,7 +105,7 @@ public static class SplatGeometryGradients
             MathF.Max(g.ScaleX, 1e-9f), MathF.Max(g.ScaleY, 1e-9f), MathF.Max(g.ScaleZ, 1e-9f), q);
         var camCov = SplatCovariance.RotateToCamera(cov3,
             v.Rx, v.Ry, v.Rz, v.Ux, v.Uy, v.Uz, v.Fx3, v.Fy3, v.Fz3);
-        var cov2 = SplatCovariance.ProjectCov2D(camCov, tx, ty, tz, v.FocalX, v.FocalY);
+        var cov2 = SplatCovariance.ProjectCov2D(camCov, tx, ty, tz, v.FocalX, v.FocalY, v.LimX, v.LimY);
 
         float det = cov2.A * cov2.C - cov2.B * cov2.B;
         if (!(det > MinDet)) return default;
@@ -158,12 +160,18 @@ public static class SplatGeometryGradients
 
         float invZ = 1f / tz;
         float invZ2 = invZ * invZ;
+        // The reference's Jacobian clamp. Clamped, J02 = -fx * (+-limX) / z: no tx dependence, and d/dz is
+        // fx * txc / z^3 - HALF the unclamped 2 fx tx / z^3. (The reference's backward keeps the factor 2 there;
+        // this is the derivative of the forward it actually runs, and finite differences hold it to that.)
+        bool clampX = MathF.Abs(tx / tz) > v.LimX, clampY = MathF.Abs(ty / tz) > v.LimY;
+        float txc = Math.Clamp(tx / tz, -v.LimX, v.LimX) * tz;
+        float tyc = Math.Clamp(ty / tz, -v.LimY, v.LimY) * tz;
         float j00 = v.FocalX * invZ;
-        float j02 = -v.FocalX * tx * invZ2;
+        float j02 = -v.FocalX * txc * invZ2;
         float j11 = v.FocalY * invZ;
-        float j12 = -v.FocalY * ty * invZ2;
+        float j12 = -v.FocalY * tyc * invZ2;
 
-        var cov2 = SplatCovariance.ProjectCov2D(camCov, tx, ty, tz, v.FocalX, v.FocalY);
+        var cov2 = SplatCovariance.ProjectCov2D(camCov, tx, ty, tz, v.FocalX, v.FocalY, v.LimX, v.LimY);
         float a = cov2.A, b = cov2.B, c = cov2.C;
         float det = a * c - b * b;
         if (!(det > MinDet)) return default;
@@ -304,13 +312,13 @@ public static class SplatGeometryGradients
             up.ScreenX * (-v.FocalX * tx * invZ2) +
             up.ScreenY * (v.FocalY * ty * invZ2);
 
-        gtx += gj02 * (-v.FocalX * invZ2);
-        gty += gj12 * (-v.FocalY * invZ2);
+        if (!clampX) gtx += gj02 * (-v.FocalX * invZ2);
+        if (!clampY) gty += gj12 * (-v.FocalY * invZ2);
         gtz +=
             gj00 * (-v.FocalX * invZ2) +
-            gj02 * (2f * v.FocalX * tx * invZ2 * invZ) +
+            gj02 * ((clampX ? 1f : 2f) * v.FocalX * txc * invZ2 * invZ) +
             gj11 * (-v.FocalY * invZ2) +
-            gj12 * (2f * v.FocalY * ty * invZ2 * invZ);
+            gj12 * ((clampY ? 1f : 2f) * v.FocalY * tyc * invZ2 * invZ);
 
         // t = A (p - eye)  =>  dL/dp = A^T dL/dt
         return new Grad

@@ -106,4 +106,58 @@ public class TrainingScheduleTests
         Assert.That(TrainingSchedule.ExponentialLr(0f, 0f, 5, 100), Is.EqualTo(0f));
         Assert.That(TrainingSchedule.ExponentialLr(1e-4f, 1e-6f, 5, 0), Is.EqualTo(1e-4f));
     }
+
+    [Test]
+    public void ShuffleEpochIsAReproducibleUniformPermutation()
+    {
+        // Truck's supervised count; production scale for a path-ordered capture.
+        const int views = 63, epochs = 20_000;
+        var rng = new Random(7);
+        var order = Enumerable.Range(0, views).ToArray();
+        var countAt = new int[views, views];      // [position, view]
+        int sameAsPrevious = 0;
+        int[] previous = (int[])order.Clone();
+        for (int e = 0; e < epochs; e++)
+        {
+            // Chained, as training calls it: each epoch permutes the previous one.
+            TrainingSchedule.ShuffleEpoch(order, rng);
+            Assert.That(order.Order(), Is.EqualTo(Enumerable.Range(0, views)), $"epoch {e} is not a permutation");
+            if (order.SequenceEqual(previous)) sameAsPrevious++;
+            previous = (int[])order.Clone();
+
+            // The distribution of ONE shuffle is measured from identity. Chained epochs cannot measure it:
+            // composing even a biased shuffle with an already-random order mixes to uniform (MEASURED: the
+            // naive rng.Next(n) swap scored chi2 4179 chained, inside noise, and 183,770 from identity).
+            var fresh = Enumerable.Range(0, views).ToArray();
+            TrainingSchedule.ShuffleEpoch(fresh, rng);
+            for (int p = 0; p < views; p++) countAt[p, fresh[p]]++;
+        }
+        Assert.That(sameAsPrevious, Is.Zero, "two consecutive epochs had the same order");
+
+        // Every view lands at every position ~epochs/views times. Chi-square over the 63x63 table
+        // (62*62 = 3844 dof, sd ~88): a biased shuffle (e.g. rng.Next(views) at each i) exceeds it by thousands.
+        double expected = epochs / (double)views, chi2 = 0;
+        foreach (int c in countAt) chi2 += (c - expected) * (c - expected) / expected;
+        Assert.That(chi2, Is.LessThan(3844 + 5 * 88), $"position/view table is not uniform: chi2 {chi2:F0}");
+
+        // Negative control: file order every epoch (what training did before) fails the same bar.
+        double chi2File = 0;
+        for (int p = 0; p < views; p++)
+            for (int v = 0; v < views; v++)
+            {
+                double c = p == v ? epochs : 0;
+                chi2File += (c - expected) * (c - expected) / expected;
+            }
+        Assert.That(chi2File, Is.GreaterThan(3844 + 5 * 88), "the uniformity check cannot fail");
+
+        // Same seed, same sequence: a run is reproducible.
+        int[] a = Enumerable.Range(0, views).ToArray(), b = Enumerable.Range(0, views).ToArray();
+        Random ra = new(3), rb = new(3);
+        for (int e = 0; e < 5; e++)
+        {
+            TrainingSchedule.ShuffleEpoch(a, ra);
+            TrainingSchedule.ShuffleEpoch(b, rb);
+            Assert.That(a, Is.EqualTo(b), $"seeded epoch {e} differs");
+        }
+    }
 }

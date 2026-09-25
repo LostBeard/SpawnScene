@@ -85,10 +85,16 @@ public static class SplatDensityControl
     /// Screen radius (3 sigma, pixels) above which a Gaussian is pruned. Also post-reset only. Off by default.
     /// </summary>
     /// <remarks>
-    /// The reference uses 20 px. MEASURED 2026-09-24 on Truck (1.2M splats, 979 px): 20 px pruned 106k splats at
+    /// The reference's 20 px prune is DEAD CODE, so "off" is what the reference actually does. In
+    /// graphdeco-inria <c>scene/gaussian_model.py</c>, <c>densify_and_prune</c> calls <c>densify_and_clone</c> and
+    /// <c>densify_and_split</c> first, and both end in <c>densification_postfix</c>, which sets
+    /// <c>self.max_radii2D = torch.zeros(...)</c>; only then does the prune test <c>self.max_radii2D &gt; 20</c>,
+    /// which is always false. (Read 2026-09-25.) Only the world-size prune (<see cref="MaxWorldSizeFraction"/>)
+    /// is live there. So a scene collapsing under a 20 px prune says nothing about our optimiser against the
+    /// reference - the reference never runs one. MEASURED 2026-09-24 on Truck (1.2M splats, 979 px): 20 px pruned 106k splats at
     /// the first densify after the opacity reset, supervised PSNR 19.0 -> 8.0 dB and never recovered (final loss
-    /// 0.188 vs 0.0018). This trainer carries far fewer, larger splats than the reference ends with, so 20 px is
-    /// most of the scene's coverage, not its floaters. Until 2026-09-24 the radius was never filled at all, so
+    /// 0.188 vs 0.0018): at 20 px the pruned splats are
+    /// much of the scene's coverage, not its floaters. Until 2026-09-24 the radius was never filled at all, so
     /// "off" is also what every earlier run had. <c>&amp;maxradpx=N</c> to measure a threshold.
     /// </remarks>
     public static float MaxScreenRadiusPx { get; set; } = float.PositiveInfinity;

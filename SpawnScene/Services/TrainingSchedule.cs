@@ -47,6 +47,25 @@ public static class TrainingSchedule
     }
 
     /// <summary>
+    /// Reorder <paramref name="order"/> into a fresh uniform random permutation: the order the views of one
+    /// epoch are trained in. The reference (train.py) pops a random view from <c>viewpoint_stack</c> each
+    /// iteration and refills the stack when it empties, which is exactly one uniform permutation per epoch.
+    ///
+    /// The alternative, file order every epoch, feeds Adam neighbouring views back to back whenever the
+    /// photos were taken along a path (Truck, video frames): the moments then average a sweep of one side of
+    /// the scene instead of the whole rig. Fisher-Yates; permutes whatever it is given, so the caller's
+    /// previous order is irrelevant to the result's distribution.
+    /// </summary>
+    public static void ShuffleEpoch(int[] order, Random rng)
+    {
+        for (int i = order.Length - 1; i > 0; i--)
+        {
+            int j = rng.Next(i + 1);
+            (order[i], order[j]) = (order[j], order[i]);
+        }
+    }
+
+    /// <summary>
     /// Exponential learning-rate decay, the reference's <c>get_expon_lr_func</c>.
     ///
     /// 3DGS decays the POSITION rate by 100x across training - 1.6e-4 to 1.6e-6 - and holds the

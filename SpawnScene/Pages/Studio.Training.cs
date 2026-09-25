@@ -118,6 +118,15 @@ public partial class Studio
     public static int PositionLrMaxSteps { get; set; } = 30_000;
 
     /// <summary>
+    /// Train the supervised views in a fresh random order every epoch, as the reference does
+    /// (<see cref="TrainingSchedule.ShuffleEpoch"/>), instead of file order. <c>&amp;shuffleviews=1</c>.
+    /// </summary>
+    public static bool ShuffleViews { get; set; }
+
+    /// <summary>Seed of the per-epoch view shuffle, so a run is reproducible. <c>&amp;shuffleseed=N</c>.</summary>
+    public static int ShuffleViewsSeed { get; set; } = 1;
+
+    /// <summary>
     /// Train against ONE view only, -1 to disable. A capacity probe, not a reconstruction:
     /// see the comment at its use site.
     /// </summary>
@@ -435,6 +444,11 @@ public partial class Studio
             var keysPerView = new int[supervised.Count];
             var lossPerView = new float[supervised.Count];
             int totalCycles = iterations / Math.Max(1, supervised.Count);
+            var viewOrder = new int[supervised.Count];
+            for (int k = 0; k < viewOrder.Length; k++) viewOrder[k] = k;
+            var viewRng = new Random(ShuffleViewsSeed);
+            if (ShuffleViews)
+                Console.WriteLine($"[Train] view order: shuffled every epoch (seed {ShuffleViewsSeed})");
 
             // Count, over the FIRST full cycle, how many views ever move each splat. Measured at
             // the start because it is a property of the INITIALISATION - a stack of per-view
@@ -458,7 +472,12 @@ public partial class Studio
                             it, PositionLrMaxSteps),
                     };
 
-                int vi = supervised[it % supervised.Count];
+                // Slot in `supervised` for this iteration: file order, or a fresh permutation per epoch
+                // (ShuffleViews, the reference's viewpoint_stack). Per-view census arrays index by slot.
+                int pos = it % supervised.Count;
+                if (pos == 0 && ShuffleViews) TrainingSchedule.ShuffleEpoch(viewOrder, viewRng);
+                int si = viewOrder[pos];
+                int vi = supervised[si];
                 var cam = views[vi].Camera.ScaledTo(w, h);
                 var (near, far) = SplatBounds.DepthRangeFor(box, cam);
 
@@ -496,14 +515,14 @@ public partial class Studio
                     if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0
                         && !_trainer.LastOverflowed)
                         deadViews.Add(vi);
-                    liveFraction[it] = (float)(st.ColourLive / (double)Math.Max(1, n));
+                    liveFraction[si] = (float)(st.ColourLive / (double)Math.Max(1, n));
 
                     // Splits the question in two. A view that emitted NO keys was culled before
                     // rasterisation, so the bug is in projection, depth range or tiling. A view
                     // that emitted keys and still produced no gradient lost them in the backward
                     // pass. Those are different files.
-                    keysPerView[it] = _trainer.LastKeyCount;
-                    lossPerView[it] = loss;
+                    keysPerView[si] = _trainer.LastKeyCount;
+                    lossPerView[si] = loss;
 
                     // For a view that produced nothing, ask WHERE it was lost.
                     if (st.ColourLive == 0 && st.CentreLive == 0 && st.ConicLive == 0)

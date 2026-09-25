@@ -321,12 +321,11 @@ public partial class Studio
             // The camera-rig radius, the scene extent the reference scales both the position
             // learning rate and the clone/split size threshold by. Needed whether or not
             // geometry is being optimised, because density control uses it too.
-            var rigCentroid = Vector3.Zero;
-            foreach (var v in views) rigCentroid += v.Camera.Position;
-            rigCentroid /= views.Count;
-            float rigRadius = 0f;
-            foreach (var v in views)
-                rigRadius = MathF.Max(rigRadius, Vector3.Distance(v.Camera.Position, rigCentroid));
+            // Exactly the reference's cameras_extent (dataset_readers.getNerfppNorm): 1.1 x the largest distance
+            // of a TRAIN camera from their centroid. Held-out cameras do not set it there, and neither do they here.
+            var rigViews = views.Where(v => v.UsedForSupervision).ToList();
+            if (rigViews.Count == 0) rigViews = views.ToList();
+            float rigRadius = TrainingSchedule.CamerasExtent(rigViews.Select(v => v.Camera.Position).ToList());
             if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
 
             SplatTrainerGpu.GeometryStep? geo = null;
@@ -348,7 +347,7 @@ public partial class Studio
                     MaxScale: MaxScaleFraction * MathF.Max(rigRadius, 1e-3f));
 
                 Console.WriteLine(
-                    $"[Train] geometry ON: rig radius {rigRadius:F3}, " +
+                    $"[Train] geometry ON: scene extent {rigRadius:F3} (1.1 x train rig, reference), " +
                     $"posLr {geo.Value.PositionLr:G3}, scaleLr {geo.Value.LogScaleLr:G3}, " +
                     $"rotLr {geo.Value.RotationLr:G3}, scale in " +
                     $"[{geo.Value.MinScale:G3}, {geo.Value.MaxScale:G3}]");

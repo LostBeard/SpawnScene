@@ -47,6 +47,23 @@ public static class TrainingSchedule
     }
 
     /// <summary>
+    /// The reference's <c>cameras_extent</c> (<c>scene/dataset_readers.py</c> getNerfppNorm): 1.1 times the largest
+    /// distance of a camera centre from the centroid of the centres. Pass the TRAIN cameras - the reference computes
+    /// it from <c>train_cam_infos</c>. Scales the position learning rate, the clone/split size bar and the
+    /// world-size prune. 0 for no cameras.
+    /// </summary>
+    public static float CamerasExtent(IReadOnlyList<System.Numerics.Vector3> centres)
+    {
+        if (centres.Count == 0) return 0f;
+        var centroid = System.Numerics.Vector3.Zero;
+        foreach (var c in centres) centroid += c;
+        centroid /= centres.Count;
+        float max = 0f;
+        foreach (var c in centres) max = MathF.Max(max, System.Numerics.Vector3.Distance(c, centroid));
+        return 1.1f * max;
+    }
+
+    /// <summary>
     /// Reorder <paramref name="order"/> into a fresh uniform random permutation: the order the views of one
     /// epoch are trained in. The reference (train.py) pops a random view from <c>viewpoint_stack</c> each
     /// iteration and refills the stack when it empties, which is exactly one uniform permutation per epoch.

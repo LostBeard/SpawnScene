@@ -160,4 +160,27 @@ public class TrainingScheduleTests
             Assert.That(a, Is.EqualTo(b), $"seeded epoch {e} differs");
         }
     }
+
+    [Test]
+    public void CamerasExtentIsTheReferenceRadius()
+    {
+        // getNerfppNorm: centroid of the centres, max distance from it, times 1.1. Off-origin, so a version that
+        // measured from the origin (or used the AABB) disagrees.
+        var off = new System.Numerics.Vector3(10, -4, 7);
+        var cams = new[]
+        {
+            off + new System.Numerics.Vector3(1, 0, 0), off + new System.Numerics.Vector3(-1, 0, 0),
+            off + new System.Numerics.Vector3(0, 3, 0), off + new System.Numerics.Vector3(0, -3, 0),
+        };
+        Assert.That(TrainingSchedule.CamerasExtent(cams), Is.EqualTo(3.3f).Within(1e-5f));
+
+        // Uneven: centroid (0.75, 0, 0); farthest centre is (3,0,0) at 2.25 -> 2.475.
+        var uneven = new[]
+        {
+            new System.Numerics.Vector3(0, 0, 0), new System.Numerics.Vector3(0, 0, 0),
+            new System.Numerics.Vector3(0, 0, 0), new System.Numerics.Vector3(3, 0, 0),
+        };
+        Assert.That(TrainingSchedule.CamerasExtent(uneven), Is.EqualTo(2.475f).Within(1e-5f));
+        Assert.That(TrainingSchedule.CamerasExtent(Array.Empty<System.Numerics.Vector3>()), Is.Zero);
+    }
 }

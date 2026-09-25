@@ -272,6 +272,10 @@ public partial class Studio : IAsyncDisposable
             // &bainit=0: per-view depth-shell init even when BA produced a sparse cloud (A/B).
             // &targetmb=N: the resident training-target budget (MiB). 256 shrank Truck's 126 views to 734 px.
             // &trainprofile=1: wait after each training-step phase and log the per-phase ms (diagnostic).
+            // &maxradpx=N: densify prunes splats whose 3-sigma screen radius exceeded N px (post-reset). Off by default.
+            if (query.TryGetValue("maxradpx", out var mrq) && float.TryParse(mrq,
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mrv) && mrv > 0)
+                SplatDensityControl.MaxScreenRadiusPx = mrv;
             // &shdeg=N: cap the viewer's SH degree after training (the trainer-render dump uses the same).
             if (query.TryGetValue("shdeg", out var shq) && int.TryParse(shq, out var shv))
                 ViewerShDegreeCap = Math.Max(0, shv);

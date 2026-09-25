@@ -81,8 +81,17 @@ public static class SplatDensityControl
     /// </summary>
     public const float MaxWorldSizeFraction = 0.1f;
 
-    /// <summary>Screen radius in pixels above which a Gaussian is pruned. Also post-reset only.</summary>
-    public const float MaxScreenRadiusPx = 20f;
+    /// <summary>
+    /// Screen radius (3 sigma, pixels) above which a Gaussian is pruned. Also post-reset only. Off by default.
+    /// </summary>
+    /// <remarks>
+    /// The reference uses 20 px. MEASURED 2026-09-24 on Truck (1.2M splats, 979 px): 20 px pruned 106k splats at
+    /// the first densify after the opacity reset, supervised PSNR 19.0 -> 8.0 dB and never recovered (final loss
+    /// 0.188 vs 0.0018). This trainer carries far fewer, larger splats than the reference ends with, so 20 px is
+    /// most of the scene's coverage, not its floaters. Until 2026-09-24 the radius was never filled at all, so
+    /// "off" is also what every earlier run had. <c>&amp;maxradpx=N</c> to measure a threshold.
+    /// </remarks>
+    public static float MaxScreenRadiusPx { get; set; } = float.PositiveInfinity;
 
     /// <summary>
     /// What the training loop accumulates per Gaussian between densification steps.

@@ -1161,6 +1161,13 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public static bool DenseGeometryAdam { get; set; }
 
+    /// <summary>
+    /// D-SSIM in the training loss per RGB channel, averaged (<see cref="ImageQuality.MeanSsimRgb"/>): the reference's
+    /// loss_utils.ssim. false: SSIM on Rec.601 luma, which hands blue 0.114 of one shared structural gradient and
+    /// none to an edge that differs only in colour. Scoring SSIM stays on luma either way. <c>&amp;ssimrgb=1</c>.
+    /// </summary>
+    public static bool SsimPerChannel { get; set; }
+
     /// <summary>Start a fresh densification window. Call after each densify step.</summary>
     public void ResetDensifyStats()
     {
@@ -1335,7 +1342,13 @@ public sealed class SplatTrainerGpu : IDisposable
     /// oracle's window ever changes, this throws with the file to edit instead of silently
     /// scoring two different metrics.
     /// </summary>
-    void WriteSsimCfg()
+    void WriteSsimCfg() => WriteSsimCfg((float)ImageQuality.LumaR, (float)ImageQuality.LumaG, (float)ImageQuality.LumaB);
+
+    /// <summary>
+    /// SSIM config with the given channel weights: luma for scoring, one-hot for one pass of the per-channel
+    /// training loss (<see cref="SsimPerChannel"/>). Every value still comes from <see cref="ImageQuality"/>.
+    /// </summary>
+    void WriteSsimCfg(float wr, float wg, float wb)
     {
         if (ImageQuality.WindowSize != 11)
             throw new InvalidOperationException(
@@ -1345,9 +1358,9 @@ public sealed class SplatTrainerGpu : IDisposable
 
         var k = ImageQuality.GaussianKernel1D();
         var f = new float[20];                       // 80 bytes: luma, consts, 3 x vec4 of taps
-        f[0] = (float)ImageQuality.LumaR;
-        f[1] = (float)ImageQuality.LumaG;
-        f[2] = (float)ImageQuality.LumaB;
+        f[0] = wr;
+        f[1] = wg;
+        f[2] = wb;
         f[4] = (float)ImageQuality.C1;
         f[5] = (float)ImageQuality.C2;
         for (int i = 0; i < k.Length; i++) f[8 + i] = (float)k[i];
@@ -1631,8 +1644,14 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(4, _dimsBuf!), Buf(5, _lossWeightsBuf!),
         });
 
+        // Per channel: the same four passes three times, one-hot channel weights at lambda / 3 each, which sums to
+        // exactly ImageQuality.AddMeanSsimRgbGradient (ssim_pix_bwd ADDS into dL/dpix). Each Dispatch submits, so
+        // rewriting the cfg between passes is ordered. The luma cfg is restored for scoring afterwards.
+        int ssimPasses = SsimPerChannel ? 3 : 1;
+        for (int ssimPass = 0; ssimPass < ssimPasses; ssimPass++)
         if (HasSsimWindows && _ssimRows != null && _ssimWinGrad != null && _ssimDRows != null)
         {
+            if (SsimPerChannel) WriteSsimCfg(ssimPass == 0 ? 1f : 0f, ssimPass == 1 ? 1f : 0f, ssimPass == 2 ? 1f : 0f);
             // Reuse the scoring forward's horizontal pass, then the three adjoint passes that
             // mirror ImageQuality.AddMeanSsimLumaGradient (FD-gated).
             // ssim_rows dims: wx, wy (=height-10), srcW, targetOffset. srcH = wy+10.
@@ -1645,7 +1664,7 @@ public sealed class SplatTrainerGpu : IDisposable
             });
 
             WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_width, 0);
-            WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaDssim, 0f, 0f, 0f);
+            WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaDssim / ssimPasses, 0f, 0f, 0f);
             int winThreads = SsimWindowsX * SsimWindowsY;
             Dispatch(_ssimWinGradPipe!, (winThreads + 255) / 256, 1, new[]
             {
@@ -1668,6 +1687,7 @@ public sealed class SplatTrainerGpu : IDisposable
                 Buf(4, _ssimDimsBuf!), Buf(5, _ssimCfgBuf!),
             });
         }
+        if (SsimPerChannel && HasSsimWindows) WriteSsimCfg();
 
         await PhaseAsync("loss+ssim");
         // ── Backward: one workgroup per tile, no atomics for signed grads ──

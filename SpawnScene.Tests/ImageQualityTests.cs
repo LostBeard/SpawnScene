@@ -166,6 +166,52 @@ public class ImageQualityTests
     }
 
     [Test]
+    public void MeanSsimRgbGradient_MatchesCentralFiniteDifference()
+    {
+        // Colour-only structure is the point: B differs from A in blue far more than in luma, so a luma-only
+        // gradient would be ~0.114x what the per-channel SSIM asks for in the blue channel.
+        const int W = 32, H = 28;
+        var (a, b) = ImageQuality.AnalyticFixture(W, H);
+        for (int i = 0; i < b.Length; i += 3) b[i + 2] = System.Math.Clamp(b[i + 2] + 0.3f * (float)System.Math.Sin(i * 0.37), 0f, 1f);
+        var grad = new float[a.Length];
+        ImageQuality.AddMeanSsimRgbGradient(a, b, W, H, grad);
+
+        const float Eps = 1e-3f;
+        int checkedN = 0, blueChecked = 0;
+        double maxAbs = 0;
+        for (int i = 0; i < a.Length; i += 13)
+        {
+            float save = a[i];
+            a[i] = save + Eps;
+            double plus = ImageQuality.MeanSsimRgb(a, b, W, H);
+            a[i] = save - Eps;
+            double minus = ImageQuality.MeanSsimRgb(a, b, W, H);
+            a[i] = save;
+            double numeric = (plus - minus) / (2 * Eps);
+            double abs = System.Math.Abs(grad[i] - numeric);
+            maxAbs = System.Math.Max(maxAbs, abs);
+            if (System.Math.Abs(numeric) < 1e-6)
+                Assert.That(abs, Is.LessThan(1e-8), $"channel {i}: analytic {grad[i]:G6} vs numeric {numeric:G6}");
+            else
+            {
+                Assert.That(abs / System.Math.Abs(numeric), Is.LessThan(0.02),
+                    $"channel {i}: analytic {grad[i]:G6} vs numeric {numeric:G6}");
+                if (i % 3 == 2) blueChecked++;
+            }
+            checkedN++;
+        }
+        Assert.That(checkedN, Is.GreaterThan(20));
+        Assert.That(blueChecked, Is.GreaterThan(5), "the blue channel must carry real gradient in this fixture");
+
+        // And it is NOT the luma gradient: on this fixture the two differ in the blue channel.
+        var luma = new float[a.Length];
+        ImageQuality.AddMeanSsimGradient(a, b, W, H, luma);
+        double diff = 0;
+        for (int i = 2; i < a.Length; i += 3) diff = System.Math.Max(diff, System.Math.Abs(luma[i] - grad[i]));
+        Assert.That(diff, Is.GreaterThan(1e-5), "per-channel and luma SSIM gradients must differ on colour structure");
+    }
+
+    [Test]
     public void DSsimLossGradient_IsNegatedMeanSsimGradient()
     {
         // loss = lambda * (1 - SSIM) ⇒ dL/d(pixel) = -lambda * dSSIM/d(pixel).

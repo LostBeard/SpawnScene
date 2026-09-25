@@ -352,6 +352,8 @@ public partial class Studio : IAsyncDisposable
             // ?poslrdecay=N is how far the position rate falls over PositionLrMaxSteps; 1 = off.
             if (query.TryGetValue("poslrdecay", out var pdq) && float.TryParse(pdq, out var pdf))
                 PositionLrDecay = pdf;
+            // ?ssimrgb=1 computes the training D-SSIM per RGB channel (the reference), not on luma.
+            if (query.TryGetValue("ssimrgb", out var srq)) SplatTrainerGpu.SsimPerChannel = srq == "1" || srq == "true";
             // ?denseadam=1 steps geometry Adam for splats with no gradient too (torch Adam, the reference).
             if (query.TryGetValue("denseadam", out var daq)) SplatTrainerGpu.DenseGeometryAdam = daq == "1" || daq == "true";
             // ?densifydenom=frustum averages the densify gradient over every step a splat projected on screen

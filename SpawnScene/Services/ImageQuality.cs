@@ -94,6 +94,53 @@ public static class ImageQuality
         => MeanSsimLuma(LumaPlane(rgbA, width, height), LumaPlane(rgbB, width, height),
             width, height);
 
+    /// <summary>One colour channel (0 = R, 1 = G, 2 = B) of interleaved RGB as a plane.</summary>
+    public static double[] ChannelPlane(ReadOnlySpan<float> rgb, int width, int height, int channel)
+    {
+        var y = new double[width * height];
+        for (int i = 0; i < y.Length; i++) y[i] = rgb[i * 3 + channel];
+        return y;
+    }
+
+    /// <summary>
+    /// Mean SSIM per RGB channel, averaged over the three channels: the reference 3DGS training loss's SSIM
+    /// (<c>utils/loss_utils.py</c> ssim: <c>conv2d(..., groups=channel)</c>, then <c>.mean()</c> over every channel
+    /// and pixel). Same window, stabilisers and 'valid' windows as <see cref="MeanSsim"/>; only the luma
+    /// projection differs. <see cref="MeanSsim"/> (luma) stays the SCORING metric so reports remain comparable.
+    /// </summary>
+    public static double MeanSsimRgb(ReadOnlySpan<float> rgbA, ReadOnlySpan<float> rgbB, int width, int height)
+    {
+        double sum = 0;
+        for (int c = 0; c < 3; c++)
+            sum += MeanSsimLuma(ChannelPlane(rgbA, width, height, c), ChannelPlane(rgbB, width, height, c), width, height);
+        return sum / 3;
+    }
+
+    /// <summary>
+    /// Gradient of <see cref="MeanSsimRgb"/> w.r.t. image A, times <paramref name="scale"/>, added into
+    /// <paramref name="dRgbA"/>. Each channel carries its own full SSIM gradient (at 1/3), where the luma form
+    /// hands blue 0.114 of one shared gradient.
+    /// </summary>
+    public static void AddMeanSsimRgbGradient(
+        ReadOnlySpan<float> rgbA, ReadOnlySpan<float> rgbB,
+        int width, int height, Span<float> dRgbA, double scale = 1.0)
+    {
+        if (width < WindowSize || height < WindowSize)
+            throw new ArgumentException(
+                $"{width}x{height} is smaller than the {WindowSize}x{WindowSize} SSIM window");
+        int nPix = width * height;
+        if (rgbA.Length < nPix * 3 || rgbB.Length < nPix * 3 || dRgbA.Length < nPix * 3)
+            throw new ArgumentException("RGB buffers shorter than width*height*3");
+        var d = new double[nPix];
+        for (int c = 0; c < 3; c++)
+        {
+            Array.Clear(d);
+            AddMeanSsimLumaGradient(ChannelPlane(rgbA, width, height, c), ChannelPlane(rgbB, width, height, c),
+                width, height, d, scale / 3);
+            for (int i = 0; i < nPix; i++) dRgbA[i * 3 + c] += (float)d[i];
+        }
+    }
+
     /// <summary>
     /// Mean SSIM of two luma planes. Separated out so the browser gate can score planes it
     /// already holds without rebuilding them.

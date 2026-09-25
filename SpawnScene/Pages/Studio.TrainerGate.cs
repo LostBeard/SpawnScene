@@ -223,6 +223,16 @@ public partial class Studio
             // -- Gradients: do the shaders compute what the verified CPU oracles compute? --
             if (!await GradientGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
 
+            // -- The same gradients with the per-channel D-SSIM loss (&ssimrgb=1) vs its CPU oracle --
+            bool ssimWas = SplatTrainerGpu.SsimPerChannel;
+            SplatTrainerGpu.SsimPerChannel = true;
+            try
+            {
+                if (!await GradientGateAsync(trainer, splatBuf, packedDc, n, cam, depthNear, depthFar)) return;
+                Console.WriteLine("[TrainerGate] gradients (per-channel D-SSIM) PASS");
+            }
+            finally { SplatTrainerGpu.SsimPerChannel = ssimWas; }
+
             // -- Densify carry: does every optimizer row land where the CPU oracle puts it? --
             if (!await CarryGateAsync(n)) return;
 
@@ -283,8 +293,12 @@ public partial class Studio
         var (colour, finalT, endIdx) = SplatTileRasterizer.Forward(cpuSplats, bin);
         var dPix = SplatRasterizer.L1Gradient(colour, target);
         for (int i = 0; i < dPix.Length; i++) dPix[i] *= ImageQuality.LambdaL1;
-        ImageQuality.AddMeanSsimGradient(colour, target, GateWidth, GateHeight, dPix,
-            scale: -ImageQuality.LambdaDssim);
+        if (SplatTrainerGpu.SsimPerChannel)
+            ImageQuality.AddMeanSsimRgbGradient(colour, target, GateWidth, GateHeight, dPix,
+                scale: -ImageQuality.LambdaDssim);
+        else
+            ImageQuality.AddMeanSsimGradient(colour, target, GateWidth, GateHeight, dPix,
+                scale: -ImageQuality.LambdaDssim);
         var cpu2d = SplatTileRasterizer.Backward(cpuSplats, bin, finalT, endIdx, dPix);
 
         // ProjectForCpu drops splats behind the camera, so CPU index != splat index. Rebuild

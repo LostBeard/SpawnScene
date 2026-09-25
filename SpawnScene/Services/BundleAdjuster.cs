@@ -41,6 +41,8 @@ public sealed class BundleAdjuster
         public double CgTolerance { get; init; } = 1e-6;
         /// <summary>Called after each round: (round, LM iterations, inlier RMS px, observations kept).</summary>
         public Action<int, int, double, int>? RoundLog { get; init; }
+        /// <summary>Called after each accepted LM step: (iteration, cost, relative decrease, max |camera step|, max |point step|).</summary>
+        public Action<int, double, double, double, double>? IterationLog { get; init; }
     }
 
     public sealed record Result(
@@ -286,6 +288,13 @@ public sealed class BundleAdjuster
                     Array.Copy(nr, _r, _r.Length); Array.Copy(nc, _c, _c.Length); Array.Copy(nx, _x, _x.Length);
                     _f = nf;
                     double rel = (cost - newCost) / Math.Max(cost, 1e-30);
+                    if (_opts.IterationLog != null)
+                    {
+                        double mc = 0, mp = 0;
+                        foreach (var d in dCam) mc = Math.Max(mc, Math.Abs(d));
+                        foreach (var d in dPt) mp = Math.Max(mp, Math.Abs(d));
+                        _opts.IterationLog(it, newCost, rel, mc, mp);
+                    }
                     cost = newCost;
                     lambda = Math.Max(lambda / 3, 1e-9);
                     improved = true;

@@ -373,6 +373,7 @@ public partial class Studio
         {
             var tv = scene.TrainingViews[i];
             await StashTrainerRenderAsync($"view-{kind}-{i}", tv.Camera);
+            await StashVideoPhotoAsync($"view-{kind}-{i}", tv.ImageName);
             await ParkOnGroundTruthPoseAsync($"{kind}-{i}", tv.Camera);
             Console.WriteLine(
                 $"[Dataset] READY-FOR-CAPTURE view-{kind}-{i} {tv.ImageName} {tv.Camera.Width}x{tv.Camera.Height} " +

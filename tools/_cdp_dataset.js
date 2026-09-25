@@ -93,6 +93,7 @@ const closeTab = (id) => new Promise(res =>
     const pendingFree = [];
     const viewMap = {};
     const pendingTrainer = [];   // view-<k>: the trainer's own render of that pose, on #trainerdump
+    const pendingPhoto = [];     // view-<k>: the photograph when it is a video frame (in memory), on #photodump
     ws.on('message', raw => {
       const m = JSON.parse(raw.toString());
       if (m.id && pend.has(m.id)) pend.get(m.id)(m);
@@ -113,6 +114,8 @@ const closeTab = (id) => new Promise(res =>
         const view = s.match(/\[Dataset\] READY-FOR-CAPTURE view-(\w+-\d+) (\S+) (\d+x\d+)/);
         const trainerRender = s.match(/\[Dataset\] TRAINER-RENDER (\S+)/);
         if (trainerRender) pendingTrainer.push(trainerRender[1]);
+        const photoDump = s.match(/\[Dataset\] PHOTO-DUMP (\S+)/);
+        if (photoDump) pendingPhoto.push(photoDump[1]);
         if (free) { pendingFree.push(free[1]); }
         else if (view) { pendingFree.push('view-' + view[1]); viewMap[view[1]] = { photo: view[2], size: view[3] }; }
         else if (/\[Dataset\] READY-FOR-CAPTURE/.test(s)) ready = true;
@@ -157,6 +160,19 @@ const closeTab = (id) => new Promise(res =>
           require('fs').writeFileSync(path.join(dir, tag), Buffer.from(dataUrl.slice(22), 'base64'));
           console.log('captured ' + tag);
         } else console.log('trainer render ' + name + ': no canvas data');
+      }
+      while (pendingPhoto.length) {
+        const name = pendingPhoto.shift();
+        const r = await send('Runtime.evaluate', {
+          expression: "document.getElementById('photodump').toDataURL('image/png')", returnByValue: true });
+        const dataUrl = r.result && r.result.result && r.result.result.value;
+        if (typeof dataUrl === 'string' && dataUrl.startsWith('data:image/png;base64,')) {
+          const dir = path.join(__dirname, '..', '_shots', 'dataset');
+          require('fs').mkdirSync(dir, { recursive: true });
+          const tag = `${NAME}__${process.env.RUN_TAG || 'untagged'}__${name}-photo.png`;
+          require('fs').writeFileSync(path.join(dir, tag), Buffer.from(dataUrl.slice(22), 'base64'));
+          console.log('captured ' + tag);
+        } else console.log('photo dump ' + name + ': no canvas data');
       }
       // Capture the finished scene, so the reconstruction can be LOOKED at and not only scored.
       while (pendingFree.length) {

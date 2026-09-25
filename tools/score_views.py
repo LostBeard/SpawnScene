@@ -17,6 +17,8 @@ from PIL import Image
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 SHOTS = os.path.join(ROOT, '_shots', 'dataset')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _photos import load_photo  # noqa: E402
 
 
 def luma(a):
@@ -51,8 +53,7 @@ def main():
         rows = []
         for k, v in sorted(side['views'].items(), key=lambda kv: (kv[0].split('-')[0] != 'held', kv[1]['photo'])):
             shot = Image.open(os.path.join(SHOTS, f'{name}__{tag}__view-{k}.png')).convert('RGB')
-            with urllib.request.urlopen(side['app'].rstrip('/') + '/' + v['photo'].lstrip('/')) as r:
-                photo = Image.open(io.BytesIO(r.read())).convert('RGB').resize(shot.size, Image.LANCZOS)
+            photo = load_photo(side, name, tag, k).resize(shot.size, Image.LANCZOS)
             a = np.asarray(shot, np.float64); b = np.asarray(photo, np.float64)
             psnr = 10 * np.log10(255 ** 2 / max(np.mean((a - b) ** 2), 1e-12))
             ya, yb = luma(a), luma(b)

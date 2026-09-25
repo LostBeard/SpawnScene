@@ -18,6 +18,8 @@ from PIL import Image, ImageDraw
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 SHOTS = os.path.join(ROOT, '_shots', 'dataset')
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _photos import load_photo  # noqa: E402
 
 
 def psnr(a, b):
@@ -37,8 +39,7 @@ def main():
             continue
         view = Image.open(os.path.join(SHOTS, f'{name}__{tag}__view-{k}.png')).convert('RGB')
         tr = Image.open(tr_path).convert('RGB')
-        with urllib.request.urlopen(side['app'].rstrip('/') + '/' + v['photo'].lstrip('/')) as r:
-            photo = Image.open(io.BytesIO(r.read())).convert('RGB')
+        photo = load_photo(side, name, tag, k)
         if tr.size != view.size:
             tr = tr.resize(view.size, Image.LANCZOS)
         if photo.size != view.size:

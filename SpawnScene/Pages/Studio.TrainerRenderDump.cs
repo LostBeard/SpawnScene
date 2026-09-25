@@ -1,3 +1,4 @@
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Models;
 using SpawnScene.Services;
 
@@ -5,6 +6,38 @@ namespace SpawnScene.Pages;
 
 public partial class Studio
 {
+    /// <summary>
+    /// For a view whose photograph is a video frame (in memory, not at a URL), put the frame on a hidden canvas the
+    /// harness saves as <c>&lt;view&gt;-photo.png</c>, so score_views / compose_views can compare against it.
+    /// </summary>
+    async Task StashVideoPhotoAsync(string key, string imageName)
+    {
+        if (!imageName.StartsWith(VideoFrameStore.Prefix, StringComparison.Ordinal)
+            || !VideoFrameStore.TryGet(imageName, out var jpeg)) return;
+        try
+        {
+            using var blob = new Blob(new byte[][] { jpeg }, new BlobOptions { Type = "image/jpeg" });
+            using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
+            _js.Set("__phBitmap", bitmap);
+            await _js.CallVoidAsync("eval", @"
+                (function(){
+                  var b = window.__phBitmap;
+                  var c = document.getElementById('photodump');
+                  if (!c) { c = document.createElement('canvas'); c.id='photodump';
+                            c.style.position='fixed'; c.style.left='-99999px';
+                            document.body.appendChild(c); }
+                  c.width = b.width; c.height = b.height;
+                  c.getContext('2d').drawImage(b, 0, 0);
+                  window.__phBitmap = null;
+                })();");
+            Console.WriteLine($"[Dataset] PHOTO-DUMP {key}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Dataset] photo dump for {key} failed: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// Render <paramref name="cam"/> with the TRAINER's rasteriser on the scene the viewer is showing, and put it
     /// on a hidden canvas the dataset harness saves as <c>&lt;view&gt;-trainer.png</c>, next to the viewer's

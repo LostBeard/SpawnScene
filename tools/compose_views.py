@@ -21,6 +21,8 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 SHOTS = os.path.join(ROOT, '_shots', 'dataset')
 CELL_W = 640
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _photos import load_photo  # noqa: E402
 
 
 def fetch(url):
@@ -67,7 +69,7 @@ def main():
     rows = []
     for ph in photos:
         cells = []
-        photo = fetch(sides[0]['app'].rstrip('/') + '/' + ph.lstrip('/'))
+        photo = load_photo(sides[0], name, tags[0], by_photo[0][ph])
         for ti, tag in enumerate(tags):
             k = by_photo[ti][ph]
             shot = os.path.join(SHOTS, f'{name}__{tag}__view-{k}.png')

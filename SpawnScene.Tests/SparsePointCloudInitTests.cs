@@ -251,6 +251,47 @@ public class SparsePointCloudOutlierTests
     }
 
     [Test]
+    public void RealTruckCloudSpacingIsFastAndExact()
+    {
+        // Production scale: Truck's COLMAP cloud, 133k points, AABB diagonal ~397 against a ~5-unit rig. MEASURED
+        // 2026-09-25 in the browser: Parse + BuildPacked took 266 s of every GT-pose Truck run.
+        string path = Path.GetFullPath(Path.Combine(TestContext.CurrentContext.TestDirectory,
+            "..", "..", "..", "..", "SpawnScene", "wwwroot", "datasets", "Truck", "points3d.bin"));
+        if (!File.Exists(path)) Assert.Ignore("Truck cloud not generated in this checkout");
+        var pts = SparsePointCloudInit.Parse(File.ReadAllBytes(path)).Positions;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var spacing = SparsePointCloudInit.LocalSpacing(pts);
+        sw.Stop();
+        TestContext.Out.WriteLine($"Truck: {pts.Length:N0} points, LocalSpacing {sw.ElapsedMilliseconds} ms");
+
+        // Exact, not approximate: brute force on a spread sample, including the farthest points (the outliers
+        // are where a search with a wrong stopping bound would go wrong).
+        var centroid = System.Numerics.Vector3.Zero;
+        foreach (var p in pts) centroid += p;
+        centroid /= pts.Length;
+        var sample = Enumerable.Range(0, pts.Length).Where(i => i % 997 == 0)
+            .Concat(Enumerable.Range(0, pts.Length)
+                .OrderByDescending(i => System.Numerics.Vector3.DistanceSquared(pts[i], centroid)).Take(40))
+            .Distinct();
+        foreach (int i in sample)
+        {
+            float b0 = float.MaxValue, b1 = float.MaxValue, b2 = float.MaxValue;
+            for (int j = 0; j < pts.Length; j++)
+            {
+                if (j == i) continue;
+                float d = System.Numerics.Vector3.DistanceSquared(pts[i], pts[j]);
+                if (d < b2) { if (d < b1) { b2 = b1; if (d < b0) { b1 = b0; b0 = d; } else b1 = d; } else b2 = d; }
+            }
+            float slow = MathF.Sqrt(MathF.Max((b0 + b1 + b2) / 3f, SparsePointCloudInit.MinSpacingSq));
+            Assert.That(spacing[i], Is.EqualTo(slow).Within(1e-4f * MathF.Max(1f, slow)), $"point {i} at {pts[i]}");
+        }
+
+        // Native .NET; the browser's wasm runs this several times slower, and it gates every Truck run.
+        Assert.That(sw.ElapsedMilliseconds, Is.LessThan(2_000), "3-NN spacing is still scanning the grid for outliers");
+    }
+
+    [Test]
     public void OutlierCloudStillMatchesBruteForce()
     {
         // Speed is worthless if the answer changed. Smaller so brute force is affordable.

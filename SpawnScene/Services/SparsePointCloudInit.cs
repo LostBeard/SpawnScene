@@ -132,10 +132,11 @@ public static class SparsePointCloudInit
     /// <summary>
     /// RMS distance from each point to its three nearest neighbours.
     ///
-    /// Through a uniform grid rather than all pairs: 80k points is 6.4 billion pair tests, which
-    /// is minutes of wasm. The grid makes the cost proportional to the points actually nearby,
-    /// and the answer is identical rather than approximate, because the search widens until
-    /// every remaining cell is provably farther than the current third-best.
+    /// Exact, through a k-d tree. The previous uniform grid was exact too, but its cost for a point is the
+    /// number of cells within its third-nearest distance - and an SfM cloud's outliers (points triangulated
+    /// into the sky) are far from everything, so each one scanned most of a 256^3 grid. MEASURED 2026-09-25:
+    /// Truck's 133k-point cloud took 28 s natively and 266 s in the browser, before every GT-pose run. The
+    /// tree's bound is the distance to the splitting plane, which prunes the same way wherever the point is.
     /// </summary>
     public static float[] LocalSpacing(Vector3[] points)
     {
@@ -153,78 +154,13 @@ public static class SparsePointCloudInit
             return result;
         }
 
-        // Size the grid from a ROBUST extent, not the bounding box.
-        //
-        // An SfM cloud has far outliers - a few points triangulated out into the sky. The
-        // bounding box is then enormous, the cell computed from it is enormous, every real
-        // point lands in one or two cells, and the grid degenerates to the all-pairs search it
-        // exists to avoid. MEASURED: drjohnson's 79,922 points took 349 SECONDS this way.
-        // Percentile bounds ignore the outliers; they are still placed, clamped into the edge
-        // cells, and still get an exact answer - they just do not get to set the cell size.
-        var (lo, hi) = RobustBounds(points);
-        Vector3 extent = Vector3.Max(hi - lo, new Vector3(1e-6f));
-
-        // Aim at a handful of points per cell: enough that a 3x3x3 block usually settles the
-        // answer, few enough that scanning a cell stays cheap.
-        double volume = (double)extent.X * extent.Y * extent.Z;
-        float cell = (float)Math.Cbrt(Math.Max(volume, 1e-12) * 8.0 / n);
-        if (!float.IsFinite(cell) || cell <= 0) cell = extent.Length() / 64f;
-
-        // Cap the axis counts so a pathological aspect ratio cannot allocate a huge grid, and
-        // widen the cell to match rather than silently building a grid that does not cover.
-        const int MaxCellsPerAxis = 256;
-        cell = MathF.Max(cell, extent.X / MaxCellsPerAxis);
-        cell = MathF.Max(cell, extent.Y / MaxCellsPerAxis);
-        cell = MathF.Max(cell, extent.Z / MaxCellsPerAxis);
-
-        int gx = Math.Clamp((int)(extent.X / cell) + 1, 1, MaxCellsPerAxis);
-        int gy = Math.Clamp((int)(extent.Y / cell) + 1, 1, MaxCellsPerAxis);
-        int gz = Math.Clamp((int)(extent.Z / cell) + 1, 1, MaxCellsPerAxis);
-
-        // Counting sort into cells: two passes and two arrays, no per-cell List allocations.
-        long cells = (long)gx * gy * gz;
-        var cellOf = new int[n];
-        var starts = new int[cells + 1];
-        for (int i = 0; i < n; i++)
-        {
-            var d = points[i] - lo;
-            int cx = Math.Clamp((int)(d.X / cell), 0, gx - 1);
-            int cy = Math.Clamp((int)(d.Y / cell), 0, gy - 1);
-            int cz = Math.Clamp((int)(d.Z / cell), 0, gz - 1);
-            int c = (cz * gy + cy) * gx + cx;
-            cellOf[i] = c;
-            starts[c + 1]++;
-        }
-        for (long c = 0; c < cells; c++) starts[c + 1] += starts[c];
-        var order = new int[n];
-        var cursor = (int[])starts.Clone();
-        for (int i = 0; i < n; i++) order[cursor[cellOf[i]]++] = i;
-
+        var tree = new KdTree(points);
         var best = new float[SpacingNeighbours];
-
         for (int i = 0; i < n; i++)
         {
-            var d = points[i] - lo;
-            int cx = Math.Clamp((int)(d.X / cell), 0, gx - 1);
-            int cy = Math.Clamp((int)(d.Y / cell), 0, gy - 1);
-            int cz = Math.Clamp((int)(d.Z / cell), 0, gz - 1);
-
             Array.Fill(best, float.MaxValue);
             int found = 0;
-
-            for (int ring = 0; ; ring++)
-            {
-                ScanRing(points, order, starts, gx, gy, gz, cx, cy, cz, ring, i, best, ref found);
-
-                // Anything outside this ring is at least ring*cell away, so once the third-best
-                // beats that, widening cannot change the answer. This is what makes the grid
-                // exact rather than approximate.
-                float guaranteed = ring * cell;
-                if (found >= SpacingNeighbours &&
-                    best[SpacingNeighbours - 1] <= guaranteed * guaranteed)
-                    break;
-                if (ring > gx + gy + gz) break;   // exhausted the grid
-            }
+            tree.Nearest(i, best, ref found);
 
             float sum = 0;
             int used = 0;
@@ -237,33 +173,118 @@ public static class SparsePointCloudInit
         return result;
     }
 
-    /// <summary>Scan the shell of cells exactly <paramref name="ring"/> steps from the centre.</summary>
-    static void ScanRing(
-        Vector3[] points, int[] order, int[] starts, int gx, int gy, int gz,
-        int cx, int cy, int cz, int ring, int self, float[] best, ref int found)
+    /// <summary>
+    /// Static k-d tree over point indices, stored implicitly: the node for range [lo, hi) is the median at
+    /// mid = (lo + hi) / 2, split on <c>_axis[mid]</c> (the range's widest axis), with [lo, mid) on the low
+    /// side and (mid, hi) on the high side. Ranges of <see cref="Leaf"/> or fewer are scanned directly.
+    /// </summary>
+    sealed class KdTree
     {
-        int x0 = cx - ring, x1 = cx + ring;
-        int y0 = cy - ring, y1 = cy + ring;
-        int z0 = cz - ring, z1 = cz + ring;
+        const int Leaf = 8;
+        readonly float[] _x, _y, _z;
+        readonly int[] _idx;
+        readonly byte[] _axis;
 
-        for (int z = Math.Max(z0, 0); z <= Math.Min(z1, gz - 1); z++)
-        for (int y = Math.Max(y0, 0); y <= Math.Min(y1, gy - 1); y++)
+        public KdTree(Vector3[] points)
         {
-            bool edgeZY = z == z0 || z == z1 || y == y0 || y == y1;
-            for (int x = Math.Max(x0, 0); x <= Math.Min(x1, gx - 1); x++)
-            {
-                // Only the SHELL: interior cells were covered by an earlier ring.
-                if (!edgeZY && x != x0 && x != x1) continue;
+            int n = points.Length;
+            _x = new float[n]; _y = new float[n]; _z = new float[n];
+            for (int i = 0; i < n; i++) { _x[i] = points[i].X; _y[i] = points[i].Y; _z[i] = points[i].Z; }
+            _idx = new int[n];
+            for (int i = 0; i < n; i++) _idx[i] = i;
+            _axis = new byte[n];
+            Build(0, n);
+        }
 
-                int c = (z * gy + y) * gx + x;
-                for (int s = starts[c]; s < starts[c + 1]; s++)
+        float Coord(int point, int axis) => axis == 0 ? _x[point] : axis == 1 ? _y[point] : _z[point];
+
+        void Build(int lo, int hi)
+        {
+            // Recurse on the smaller side, loop on the larger: depth stays log2(n) whatever the data.
+            while (hi - lo > Leaf)
+            {
+                float minX = float.MaxValue, minY = float.MaxValue, minZ = float.MaxValue;
+                float maxX = float.MinValue, maxY = float.MinValue, maxZ = float.MinValue;
+                for (int k = lo; k < hi; k++)
                 {
-                    int j = order[s];
-                    if (j == self) continue;
-                    float d2 = Vector3.DistanceSquared(points[self], points[j]);
-                    Insert(best, d2, ref found);
+                    int p = _idx[k];
+                    minX = MathF.Min(minX, _x[p]); maxX = MathF.Max(maxX, _x[p]);
+                    minY = MathF.Min(minY, _y[p]); maxY = MathF.Max(maxY, _y[p]);
+                    minZ = MathF.Min(minZ, _z[p]); maxZ = MathF.Max(maxZ, _z[p]);
                 }
+                float ex = maxX - minX, ey = maxY - minY, ez = maxZ - minZ;
+                int axis = ex >= ey && ex >= ez ? 0 : ey >= ez ? 1 : 2;
+                int mid = (lo + hi) >> 1;
+                Select(lo, hi - 1, mid, axis);
+                _axis[mid] = (byte)axis;
+                if (mid - lo < hi - mid - 1) { Build(lo, mid); lo = mid + 1; }
+                else { Build(mid + 1, hi); hi = mid; }
             }
+        }
+
+        /// <summary>
+        /// Quickselect: afterwards _idx[k] holds the k-th smallest on <paramref name="axis"/> within [l, r], with
+        /// nothing larger before it and nothing smaller after it.
+        /// </summary>
+        void Select(int l, int r, int k, int axis)
+        {
+            while (r > l)
+            {
+                // Median-of-three pivot: sorted or clustered input cannot drive it quadratic.
+                int m = (l + r) >> 1;
+                if (Coord(_idx[m], axis) < Coord(_idx[l], axis)) Swap(l, m);
+                if (Coord(_idx[r], axis) < Coord(_idx[l], axis)) Swap(l, r);
+                if (Coord(_idx[r], axis) < Coord(_idx[m], axis)) Swap(m, r);
+                float pivot = Coord(_idx[m], axis);
+                int i = l, j = r;
+                while (i <= j)
+                {
+                    while (Coord(_idx[i], axis) < pivot) i++;
+                    while (Coord(_idx[j], axis) > pivot) j--;
+                    if (i <= j) { Swap(i, j); i++; j--; }
+                }
+                if (k <= j) r = j;
+                else if (k >= i) l = i;
+                else return;
+            }
+        }
+
+        void Swap(int a, int b) => (_idx[a], _idx[b]) = (_idx[b], _idx[a]);
+
+        /// <summary>The <see cref="SpacingNeighbours"/> smallest squared distances from point <paramref name="self"/> to any other.</summary>
+        public void Nearest(int self, float[] best, ref int found)
+            => Search(0, _idx.Length, self, _x[self], _y[self], _z[self], best, ref found);
+
+        void Search(int lo, int hi, int self, float qx, float qy, float qz, float[] best, ref int found)
+        {
+            if (hi - lo <= Leaf)
+            {
+                for (int k = lo; k < hi; k++) Visit(_idx[k], self, qx, qy, qz, best, ref found);
+                return;
+            }
+            int mid = (lo + hi) >> 1;
+            int p = _idx[mid];
+            Visit(p, self, qx, qy, qz, best, ref found);
+            int axis = _axis[mid];
+            float diff = (axis == 0 ? qx : axis == 1 ? qy : qz) - Coord(p, axis);
+            // Near side first, so the far side is usually pruned by a bound that is already tight.
+            if (diff < 0)
+            {
+                Search(lo, mid, self, qx, qy, qz, best, ref found);
+                if (diff * diff < best[SpacingNeighbours - 1]) Search(mid + 1, hi, self, qx, qy, qz, best, ref found);
+            }
+            else
+            {
+                Search(mid + 1, hi, self, qx, qy, qz, best, ref found);
+                if (diff * diff < best[SpacingNeighbours - 1]) Search(lo, mid, self, qx, qy, qz, best, ref found);
+            }
+        }
+
+        void Visit(int p, int self, float qx, float qy, float qz, float[] best, ref int found)
+        {
+            if (p == self) return;
+            float dx = _x[p] - qx, dy = _y[p] - qy, dz = _z[p] - qz;
+            Insert(best, dx * dx + dy * dy + dz * dz, ref found);
         }
     }
 
@@ -275,24 +296,6 @@ public static class SparsePointCloudInit
         while (k > 0 && best[k - 1] > d2) { best[k] = best[k - 1]; k--; }
         best[k] = d2;
         if (found < SpacingNeighbours) found++;
-    }
-
-    /// <summary>
-    /// Per-axis 1st and 99th percentile, so a handful of far outliers cannot set the scale.
-    /// </summary>
-    static (Vector3 lo, Vector3 hi) RobustBounds(Vector3[] points)
-    {
-        int n = points.Length;
-        var xs = new float[n];
-        var ys = new float[n];
-        var zs = new float[n];
-        for (int i = 0; i < n; i++) { xs[i] = points[i].X; ys[i] = points[i].Y; zs[i] = points[i].Z; }
-        Array.Sort(xs); Array.Sort(ys); Array.Sort(zs);
-
-        int lo = n / 100;
-        int hi = n - 1 - lo;
-        if (hi <= lo) { lo = 0; hi = n - 1; }
-        return (new Vector3(xs[lo], ys[lo], zs[lo]), new Vector3(xs[hi], ys[hi], zs[hi]));
     }
 
     static (Vector3 lo, Vector3 hi) Bounds(Vector3[] points)

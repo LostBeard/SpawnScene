@@ -22,6 +22,12 @@ namespace SpawnScene.Pages;
 /// </summary>
 public partial class Studio
 {
+    /// <summary>Diagnostic (&amp;capturetwice=1): capture every harness view a second time as view-&lt;kind&gt;x-&lt;i&gt;.</summary>
+    public static bool CaptureTwice { get; set; }
+
+    /// <summary>Diagnostic (&amp;capturesubsets=1): also capture each view's near and far halves through both renderers.</summary>
+    public static bool CaptureSubsets { get; set; }
+
     /// <summary>
     /// Load a dataset's sparse SfM cloud and turn it into packed splats, or null when it has none.
     ///
@@ -379,6 +385,24 @@ public partial class Studio
                 $"[Dataset] READY-FOR-CAPTURE view-{kind}-{i} {tv.ImageName} {tv.Camera.Width}x{tv.Camera.Height} " +
                 $"turns={tv.QuarterTurns}");
             await Task.Delay(1800);
+            if (CaptureSubsets)
+            {
+                var rig = Vector3.Zero;
+                foreach (var c in scene.TrainingCameras) rig += c.Position;
+                rig /= scene.TrainingCameras.Count;
+                await CaptureDepthSubsetsAsync(kind, i, tv.Camera, tv.ImageName, tv.QuarterTurns, rig);
+            }
+            if (CaptureTwice)
+            {
+                // Diagnostic: the same pose again, re-parked and after 5 s more. Two viewer captures of one pose
+                // that differ mean the viewer's output depends on timing/state, not only on the scene and camera.
+                await ParkOnGroundTruthPoseAsync($"{kind}x-{i}", tv.Camera);
+                await Task.Delay(5000);
+                Console.WriteLine(
+                    $"[Dataset] READY-FOR-CAPTURE view-{kind}x-{i} {tv.ImageName} {tv.Camera.Width}x{tv.Camera.Height} " +
+                    $"turns={tv.QuarterTurns}");
+                await Task.Delay(1800);
+            }
         }
 
         var moves = new (string Name, Vector3 Offset, float Yaw)[]

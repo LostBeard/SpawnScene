@@ -394,7 +394,7 @@ public class GpuGaussianRenderer : IDisposable
             Vertex = new GPUVertexState
             {
                 Module = splatShader,
-                EntryPoint = "vs_main",
+                EntryPoint = "vs_trainer",
                 Buffers = new[]
                 {
                     new GPUVertexBufferLayout
@@ -414,7 +414,7 @@ public class GpuGaussianRenderer : IDisposable
             Fragment = new GPUFragmentState
             {
                 Module = splatShader,
-                EntryPoint = "fs_main",
+                EntryPoint = "fs_trainer",
                 Targets = new[]
                 {
                     new GPUColorTargetState
@@ -1806,6 +1806,9 @@ struct VertexOutput {
     @location(1) opacity : f32,
     @location(2) uv      : vec2<f32>,      // whitened splat coordinate; unit disk = the footprint
     @location(3) cut     : f32,            // footprint radius in sigmas (the unit disk's edge)
+    // vs_trainer only: the trainer's conic (inverse 2D covariance) and centre, framebuffer pixels (y down).
+    @location(4) @interpolate(flat) conic     : vec3<f32>,
+    @location(5) @interpolate(flat) centre_px : vec2<f32>,
 };
 
 // The trainer's footprint, not a fixed ellipse: like the reference rasteriser it has NO sigma cutoff, only
@@ -1814,6 +1817,8 @@ struct VertexOutput {
 // at 3 sigma and missed them: MEASURED 2026-09-24, trainer-vs-viewer dumps on Truck differed on every edge.
 const VIEW_MIN_ALPHA : f32 = 0.00392156862;   // 1/255, SplatTrainerShaders.MIN_ALPHA
 const VIEW_MAX_ALPHA : f32 = 0.99;            // SplatTrainerShaders.MAX_ALPHA
+const TRAINER_TILE : f32 = 16.0;              // SplatTrainerShaders TILE
+const TRAINER_TILE_SIGMAS : f32 = 3.0;        // SplatTrainerShaders SIGMA_CUTOFF (tile overlap extent)
 
 // Footprint cutoff in standard deviations. 3 sigma captures 98.9% of the mass; below ~2.5 the
 // truncation shows up as a visible hard edge on large splats.
@@ -1844,6 +1849,118 @@ fn splat_reject(uv : vec2<f32>, color : vec3<f32>) -> VertexOutput {
     out.opacity = 0.0;
     out.uv = uv;
     out.cut = 1.0;
+    return out;
+}
+
+@vertex
+fn vs_trainer(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutput {
+    let uv = quad_corner(vid);
+    let rgb = input.color_alpha.rgb;
+
+    let center_clip = u.mvp * vec4<f32>(input.position, 1.0);
+    if (center_clip.w <= 0.001) { return splat_reject(uv, rgb); }
+
+    // -- Camera-space centre. Basis rows are (right, up, forward), z forward and positive,
+    //    y measured UPWARD so a pixel offset maps to NDC with no sign flip. --
+    let rel = input.position - u.cam_pos.xyz;
+    let cx = dot(u.cam_right.xyz, rel);
+    let cy = dot(u.cam_up.xyz, rel);
+    let cz = dot(u.cam_fwd.xyz, rel);
+    // Near plane 0.2 scene units, same as the trainer and the reference rasteriser. A splat at
+    // depth 1e-5 projects to a frame-covering quad whose f32 conic is garbage: a full-screen flash.
+    if (cz <= 0.2) { return splat_reject(uv, rgb); }
+
+    // -- Sigma_world = R S S^T R^T --
+    let q = normalize(input.quat);
+    let s = max(input.scale.xyz, vec3<f32>(1e-9, 1e-9, 1e-9)) * u.dilation;
+
+    let xx = q.x * q.x; let yy = q.y * q.y; let zz = q.z * q.z;
+    let xy = q.x * q.y; let xz = q.x * q.z; let yz = q.y * q.z;
+    let wx = q.w * q.x; let wy = q.w * q.y; let wz = q.w * q.z;
+
+    // Columns of R, each pre-scaled by its axis: M = R * S, so Sigma = M * M^T.
+    let m0 = vec3<f32>(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)) * s.x;
+    let m1 = vec3<f32>(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)) * s.y;
+    let m2 = vec3<f32>(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy)) * s.z;
+    let M = mat3x3<f32>(m0, m1, m2);
+    let sigma_world = M * transpose(M);
+
+    // -- Rotate into camera space: Sigma_cam = A * Sigma * A^T, A rows = (right, up, fwd) --
+    let A = transpose(mat3x3<f32>(u.cam_right.xyz, u.cam_up.xyz, u.cam_fwd.xyz));
+    let sc = A * sigma_world * transpose(A);
+
+    // -- Perspective Jacobian of (u, v) = (fx * x / z, fy * y / z) at the centre, x/z and y/z clamped to
+    //    1.3 x tan(fov/2) exactly as the trainer (and the reference's computeCov2D) do. Without it the viewer drew
+    //    far-off-axis splats as the same huge smears the trainer did - differently, since it culls by world margin. --
+    let invz = 1.0 / cz;
+    let invz2 = invz * invz;
+    let lim = 1.3 * 0.5 * u.viewport / u.focal;
+    let cxc = clamp(cx * invz, -lim.x, lim.x) * cz;
+    let cyc = clamp(cy * invz, -lim.y, lim.y) * cz;
+    let j00 = u.focal.x * invz;
+    let j02 = -u.focal.x * cxc * invz2;
+    let j11 = u.focal.y * invz;
+    let j12 = -u.focal.y * cyc * invz2;
+
+    // mat[col][row]; sigma_cam is symmetric so the order does not matter.
+    let s00 = sc[0][0]; let s01 = sc[1][0]; let s02 = sc[2][0];
+    let s11 = sc[1][1]; let s12 = sc[2][1]; let s22 = sc[2][2];
+
+    let a0 = j00 * s00 + j02 * s02;
+    let a1 = j00 * s01 + j02 * s12;
+    let a2 = j00 * s02 + j02 * s22;
+    let b1 = j11 * s11 + j12 * s12;
+    let b2 = j11 * s12 + j12 * s22;
+
+    let cov_a = a0 * j00 + a2 * j02 + EWA_FILTER_PX2;
+    let cov_b = a1 * j11 + a2 * j12;
+    let cov_c = b1 * j11 + b2 * j12 + EWA_FILTER_PX2;
+
+    // -- Eigen-decompose the 2x2 into principal screen axes --
+    let det = cov_a * cov_c - cov_b * cov_b;
+    if (det <= 1e-20) { return splat_reject(uv, rgb); }
+
+    // -- From here on, exactly the trainer's footprint (SplatTrainerShaders project() + emit_keys + splat_weight):
+    //    the conic from the same det, the centre in pixels, and ONLY the pixels of the 16-px tiles overlapped by
+    //    centre +- 3 sqrt(lambda_max). The eigen-decomposed whitened quad of vs_main disagreed with it for thin,
+    //    near splats (MEASURED 2026-09-25 TruckFull 30K: the near post and near pavement smeared in the viewer
+    //    and not in the trainer; held-out captures 1.6-2.3 dB under the trainer's own render). --
+    let conic = vec3<f32>(cov_c / det, -cov_b / det, cov_a / det);
+    let mid = 0.5 * (cov_a + cov_c);
+    let l1 = mid + sqrt(max(mid * mid - det, 0.0));
+    let op = input.color_alpha.a;
+    if (op <= 0.0) { return splat_reject(uv, rgb); }
+
+    let ndc_center = center_clip.xyz / center_clip.w;
+    if (ndc_center.z < -0.1 || ndc_center.z > 1.1) { return splat_reject(uv, rgb); }
+    let centre_px = vec2<f32>((ndc_center.x + 1.0) * 0.5 * u.viewport.x, (1.0 - ndc_center.y) * 0.5 * u.viewport.y);
+    let r = TRAINER_TILE_SIGMAS * sqrt(max(l1, 1e-20));
+    if (!(r < 1e30)) { return splat_reject(uv, rgb); }
+    let tiles_end = ceil(u.viewport / TRAINER_TILE) * TRAINER_TILE;
+    var lo = max(floor((centre_px - vec2<f32>(r, r)) / TRAINER_TILE) * TRAINER_TILE, vec2<f32>(0.0, 0.0));
+    var hi = min((floor((centre_px + vec2<f32>(r, r)) / TRAINER_TILE) + 1.0) * TRAINER_TILE, tiles_end);
+    // Overdraw only: a pixel survives fs_trainer iff alpha >= 1/255, i.e. Mahalanobis^2 <= k^2 = 2 ln(255 op), whose
+    // bounding box has half-widths k sqrt(cov_a), k sqrt(cov_c). Intersecting with it (1 px margin for rounding)
+    // changes no pixel's value - the fragment test still decides - but a thin splat no longer rasterises the whole
+    // 3-sigma square of its long axis.
+    let k2 = 2.0 * log(255.0 * op);
+    if (k2 <= 0.0) { return splat_reject(uv, rgb); }
+    let half = sqrt(k2 * vec2<f32>(cov_a, cov_c)) + vec2<f32>(1.0, 1.0);
+    lo = max(lo, floor(centre_px - half));
+    hi = min(hi, ceil(centre_px + half));
+    if (hi.x <= lo.x || hi.y <= lo.y) { return splat_reject(uv, rgb); }
+
+    let corner_px = select(lo, hi, uv > vec2<f32>(0.0, 0.0));
+    let ndc = vec2<f32>(corner_px.x / u.viewport.x * 2.0 - 1.0, 1.0 - corner_px.y / u.viewport.y * 2.0);
+
+    var out : VertexOutput;
+    out.clip_pos = vec4<f32>(ndc * center_clip.w, ndc_center.z * center_clip.w, center_clip.w);
+    out.color = rgb;
+    out.opacity = op;
+    out.uv = uv;
+    out.cut = 1.0;
+    out.conic = conic;
+    out.centre_px = centre_px;
     return out;
 }
 
@@ -1969,6 +2086,18 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
     //  Sorted pipeline - classic back-to-front alpha blending.
     // ============================================================
     private const string SplatShaderSource = SplatVertexWgsl + @"
+// The trainer's per-pixel weight (SplatTrainerShaders splat_weight) at this pixel's centre, with its alpha rules.
+@fragment
+fn fs_trainer(input : VertexOutput) -> @location(0) vec4<f32> {
+    let d = input.clip_pos.xy - input.centre_px;
+    let c = input.conic;
+    let power = -0.5 * (c.x * d.x * d.x + c.z * d.y * d.y) - c.y * d.x * d.y;
+    if (power > 0.0) { discard; }
+    let alpha = min(VIEW_MAX_ALPHA, input.opacity * exp(power));
+    if (alpha < VIEW_MIN_ALPHA) { discard; }
+    return vec4<f32>(input.color, alpha);
+}
+
 @fragment
 fn fs_main(input : VertexOutput) -> @location(0) vec4<f32> {
     // uv is whitened: the unit disk IS the cut-sigma ellipse, so the Mahalanobis distance

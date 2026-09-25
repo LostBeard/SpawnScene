@@ -258,6 +258,7 @@ public partial class Studio
 
         var sc = _sceneManager.ActiveScene;
         int splats = sc == null ? 0 : Math.Max(sc.GpuSplatCount, sc.Count);
+        Console.WriteLine($"[NovelView] viewer {_renderService.Fps:F1} fps at {viewName} ({splats:N0} splats)");
         Console.WriteLine(
             $"[NovelView] READY view={viewName} splats={splats} " +
             $"pose=({gt.Position.X:F4},{gt.Position.Y:F4},{gt.Position.Z:F4}) " +

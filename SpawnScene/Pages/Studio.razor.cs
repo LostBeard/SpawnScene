@@ -290,6 +290,7 @@ public partial class Studio : IAsyncDisposable
                 _gpuRenderer.LodCullPixels = Math.Max(0f, lpxv);
             if (query.TryGetValue("trainprofile", out var tpv))
                 ProfileTrainPhases = tpv is "1" or "true";
+            if (query.TryGetValue("llffhold", out var lhq) && int.TryParse(lhq, out var lhv)) LlffHold = Math.Max(0, lhv);
             if (query.TryGetValue("targetmb", out var tmb) && int.TryParse(tmb, out var tmbi) && tmbi > 0)
                 MaxTargetStackBytes = (long)tmbi * 1024 * 1024;
             if (query.TryGetValue("badump", out var bdv))

@@ -12,6 +12,12 @@ namespace SpawnScene.Pages;
 // Project/scene CRUD, scene generation, file handling, thumbnails
 public partial class Studio
 {
+    /// <summary>
+    /// The reference's held-out rule (<c>llffhold</c>): hold out every posed view whose index % N == 0. 0 (default) keeps
+    /// SpawnScene's every-fourth split. <c>&amp;llffhold=8</c> is the published 3DGS protocol.
+    /// </summary>
+    public static int LlffHold { get; set; }
+
     private async void OnNewProjectClicked()
     {
         Console.WriteLine("[Studio] New Project button clicked");
@@ -338,8 +344,10 @@ public partial class Studio
             int turns = poseFrameHasGravity ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
 
             // Hold every fourth posed view out, so the run reports a novel-view number rather
-            // than a reconstruction of its own input.
-            bool supervise = posed % 4 != 3;
+            // than a reconstruction of its own input. &llffhold=N instead uses the reference's split
+            // (dataset_readers: test = image index % llffhold == 0, images sorted by name), for numbers
+            // comparable with the published ones.
+            bool supervise = LlffHold > 0 ? posed % LlffHold != 0 : posed % 4 != 3;
             if (!supervise) held++;
             posed++;
 

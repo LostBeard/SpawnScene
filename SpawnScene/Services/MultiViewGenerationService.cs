@@ -127,7 +127,12 @@ public class MultiViewGenerationService
     /// <summary>Pairs whose cascade cameras face further apart than this are not verified or used by BA.</summary>
     public float MaxPairAngleDeg { get; set; } = 45f;
 
-    private PointCloud? RefineWithBundleAdjustment(
+    private GpuEpipolarRansac? _epipolarRansac;
+
+    /// <summary>Verify pairs on the GPU (<see cref="GpuEpipolarRansac"/>) or the CPU estimator (<c>&amp;verify=cpu</c>, A/B).</summary>
+    public bool GpuPairVerification { get; set; } = true;
+
+    private async Task<PointCloud?> RefineWithBundleAdjustmentAsync(
         IReadOnlyList<ImportedImage> images, CameraParams?[] cameras, IReadOnlyList<int> posed)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -155,9 +160,10 @@ public class MultiViewGenerationService
         int strong = Math.Max(60, 2 * noiseFloor);
         float cosMax = MathF.Cos(MaxPairAngleDeg * MathF.PI / 180f);
         Console.WriteLine($"[BA] entering refine: {ImageImportService.HeapReport()}");
-        var verified = new List<(int, int, int, int)>();
-        int considered = 0, passed = 0;
-        var tv = System.Diagnostics.Stopwatch.StartNew();
+        // Candidates first, then every candidate verified in one GPU pass (GpuEpipolarRansac; CPU EpipolarRansac
+        // took 208 s for TruckFull's 8,716 candidates).
+        var candidates = new List<ImagePair>();
+        var ransacPairs = new List<GpuEpipolarRansac.Pair>();
         foreach (var p in pairs)
         {
             if (!baIndex.ContainsKey(p.ImageIndexA) || !baIndex.ContainsKey(p.ImageIndexB)) continue;
@@ -166,7 +172,6 @@ public class MultiViewGenerationService
             bool near = System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(ca.Forward),
                 System.Numerics.Vector3.Normalize(cb.Forward)) >= cosMax;
             if (!near && p.Matches.Count < strong) continue;
-            considered++;
             var fa = images[p.ImageIndexA].Features; var fb = images[p.ImageIndexB].Features;
             var xa = new float[p.Matches.Count * 2]; var xb = new float[p.Matches.Count * 2];
             for (int k = 0; k < p.Matches.Count; k++)
@@ -175,16 +180,37 @@ public class MultiViewGenerationService
                 xa[k * 2] = fa[m.IndexA].X; xa[k * 2 + 1] = fa[m.IndexA].Y;
                 xb[k * 2] = fb[m.IndexB].X; xb[k * 2 + 1] = fb[m.IndexB].Y;
             }
-            var r = EpipolarRansac.Estimate(xa, xb, thresholdPx: 2.0, minInliers: 15,
-                seed: p.ImageIndexA * 7919 + p.ImageIndexB);
+            candidates.Add(p);
+            ransacPairs.Add(new GpuEpipolarRansac.Pair(xa, xb, p.ImageIndexA * 7919 + p.ImageIndexB));
+        }
+        var verified = new List<(int, int, int, int)>();
+        int considered = candidates.Count, passed = 0;
+        var tv = System.Diagnostics.Stopwatch.StartNew();
+        EpipolarRansac.Result?[] ransac;
+        if (GpuPairVerification)
+        {
+            _epipolarRansac ??= new GpuEpipolarRansac(_gpu.Accelerator) { OnBatch = line => Console.WriteLine($"[BA] verify {line}") };
+            ransac = await _epipolarRansac.EstimateAsync(ransacPairs, thresholdPx: 2.0, minInliers: 15);
+        }
+        else
+        {
+            ransac = new EpipolarRansac.Result?[ransacPairs.Count];
+            for (int c = 0; c < ransacPairs.Count; c++)
+                ransac[c] = EpipolarRansac.Estimate(ransacPairs[c].A, ransacPairs[c].B, thresholdPx: 2.0, minInliers: 15,
+                    seed: ransacPairs[c].Seed);
+        }
+        for (int c = 0; c < candidates.Count; c++)
+        {
+            var r = ransac[c];
             if (r == null) continue;
+            var p = candidates[c];
             passed++;
             for (int k = 0; k < p.Matches.Count; k++)
                 if (r.Inliers[k]) verified.Add((p.ImageIndexA, p.Matches[k].IndexA, p.ImageIndexB, p.Matches[k].IndexB));
         }
         Console.WriteLine(
             $"[BA] verification: {considered} candidate pairs (within {MaxPairAngleDeg} deg, or >= {strong} raw matches; " +
-            $"noise floor {noiseFloor}), {passed} verified, {verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s)");
+            $"noise floor {noiseFloor}), {passed} verified, {verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s {(GpuPairVerification ? "GPU" : "CPU")})");
         var tracks = BundleAdjuster.BuildTracks(verified);
         {
             var hist = tracks.GroupBy(t => Math.Min(t.Count, 6)).OrderBy(g => g.Key)
@@ -995,7 +1021,7 @@ public class MultiViewGenerationService
             return null;
         }
 
-        var baCloud = BundleAdjust ? RefineWithBundleAdjustment(images, poses.Cameras, posed) : null;
+        var baCloud = BundleAdjust ? await RefineWithBundleAdjustmentAsync(images, poses.Cameras, posed) : null;
         posed.RemoveAll(i => poses.Cameras[i] == null);   // views BA could not place were dropped
 
         // Initialise from the adjusted SPARSE CLOUD, as 3DGS does from COLMAP, not from per-view depth shells.

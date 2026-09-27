@@ -270,6 +270,9 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.BundleAdjust = bav is not ("0" or "false");
             if (query.TryGetValue("baiters", out var bai) && int.TryParse(bai, out var baii))
                 _multiViewService.BundleAdjustIterations = baii;
+            // &verify=cpu: verify matched pairs with the CPU estimator instead of GpuEpipolarRansac (A/B).
+            if (query.TryGetValue("verify", out var vq))
+                _multiViewService.GpuPairVerification = vq != "cpu";
             // &bainit=0: per-view depth-shell init even when BA produced a sparse cloud (A/B).
             // &targetmb=N: the resident training-target budget (MiB). 256 shrank Truck's 126 views to 734 px.
             // &trainprofile=1: wait after each training-step phase and log the per-phase ms (diagnostic).

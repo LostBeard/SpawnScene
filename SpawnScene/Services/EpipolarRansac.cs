@@ -19,7 +19,8 @@ public static class EpipolarRansac
     /// Null when no model reaches <paramref name="minInliers"/>.
     /// </summary>
     public static Result? Estimate(ReadOnlySpan<float> a, ReadOnlySpan<float> b, double thresholdPx = 2.0,
-        int minInliers = 15, int maxIterations = 1000, double confidence = 0.999, int seed = 1)
+        int minInliers = 15, int maxIterations = 1000, double confidence = 0.999, int seed = 1,
+        double minInlierRatio = DefaultMinInlierRatio)
     {
         int n = a.Length / 2;
         if (n < 8 || n < minInliers) return null;
@@ -49,14 +50,44 @@ public static class EpipolarRansac
                 bestF = (double[])f.Clone();
                 double w = (double)best / n;
                 double p8 = Math.Pow(w, 8);
-                needed = p8 >= 1 ? 1 : (int)Math.Ceiling(Math.Log(1 - confidence) / Math.Log(Math.Max(1e-12, 1 - p8)));
+                // Do NOT write Math.Log(1 - p8): for a poor first hypothesis on a large pair (4 of 584 matches,
+                // p8 ~ 5e-18) 1 - p8 rounds to exactly 1, the log is 0, the ratio is -infinity and the int cast
+                // saturates to int.MinValue - RANSAC stopped after ONE iteration and rejected real pairs with ~300
+                // true matches (GpuEpipolarRansacTests found it). double.LogP1 does not help: it is Log(1 + x) and
+                // rounds the same way (measured). log(1 - p) = -p to double precision for p < 1e-8. Clamp before the cast.
+                double log1mp = p8 < 1e-8 ? -p8 : Math.Log(1 - p8);
+                double iters = p8 >= 1 ? 1 : Math.Ceiling(Math.Log(1 - confidence) / log1mp);
+                needed = iters >= maxIterations ? maxIterations : Math.Max(1, (int)iters);
             }
         }
         if (bestF == null || best < minInliers) return null;
+        return Finish(bestF, pa, pb, th2, minInliers, it, minInlierRatio);
+    }
 
-        // Refit on all inliers, then re-score (one refinement pass).
+    /// <summary>
+    /// A pair verifies only if its inliers are also this fraction of its matches (COLMAP's TwoViewGeometry
+    /// min_inlier_ratio). A fixed count alone lets chance matches verify on big pairs: MEASURED 2026-09-27, pure
+    /// random matches with n >= 400 verified 20/20 at minInliers 15 (15-30 "inliers", 4-6% of n) - the best of 1,000
+    /// hypotheses always finds a 2 px band holding 15 of them. The one-iteration early-exit bug had hidden this by
+    /// rejecting most such pairs; fixed, it cost Truck poses 0.3% -> 1.1% median (tuvok-ab-A/B).
+    /// </summary>
+    public const double DefaultMinInlierRatio = 0.25;
+
+    /// <summary>
+    /// The tail shared with <see cref="GpuEpipolarRansac"/>: given the best hypothesis, refit on all its inliers
+    /// (one refinement pass, kept when it scores at least as well) and build the final mask, in double.
+    /// Null when fewer than <paramref name="minInliers"/> survive.
+    /// </summary>
+    public static Result? Finish(double[] hypothesis, float[] pa, float[] pb, double th2, int minInliers, int iterations,
+        double minInlierRatio = DefaultMinInlierRatio)
+    {
+        int n = pa.Length / 2;
+        var bestF = (double[])hypothesis.Clone();
         var inl = new List<int>();
         for (int i = 0; i < n; i++) if (Sampson2(bestF, pa, pb, i) <= th2) inl.Add(i);
+        int best = inl.Count;
+        if (best < minInliers) return null;
+        var f = new double[9];
         if (inl.Count >= 8 && EightPoint(pa, pb, inl.ToArray(), f))
         {
             int c = 0;
@@ -66,7 +97,7 @@ public static class EpipolarRansac
         var mask = new bool[n];
         int total = 0;
         for (int i = 0; i < n; i++) if (mask[i] = Sampson2(bestF, pa, pb, i) <= th2) total++;
-        return total < minInliers ? null : new Result(bestF, mask, total, it);
+        return total < minInliers || total < minInlierRatio * n ? null : new Result(bestF, mask, total, iterations);
     }
 
     static bool Contains(Span<int> s, int k, int v)

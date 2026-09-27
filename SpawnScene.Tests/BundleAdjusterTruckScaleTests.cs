@@ -16,8 +16,13 @@ public class BundleAdjusterTruckScaleTests
 {
     const int W = 979, H = 546;
 
-    static string DatasetFile(string name) => Path.GetFullPath(Path.Combine(TestContext.CurrentContext.TestDirectory,
-        "..", "..", "..", "..", "SpawnScene", "wwwroot", "datasets", "Truck", name));
+    static string DatasetFile(string name, string dataset = "Truck") => Path.GetFullPath(Path.Combine(
+        TestContext.CurrentContext.TestDirectory, "..", "..", "..", "..", "SpawnScene", "wwwroot", "datasets", dataset, name));
+
+    // Truck's measured views-per-track mix (tuvok-truckphoto-7k): 2:14186 3:4078 4:1744 5:891 6+:1440.
+    static readonly double[] TruckTrackMix = { 0.635, 0.817, 0.895, 0.935, 1.0 };
+    // TruckFull (251 views, tuvok-b9-full30k-sfm): 2:24662 3:8286 4:4088 5:2308 6+:4544.
+    static readonly double[] TruckFullTrackMix = { 0.562, 0.751, 0.844, 0.897, 1.0 };
 
     static float Gauss(Random rng) =>
         (float)(Math.Sqrt(-2 * Math.Log(Math.Max(rng.NextDouble(), 1e-12))) * Math.Cos(2 * Math.PI * rng.NextDouble()));
@@ -30,9 +35,10 @@ public class BundleAdjusterTruckScaleTests
 
     /// <summary>The Truck problem, deterministic for a seed. Null when the dataset is not in this checkout.</summary>
     internal static (List<CameraParams> truth, List<CameraParams> init, List<Vector3> points,
-        List<BundleAdjuster.Observation> obs)? BuildTruckProblem(int seed, int tracksWanted = 21_000)
+        List<BundleAdjuster.Observation> obs)? BuildTruckProblem(int seed, int tracksWanted = 21_000,
+            string dataset = "Truck", double[]? trackMix = null)
     {
-        string posesPath = DatasetFile("poses.par"), pointsPath = DatasetFile("points3d.bin");
+        string posesPath = DatasetFile("poses.par", dataset), pointsPath = DatasetFile("points3d.bin", dataset);
         if (!File.Exists(posesPath) || !File.Exists(pointsPath)) return null;
         var truth = WorldSpaceGeometry.ParseMiddleburyParams(File.ReadAllText(posesPath), 1957, 1091)
             .OrderBy(e => e.filename, StringComparer.Ordinal)
@@ -40,8 +46,7 @@ public class BundleAdjusterTruckScaleTests
         var cloud = SparsePointCloudInit.Parse(File.ReadAllBytes(pointsPath)).Positions;
 
         var rng = new Random(seed);
-        // Truck's measured views-per-track mix (tuvok-truckphoto-7k): 2:14186 3:4078 4:1744 5:891 6+:1440.
-        double[] cumulative = { 0.635, 0.817, 0.895, 0.935, 1.0 };
+        double[] cumulative = trackMix ?? TruckTrackMix;
         var order = Enumerable.Range(0, cloud.Length).OrderBy(_ => rng.Next()).ToList();
         var tracks = new List<List<(int Camera, float U, float V)>>();
         var visible = new List<(int c, float u, float v)>();
@@ -123,10 +128,22 @@ public class BundleAdjusterTruckScaleTests
     }
 
     [Test]
-    public void TruckScale_RefinesToSfmGrade_AndReportsWhereTheTimeGoes()
+    public void TruckScale_RefinesToSfmGrade_AndReportsWhereTheTimeGoes() => RefinesToSfmGrade(BuildTruckProblem(seed: 5), "Truck");
+
+    /// <summary>
+    /// TruckFull's scale (251 cameras, its measured track mix). MEASURED 2026-09-27 in the browser (tuvok-b9-full30k-sfm):
+    /// the first BA solve took 889 s (build 148 s, solve 730 s of which CG 240 s, 526 attempts). Benchmark for a faster
+    /// solver; explicit because it runs minutes natively.
+    /// </summary>
+    [Test, Explicit("benchmark: minutes natively")]
+    public void TruckFullScale_RefinesToSfmGrade_AndReportsWhereTheTimeGoes() =>
+        RefinesToSfmGrade(BuildTruckProblem(seed: 5, tracksWanted: 44_000, dataset: "TruckFull", trackMix: TruckFullTrackMix), "TruckFull");
+
+    static void RefinesToSfmGrade(
+        (List<CameraParams> truth, List<CameraParams> init, List<Vector3> points, List<BundleAdjuster.Observation> obs)? problem,
+        string name)
     {
-        var problem = BuildTruckProblem(seed: 5);
-        if (problem == null) Assert.Ignore("Truck dataset not generated in this checkout");
+        if (problem == null) Assert.Ignore($"{name} dataset not generated in this checkout");
         var (truth, init, points, obs) = problem.Value;
 
         var (ba, result) = SolveLikeProduction(init, points, obs);
@@ -138,7 +155,7 @@ public class BundleAdjusterTruckScaleTests
             init.Cast<CameraParams?>().ToList(), truth.Cast<CameraParams?>().ToList(), out var acc0, out _, out _), Is.True);
 
         TestContext.Out.WriteLine(
-            $"Truck-scale BA: {truth.Count} cams, {points.Count} points, {result.Observations} obs ({result.ObservationsKept} kept), " +
+            $"{name}-scale BA: {truth.Count} cams, {points.Count} points, {result.Observations} obs ({result.ObservationsKept} kept), " +
             $"{result.Iterations} iters, RMS {result.InitialRmsPixels:F1} -> {result.FinalRmsPixels:F3} px, {result.Seconds:F1}s");
         TestContext.Out.WriteLine($"  timing: {ba.TimingSummary()}");
         TestContext.Out.WriteLine(

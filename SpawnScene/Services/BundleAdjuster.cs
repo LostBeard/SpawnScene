@@ -225,12 +225,14 @@ public sealed class BundleAdjuster
     }
     long _tBuild, _tSolve, _tCost, _tCg;
     int _attempts;
+    readonly int _gc0 = GC.CollectionCount(0), _gc1 = GC.CollectionCount(1), _gc2 = GC.CollectionCount(2);
 
     /// <summary>Where the time went (seconds): normal equations, damped solve (Schur + CG), of which CG, cost evaluation; LM attempts.</summary>
     public string TimingSummary()
     {
         double f = System.Diagnostics.Stopwatch.Frequency;
-        return $"build {_tBuild / f:F2}s, solve {_tSolve / f:F2}s (CG {_tCg / f:F2}s), cost {_tCost / f:F2}s, {_attempts} attempts";
+        return $"build {_tBuild / f:F2}s, solve {_tSolve / f:F2}s (CG {_tCg / f:F2}s), cost {_tCost / f:F2}s, {_attempts} attempts, " +
+            $"GCs gen0/1/2 {GC.CollectionCount(0) - _gc0}/{GC.CollectionCount(1) - _gc1}/{GC.CollectionCount(2) - _gc2}";
     }
 
     public Result Solve(Options? options = null)
@@ -321,15 +323,25 @@ public sealed class BundleAdjuster
     /// <summary>Global parameter index of column <paramref name="a"/> (0..6) of an observation in camera <paramref name="ci"/>; -1 if fixed/absent.</summary>
     int Col(int ci, int a) => a < 6 ? (_fixed[ci] ? -1 : ci * 6 + a) : (_sharedFocal ? FocalIndex : -1);
 
+    // Solver buffers, allocated once per instance and reused by every LM iteration and attempt. MEASURED
+    // 2026-09-27: TruckFull-shaped BA ran 57 s natively and 889 s in the browser (Truck-126: 41 s vs 78 s). Every
+    // iteration allocated a dense ParamCount^2 U (18 MB at 251 cameras), every attempt cloned it into S, plus Wb
+    // (obs x 21 doubles) and a List per point - against a ~770 MB live browser heap (the decoded photos).
+    NormalEquations? _ne;
+    double[]? _s, _rhs, _vInv, _dCam, _dPt, _pre, _tailInv, _cgR, _cgZ, _cgP, _cgAp;
+
     NormalEquations BuildNormalEquations()
     {
         int n = ParamCount;
-        var u = new double[n * n];
-        var g = new double[n];
-        var v = new double[_np * 9];
-        var gP = new double[_np * 3];
-        var wb = new double[_obs.Count * Cols * 3];
-        var byPoint = new List<int>?[_np];
+        _ne ??= new NormalEquations
+        {
+            U = new double[n * n], G = new double[n], V = new double[_np * 9], GP = new double[_np * 3],
+            // Wb is read only at (observation, column) entries written by the same build: no clear needed.
+            Wb = new double[_obs.Count * Cols * 3], ByPoint = new List<int>?[_np],
+        };
+        var u = _ne.U; var g = _ne.G; var v = _ne.V; var gP = _ne.GP; var wb = _ne.Wb; var byPoint = _ne.ByPoint;
+        Array.Clear(u); Array.Clear(g); Array.Clear(v); Array.Clear(gP);
+        foreach (var list in byPoint) list?.Clear();
         Span<double> jc = stackalloc double[2 * Cols]; // row 0 = du, row 1 = dv
         Span<double> jp = stackalloc double[6];
         Span<int> col = stackalloc int[Cols];
@@ -380,16 +392,17 @@ public sealed class BundleAdjuster
                     v[pi * 9 + a * 3 + bb] += w * (jp[a] * jp[bb] + jp[3 + a] * jp[3 + bb]);
             }
         }
-        return new NormalEquations { U = u, G = g, V = v, GP = gP, Wb = wb, ByPoint = byPoint };
+        return _ne;
     }
 
     bool SolveDamped(NormalEquations ne, double lambda, out double[] dCam, out double[] dPt)
     {
         int n = ParamCount;
-        dCam = new double[n];
-        dPt = new double[_np * 3];
+        dCam = _dCam ??= new double[n];
+        dPt = _dPt ??= new double[_np * 3];
+        Array.Clear(dCam);   // CG's starting x
 
-        var vInv = new double[_np * 9];
+        var vInv = _vInv ??= new double[_np * 9];
         Span<double> m = stackalloc double[9];
         for (int p = 0; p < _np; p++)
         {
@@ -399,8 +412,9 @@ public sealed class BundleAdjuster
         }
 
         // S = U* - sum_p W_p V*_p^-1 W_p^T ; b = -g + sum_p W_p V*_p^-1 gP_p
-        var s = (double[])ne.U.Clone();
-        var rhs = new double[n];
+        var s = _s ??= new double[n * n];
+        Array.Copy(ne.U, s, s.Length);
+        var rhs = _rhs ??= new double[n];
         for (int k = 0; k < n; k++)
         {
             rhs[k] = -ne.G[k];
@@ -493,7 +507,7 @@ public sealed class BundleAdjuster
     {
         // 6x6 blocks for the poses, scalar blocks for anything after them (the shared focal).
         int nb = _nc;
-        var pre = new double[nb * 36];
+        var pre = _pre ??= new double[nb * 36];
         Span<double> blk = stackalloc double[36];
         for (int k = 0; k < nb; k++)
         {
@@ -503,7 +517,7 @@ public sealed class BundleAdjuster
             if (!InvertSpd(blk, pre.AsSpan(k * 36, 36), 6)) return false;
         }
         int tail0 = nb * 6;
-        var tailInv = new double[n - tail0];
+        var tailInv = _tailInv ??= new double[n - tail0];
         for (int k = tail0; k < n; k++) tailInv[k - tail0] = s[k * n + k] > 0 ? 1 / s[k * n + k] : 0;
 
         void Pre(double[] r, double[] z)
@@ -518,11 +532,13 @@ public sealed class BundleAdjuster
             for (int k = tail0; k < n; k++) z[k] = tailInv[k - tail0] * r[k];
         }
 
-        var r = (double[])b.Clone();
-        var z = new double[n];
+        var r = _cgR ??= new double[n];
+        Array.Copy(b, r, n);
+        var z = _cgZ ??= new double[n];
         Pre(r, z);
-        var p = (double[])z.Clone();
-        var ap = new double[n];
+        var p = _cgP ??= new double[n];
+        Array.Copy(z, p, n);
+        var ap = _cgAp ??= new double[n];
         double rz = Dot(r, z);
         double b2 = Math.Max(Dot(b, b), 1e-300);
         for (int it = 0; it < _opts.MaxCgIterations; it++)

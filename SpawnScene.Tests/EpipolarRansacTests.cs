@@ -64,4 +64,18 @@ public class EpipolarRansacTests
         TestContext.Out.WriteLine(r == null ? "rejected" : $"accepted with {r.InlierCount}");
         Assert.That(r, Is.Null, "a pair of chance matches must not verify");
     }
+
+    [Test]
+    public void LargePureNoisePairs_AreRejected()
+    {
+        // Chance matches scale with n: a fixed minInliers of 15 accepted 20/20 random pairs at n >= 400 (the best of
+        // 1,000 hypotheses finds a 2 px band holding 15-30 of them). The inlier-ratio guard rejects them.
+        foreach (int n in new[] { 200, 400, 800 })
+            for (int seed = 0; seed < 10; seed++)
+            {
+                var (a, b, _) = Pair(inliers: 0, outliers: n, seed: 1000 + seed * 17 + n);
+                var r = EpipolarRansac.Estimate(a, b, thresholdPx: 2.0, minInliers: 15, seed: seed);
+                Assert.That(r, Is.Null, $"n={n} seed={seed}: {r?.InlierCount} chance inliers verified");
+            }
+    }
 }

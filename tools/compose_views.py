@@ -3,8 +3,8 @@
     python tools/compose_views.py <Dataset> <RUN_TAG> [<RUN_TAG> ...]
 
 Reads _shots/dataset/<Dataset>__<TAG>__views.json (written by _cdp_dataset.js) and the matching
-<Dataset>__<TAG>__view-<kind>-<i>.png captures, fetches each photo from the app server named in the
-sidecar, and writes _shots/dataset/<Dataset>__<TAG>__compare.png. With several tags the renders go in
+<Dataset>__<TAG>__view-<kind>-<i>.png captures, loads each photo (tools/_photos.py: disk, else the app named in the
+sidecar), and writes _shots/dataset/<Dataset>__<TAG>__compare.png. With several tags the renders go in
 columns, one per tag, then the photo - the same view across runs, for a by-eye A/B.
 
 Numbers do not decide quality on this project; TJ's eyes do, and these are for him.

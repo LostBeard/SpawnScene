@@ -97,6 +97,10 @@ public partial class Studio : IAsyncDisposable
     // Dynamic HUD labels (updated each frame)
     private UILabel? _hudSplatLabel;
     private UILabel? _hudFpsLabel;
+    // Project training (TrainProjectSceneAsync): progress line + Stop button in the viewer HUD.
+    private bool _trainingActive;
+    private string _trainHudText = "";
+    private UILabel? _hudTrainLabel;
     private UILabel? _statusLabel;
     private UIPanel? _settingsPanel;
     private bool _showSettings;
@@ -244,6 +248,15 @@ public partial class Studio : IAsyncDisposable
                 ? dpi : 37;
             bool disp = query.TryGetValue("disparity", out var ds) && ds is "1" or "true";
             await RunDepthMapAutotestAsync(img, dmPatches, disp);
+        }
+        else if (mode == "project")
+        {
+            // The USER path: a project from a dataset's photos, Generate (train + save), reopen. See Studio.ProjectAutotest.cs.
+            string pname = query.TryGetValue("name", out var pn2) ? pn2 : "TruckFull";
+            int piters = query.TryGetValue("train", out var pt2) && int.TryParse(pt2, out var pti2) ? pti2 : 1000;
+            int pcount = query.TryGetValue("count", out var pc2) && int.TryParse(pc2, out var pci2) ? pci2 : 24;
+            int pstride = query.TryGetValue("stride", out var ps2) && int.TryParse(ps2, out var psi2) ? psi2 : 1;
+            await RunProjectAutotestAsync(pname, piters, pcount, pstride);
         }
         else if (mode == "dataset")
         {

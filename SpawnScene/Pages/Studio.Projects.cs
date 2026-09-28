@@ -215,6 +215,7 @@ public partial class Studio
             _statusMessage = $"Uploading {splatCount:N0} splats...";
             BuildProjectDetailUI();
 
+            _gpuRenderer.UseRgbColours();
             await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
 
             var scene = new GaussianScene
@@ -298,7 +299,7 @@ public partial class Studio
     /// fitting a scene to them produces a confident reconstruction of a fiction.
     /// </summary>
     private void RecordTrainingViews(
-        GaussianScene scene, IReadOnlyList<ImportedImage> images, bool fromProjectStore)
+        GaussianScene scene, IReadOnlyList<ImportedImage> images, bool fromProjectStore, bool holdOut = true)
     {
         // Orientation correction needs a gravity-aligned world frame, and only a calibration
         // file gives one. SfM recovers geometry up to an arbitrary rotation and DAv3 extrinsics
@@ -347,7 +348,8 @@ public partial class Studio
             // than a reconstruction of its own input. &llffhold=N instead uses the reference's split
             // (dataset_readers: test = image index % llffhold == 0, images sorted by name), for numbers
             // comparable with the published ones.
-            bool supervise = LlffHold > 0 ? posed % LlffHold != 0 : posed % 4 != 3;
+            // holdOut: false (a user's own project) trains on EVERY photo - the held-out split is for measuring.
+            bool supervise = !holdOut || (LlffHold > 0 ? posed % LlffHold != 0 : posed % 4 != 3);
             if (!supervise) held++;
             posed++;
 
@@ -495,6 +497,7 @@ public partial class Studio
                 if (result == null) { _statusMessage = _multiViewService.Status; BuildProjectDetailUI(); return; }
 
                 var (packedBuf, splatCount) = result.Value;
+                _gpuRenderer.UseRgbColours();
                 await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
 
                 var scene = new GaussianScene
@@ -584,6 +587,8 @@ public partial class Studio
     private async Task GenerateMultiViewScene()
     {
         if (_activeProject == null) return;
+        // The depth input the measured runs used (the dataset path sets it per run; nothing else may leak in).
+        DepthEstimationService.SetSquareInput(DepthEstimationService.SafeMultiViewPatches);
 
         _statusMessage = "Preparing multi-view pipeline...";
         BuildProjectDetailUI();
@@ -660,6 +665,7 @@ public partial class Studio
                 _statusMessage = $"Uploading {splatCount:N0} splats...";
                 BuildProjectDetailUI();
 
+                _gpuRenderer.UseRgbColours();
                 await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
 
                 var scene = new GaussianScene
@@ -670,33 +676,31 @@ public partial class Studio
                 };
 
                 // Record what the pose cascade settled on, so the optimiser can run on captures
-                // that have no calibration file. Until now only the TempleRing path populated
-                // this, which is why the optimiser could not touch any of the real datasets.
+                // that have no calibration file. A user's own project trains on EVERY photo
+                // (holdOut: false) - the held-out split exists to measure, not to build a scene.
                 //
                 // Fallback poses are not recorded on purpose: they are a placeholder, not a
                 // measurement, and training against them would fit the scene to a fiction.
-                RecordTrainingViews(scene, images, fromProjectStore: true);
+                RecordTrainingViews(scene, images, fromProjectStore: true, holdOut: false);
 
                 _renderService.SetActiveSceneGpuLoaded(scene);
                 _sceneManager.ActiveScene = scene;
 
-                // Save to OPFS
-                _statusMessage = $"Saving {splatCount:N0} splats to storage...";
-                BuildProjectDetailUI();
+                // Straight to the viewer, standing where a photo was taken (FitToScene can leave an
+                // SfM reconstruction behind the camera - see the dataset path), so training can be watched.
+                _statusMessage = null;
+                _state = StudioState.SceneViewer;
+                SeatViewerAtCapturePose(scene);
+                BuildViewerHudUI();
 
-                // GPU → JS Uint8Array → OPFS (zero .NET managed-heap copies — see single-image path).
-                using var packedU8 = await _gpuRenderer.ReadPackedUint8ArrayAsync(splatCount);
-                if (packedU8 != null)
-                {
-                    var projectScene = new ProjectScene
-                    {
-                        SplatCount = splatCount,
-                        FloatsPerSplat = SplatFormat.Floats,
-                        QualityPreset = _activeProject.Settings.QualityPreset,
-                    };
-                    await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
-                    Console.WriteLine($"[Studio] Multi-view scene saved: {packedU8.Length / (1024 * 1024):F1} MB");
-                }
+                int trainIters = _activeProject.Settings.TrainIterations;
+                int trainedIters = 0;
+                if (trainIters > 0 && scene.TrainingViews.Count > 0)
+                    trainedIters = await TrainProjectSceneAsync(trainIters);
+                else if (trainIters > 0)
+                    Console.WriteLine("[Studio] not training: the pose recovery produced no usable camera poses");
+
+                await SaveViewedSceneToProjectAsync(trainedIters);
 
                 // Schedule thumbnail
                 var lastScene = _activeProject.Scenes.LastOrDefault();
@@ -706,11 +710,6 @@ public partial class Studio
                     _pendingThumbnailSceneId = lastScene.Id;
                     _thumbnailDelayFrames = 30;
                 }
-
-                _statusMessage = null;
-                _state = StudioState.SceneViewer;
-                _cameraController?.FitToScene();
-                BuildViewerHudUI();
 
                 Console.WriteLine($"[Studio] Multi-view scene: {splatCount:N0} splats from {images.Count} images");
             }
@@ -727,9 +726,115 @@ public partial class Studio
         }
     }
 
+    /// <summary>Stand the viewer at the first photo's pose (else fit to the scene).</summary>
+    private void SeatViewerAtCapturePose(GaussianScene scene)
+    {
+        if (scene.TrainingCameras.Count > 0 && _cameraController != null)
+        {
+            var seat = scene.TrainingCameras[0];
+            _cameraController.SetPose(seat.Position, seat.Forward, seat.Up);
+        }
+        else
+        {
+            _cameraController?.FitToScene();
+        }
+    }
+
+    /// <summary>
+    /// Train the viewed scene with the settings that produced the measured TruckFull result (b24, 2026-09-28:
+    /// 24.75 dB held out at 30K) rather than the trainer's bare defaults, which the dataset harness always
+    /// overrides from the URL (opacity reset off, a 450K densify cap, a 256 MB target budget). The static knobs
+    /// are restored afterwards so a later dataset run still gets its own URL settings. Returns the iterations
+    /// done (0 = did not train).
+    /// </summary>
+    private async Task<int> TrainProjectSceneAsync(int iterations)
+    {
+        var saved = (DensifyEveryIters, OpacityResetEveryIters, SplatDensityControl.GrowthSelectFraction,
+            MaxDensifiedSplats, MaxTargetStackBytes, HeldOutEveryCycles, _unloadDepthBeforeTraining);
+        DensifyEveryIters = 100;
+        OpacityResetEveryIters = 3000;
+        SplatDensityControl.GrowthSelectFraction = 1f;
+        MaxDensifiedSplats = 3_000_000;
+        MaxTargetStackBytes = 640L * 1024 * 1024;
+        HeldOutEveryCycles = 0;           // no held-out views to score, so no mid-run evaluation passes
+        _unloadDepthBeforeTraining = true; // give the trainer the depth model's GPU memory
+
+        _trainingActive = true;
+        _trainHudText = $"Preparing training ({iterations:N0} iterations)…";
+        if (_state == StudioState.SceneViewer) BuildViewerHudUI();
+        int done = 0;
+        try
+        {
+            bool ok = await TrainOnTrainingViewsAsync(
+                iterations, optimiseGeometry: true, maxTrainDimension: 1024,
+                onProgress: p =>
+                {
+                    done = p.Done;
+                    double rate = p.Done / Math.Max(p.Seconds, 1e-6);
+                    var left = TimeSpan.FromSeconds((p.Total - p.Done) / Math.Max(rate, 1e-6));
+                    _trainHudText = _trainStopRequested
+                        ? "Stopping - finishing up and saving…"
+                        : $"Training {p.Done:N0} / {p.Total:N0} · {p.Splats:N0} splats · {rate:F1} it/s · " +
+                          $"~{(int)left.TotalMinutes}m {left.Seconds:D2}s left";
+                    if (_hudTrainLabel != null) _hudTrainLabel.Text = _trainHudText;
+                },
+                livePreview: true);
+            return ok ? done : 0;
+        }
+        finally
+        {
+            (DensifyEveryIters, OpacityResetEveryIters, SplatDensityControl.GrowthSelectFraction,
+                MaxDensifiedSplats, MaxTargetStackBytes, HeldOutEveryCycles, _unloadDepthBeforeTraining) = saved;
+            _trainingActive = false;
+            if (_state == StudioState.SceneViewer) BuildViewerHudUI();
+        }
+    }
+
+    /// <summary>
+    /// Save the scene on screen to the active project: packed splats, plus (trained) the colour model and the SH
+    /// bands. GPU -> JS -> OPFS, never the .NET heap.
+    /// </summary>
+    private async Task SaveViewedSceneToProjectAsync(int trainedIters)
+    {
+        if (_activeProject == null) return;
+        int count = _gpuRenderer.SplatCount;
+        using var packedU8 = await _gpuRenderer.ReadPackedUint8ArrayAsync(count);
+        if (packedU8 == null) { Console.WriteLine("[Studio] save skipped: no packed splat data"); return; }
+
+        Uint8Array? shRest = null;
+        if (trainedIters > 0 && _gpuRenderer.ShDegree > 0 && _trainer != null)
+            shRest = await _trainer.ReadShRestUint8ArrayAsync(count);
+        try
+        {
+            var projectScene = new ProjectScene
+            {
+                SplatCount = count,
+                FloatsPerSplat = SplatFormat.Floats,
+                QualityPreset = _activeProject.Settings.QualityPreset,
+                ColoursAreShDc = _gpuRenderer.ColoursAreShDc,
+                ShDegree = shRest != null ? _gpuRenderer.ShDegree : 0,
+                TrainedIterations = trainedIters,
+            };
+            await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
+            if (shRest != null)
+                await _projectService.SaveSceneShRestAsync(_activeProject.Id, projectScene, shRest);
+            Console.WriteLine(
+                $"[Studio] scene saved: {count:N0} splats, {packedU8.Length / (1024 * 1024)} MB" +
+                (shRest != null ? $" + SH degree {projectScene.ShDegree} bands {shRest.Length / (1024 * 1024)} MB" : "") +
+                (trainedIters > 0 ? $", trained {trainedIters:N0} iterations" : ", untrained"));
+        }
+        finally
+        {
+            shRest?.Dispose();
+        }
+    }
+
     // ─── Scene Viewing ───
 
-    private async void OnViewScene(ProjectScene scene)
+    private async void OnViewScene(ProjectScene scene) => await LoadProjectSceneAsync(scene);
+
+    /// <summary>Open a saved scene in the viewer (what clicking it in the project does).</summary>
+    private async Task LoadProjectSceneAsync(ProjectScene scene)
     {
         if (_activeProject == null) return;
 
@@ -753,7 +858,20 @@ public partial class Studio
             _statusMessage = $"Streaming {scene.SplatCount:N0} splats to GPU...";
             BuildProjectDetailUI();
 
+            // A trained scene stores SH DC in the colour slots and its SH bands beside it.
+            _gpuRenderer.UseRgbColours();
+            _gpuRenderer.ColoursAreShDc = scene.ColoursAreShDc;
             await _gpuRenderer.UploadSceneFromStream(sceneStream, scene.SplatCount, scene.EffectiveFloatsPerSplat);
+            if (scene.ShDegree > 0)
+            {
+                using var shRest = await _projectService.ReadSceneShRestAsync(_activeProject.Id, scene.Id);
+                if (shRest != null)
+                {
+                    _gpuRenderer.LoadShRest(shRest, scene.ShDegree);
+                    _gpuRenderer.RepackForDisplay();
+                }
+                else Console.WriteLine($"[Studio] scene {scene.Id}: SH bands missing - drawing base colour only");
+            }
 
             var gaussianScene = new GaussianScene
             {

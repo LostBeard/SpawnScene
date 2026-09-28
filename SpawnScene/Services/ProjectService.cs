@@ -196,6 +196,44 @@ public class ProjectService
     }
 
     /// <summary>
+    /// Save a trained scene's SH rest bands next to its packed data (scenes/{id}.sh.bin), JS memory straight to
+    /// OPFS. Call after <see cref="SaveSceneAsync(string, ProjectScene, Uint8Array)"/>; adds to the scene's size.
+    /// </summary>
+    public async Task SaveSceneShRestAsync(string projectId, ProjectScene scene, Uint8Array shRest)
+    {
+        var project = (await ListProjectsAsync()).FirstOrDefault(p => p.Id == projectId);
+        if (project == null) return;
+        var root = await GetRootDirAsync();
+        var projDir = await GetProjectDirAsync(root, projectId);
+        using var scenesDir = await projDir.GetDirectoryHandle("scenes", create: true);
+        await WriteBinaryAsync(scenesDir, $"{scene.Id}.sh.bin", shRest);
+        var stored = project.Scenes.FirstOrDefault(s => s.Id == scene.Id);
+        if (stored != null) stored.SizeBytes += shRest.Length;
+        await SaveIndexAsync();
+    }
+
+    /// <summary>
+    /// A trained scene's SH rest bands as a JS ArrayBuffer (never the .NET heap), or null when the scene has
+    /// none. Caller disposes.
+    /// </summary>
+    public async Task<ArrayBuffer?> ReadSceneShRestAsync(string projectId, string sceneId)
+    {
+        try
+        {
+            var root = await GetRootDirAsync();
+            var projDir = await GetProjectDirAsync(root, projectId);
+            using var scenesDir = await projDir.GetDirectoryHandle("scenes");
+            using var fileHandle = await scenesDir.GetFileHandle($"{sceneId}.sh.bin");
+            using var file = await fileHandle.GetFile();
+            return await file.ArrayBuffer();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// Open a streaming <see cref="Stream"/> over a scene's packed data in OPFS, WITHOUT reading it into
     /// memory. Returns a <see cref="BlobStream"/> (an <c>IJSReadStream</c>, <c>CanReadSync=false</c>) so the
     /// caller can stream it straight to the GPU via <c>ArrayView.CopyFromStreamAsync</c> — the bytes flow
@@ -304,6 +342,7 @@ public class ProjectService
             var projDir = await GetProjectDirAsync(root, projectId);
             using var scenesDir = await projDir.GetDirectoryHandle("scenes");
             await scenesDir.RemoveEntry($"{sceneId}.bin");
+            try { await scenesDir.RemoveEntry($"{sceneId}.sh.bin"); } catch { /* untrained scenes have none */ }
         }
         catch { }
 

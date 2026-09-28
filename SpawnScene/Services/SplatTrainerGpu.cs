@@ -1573,6 +1573,18 @@ public sealed class SplatTrainerGpu : IDisposable
         return dst;
     }
 
+    /// <summary>
+    /// The SH rest coefficients as a JS Uint8Array (caller disposes), for saving to OPFS without passing
+    /// through the .NET heap - 45 floats per splat is ~300 MB at 1.7M splats. Null when there are none.
+    /// </summary>
+    public async Task<Uint8Array?> ReadShRestUint8ArrayAsync(int splatCount)
+    {
+        if (_shRest == null || splatCount <= 0) return null;
+        long bytes = (long)splatCount * SphericalHarmonics.RestFloatsPerSplat * sizeof(float);
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        return await _shRest.CopyToHostUint8ArrayAsync(0, bytes);
+    }
+
     public async Task<float[]> ReadShRestAsync(int splatCount)
     {
         if (_shRest == null) return System.Array.Empty<float>();

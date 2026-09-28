@@ -194,6 +194,7 @@ public partial class Studio
     {
         _uiRoot.ClearChildren();
         _statusLabel = null;
+        _hudTrainLabel = null;
 
         if (_showDepthMap && _depthMapView != null)
         {
@@ -240,6 +241,39 @@ public partial class Studio
             Color = UITheme.Current.TextMuted,
         });
 
+        if (_trainingActive)
+        {
+            // Training runs in this view: the scene on screen improves as it goes (live repack).
+            var trainPanel = _uiRoot.AddChild(new UIPanel
+            {
+                X = 12, Y = _canvasHeight - 88 - 52,
+                Width = Math.Min(620, _canvasWidth - 24), Height = 44,
+                BackgroundColor = Color.FromArgb(200, 12, 16, 22),
+            });
+            _hudTrainLabel = trainPanel.AddChild(new UILabel
+            {
+                X = 12, Y = 14,
+                Text = _trainHudText,
+                FontSize = FontSize.Caption,
+                Color = UITheme.Current.TextPrimary,
+            });
+            trainPanel.AddChild(new UIButton
+            {
+                X = Math.Min(620, _canvasWidth - 24) - 132, Y = 6,
+                Width = 124, Height = 32,
+                Text = "Stop training",
+                FontSize = FontSize.Caption,
+                OnClick = () =>
+                {
+                    // Keeps what has been learned: training finishes its current iteration, then evaluates,
+                    // hands the viewer its SH bands and the scene is saved.
+                    _trainStopRequested = true;
+                    _trainHudText = "Stopping - finishing up and saving…";
+                    if (_hudTrainLabel != null) _hudTrainLabel.Text = _trainHudText;
+                },
+            });
+        }
+
         _uiRoot.AddChild(new UIButton
         {
             X = 12, Y = 12,
@@ -248,6 +282,15 @@ public partial class Studio
             FontSize = FontSize.Caption,
             OnClick = async () =>
             {
+                if (_trainingActive)
+                {
+                    // Leaving mid-training would pull the scene out from under the trainer. Stop first; the
+                    // scene is saved when it finishes, then Back works normally.
+                    _trainStopRequested = true;
+                    _trainHudText = "Stopping - finishing up and saving… (press Back again when done)";
+                    if (_hudTrainLabel != null) _hudTrainLabel.Text = _trainHudText;
+                    return;
+                }
                 _showSettings = false;
                 if (_activeProject != null)
                 {

@@ -215,6 +215,7 @@ public partial class Studio
             if (forUi)
                 SetUiStatus($"Uploading {splatCount:N0} splats…");
 
+            _gpuRenderer.UseRgbColours();
             await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
 
             var scene = new GaussianScene

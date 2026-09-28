@@ -94,6 +94,35 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>The SH degree the viewer is drawing with (0 = DC only).</summary>
     public int ShDegree => _shDegree;
 
+    /// <summary>
+    /// The next scene's colours are plain RGB with no SH bands - every scene load that is NOT a trained scene
+    /// must say so. Training sets <see cref="ColoursAreShDc"/> and nothing reset it, so any scene loaded after a
+    /// training run in the same tab had its RGB colours drawn as SH DC coefficients.
+    /// </summary>
+    public void UseRgbColours()
+    {
+        ColoursAreShDc = false;
+        SetShRest(null, 0);
+    }
+
+    /// <summary>
+    /// Load a trained scene's SH rest bands (45 floats per splat, as saved from the trainer) from JS memory straight
+    /// into a GPU buffer - the bytes never enter the .NET heap (1.7M splats is ~300 MB).
+    /// </summary>
+    public void LoadShRest(ArrayBuffer data, int degree)
+    {
+        if (_device == null || _queue == null) return;
+        long bytes = (long)data.ByteLength;
+        if (bytes <= 0 || degree <= 0) { SetShRest(null, 0); return; }
+        var buffer = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = (ulong)bytes,
+            Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
+        });
+        _queue.WriteBuffer(buffer, 0L, data);
+        SetShRest(buffer, degree);
+    }
+
     /// <summary>Lower the SH degree in use (diagnostic A/B); takes effect at the next pack.</summary>
     public void CapShDegree(int degree)
     {
@@ -888,6 +917,7 @@ public class GpuGaussianRenderer : IDisposable
     /// </summary>
     public async Task UploadScene(GaussianScene scene)
     {
+        UseRgbColours(); // a CPU-side scene (.ply / .splat / depth) is always RGB, never a trained scene
         await _sorter.UploadAsync(scene);
 
         _splatCount = _sorter.SplatCount;

@@ -56,6 +56,8 @@ const DENSIFYUNTIL = process.env.DENSIFYUNTIL ? `&densifyuntil=${process.env.DEN
 const OPACITYRESET = process.env.OPACITYRESET ? `&opacityreset=${process.env.OPACITYRESET}` : '';
 // FITONE=N trains against view N alone: a capacity ceiling for the rasteriser.
 const FITONE = process.env.FITONE ? `&fitone=${process.env.FITONE}` : '';
+// AUTOTEST=project runs the USER path (Studio.ProjectAutotest.cs); COUNT / STRIDE pick its photos.
+const PROJECTPICK = (process.env.COUNT ? `&count=${process.env.COUNT}` : '') + (process.env.STRIDE ? `&stride=${process.env.STRIDE}` : '');
 
 let CDP = 9223;
 const cdp = (p) => `http://127.0.0.1:${CDP}${p}`;
@@ -139,7 +141,7 @@ const closeTab = (id) => new Promise(res =>
       await send('Emulation.setDeviceMetricsOverride', { width: vw, height: vh, deviceScaleFactor: 1, mobile: false });
       console.log(`[harness] viewport ${vw}x${vh} @1x`);
     }
-    const url = `${APP}/studio?autotest=dataset&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${MAXDENSIFY}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${EXTRA}&cb=${Date.now()}`;
+    const url = `${APP}/studio?autotest=${process.env.AUTOTEST || 'dataset'}&name=${NAME}&train=${TRAIN}${GEOM}${MAXDIM}${POSES}${PATCHES}${ANCHORS}${NVIEWS}${BUDGET}${MAXSCALE}${POSLR}${HELDEVERY}${SKIPZEROGRAD}${GTPOSES}${DENSIFY}${DENSIFYGRAD}${DENSIFYFRAC}${MAXDENSIFY}${DENSIFYUNTIL}${OPACITYRESET}${FITONE}${INIT}${PROJECTPICK}${EXTRA}&cb=${Date.now()}`;
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 

@@ -42,6 +42,15 @@ public class ProjectScene
     /// the old 10-float layout rather than silently reading the file at the wrong stride.
     /// </summary>
     public int FloatsPerSplat { get; set; }
+    /// <summary>
+    /// True for a TRAINED scene: the packed colour slots hold SH DC coefficients, not RGB, and the viewer must
+    /// convert (GpuGaussianRenderer.ColoursAreShDc). False for every generated-only scene.
+    /// </summary>
+    public bool ColoursAreShDc { get; set; }
+    /// <summary>SH degree of the saved rest bands (0 = none). The bands are in scenes/{Id}.sh.bin.</summary>
+    public int ShDegree { get; set; }
+    /// <summary>Training iterations this scene received (0 = not trained).</summary>
+    public int TrainedIterations { get; set; }
 
     /// <summary>Stride to read this scene's .bin at. 10 = pre-rotation layout, needs widening.</summary>
     [JsonIgnore]
@@ -58,6 +67,11 @@ public class ProjectSettings
     public string QualityPreset { get; set; } = "Standard";
     public int Subsample { get; set; } = 2;
     public float EdgeSharpness { get; set; } = 0.3f;
+    /// <summary>
+    /// Optimiser iterations after a multi-image generation (0 = do not train). 7,000 is the reference's
+    /// first checkpoint; 30,000 is its full run (TruckFull 251 photos: ~70 min training in the browser).
+    /// </summary>
+    public int TrainIterations { get; set; } = 7000;
     // Parked for a future NATIVE super-resolution pass (ORT SR retired 2026-07-01). See SuperResolutionService.cs.
     public bool UseSuperResolution { get; set; }
 

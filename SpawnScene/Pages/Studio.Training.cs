@@ -185,17 +185,27 @@ public partial class Studio
 
     bool _hadOpacityReset;
 
-    private async Task TrainOnTrainingViewsAsync(
+    /// <summary>Progress of a training run, reported about once a second.</summary>
+    internal readonly record struct TrainProgress(int Done, int Total, int Splats, double Seconds);
+
+    /// <summary>Set to finish the running training early: it stops at the next iteration, then finishes normally
+    /// (final evaluation, SH hand-off, display repack) so what was learned so far is kept.</summary>
+    private bool _trainStopRequested;
+
+    /// <summary>Returns true when the scene was trained (including a stop requested part way), false when training
+    /// could not start or failed.</summary>
+    private async Task<bool> TrainOnTrainingViewsAsync(
         int iterations, int keysPerSplat = 8, bool optimiseGeometry = false,
-        int maxTrainDimension = 720)
+        int maxTrainDimension = 720, Action<TrainProgress>? onProgress = null, bool livePreview = false)
     {
+        _trainStopRequested = false;
         try
         {
             var scene = _sceneManager.ActiveScene;
             if (scene == null || scene.TrainingViews.Count == 0)
             {
                 Console.WriteLine("[Train] FAIL: no training views on the active scene");
-                return;
+                return false;
             }
 
             var packed = _gpuRenderer.PackedSplatBuffer;
@@ -203,7 +213,7 @@ public partial class Studio
             if (packed == null || n <= 0)
             {
                 Console.WriteLine("[Train] FAIL: no packed splat buffer uploaded");
-                return;
+                return false;
             }
 
             var accel = _gpuService.WebGPUAccelerator;
@@ -222,7 +232,7 @@ public partial class Studio
             if (aabb == null)
             {
                 Console.WriteLine("[Train] FAIL: scene has no splats with opacity");
-                return;
+                return false;
             }
             var box = aabb.Value;   // reassigned after densification changes the scene
             Console.WriteLine(
@@ -317,7 +327,7 @@ public partial class Studio
                 if (!ok)
                 {
                     Console.WriteLine($"[Train] FAIL: could not load target {views[i].ImageName}");
-                    return;
+                    return false;
                 }
             }
             await accel.SynchronizeAsync();
@@ -392,7 +402,7 @@ public partial class Studio
             if (supervised.Count == 0)
             {
                 Console.WriteLine("[Train] FAIL: every view is held out - nothing to fit to");
-                return;
+                return false;
             }
             Console.WriteLine(
                 $"[Train] supervising on {supervised.Count} views, " +
@@ -466,8 +476,16 @@ public partial class Studio
             // depth shells - not of anything the optimiser subsequently does.
             _trainer.ResetViewSupport(n);
             double firstCycle = double.NaN, lastCycle = double.NaN;
+            int itersDone = iterations;
+            long lastReportTicks = 0, lastPreviewTicks = 0;
             for (int it = 0; it < iterations; it++)
             {
+                if (_trainStopRequested)
+                {
+                    itersDone = it;
+                    Console.WriteLine($"[Train] stopped on request after {it} of {iterations} iterations");
+                    break;
+                }
                 _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(it);
                 if (it == 0 || it == 1000 || it == 2000 || it == 3000)
                     Console.WriteLine($"[Train] SH degree -> {_trainer.ActiveShDegree} at iter {it}");
@@ -668,13 +686,33 @@ public partial class Studio
                     cycleSum = 0; cycleN = 0;
                 }
 
+                // Progress about once a second, and (project runs) a fresh display pack every two seconds so the
+                // viewer shows the scene improving - training writes straight to the splat data and the viewer
+                // draws a packed copy that is otherwise only rebuilt when training ends.
+                if (onProgress != null || livePreview)
+                {
+                    long now = System.Diagnostics.Stopwatch.GetTimestamp();
+                    long freq = System.Diagnostics.Stopwatch.Frequency;
+                    if (onProgress != null && now - lastReportTicks >= freq)
+                    {
+                        lastReportTicks = now;
+                        onProgress(new TrainProgress(it + 1, iterations, n, (DateTime.UtcNow - start).TotalSeconds));
+                    }
+                    if (livePreview && now - lastPreviewTicks >= 2 * freq)
+                    {
+                        lastPreviewTicks = now;
+                        _gpuRenderer.RepackForDisplay();
+                    }
+                }
+
                 // Yield to the browser. A tight await loop still starves rAF on some drivers,
                 // and a starved page is a lost device.
                 if (it % 4 == 3) await Task.Delay(1);
             }
             double total = (DateTime.UtcNow - start).TotalSeconds;
+            onProgress?.Invoke(new TrainProgress(itersDone, iterations, n, total));
             Console.WriteLine(
-                $"[Train] {iterations} iters in {total:F1}s ({iterations / Math.Max(total, 1e-6):F1} it/s), " +
+                $"[Train] {itersDone} iters in {total:F1}s ({itersDone / Math.Max(total, 1e-6):F1} it/s), " +
                 $"mean loss/cycle {firstCycle:F6} -> {lastCycle:F6}");
             if (overflowed > 0)
                 Console.WriteLine(
@@ -713,10 +751,12 @@ public partial class Studio
             // wrote straight through to the splat data behind it.
             _gpuRenderer.RepackForDisplay();
             Console.WriteLine("[Train] DONE");
+            return true;
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Train] FAIL: {ex}");
+            return false;
         }
     }
 

@@ -143,7 +143,12 @@ const closeTab = (id) => new Promise(res =>
     console.log(`\n=== ${NAME}, ${TRAIN} iters ===\n${url}\n`);
     await send('Page.navigate', { url });
 
-    const deadline = Date.now() + 55 * 60 * 1000;
+    // MINUTES (env) bounds the whole run, as in _cdp_autotest.js. It was hard-coded to 55 here, so every run
+    // script's MINUTES=240/360 was ignored and a 30K TruckFull training was cut off at cycle 32 as "TIMED OUT"
+    // (b22, 2026-09-27) - the run was healthy.
+    const minutes = parseInt(process.env.MINUTES || '55', 10);
+    console.log(`[harness] deadline ${minutes} min`);
+    const deadline = Date.now() + minutes * 60 * 1000;
     let shot = false;
     while (Date.now() < deadline && !done && !failed) {
       await new Promise(r => setTimeout(r, 500));

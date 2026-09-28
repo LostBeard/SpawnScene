@@ -46,6 +46,32 @@ public class GpuService : IBackgroundService, IAsyncDisposable
         return sb.ToString();
     }
 
+    /// <summary>
+    /// &amp;pooltrace=1: SpawnDev.ILGPU.ML's pool misses (fresh device allocations, by rent name) and Rent/Return
+    /// ownership violations since the last call - what a leak of POOL buffers looks like from outside. Clears both.
+    /// </summary>
+    public static string PoolTraceReport()
+    {
+        var names = SpawnDev.ILGPU.ML.Tensors.BufferPool.RecentFreshAllocNames;
+        var counts = new Dictionary<string, int>();
+        foreach (var n in names) counts[n] = counts.TryGetValue(n, out var c) ? c + 1 : 1;
+        int total = names.Count;
+        names.Clear();
+        var sorted = new List<KeyValuePair<string, int>>(counts);
+        sorted.Sort((a, b) => b.Value.CompareTo(a.Value));
+        var sb = new System.Text.StringBuilder();
+        sb.Append("pool misses ").Append(total).Append(" (").Append(counts.Count).Append(" names)");
+        for (int i = 0; i < sorted.Count && i < 12; i++) sb.Append(' ').Append(sorted[i].Key).Append('x').Append(sorted[i].Value);
+        var violations = SpawnDev.ILGPU.ML.Tensors.BufferPool.PoolOwnershipViolations;
+        lock (violations)
+        {
+            sb.Append("; ownership violations ").Append(violations.Count);
+            for (int i = 0; i < violations.Count && i < 4; i++) sb.Append("\n[POOL]   ").Append(violations[i]);
+            violations.Clear();
+        }
+        return sb.ToString();
+    }
+
     private Context? _context;
     private bool _initialized;
     SpawnJSRuntime _js;

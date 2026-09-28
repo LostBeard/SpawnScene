@@ -1438,7 +1438,11 @@ public class MultiViewGenerationService
 
             // Live-buffer growth through the cascade (2026-09-27: 1,640 MB in ~20k buffers remained after it).
             if (ci < 3 || ci % 10 == 0)
+            {
                 Console.WriteLine($"[GPU] after chunk {ci}: {GpuService.MemoryReport(3)}");
+                if (SpawnDev.ILGPU.ML.Tensors.BufferPool.TraceFreshAllocNames)
+                    Console.WriteLine($"[POOL] since the last report: {GpuService.PoolTraceReport()}");
+            }
             Console.WriteLine(
                 $"[MultiView] chunk {ci} folded: {fitLine}, depth scale {sim.Scale:F4}, " +
                 $"{chunk.NewViews.Length} new view(s)");

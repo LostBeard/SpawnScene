@@ -593,31 +593,49 @@ public partial class Studio
         _statusMessage = "Preparing multi-view pipeline...";
         BuildProjectDetailUI();
 
+        List<ImportedImage>? gpuImages = null;
+        if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
         try
         {
-            // Load all source images as ImportedImage objects
+            // Load every source photo STRAIGHT TO THE GPU: OPFS File -> browser decode -> canvas resize -> device buffer
+            // (MediaInterop.DecodeToDeviceAsync). Neither the JPEG nor its pixels enter the .NET heap.
+            //
+            // 🔴 This used to read each photo's bytes into a byte[], decode it at FULL resolution and ReadBytes() the
+            // RGBA onto the managed heap: 35 phone photos (~12 MP) is ~1.7 GB against the 2 GB WASM ceiling, and TJ's
+            // 35-photo Bathroom project on gh-pages died with "Garbage collector could not allocate 16384u bytes of
+            // memory for major heap section" (2026-09-28). TJ: data in .NET WASM that does not need to be there.
+            // 1024 on the longest edge (ImageImportService.MaxImportDimension): features detect at 1024, depth resizes
+            // to its own input, and training reloads its targets from the stored photos at its own size.
             var images = new List<ImportedImage>();
+            gpuImages = images;
+            var accel = _gpuService.WebGPUAccelerator;
             foreach (var source in _activeProject.Sources)
             {
                 _statusMessage = $"Loading {source.FileName}...";
                 BuildProjectDetailUI();
 
-                var imageBytes = await _projectService.GetSourceAsync(_activeProject.Id, source.FileName);
-                if (imageBytes == null) continue;
+                using var file = await _projectService.GetSourceFileAsync(_activeProject.Id, source.FileName);
+                if (file == null) continue;
 
-                // Extract EXIF focal length before decoding
-                var exifFocal = ExifReader.ExtractFocalLength(imageBytes);
+                // EXIF lives in the first APP1 segment (<= 64 KB); only a prefix crosses into .NET for it.
+                ExifReader.ExifFocalLength? exifFocal = null;
+                try
+                {
+                    using var head = file.Slice(0, 256 * 1024);
+                    using var headBuf = await head.ArrayBuffer();
+                    using var headBytes = new Uint8Array(headBuf);
+                    exifFocal = ExifReader.ExtractFocalLength(headBytes.ReadBytes());
+                }
+                catch (Exception ex) { Console.WriteLine($"[Studio] {source.FileName}: no EXIF ({ex.Message})"); }
 
-                // Decode CAPPED (ImageImportService.MaxImportDimension, 1024 on the longest edge) - never at full size.
-                // This decoded every photo at full resolution into the managed heap: 35 phone photos (~12 MP each) is
-                // ~1.7 GB of RGBA against the 2 GB WASM ceiling, and a 35-photo Bathroom project died with "Garbage
-                // collector could not allocate 16384u bytes of memory for major heap section" (TJ, gh-pages, 2026-09-28)
-                // - the same crash the dataset loader's cap was added for. Nothing downstream wants more: features
-                // detect at 1024, depth resizes to its own input, training reloads its targets from the stored photos.
-                string mime = source.FileName.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/jpeg";
-                var decoded = await _importService.DecodeImageAsync(imageBytes, mime);
-                if (decoded == null) { Console.WriteLine($"[Studio] could not decode {source.FileName} - skipped"); continue; }
-                var (rgbaPixels, w, h) = decoded.Value;
+                MemoryBuffer1D<int, Stride1D.Dense> rgba;
+                int w, h;
+                try
+                {
+                    (rgba, w, h, _, _) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
+                        file, accel, ImageImportService.MaxImportDimension);
+                }
+                catch (Exception ex) { Console.WriteLine($"[Studio] could not decode {source.FileName} - skipped ({ex.Message})"); continue; }
 
                 // EXIF focal is converted to pixels AT this size (CreateFromExif scales by width/height).
                 var camera = CameraParams.CreateFromExif(w, h, exifFocal);
@@ -627,7 +645,7 @@ public partial class Studio
                     FileName = source.FileName,
                     Width = w,
                     Height = h,
-                    RgbaPixels = rgbaPixels,
+                    GpuRgba = rgba,
                     EstimatedCamera = camera,
                 });
             }
@@ -723,6 +741,13 @@ public partial class Studio
             _statusMessage = $"Error: {ex.Message}";
             BuildProjectDetailUI();
             Console.WriteLine($"[Studio] Multi-view generation error: {ex}");
+        }
+        finally
+        {
+            // The device photos are only read by generation (training reloads its targets from OPFS). Every
+            // dispatch that read them has completed by here - generation and training both awaited their results.
+            if (gpuImages != null)
+                foreach (var im in gpuImages) im.DisposeGpu();
         }
     }
 

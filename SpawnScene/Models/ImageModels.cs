@@ -48,6 +48,17 @@ public class ImageFeature
     /// Used for Hamming distance matching.
     /// </summary>
     public byte[] Descriptor { get; set; } = new byte[32];
+
+    /// <summary>
+    /// The photo's colour at this feature (packed RGBA, R in the low byte; 0 = not sampled), taken at detection from
+    /// pixel (round(X), round(Y)). The SfM cloud and the BA sparse-cloud init colour their points from this, so a
+    /// GPU-resident import never has to bring the image back to the host to colour a point.
+    /// </summary>
+    public int PackedColor { get; set; }
+
+    /// <summary><see cref="PackedColor"/> as RGB in [0,1], or null when it was never sampled.</summary>
+    public System.Numerics.Vector3? ColorRgb => PackedColor == 0 ? null : new System.Numerics.Vector3(
+        (PackedColor & 0xFF) / 255f, ((PackedColor >> 8) & 0xFF) / 255f, ((PackedColor >> 16) & 0xFF) / 255f);
 }
 
 /// <summary>
@@ -88,8 +99,23 @@ public class ImportedImage
     /// <summary>Grayscale pixel data (for feature detection).</summary>
     public byte[] GrayPixels { get; set; } = [];
 
-    /// <summary>RGBA pixel data (for display).</summary>
+    /// <summary>RGBA pixel data in MANAGED memory - legacy / CPU paths only. Empty for a GPU-resident import
+    /// (<see cref="GpuRgba"/>), which is the only kind the project flow creates.</summary>
     public byte[] RgbaPixels { get; set; } = [];
+
+    /// <summary>
+    /// The photo on the device: packed RGBA (R low byte), <see cref="Width"/> x <see cref="Height"/> ints, straight
+    /// from <c>MediaInterop.DecodeToDeviceAsync</c> - the pixels never entered the .NET heap. Depth, unprojection and
+    /// feature detection read it in place. Owned by the image: call <see cref="DisposeGpu"/> when the run is over.
+    /// </summary>
+    public MemoryBuffer1D<int, Stride1D.Dense>? GpuRgba { get; set; }
+
+    /// <summary>Release <see cref="GpuRgba"/> (only after every dispatch that reads it has completed).</summary>
+    public void DisposeGpu()
+    {
+        GpuRgba?.Dispose();
+        GpuRgba = null;
+    }
 
     /// <summary>Resolution used for feature detection (may be downsampled).</summary>
     public int FeatureWidth { get; set; }

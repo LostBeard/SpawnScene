@@ -1942,7 +1942,7 @@ public class SfmReconstructor
                     Points3D.Add(new ReconstructedPoint
                     {
                         Position = pt3D.Value,
-                        Color = GetPixelColor(images[idxA], featA.X, featA.Y),
+                        Color = featA.ColorRgb ?? GetPixelColor(images[idxA], featA.X, featA.Y),
                     });
                     results.Add((match, ptIdx));
                 }

@@ -655,10 +655,12 @@ public class DepthToGaussianKernel
         EnsureKernelLoaded(accelerator);
 
         // Upload RGBA to GPU — justified: image data from file/picker (CPU source boundary).
-        var packedRgba = MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
-        using var rgbaBuf = accelerator.Allocate1D(packedRgba);
+        // GPU-resident import: read its buffer in place. Only a legacy managed image is uploaded.
+        using var uploadedRgba = image.GpuRgba == null
+            ? accelerator.Allocate1D(MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray()) : null;
+        var rgbaView = image.GpuRgba?.View ?? uploadedRgba!.View;
 
-        return await RunUnprojectAsync(accelerator, depth, rgbaBuf.View, subsample, edgeSharpness, camera);
+        return await RunUnprojectAsync(accelerator, depth, rgbaView, subsample, edgeSharpness, camera);
     }
 
     /// <summary>
@@ -690,8 +692,10 @@ public class DepthToGaussianKernel
         EnsureKernelLoaded(accelerator);
 
         // Upload RGBA to GPU
-        var packedRgba = MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
-        using var rgbaBuf = accelerator.Allocate1D(packedRgba);
+        // GPU-resident import: read its buffer in place. Only a legacy managed image is uploaded.
+        using var uploadedRgba = image.GpuRgba == null
+            ? accelerator.Allocate1D(MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray()) : null;
+        var rgbaView = image.GpuRgba?.View ?? uploadedRgba!.View;
 
         int w = depth.Width;
         int h = depth.Height;
@@ -735,7 +739,7 @@ public class DepthToGaussianKernel
 
         _unprojectWorldSpaceKernel!(numPoints,
             depth.RawDepthGpu.View,
-            rgbaBuf.View,
+            rgbaView,
             confView,
             outPackedBuf.View,
             counterBuf.View,
@@ -771,8 +775,10 @@ public class DepthToGaussianKernel
         var accelerator = _gpu.WebGPUAccelerator;
         EnsureKernelLoaded(accelerator);
 
-        var packedRgba = MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
-        using var rgbaBuf = accelerator.Allocate1D(packedRgba);
+        // GPU-resident import: read its buffer in place. Only a legacy managed image is uploaded.
+        using var uploadedRgba = image.GpuRgba == null
+            ? accelerator.Allocate1D(MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray()) : null;
+        var rgbaView = image.GpuRgba?.View ?? uploadedRgba!.View;
 
         int w = depth.Width;
         int h = depth.Height;
@@ -822,7 +828,7 @@ public class DepthToGaussianKernel
 
         _unprojectAndPackKernel!(numPoints,
             depth.RawDepthGpu.View,
-            rgbaBuf.View,
+            rgbaView,
             outPackedBuf.View,
             counterBuf.View,
             splatParams);

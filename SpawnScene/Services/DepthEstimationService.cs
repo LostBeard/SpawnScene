@@ -212,7 +212,12 @@ public class DepthEstimationService : IAsyncDisposable
             return null;
         }
 
-        // ImportedImage already holds managed bytes (feature/SfM path).
+        // A GPU-resident import: preprocess reads the device buffer in place, no copy anywhere.
+        if (image.GpuRgba != null)
+            return await RunPipelineAsync(() => _pipe!.EstimateGpuRawAsync(
+                image.GpuRgba.View, image.Width, image.Height, image.Width, image.Height));
+
+        // Legacy managed import (feature/SfM path).
         var packedRgba = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray();
 
@@ -330,6 +335,13 @@ public class DepthEstimationService : IAsyncDisposable
             for (int i = 0; i < count; i++)
             {
                 var image = images[i];
+                // Already on the device (GPU-first import): hand out its own buffer. Not cached and not released
+                // here - the image owns it.
+                if (image.GpuRgba != null)
+                {
+                    views[i] = image.GpuRgba.View;
+                    continue;
+                }
                 if (_cache.TryGetValue(image, out var existing))
                 {
                     Reuses++;
@@ -451,6 +463,11 @@ public class DepthEstimationService : IAsyncDisposable
             // 768x1024 is 105 MB resident before any copy, in a 2 GB WASM heap that has already
             // thrown an OutOfMemoryException on this exact class of thing. Uploading each frame
             // once and reusing the GPU buffer removes both the copies and the repeat uploads.
+            // GPU-resident images never go through BuildManagedFrames (they have no managed pixels): route them
+            // through a pass-local cache, which hands out their own buffers.
+            using var localUploads = uploads == null && images.Take(n).Any(im => im.GpuRgba != null)
+                ? new MultiViewUploadCache(_gpu) : null;
+            uploads ??= localUploads;
             using var mv = uploads != null
                 ? await _pipe.EstimateMultiViewGpuAsync(
                     await uploads.ViewsForAsync(images, n), widths, heights,

@@ -407,6 +407,7 @@ public class MultiViewGenerationService
             {
                 var im = images[img];
                 var f = im.Features[feat];
+                if (f.ColorRgb is { } fc) { sum += fc; n++; continue; } // stamped at detection (same pixel)
                 int px = Math.Clamp((int)MathF.Round(f.X), 0, im.Width - 1);
                 int py = Math.Clamp((int)MathF.Round(f.Y), 0, im.Height - 1);
                 int o = (py * im.Width + px) * 4;

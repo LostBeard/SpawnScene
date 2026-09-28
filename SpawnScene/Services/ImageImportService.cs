@@ -230,7 +230,8 @@ public class ImageImportService : IDisposable
                 Progress = (float)i / images.Count;
 
                 // Ensure grayscale + features exist
-                if (img.GrayPixels == null || img.GrayPixels.Length == 0)
+                bool onDevice = img.GpuRgba != null;
+                if ((img.Features == null || img.Features.Count == 0) && (img.GrayPixels == null || img.GrayPixels.Length == 0))
                 {
                     int featureWidth = img.Width, featureHeight = img.Height;
                     if (img.Width > 1024 || img.Height > 1024)
@@ -238,12 +239,16 @@ public class ImageImportService : IDisposable
                         float ds = 1024f / Math.Max(img.Width, img.Height);
                         featureWidth = (int)(img.Width * ds);
                         featureHeight = (int)(img.Height * ds);
+                    }
+                    // A GPU-resident photo is reduced to the detector's grayscale ON THE DEVICE (same formula, same
+                    // bytes); only that frame comes back, and only until the detector has run.
+                    if (onDevice)
+                        img.GrayPixels = await GpuImageOps.GrayscaleAsync(_gpu.WebGPUAccelerator, img.GpuRgba!,
+                            img.Width, img.Height, featureWidth, featureHeight);
+                    else if (featureWidth != img.Width)
                         img.GrayPixels = DownsampleGrayscale(img.RgbaPixels, img.Width, img.Height, featureWidth, featureHeight);
-                    }
                     else
-                    {
                         img.GrayPixels = RgbaToGrayscale(img.RgbaPixels, img.Width, img.Height);
-                    }
                     img.FeatureWidth = featureWidth;
                     img.FeatureHeight = featureHeight;
                 }
@@ -267,6 +272,12 @@ public class ImageImportService : IDisposable
                             feat.Y *= scaleBackY;
                         }
                     }
+                    // Colour each feature now, while the photo is at hand, so nothing later needs the pixels on the host.
+                    if (onDevice)
+                        await GpuImageOps.SampleFeatureColoursAsync(_gpu.WebGPUAccelerator, img.GpuRgba!, img.Width, img.Height, img.Features);
+                    else
+                        GpuImageOps.SampleFeatureColours(img.RgbaPixels, img.Width, img.Height, img.Features);
+                    if (onDevice) img.GrayPixels = []; // the detector has run; the frame goes
                     Console.WriteLine($"[Import] {img.FileName}: {img.Features.Count} features");
                 }
 

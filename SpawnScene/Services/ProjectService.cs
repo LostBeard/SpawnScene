@@ -139,6 +139,26 @@ public class ProjectService
     }
 
     /// <summary>Read a source image file from the project.</summary>
+    /// <summary>
+    /// A source photo as a browser <see cref="File"/> (a Blob) - the bytes stay in JS. Decode it with
+    /// <c>MediaInterop.DecodeToDeviceAsync</c> and it goes OPFS -> GPU without touching the .NET heap. Caller disposes.
+    /// </summary>
+    public async Task<SpawnDev.SpawnJS.JSObjects.File?> GetSourceFileAsync(string projectId, string fileName)
+    {
+        try
+        {
+            var root = await GetRootDirAsync();
+            var projDir = await GetProjectDirAsync(root, projectId);
+            using var sourcesDir = await projDir.GetDirectoryHandle("sources");
+            using var fileHandle = await sourcesDir.GetFileHandle(fileName);
+            return await fileHandle.GetFile();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     public async Task<byte[]?> GetSourceAsync(string projectId, string fileName)
     {
         try

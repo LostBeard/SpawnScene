@@ -270,6 +270,18 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.BundleAdjust = bav is not ("0" or "false");
             if (query.TryGetValue("baiters", out var bai) && int.TryParse(bai, out var baii))
                 _multiViewService.BundleAdjustIterations = baii;
+            // &tracecarry=1: log each densify-carry operation before it runs.
+            if (query.TryGetValue("tracecarry", out var tcq))
+                SplatTrainerGpu.TraceCarrySteps = tcq is "1" or "true";
+            // &bufsites=1: record who allocates every WebGPU buffer; the [GPU] reports then list the top creation sites.
+            if (query.TryGetValue("bufsites", out var bsq))
+            {
+                SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.CaptureCreationSites = bsq is "1" or "true";
+                SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.CreationSiteDepth = 5;   // pool frames hide the real caller at 3
+            }
+            // &unloaddepth=1: unload the depth model before training (A/B for the densify-carry device loss).
+            if (query.TryGetValue("unloaddepth", out var udq))
+                _unloadDepthBeforeTraining = udq is "1" or "true";
             // &verify=cpu: verify matched pairs with the CPU estimator instead of GpuEpipolarRansac (A/B).
             if (query.TryGetValue("verify", out var vq))
                 _multiViewService.GpuPairVerification = vq != "cpu";

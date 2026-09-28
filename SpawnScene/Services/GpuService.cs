@@ -18,6 +18,34 @@ namespace SpawnScene.Services;
 /// </summary>
 public class GpuService : IBackgroundService, IAsyncDisposable
 {
+    /// <summary>
+    /// What this process's WebGPU buffers actually hold (SpawnDev.ILGPU WebGPUBufferAccounting), for the log: live
+    /// storage + cached readback staging bytes and the largest buffers. nvidia-smi only shows the GPU process's pooled
+    /// high-water mark, which after a depth cascade sat ~4.7 GB above baseline through training (2026-09-27).
+    /// </summary>
+    public static string MemoryReport(int largest = 6)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.Append("live WebGPU buffers: storage ")
+          .Append((SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes / 1048576.0).ToString("F0"))
+          .Append(" MB, staging ")
+          .Append((SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStagingBytes / 1048576.0).ToString("F0"))
+          .Append(" MB, ").Append(SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveBufferCount).Append(" buffers; largest");
+        foreach (var (label, bytes) in SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LargestLiveBuffers(largest))
+            sb.Append(' ').Append(label.Split(':')[0]).Append('=').Append((bytes / 1048576.0).ToString("F0")).Append("MB");
+        if (SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.CaptureCreationSites)
+        {
+            // Largest by bytes AND by count: a leak of many tiny buffers never reaches a by-bytes top list.
+            var all = SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.TopCreationSites(int.MaxValue);
+            for (int i = 0; i < all.Count && i < 6; i++)
+                sb.Append("\n[GPU]   bytes ").Append(all[i].Count).Append(" buffers ").Append((all[i].Bytes / 1048576.0).ToString("F1")).Append(" MB  ").Append(all[i].Site);
+            all.Sort((a, b) => b.Count.CompareTo(a.Count));
+            for (int i = 0; i < all.Count && i < 10; i++)
+                sb.Append("\n[GPU]   count ").Append(all[i].Count).Append(" buffers ").Append((all[i].Bytes / 1048576.0).ToString("F1")).Append(" MB  ").Append(all[i].Site);
+        }
+        return sb.ToString();
+    }
+
     private Context? _context;
     private bool _initialized;
     SpawnJSRuntime _js;

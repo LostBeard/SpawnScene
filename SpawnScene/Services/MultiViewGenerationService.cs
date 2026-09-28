@@ -1367,6 +1367,8 @@ public class MultiViewGenerationService
             CamerasFromRun(images, reference.Chunks[0], firstRun), firstRun,
             Similarity3.Identity, adoptAnchors: true);
         firstRun.Dispose();
+        // Anchors are in every chunk; a chunk's NEW views are in no other, so their uploads can go once it ran.
+        uploads.Release(NewViewImages(images, reference.Chunks[0]));
 
         var placed = BuildPlacedLookup(result);
         if (placed.Count < MultiViewChunkPlan.MinAnchors && reference.Chunks.Count > 1)
@@ -1392,6 +1394,8 @@ public class MultiViewGenerationService
                     $"{chunk.NewViews.Length} view(s) stay unposed.");
                 continue;
             }
+            // The pass completed (its results were read back), so nothing pending still reads these uploads.
+            uploads.Release(NewViewImages(images, chunk));
 
             var cams = CamerasFromRun(images, chunk, run);
             bool fitted = MultiViewChunkPlan.TryFitChunkToReference(
@@ -1432,6 +1436,9 @@ public class MultiViewGenerationService
                 continue;
             }
 
+            // Live-buffer growth through the cascade (2026-09-27: 1,640 MB in ~20k buffers remained after it).
+            if (ci < 3 || ci % 10 == 0)
+                Console.WriteLine($"[GPU] after chunk {ci}: {GpuService.MemoryReport(3)}");
             Console.WriteLine(
                 $"[MultiView] chunk {ci} folded: {fitLine}, depth scale {sim.Scale:F4}, " +
                 $"{chunk.NewViews.Length} new view(s)");
@@ -1448,8 +1455,8 @@ public class MultiViewGenerationService
 
         LastChunkSize = chunkSize;
         Console.WriteLine(
-            $"[MultiView] frame uploads: {uploads.Uploads} new, {uploads.Reuses} reused " +
-            "(an anchor is in every chunk; each upload is a full RGBA frame)");
+            $"[MultiView] frame uploads: {uploads.Uploads} new, {uploads.Reuses} reused, {uploads.Released} released " +
+            "after their pass (an anchor is in every chunk; each upload is a full RGBA frame)");
         Console.WriteLine(
             $"[MultiView] chunked poses done: {result.PosedCount}/{images.Count} views posed in one " +
             $"frame, {result.ChunksRejected} chunk(s) rejected; {ImageImportService.HeapReport()}");
@@ -1457,6 +1464,7 @@ public class MultiViewGenerationService
         // session keeps its entire activation arena (MEASURED 3.9 GB after 14 DAv3 N=6 passes) and
         // the trainer's first densify resize is what finally tips Chrome over.
         _depthService.ReleaseWorkingMemory();
+        Console.WriteLine($"[GPU] after the depth cascade: {GpuService.MemoryReport()}");
         return result;
     }
 
@@ -1589,6 +1597,13 @@ public class MultiViewGenerationService
         Console.WriteLine(
             $"[MultiView] gravity: scene up was ({sceneUp.X:F3},{sceneUp.Y:F3},{sceneUp.Z:F3}), " +
             $"agreement {agreement:P1} across {list.Count} cameras - rotated onto +Y");
+    }
+
+    private static List<ImportedImage> NewViewImages(IReadOnlyList<ImportedImage> images, MultiViewChunk chunk)
+    {
+        var list = new List<ImportedImage>(chunk.NewViews.Length);
+        foreach (int v in chunk.NewViews) list.Add(images[v]);
+        return list;
     }
 
     /// <summary>One joint forward, returning null rather than throwing when the device refuses it.</summary>

@@ -120,6 +120,9 @@ public sealed class SplatTrainerGpu : IDisposable
 
     /// <summary>Adam moment slots per splat: 3 colour, 1 opacity, 3 position, 3 scale, 4 quaternion.</summary>
     public const int AdamSlots = 14;
+
+    /// <summary>Log each operation of a densify carry before it runs (&amp;tracecarry=1, device-loss diagnosis).</summary>
+    public static bool TraceCarrySteps { get; set; }
     /// <summary>Adam layout: RGB(0..2), opacity(3), pos(4..6), log-scale(7..9), quat(10..13).</summary>
     const int AdamOpacitySlot = 3;
 
@@ -970,6 +973,9 @@ public sealed class SplatTrainerGpu : IDisposable
         MemoryBuffer1D<int, Stride1D.Dense> sources, int priorCount, int newCount,
         int stride, int zeroSlot = -1)
     {
+        // Step markers BEFORE each operation (no sync): three TruckFull no-COLMAP runs lost the device inside the
+        // first bank's carry and the post-stage log could not say which operation. Printed only when enabled.
+        if (TraceCarrySteps) Console.WriteLine($"[Trainer]   carry bank x{stride}: allocate {(long)newCount * stride * 4 / 1048576.0:F0} MB ({GpuService.MemoryReport(4)})");
         var next = _gpu.WebGPUAccelerator.Allocate1D<float>((long)newCount * stride);
         if (prior == null)
         {
@@ -992,18 +998,22 @@ public sealed class SplatTrainerGpu : IDisposable
         int zeroSlot = -1)
     {
         if (prior == null || next == null || _remapFloatRows == null) return;
+        if (TraceCarrySteps) Console.WriteLine("[Trainer]   carry bank: zero");
         next.MemSetToZero();
         // The clear sits in ILGPU's pending encoder and the gather below goes straight to the queue.
         // Unflushed, the clear was submitted by the fence's readback AFTER the gather and zeroed the whole
         // bank: every densify wiped all SH bands and their moments (CarryGateAsync, 11,160/11,160 floats).
+        if (TraceCarrySteps) Console.WriteLine("[Trainer]   carry bank: flush");
         _gpu.WebGPUAccelerator.FlushPendingCommands();
         uint z = zeroSlot >= 0 && zeroSlot < stride ? (uint)zeroSlot : uint.MaxValue;
+        if (TraceCarrySteps) Console.WriteLine($"[Trainer]   carry bank: remap dispatch {(newCount + 63) / 64} groups");
         WriteU32x4(_dimsBuf!, (uint)newCount, (uint)stride, (uint)priorCount, z);
         Dispatch(_remapFloatRows!, (newCount + 63) / 64, 1, new[]
         {
             Buf(0, prior.GetGPUBuffer()!), Buf(1, next.GetGPUBuffer()!),
             Buf(2, sources.GetGPUBuffer()!), Buf(3, _dimsBuf!),
         });
+        if (TraceCarrySteps) Console.WriteLine("[Trainer]   carry bank: fence");
         // CPU transfer: 4-byte fence — drains WebGPU queue after Dispatch Submit.
         _ = await next.CopyToHostAsync<float>(0, 1);
     }

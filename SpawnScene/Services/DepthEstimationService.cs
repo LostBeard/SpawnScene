@@ -169,6 +169,7 @@ public class DepthEstimationService : IAsyncDisposable
             LoadedModelName = model.Name;
             Status = $"✅ {model.Name} ready";
             Console.WriteLine($"[Depth] {Status}");
+            Console.WriteLine($"[GPU] after depth model load: {GpuService.MemoryReport(3)}");
         }
         catch (Exception ex)
         {
@@ -350,6 +351,21 @@ public class DepthEstimationService : IAsyncDisposable
             return views;
         }
 
+        /// <summary>
+        /// Free the uploads of images no later pass needs. Call only after a pass that read them COMPLETED
+        /// (its results were read back): a dispatch still pending in an un-submitted batch would otherwise
+        /// submit a destroyed buffer. An image requested again later is simply uploaded again.
+        /// Without this every image's RGBA stayed resident for the whole cascade: 251 x 2 MB on TruckFull,
+        /// on top of the per-view depth, until the depth model was unloaded (2026-09-27).
+        /// </summary>
+        public void Release(IEnumerable<ImportedImage> images)
+        {
+            foreach (var image in images)
+                if (_cache.Remove(image, out var buffer)) { buffer.Dispose(); Released++; }
+        }
+
+        public int Released { get; private set; }
+
         public void Dispose()
         {
             foreach (var b in _cache.Values) b.Dispose();
@@ -499,6 +515,24 @@ public class DepthEstimationService : IAsyncDisposable
         long freed = _pipe.ReleaseWorkingMemory();
         Console.WriteLine($"[Depth] released {freed / 1048576.0:F0} MB of depth working memory (weights kept)");
         return freed;
+    }
+
+    /// <summary>
+    /// Unload the depth model entirely (weights, arena, capture plan); the next depth call reloads it from the
+    /// model cache. For when depth is finished for this scene and the trainer takes over the GPU.
+    /// MEASURED 2026-09-27 TruckFull no-COLMAP: after <see cref="ReleaseWorkingMemory"/> the GPU process still held
+    /// ~4.7 GB above the desktop baseline through BA and into training, and training lost the device at the
+    /// same densify carry (1.2-1.36M splats) in 3 of 3 runs; the same trainer on COLMAP poses (no depth cascade)
+    /// carried to 1.78M.
+    /// </summary>
+    public void UnloadModel()
+    {
+        if (_pipe == null) return;
+        _pipe.Dispose();
+        _pipe = null;
+        LoadedModelId = null;
+        LoadedModelName = null;
+        Console.WriteLine("[Depth] unloaded the depth model (reloads from cache on next use)");
     }
 
     public ValueTask DisposeAsync()

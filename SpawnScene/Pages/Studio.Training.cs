@@ -25,6 +25,9 @@ namespace SpawnScene.Pages;
 /// </summary>
 public partial class Studio
 {
+    /// <summary>&amp;unloaddepth=1: unload the depth model (not just its working memory) before training.</summary>
+    private bool _unloadDepthBeforeTraining;
+
     SplatTrainerGpu? _trainer;
     bool _trainerInitialized;
 
@@ -207,7 +210,10 @@ public partial class Studio
 
             // Depth is finished; its activation arena has no more work to do and would otherwise
             // sit on the GPU while the trainer allocates (~3.9 GB after a DAv3 cascade, MEASURED).
-            _depthService.ReleaseWorkingMemory();
+            // &unloaddepth=1 (A/B, 2026-09-27): unload the whole model instead - see DepthEstimationService.UnloadModel.
+            if (_unloadDepthBeforeTraining) _depthService.UnloadModel();
+            else _depthService.ReleaseWorkingMemory();
+            Console.WriteLine($"[GPU] before training: {GpuService.MemoryReport()}");
 
             // -- Scene extent, from the splats themselves --
             // The sort key packs depth into 18 bits, so it needs a real range to quantise

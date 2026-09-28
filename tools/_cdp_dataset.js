@@ -211,7 +211,36 @@ const closeTab = (id) => new Promise(res =>
       require('fs').writeFileSync(side, JSON.stringify({ app: APP, views: viewMap }, null, 2));
       console.log('wrote ' + side);
     }
-    if (failed) { console.log('\nFAILED'); process.exitCode = 1; }
+    if (failed) {
+      // A device loss names nothing page-side ("A valid external Instance reference no longer exists"); Chrome's
+      // own chrome://gpu "Log Messages" say why the GPU process went away. Save them before this Chrome closes.
+      try {
+        const bws2 = new WebSocket(ver.webSocketDebuggerUrl);
+        await new Promise(r => bws2.on('open', r));
+        bws2.send(JSON.stringify({ id: 1, method: 'Target.createTarget', params: { url: 'chrome://gpu' } }));
+        await new Promise(r => setTimeout(r, 3000));
+        bws2.close();
+        const gpuTab = (await get(cdp('/json/list'))).find(t => (t.url || '').startsWith('chrome://gpu'));
+        if (gpuTab) {
+          const gws = new WebSocket(gpuTab.webSocketDebuggerUrl);
+          await new Promise(r => gws.on('open', r));
+          const text = await new Promise(res => {
+            gws.on('message', raw => { const m = JSON.parse(raw.toString()); if (m.id === 7) res(m.result?.result?.value || ''); });
+            gws.send(JSON.stringify({ id: 7, method: 'Runtime.evaluate', params: {
+              returnByValue: true,
+              expression: "(() => { const v = document.querySelector('info-view'); " +
+                "return (v && v.shadowRoot) ? v.shadowRoot.textContent : document.body.innerText; })()" } }));
+            setTimeout(() => res(''), 5000);
+          });
+          gws.close();
+          const out = path.join(__dirname, '..', '_runs', `${process.env.RUN_TAG || 'untagged'}-chromegpu.txt`);
+          require('fs').writeFileSync(out, text);
+          console.log(`saved chrome://gpu (${text.length} chars) to ${out}`);
+          await closeTab(gpuTab.id);
+        }
+      } catch (e) { console.log('chrome://gpu capture failed: ' + e.message); }
+      console.log('\nFAILED'); process.exitCode = 1;
+    }
     else if (!done) { console.log('\nTIMED OUT'); process.exitCode = 1; }
     else console.log('\nOK');
   } finally {

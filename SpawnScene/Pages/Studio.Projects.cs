@@ -608,19 +608,18 @@ public partial class Studio
                 // Extract EXIF focal length before decoding
                 var exifFocal = ExifReader.ExtractFocalLength(imageBytes);
 
-                // Decode image
-                using var blob = new Blob(new byte[][] { imageBytes }, new BlobOptions { Type = "image/jpeg" });
-                using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
-                int w = (int)bitmap.Width;
-                int h = (int)bitmap.Height;
+                // Decode CAPPED (ImageImportService.MaxImportDimension, 1024 on the longest edge) - never at full size.
+                // This decoded every photo at full resolution into the managed heap: 35 phone photos (~12 MP each) is
+                // ~1.7 GB of RGBA against the 2 GB WASM ceiling, and a 35-photo Bathroom project died with "Garbage
+                // collector could not allocate 16384u bytes of memory for major heap section" (TJ, gh-pages, 2026-09-28)
+                // - the same crash the dataset loader's cap was added for. Nothing downstream wants more: features
+                // detect at 1024, depth resizes to its own input, training reloads its targets from the stored photos.
+                string mime = source.FileName.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/jpeg";
+                var decoded = await _importService.DecodeImageAsync(imageBytes, mime);
+                if (decoded == null) { Console.WriteLine($"[Studio] could not decode {source.FileName} - skipped"); continue; }
+                var (rgbaPixels, w, h) = decoded.Value;
 
-                using var osc = new OffscreenCanvas(w, h);
-                using var ctx = osc.Get2DContext();
-                ctx.DrawImage(bitmap, 0, 0);
-                using var imageData = ctx.GetImageData(0, 0, w, h);
-                using var dataArray = imageData.Data;
-                var rgbaPixels = dataArray.ReadBytes();
-
+                // EXIF focal is converted to pixels AT this size (CreateFromExif scales by width/height).
                 var camera = CameraParams.CreateFromExif(w, h, exifFocal);
 
                 images.Add(new ImportedImage

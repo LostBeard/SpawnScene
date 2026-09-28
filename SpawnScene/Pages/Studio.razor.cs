@@ -260,6 +260,10 @@ public partial class Studio : IAsyncDisposable
             int pmax = query.TryGetValue("maxsplats", out var pm2) && int.TryParse(pm2, out var pmi2) ? pmi2 : 3_000_000;
             int pres = query.TryGetValue("trainres", out var pr2) && int.TryParse(pr2, out var pri2) ? pri2 : 1024;
             bool ppage = query.TryGetValue("pageonly", out var pp2) && pp2 is "1" or "true";
+            // &importmax=N: longest edge photos are decoded at (0 = full size - the red check for the managed-heap
+            // blow-up TJ hit on gh-pages with 35 Bathroom photos; default 1024).
+            if (query.TryGetValue("importmax", out var imq) && int.TryParse(imq, out var imv))
+                ImageImportService.MaxImportDimension = Math.Max(0, imv);
             await RunProjectAutotestAsync(pname, piters, pcount, pstride, pmax, pres, ppage);
         }
         else if (mode == "dataset")

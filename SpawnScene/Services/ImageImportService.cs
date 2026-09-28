@@ -317,7 +317,31 @@ public class ImageImportService : IDisposable
     /// </summary>
     public static int MaxImportDimension { get; set; } = 1024;
 
-    private async Task<(byte[] rgba, int width, int height)?> DecodeImageAsync(byte[] bytes, string mimeType)
+    /// <summary>The Bathroom capture's 35 phone photos (the dataset has no manifest).</summary>
+    public static readonly string[] BathroomImages = {
+                    "IMG_20260223_133436884.jpg", "IMG_20260223_133439584.jpg",
+                    "IMG_20260223_133441993_HDR.jpg", "IMG_20260223_133446428_HDR.jpg",
+                    "IMG_20260223_133449608.jpg", "IMG_20260223_133453518.jpg",
+                    "IMG_20260223_133455077.jpg", "IMG_20260223_133457370.jpg",
+                    "IMG_20260223_133459619.jpg", "IMG_20260223_133501789.jpg",
+                    "IMG_20260223_133504521.jpg", "IMG_20260223_133506760.jpg",
+                    "IMG_20260223_133509247.jpg", "IMG_20260223_133512126.jpg",
+                    "IMG_20260223_133520304.jpg", "IMG_20260223_133524853.jpg",
+                    "IMG_20260223_133528946.jpg", "IMG_20260223_133531494.jpg",
+                    "IMG_20260223_133534018.jpg", "IMG_20260223_133535902.jpg",
+                    "IMG_20260223_133538361.jpg", "IMG_20260223_133541652.jpg",
+                    "IMG_20260223_133544880.jpg", "IMG_20260223_133546894.jpg",
+                    "IMG_20260223_133548727.jpg", "IMG_20260223_133551070.jpg",
+                    "IMG_20260223_133553527.jpg", "IMG_20260223_133556013.jpg",
+                    "IMG_20260223_133558348.jpg", "IMG_20260223_133601527.jpg",
+                    "IMG_20260223_133603411.jpg", "IMG_20260223_133609313.jpg",
+                    "IMG_20260223_133612910_HDR.jpg", "IMG_20260223_133616395.jpg",
+                    "IMG_20260223_133618729.jpg"
+                };
+
+    /// <summary>Decode an image at most <see cref="MaxImportDimension"/> on its longest edge (resized in the canvas,
+    /// so the full-size bitmap never becomes a managed array). Every multi-image path must decode through this.</summary>
+    internal async Task<(byte[] rgba, int width, int height)?> DecodeImageAsync(byte[] bytes, string mimeType)
     {
         try
         {
@@ -560,26 +584,7 @@ public class ImageImportService : IDisposable
             {
                 basePath = $"datasets/{datasetName}/";
                 // All 35 bathroom images
-                imageNames.AddRange(new[] {
-                    "IMG_20260223_133436884.jpg", "IMG_20260223_133439584.jpg",
-                    "IMG_20260223_133441993_HDR.jpg", "IMG_20260223_133446428_HDR.jpg",
-                    "IMG_20260223_133449608.jpg", "IMG_20260223_133453518.jpg",
-                    "IMG_20260223_133455077.jpg", "IMG_20260223_133457370.jpg",
-                    "IMG_20260223_133459619.jpg", "IMG_20260223_133501789.jpg",
-                    "IMG_20260223_133504521.jpg", "IMG_20260223_133506760.jpg",
-                    "IMG_20260223_133509247.jpg", "IMG_20260223_133512126.jpg",
-                    "IMG_20260223_133520304.jpg", "IMG_20260223_133524853.jpg",
-                    "IMG_20260223_133528946.jpg", "IMG_20260223_133531494.jpg",
-                    "IMG_20260223_133534018.jpg", "IMG_20260223_133535902.jpg",
-                    "IMG_20260223_133538361.jpg", "IMG_20260223_133541652.jpg",
-                    "IMG_20260223_133544880.jpg", "IMG_20260223_133546894.jpg",
-                    "IMG_20260223_133548727.jpg", "IMG_20260223_133551070.jpg",
-                    "IMG_20260223_133553527.jpg", "IMG_20260223_133556013.jpg",
-                    "IMG_20260223_133558348.jpg", "IMG_20260223_133601527.jpg",
-                    "IMG_20260223_133603411.jpg", "IMG_20260223_133609313.jpg",
-                    "IMG_20260223_133612910_HDR.jpg", "IMG_20260223_133616395.jpg",
-                    "IMG_20260223_133618729.jpg"
-                });
+                imageNames.AddRange(BathroomImages);
             }
             else if (datasetName == "TempleRing")
             {

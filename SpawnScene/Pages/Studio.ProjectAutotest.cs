@@ -1,3 +1,4 @@
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Models;
 using SpawnScene.Services;
 
@@ -29,12 +30,25 @@ public partial class Studio
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
 
             var manifest = await _importService.TryLoadManifestAsync(datasetName);
-            if (manifest == null || manifest.Images.Count < 2 || !string.IsNullOrEmpty(manifest.Video))
+            List<string> allNames;
+            string imageDir;
+            if (manifest != null && manifest.Images.Count >= 2 && string.IsNullOrEmpty(manifest.Video))
+            {
+                allNames = manifest.Images;
+                imageDir = $"datasets/{datasetName}/{manifest.ImageDir}";
+            }
+            else if (datasetName == "Bathroom")
+            {
+                // TJ's phone capture (no manifest) - the gh-pages crash repro, 2026-09-28.
+                allNames = ImageImportService.BathroomImages.ToList();
+                imageDir = $"datasets/{datasetName}";
+            }
+            else
             {
                 Console.WriteLine($"[Dataset] FAIL: {datasetName} has no photo manifest with 2+ images");
                 return;
             }
-            var names = manifest.Images.Where((_, i) => i % Math.Max(1, stride) == 0).Take(count).ToList();
+            var names = allNames.Where((_, i) => i % Math.Max(1, stride) == 0).Take(count).ToList();
 
             // -- A project, with the photos stored exactly as the file picker stores them --
             var project = await _projectService.CreateProjectAsync(
@@ -43,8 +57,11 @@ public partial class Studio
             var t0 = DateTime.UtcNow;
             foreach (var name in names)
             {
-                var bytes = await _http.GetByteArrayAsync($"datasets/{datasetName}/{manifest.ImageDir}/{name}");
-                await _projectService.AddSourceAsync(project.Id, name, bytes, manifest.Width, manifest.Height);
+                var bytes = await _http.GetByteArrayAsync($"{imageDir}/{name}");
+                // Real size, as the file picker records it; the bitmap's pixels are never read here.
+                using var sizeBlob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/jpeg" });
+                using var sizeBitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", sizeBlob);
+                await _projectService.AddSourceAsync(project.Id, name, bytes, (int)sizeBitmap.Width, (int)sizeBitmap.Height);
             }
             Console.WriteLine(
                 $"[Dataset] project {project.Id}: {names.Count} photos stored in " +

@@ -19,7 +19,8 @@ public partial class Studio
     /// Speaks the dataset harness's markers ([Dataset] READY-FOR-CAPTURE free-..., DONE, FAIL):
     /// <c>AUTOTEST=project node tools/_cdp_dataset.js NAME ITERS</c>, with COUNT / STRIDE picking the photos.
     /// </remarks>
-    private async Task RunProjectAutotestAsync(string datasetName, int trainIters, int count, int stride)
+    private async Task RunProjectAutotestAsync(string datasetName, int trainIters, int count, int stride,
+        int maxSplats = 3_000_000, int trainRes = 1024, bool pageOnly = false)
     {
         Console.WriteLine(
             $"[Dataset] project autotest name={datasetName} train={trainIters} count={count} stride={stride}");
@@ -38,7 +39,7 @@ public partial class Studio
             // -- A project, with the photos stored exactly as the file picker stores them --
             var project = await _projectService.CreateProjectAsync(
                 $"autotest {datasetName} {DateTime.Now:MMdd-HHmmss}",
-                new ProjectSettings { TrainIterations = trainIters });
+                new ProjectSettings { TrainIterations = trainIters, TrainMaxSplats = maxSplats, TrainMaxDimension = trainRes });
             var t0 = DateTime.UtcNow;
             foreach (var name in names)
             {
@@ -52,6 +53,18 @@ public partial class Studio
             _projects = await _projectService.ListProjectsAsync();
             _activeProject = _projects.First(p => p.Id == project.Id);
             _state = StudioState.ProjectDetail;
+            // The project page as a user sees it, settings included.
+            _hideUiOverlay = false;
+            BuildProjectDetailUI();
+            await Task.Delay(1500);
+            Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_page");
+            await Task.Delay(2500);
+            // ...and scrolled to the bottom: the Training settings and Generate sit under the photo list.
+            _projectDetailScroll?.ScrollToBottom();
+            await Task.Delay(1500);
+            Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_page_settings");
+            await Task.Delay(2500);
+            if (pageOnly) { Console.WriteLine("[Dataset] DONE"); return; }
             // Deterministic captures: sorted mode, full resolution (as the dataset harness renders).
             _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
             _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
@@ -71,6 +84,11 @@ public partial class Studio
                 $"{saved.SplatCount:N0} splats, trained {saved.TrainedIterations:N0} iters, " +
                 $"shDc={saved.ColoursAreShDc}, shDegree={saved.ShDegree}, {saved.SizeBytes / (1024 * 1024)} MB, " +
                 $"{liveScene.TrainingViews.Count} training views");
+            if (saved.SplatCount > maxSplats)
+            {
+                Console.WriteLine($"[Dataset] FAIL: {saved.SplatCount:N0} splats exceeds the project's cap {maxSplats:N0}");
+                return;
+            }
             if (trainIters > 0 && saved.TrainedIterations != trainIters)
             {
                 Console.WriteLine($"[Dataset] FAIL: asked for {trainIters} iterations, the saved scene got {saved.TrainedIterations}");

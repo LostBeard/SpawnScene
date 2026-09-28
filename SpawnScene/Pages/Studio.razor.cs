@@ -101,6 +101,7 @@ public partial class Studio : IAsyncDisposable
     private bool _trainingActive;
     private string _trainHudText = "";
     private UILabel? _hudTrainLabel;
+    private UIScrollView? _projectDetailScroll; // the project page body (autotest scrolls it to capture the settings)
     private UILabel? _statusLabel;
     private UIPanel? _settingsPanel;
     private bool _showSettings;
@@ -256,7 +257,10 @@ public partial class Studio : IAsyncDisposable
             int piters = query.TryGetValue("train", out var pt2) && int.TryParse(pt2, out var pti2) ? pti2 : 1000;
             int pcount = query.TryGetValue("count", out var pc2) && int.TryParse(pc2, out var pci2) ? pci2 : 24;
             int pstride = query.TryGetValue("stride", out var ps2) && int.TryParse(ps2, out var psi2) ? psi2 : 1;
-            await RunProjectAutotestAsync(pname, piters, pcount, pstride);
+            int pmax = query.TryGetValue("maxsplats", out var pm2) && int.TryParse(pm2, out var pmi2) ? pmi2 : 3_000_000;
+            int pres = query.TryGetValue("trainres", out var pr2) && int.TryParse(pr2, out var pri2) ? pri2 : 1024;
+            bool ppage = query.TryGetValue("pageonly", out var pp2) && pp2 is "1" or "true";
+            await RunProjectAutotestAsync(pname, piters, pcount, pstride, pmax, pres, ppage);
         }
         else if (mode == "dataset")
         {

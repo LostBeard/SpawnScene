@@ -72,6 +72,16 @@ public class ProjectSettings
     /// first checkpoint; 30,000 is its full run (TruckFull 251 photos: ~70 min training in the browser).
     /// </summary>
     public int TrainIterations { get; set; } = 7000;
+    /// <summary>
+    /// Ceiling on the splat count while training grows the scene (densification). Bounds GPU memory: TruckFull
+    /// reached 1.7M under a 3M cap (b24). Lower it on a smaller GPU.
+    /// </summary>
+    public int TrainMaxSplats { get; set; } = 3_000_000;
+    /// <summary>
+    /// Longest side, in pixels, the photos are trained at (the trainer also shrinks further to fit its target
+    /// memory budget). Higher = sharper detail, more GPU memory and time per iteration.
+    /// </summary>
+    public int TrainMaxDimension { get; set; } = 1024;
     // Parked for a future NATIVE super-resolution pass (ORT SR retired 2026-07-01). See SuperResolutionService.cs.
     public bool UseSuperResolution { get; set; }
 

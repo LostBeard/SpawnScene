@@ -545,6 +545,7 @@ public partial class Studio
             BackgroundColor = Color.Transparent,
             BorderWidth = 0,
         });
+        _projectDetailScroll = scroll;
 
         float y = 8;
         float contentW = panelW - 40;
@@ -743,6 +744,34 @@ public partial class Studio
         }
         y += 36;
 
+        // ── Training (multi-photo projects) ──
+        // Generate trains the scene after posing it (TrainProjectSceneAsync). One photo is never trained.
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Text = "Training (2+ photos)",
+            FontSize = FontSize.Body,
+            Color = UITheme.Current.TextPrimary,
+        });
+        y += 28;
+        y = AddSettingRow(scroll, y, "Iterations",
+            new (string, int)[] { ("Off", 0), ("3K", 3000), ("7K", 7000), ("15K", 15000), ("30K", 30000) },
+            _activeProject.Settings.TrainIterations, v => _activeProject.Settings.TrainIterations = v);
+        y = AddSettingRow(scroll, y, "Max splats",
+            new (string, int)[] { ("500K", 500_000), ("1M", 1_000_000), ("3M", 3_000_000) },
+            _activeProject.Settings.TrainMaxSplats, v => _activeProject.Settings.TrainMaxSplats = v);
+        y = AddSettingRow(scroll, y, "Resolution",
+            new (string, int)[] { ("720", 720), ("1024", 1024), ("1600", 1600) },
+            _activeProject.Settings.TrainMaxDimension, v => _activeProject.Settings.TrainMaxDimension = v);
+        scroll.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Text = "More iterations = sharper, longer (TruckFull 30K ~70 min). Lower splats / resolution for smaller GPUs.",
+            FontSize = FontSize.Caption,
+            Color = UITheme.Current.TextMuted,
+        });
+        y += 30;
+
         bool canGenerate = _activeProject.Sources.Count > 0 && !_pipelineBusy;
         scroll.AddChild(new UIButton
         {
@@ -799,7 +828,8 @@ public partial class Studio
                 sceneCard.AddChild(new UILabel
                 {
                     X = 178, Y = 38,
-                    Text = $"Created {scene.CreatedAt:g}",
+                    Text = $"Created {scene.CreatedAt:g}" +
+                           (scene.TrainedIterations > 0 ? $" · trained {scene.TrainedIterations:N0} iters" : " · untrained"),
                     FontSize = FontSize.Caption,
                     Color = UITheme.Current.TextMuted,
                 });
@@ -1056,6 +1086,45 @@ public partial class Studio
             FontSize = FontSize.Caption,
             Color = Color.FromArgb(255, 80, 210, 220),
         });
+    }
+
+    /// <summary>
+    /// One project-setting row: a caption and a button per choice, the current value highlighted. Saves the project
+    /// on click. Returns the next row's y.
+    /// </summary>
+    private float AddSettingRow(UIElement parent, float y, string caption, (string Label, int Value)[] choices,
+        int current, Action<int> set)
+    {
+        parent.AddChild(new UILabel
+        {
+            X = 20, Y = y,
+            Text = caption,
+            FontSize = FontSize.Caption,
+            Color = UITheme.Current.TextSecondary,
+        });
+        float x = 120;
+        foreach (var (label, value) in choices)
+        {
+            var v = value;
+            parent.AddChild(new UIButton
+            {
+                X = x, Y = y - 3,
+                Width = 70, Height = 26,
+                Text = label,
+                FontSize = FontSize.Caption,
+                NormalColor = current == value ? AccentSelected : UITheme.Current.ButtonNormal,
+                Enabled = !_pipelineBusy,
+                OnClick = () =>
+                {
+                    if (_activeProject == null) return;
+                    set(v);
+                    _ = _projectService.UpdateProjectAsync(_activeProject);
+                    BuildProjectDetailUI();
+                },
+            });
+            x += 76;
+        }
+        return y + 34;
     }
 
     private void SetUiStatus(string message)

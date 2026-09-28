@@ -696,7 +696,8 @@ public partial class Studio
                 int trainIters = _activeProject.Settings.TrainIterations;
                 int trainedIters = 0;
                 if (trainIters > 0 && scene.TrainingViews.Count > 0)
-                    trainedIters = await TrainProjectSceneAsync(trainIters);
+                    trainedIters = await TrainProjectSceneAsync(
+                        trainIters, _activeProject.Settings.TrainMaxSplats, _activeProject.Settings.TrainMaxDimension);
                 else if (trainIters > 0)
                     Console.WriteLine("[Studio] not training: the pose recovery produced no usable camera poses");
 
@@ -747,14 +748,14 @@ public partial class Studio
     /// are restored afterwards so a later dataset run still gets its own URL settings. Returns the iterations
     /// done (0 = did not train).
     /// </summary>
-    private async Task<int> TrainProjectSceneAsync(int iterations)
+    private async Task<int> TrainProjectSceneAsync(int iterations, int maxSplats = 3_000_000, int maxDimension = 1024)
     {
         var saved = (DensifyEveryIters, OpacityResetEveryIters, SplatDensityControl.GrowthSelectFraction,
             MaxDensifiedSplats, MaxTargetStackBytes, HeldOutEveryCycles, _unloadDepthBeforeTraining);
         DensifyEveryIters = 100;
         OpacityResetEveryIters = 3000;
         SplatDensityControl.GrowthSelectFraction = 1f;
-        MaxDensifiedSplats = 3_000_000;
+        MaxDensifiedSplats = maxSplats;
         MaxTargetStackBytes = 640L * 1024 * 1024;
         HeldOutEveryCycles = 0;           // no held-out views to score, so no mid-run evaluation passes
         _unloadDepthBeforeTraining = true; // give the trainer the depth model's GPU memory
@@ -766,7 +767,7 @@ public partial class Studio
         try
         {
             bool ok = await TrainOnTrainingViewsAsync(
-                iterations, optimiseGeometry: true, maxTrainDimension: 1024,
+                iterations, optimiseGeometry: true, maxTrainDimension: maxDimension,
                 onProgress: p =>
                 {
                     done = p.Done;

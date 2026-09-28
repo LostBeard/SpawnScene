@@ -273,11 +273,13 @@ public partial class Studio : IAsyncDisposable
             // &tracecarry=1: log each densify-carry operation before it runs.
             if (query.TryGetValue("tracecarry", out var tcq))
                 SplatTrainerGpu.TraceCarrySteps = tcq is "1" or "true";
-            // &pooltrace=1: the ML pool's misses by rent name and its ownership violations, per [GPU] chunk report.
-            if (query.TryGetValue("pooltrace", out var ptq) && ptq is "1" or "true")
+            // &pooltrace=1: the ML pool's misses by rent name, per [GPU] chunk report. &pooltrace=2 adds the pool's
+            // ownership trace, which logs EVERY violation as it happens - on DAv3 ~500 ALIEN-RETURN lines per pass
+            // (40,709 by chunk 80 in b23), so it is opt-in separately.
+            if (query.TryGetValue("pooltrace", out var ptq) && ptq is "1" or "2" or "true")
             {
                 SpawnDev.ILGPU.ML.Tensors.BufferPool.TraceFreshAllocNames = true;
-                SpawnDev.ILGPU.ML.Tensors.BufferPool.TracePoolOwnership = true;
+                SpawnDev.ILGPU.ML.Tensors.BufferPool.TracePoolOwnership = ptq == "2";
             }
             // &bufsites=1: record who allocates every WebGPU buffer; the [GPU] reports then list the top creation sites.
             if (query.TryGetValue("bufsites", out var bsq))

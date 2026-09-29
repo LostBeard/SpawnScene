@@ -230,7 +230,7 @@ public class GlobalSfmInitTests
         foreach (var c in start) c.Position += new Vector3((float)Gauss(rng), (float)Gauss(rng), (float)Gauss(rng)) * (0.2f * spread);
         var connected = Enumerable.Repeat(true, n).ToArray();
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var (centres, _) = GlobalSfmInit.GlobalPositioning(start, truthR, connected, obs, points, focal);
+        var (centres, _, _) = GlobalSfmInit.GlobalPositioningRobust(start, truthR, connected, obs, points, focal);
         var est = cams.Select((c, i) => { var k = Copy(c); k.Position = centres[i]; return (CameraParams?)k; }).ToList();
         Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out _, out _), Is.True);
         TestContext.Out.WriteLine($"{points} points, {obs.Count} observations: centres {acc.PositionRms / acc.Spread:P3} of spread " +
@@ -258,16 +258,14 @@ public class GlobalSfmInitTests
     }
 
     /// <summary>
-    /// Global positioning with TRUE rotations under the real data's conditions, one at a time: TruckFull's short tracks
-    /// (mostly 2-3 views), mismatched observations, and the cascade's bent start. On TruckFull (b51, 2026-09-28) global
-    /// positioning with COLMAP's rotations still landed 11.6% median off COLMAP.
+    /// GLOMAP-style robust positioning (random start, Huber, per-observation scales) under the same real-data conditions.
+    /// The linear formulation reached 0.34% median on clean real-length tracks but 40% with 5% mismatches.
     /// </summary>
-    [TestCase(false, 0.0, false, TestName = "GlobalPositioning_Hard_LongTracks_Clean_Random")]
-    [TestCase(true, 0.0, false, TestName = "GlobalPositioning_Hard_RealLengths_Clean_Random")]
-    [TestCase(true, 0.05, false, TestName = "GlobalPositioning_Hard_RealLengths_Outliers_Random")]
-    [TestCase(true, 0.0, true, TestName = "GlobalPositioning_Hard_RealLengths_Clean_Bent")]
-    [TestCase(true, 0.05, true, TestName = "GlobalPositioning_Hard_RealLengths_Outliers_Bent")]
-    public void GlobalPositioning_Hard(bool realLengths, double outliers, bool bent)
+    [TestCase(false, 0.0, TestName = "GlobalPositioningRobust_LongTracks_Clean")]
+    [TestCase(true, 0.0, TestName = "GlobalPositioningRobust_RealLengths_Clean")]
+    [TestCase(true, 0.05, TestName = "GlobalPositioningRobust_RealLengths_Outliers5")]
+    [TestCase(true, 0.10, TestName = "GlobalPositioningRobust_RealLengths_Outliers10")]
+    public void GlobalPositioningRobust(bool realLengths, double outliers)
     {
         var cams = TruckCameras();
         if (cams == null) Assert.Ignore("Truck dataset not in this checkout");
@@ -275,46 +273,19 @@ public class GlobalSfmInitTests
         int n = cams.Count;
         var (obs, points, focal) = SyntheticTracks(cams, rng, realLengths ? 12000 : 3000, 0.5, realLengths, outliers);
         var truthR = cams.Select(GlobalSfmInit.RotationOf).ToArray();
-        List<CameraParams> start;
-        if (bent) start = Bent(cams);
-        else
-        {
-            var centre = cams.Aggregate(Vector3.Zero, (s, c) => s + c.Position) / n;
-            float spread = MathF.Sqrt(cams.Average(c => (c.Position - centre).LengthSquared()));
-            start = cams.Select(Copy).ToList();
-            foreach (var c in start) c.Position += new Vector3((float)Gauss(rng), (float)Gauss(rng), (float)Gauss(rng)) * (0.2f * spread);
-        }
         var connected = Enumerable.Repeat(true, n).ToArray();
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var (centres, _) = GlobalSfmInit.GlobalPositioning(start, truthR, connected, obs, points, focal, 200, 0.001, true, false);
+        var (centres, _, summary) = GlobalSfmInit.GlobalPositioningRobust(cams, truthR, connected, obs, points, focal);
         var est = cams.Select((c, i) => { var k = Copy(c); k.Position = centres[i]; return (CameraParams?)k; }).ToList();
-        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out _, out _), Is.True);
-        TestContext.Out.WriteLine($"[{TestContext.CurrentContext.Test.Name}] prox200 {sw.Elapsed.TotalSeconds:F1}s {points} points, {obs.Count} observations: " +
+        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out var perView, out _), Is.True);
+        var perCam = new int[n];
+        foreach (var o in obs) perCam[o.Camera]++;
+        var worst = Enumerable.Range(0, n).OrderByDescending(i => perView[i]).Take(8)
+            .Select(i => $"#{i} {perView[i]:P1} ({perCam[i]} obs)");
+        TestContext.Out.WriteLine($"  worst: {string.Join(", ", worst)}; over 2%: {perView.Count(f => f > 0.02f)}");
+        TestContext.Out.WriteLine($"[{TestContext.CurrentContext.Test.Name}] {sw.Elapsed.TotalSeconds:F1}s {summary}: " +
             $"centres {acc.PositionRms / acc.Spread:P3} of spread, median {acc.MedianPosFrac:P3}");
         Assert.That(acc.MedianPosFrac, Is.LessThan(0.01));
-    }
-
-    /// <summary>DIAGNOSIS: is the least-squares minimum itself right on real-length tracks (many rounds, tiny pull, no
-    /// robust reweighting)?</summary>
-    [TestCase(40, 1.0, true, true, TestName = "GlobalPositioning_Converge_Bata40_Robust")]
-    [TestCase(40, 1.0, false, true, TestName = "GlobalPositioning_Converge_Bata40_Plain")]
-    [TestCase(100, 1.0, true, true, TestName = "GlobalPositioning_Converge_Bata100_Robust")]
-    [TestCase(200, 0.001, false, false, TestName = "GlobalPositioning_Converge_Prox200_Plain")]
-    public void GlobalPositioning_Converge(int rounds, double lambda, bool robust, bool bata)
-    {
-        var cams = TruckCameras();
-        if (cams == null) Assert.Ignore("Truck dataset not in this checkout");
-        var rng = new Random(21);
-        int n = cams.Count;
-        var (obs, points, focal) = SyntheticTracks(cams, rng, 12000, 0.5, realLengths: true);
-        var truthR = cams.Select(GlobalSfmInit.RotationOf).ToArray();
-        var start = Bent(cams);
-        var connected = Enumerable.Repeat(true, n).ToArray();
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        var (centres, _) = GlobalSfmInit.GlobalPositioning(start, truthR, connected, obs, points, focal, rounds, lambda, robust, bata);
-        var est = cams.Select((c, i) => { var k = Copy(c); k.Position = centres[i]; return (CameraParams?)k; }).ToList();
-        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out _, out _), Is.True);
-        TestContext.Out.WriteLine($"[{TestContext.CurrentContext.Test.Name}] centres {acc.PositionRms / acc.Spread:P3} of spread, median {acc.MedianPosFrac:P3}, {sw.Elapsed.TotalSeconds:F1}s");
     }
 
     [Test]

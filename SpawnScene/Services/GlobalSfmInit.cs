@@ -409,308 +409,6 @@ public static class GlobalSfmInit
         return q;
     }
 
-    // ── global positioning (camera centres AND points, rotations known) ─────────────────────
-
-    /// <summary>
-    /// Camera centres and track points given the global rotations: every observation says the point lies along the
-    /// camera's bearing b = R^T K^-1 [u v 1] (normalised). Per IRLS round, min over C and X of
-    ///   sum w (|P_b (X - C)|^2 + lambda (b.(X - C) - s)^2),  P_b = I - b b^T,
-    /// the perpendicular miss plus a whisper of pull along the bearing towards s (the observation's current depth, or the
-    /// median when the point is behind) - only so a point seen along parallel bearings stays invertible. Scale and sign
-    /// are fixed by pinning one camera-pair distance. Each point's 3x3 block is eliminated (Schur), leaving a sparse
-    /// system over the camera centres (one camera held), solved by block-Jacobi PCG; the points are then back-substituted.
-    /// Weights 1/(s^2 max(angle, 0.05 deg)) make the residual angular and down-weight mismatched observations.
-    /// </summary>
-    /// <remarks>
-    /// Why tracks and not pairs: consecutive video frames have nearly parallel baselines, so pairwise translation
-    /// directions leave each camera free to slide along the path. MEASURED (GlobalSfmInitTests, Truck path): pairwise
-    /// averaging took a 20%-perturbed start only to 14.5%. Points triangulate that slide away - GLOMAP's global positioning.
-    /// </remarks>
-    public static (Vector3[] Centres, Vector3[] Points) GlobalPositioning(IReadOnlyList<CameraParams> cams, double[][] rot,
-        bool[] connected, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal,
-        int rounds = 40, double lambda = 1.0, bool robust = true, bool bataScale = true, bool pinScale = false)
-    {
-        int n = cams.Count, np = pointCount, no = obs.Count;
-        var c = new double[n * 3];
-        for (int i = 0; i < n; i++) { c[i * 3] = cams[i].Position.X; c[i * 3 + 1] = cams[i].Position.Y; c[i * 3 + 2] = cams[i].Position.Z; }
-        // World bearings.
-        var bdir = new double[no * 3];
-        for (int k = 0; k < no; k++)
-        {
-            var o = obs[k]; var cam = cams[o.Camera]; var rr = rot[o.Camera];
-            double x = (o.U - cam.CenterX) / focal, y = (o.V - cam.CenterY) / focal, zz = 1;
-            double bx = rr[0] * x + rr[3] * y + rr[6] * zz;
-            double by = rr[1] * x + rr[4] * y + rr[7] * zz;
-            double bz = rr[2] * x + rr[5] * y + rr[8] * zz;
-            double bn = Math.Sqrt(bx * bx + by * by + bz * bz);
-            bdir[k * 3] = bx / bn; bdir[k * 3 + 1] = by / bn; bdir[k * 3 + 2] = bz / bn;
-        }
-        var pointObs = new List<int>[np];
-        for (int p = 0; p < np; p++) pointObs[p] = new();
-        for (int k = 0; k < no; k++) if (connected[obs[k].Camera]) pointObs[obs[k].Point].Add(k);
-        int anchor = Array.IndexOf(connected, true);
-        // Scale (and the global sign) is pinned by ONE constraint - the anchor-to-far-camera distance along their current
-        // direction - not by a pull on every depth. MEASURED (GlobalSfmInitTests, TruckFull-like 2-3 view tracks, bent
-        // start): a lambda-0.01 pull on every depth towards the previous round's made each round a small proximal step -
-        // 20 rounds left 9.2% median, 200 rounds 0.17%. With the pin, every round is an exact least-squares solve.
-        int far = anchor;
-        {
-            double best = -1;
-            for (int i = 0; i < n; i++)
-            {
-                if (!connected[i]) continue;
-                double dx = c[i * 3] - c[anchor * 3], dy = c[i * 3 + 1] - c[anchor * 3 + 1], dz = c[i * 3 + 2] - c[anchor * 3 + 2];
-                double d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 > best) { best = d2; far = i; }
-            }
-        }
-        var free = new bool[n];
-        for (int i = 0; i < n; i++) free[i] = connected[i] && i != anchor;
-        var xpt = new double[np * 3];
-        var w = new double[no];
-        var s = new double[no];
-        var vinv = new double[np * 9];
-        var a = new double[no * 9];   // per observation A = w (I - (1 - lambda) b b^T)
-        var g = new double[no * 3];   // per observation g = w lambda s b
-
-        double Spread()
-        {
-            double mx = 0, my = 0, mz = 0; int k = 0;
-            for (int i = 0; i < n; i++) if (connected[i]) { mx += c[i * 3]; my += c[i * 3 + 1]; mz += c[i * 3 + 2]; k++; }
-            mx /= k; my /= k; mz /= k;
-            double sum = 0;
-            for (int i = 0; i < n; i++)
-                if (connected[i]) { double dx = c[i * 3] - mx, dy = c[i * 3 + 1] - my, dz = c[i * 3 + 2] - mz; sum += dx * dx + dy * dy + dz * dz; }
-            return Math.Sqrt(sum / k);
-        }
-        double spread0 = Spread();
-
-        void BuildBlocks(double lam)
-        {
-            for (int k = 0; k < no; k++)
-            {
-                double kk = 1 - lam;
-                int o9 = k * 9, o3 = k * 3;
-                for (int i = 0; i < 3; i++)
-                    for (int j = 0; j < 3; j++)
-                        a[o9 + i * 3 + j] = w[k] * ((i == j ? 1 : 0) - kk * bdir[o3 + i] * bdir[o3 + j]);
-                g[o3] = w[k] * lam * s[k] * bdir[o3]; g[o3 + 1] = w[k] * lam * s[k] * bdir[o3 + 1]; g[o3 + 2] = w[k] * lam * s[k] * bdir[o3 + 2];
-            }
-            for (int pp = 0; pp < np; pp++)
-            {
-                Span<double> v = stackalloc double[9];
-                v.Clear();
-                foreach (int k in pointObs[pp]) for (int q = 0; q < 9; q++) v[q] += a[k * 9 + q];
-                var inv = pointObs[pp].Count > 0 ? Invert3(v) : new double[9];
-                for (int q = 0; q < 9; q++) vinv[pp * 9 + q] = inv[q];
-            }
-        }
-        // X_p = V^-1 sum (A C_i + g)
-        void BackSubstitute()
-        {
-            for (int pp = 0; pp < np; pp++)
-            {
-                double hx = 0, hy = 0, hz = 0;
-                foreach (int k in pointObs[pp])
-                {
-                    int i = obs[k].Camera, o9 = k * 9;
-                    double cx = c[i * 3], cy = c[i * 3 + 1], cz = c[i * 3 + 2];
-                    hx += a[o9] * cx + a[o9 + 1] * cy + a[o9 + 2] * cz + g[k * 3];
-                    hy += a[o9 + 3] * cx + a[o9 + 4] * cy + a[o9 + 5] * cz + g[k * 3 + 1];
-                    hz += a[o9 + 6] * cx + a[o9 + 7] * cy + a[o9 + 8] * cz + g[k * 3 + 2];
-                }
-                int b9 = pp * 9;
-                xpt[pp * 3] = vinv[b9] * hx + vinv[b9 + 1] * hy + vinv[b9 + 2] * hz;
-                xpt[pp * 3 + 1] = vinv[b9 + 3] * hx + vinv[b9 + 4] * hy + vinv[b9 + 5] * hz;
-                xpt[pp * 3 + 2] = vinv[b9 + 6] * hx + vinv[b9 + 7] * hy + vinv[b9 + 8] * hz;
-            }
-        }
-
-        // Start: triangulate every point from the start centres (pure perpendicular residual, a whisper of pull).
-        for (int k = 0; k < no; k++) { w[k] = 1; s[k] = 0; }
-        BuildBlocks(1e-6);
-        BackSubstitute();
-
-        // Reduced camera system storage: dense 3x3 blocks, visited through per-camera neighbour lists.
-        var nb = new HashSet<int>[n];
-        for (int i = 0; i < n; i++) nb[i] = new HashSet<int> { i };
-        foreach (var list in pointObs)
-            foreach (int k1 in list) foreach (int k2 in list) nb[obs[k1].Camera].Add(obs[k2].Camera);
-        var nbl = nb.Select(h => h.ToArray()).ToArray();
-        var S = new double[(long)n * n * 9];
-        var rhs = new double[n * 3];
-        var pre = new double[n * 9];
-        var r = new double[n * 3]; var z = new double[n * 3]; var pv = new double[n * 3]; var ap = new double[n * 3];
-        void ApplyS(double[] v, double[] y)
-        {
-            Array.Clear(y);
-            for (int i = 0; i < n; i++)
-            {
-                if (!free[i]) continue;
-                foreach (int j in nbl[i])
-                {
-                    if (!free[j]) continue;
-                    long o = ((long)i * n + j) * 9;
-                    y[i * 3] += S[o] * v[j * 3] + S[o + 1] * v[j * 3 + 1] + S[o + 2] * v[j * 3 + 2];
-                    y[i * 3 + 1] += S[o + 3] * v[j * 3] + S[o + 4] * v[j * 3 + 1] + S[o + 5] * v[j * 3 + 2];
-                    y[i * 3 + 2] += S[o + 6] * v[j * 3] + S[o + 7] * v[j * 3 + 1] + S[o + 8] * v[j * 3 + 2];
-                }
-            }
-        }
-        double Dot(double[] x1, double[] x2)
-        {
-            double sum = 0;
-            for (int i = 0; i < n; i++) if (free[i]) sum += x1[i * 3] * x2[i * 3] + x1[i * 3 + 1] * x2[i * 3 + 1] + x1[i * 3 + 2] * x2[i * 3 + 2];
-            return sum;
-        }
-
-        for (int round = 0; round < rounds; round++)
-        {
-            // Depths and weights from the current centres and points.
-            var depths = new List<double>();
-            for (int k = 0; k < no; k++)
-            {
-                var o = obs[k];
-                if (!connected[o.Camera] || pointObs[o.Point].Count < 2) continue;
-                double dx = xpt[o.Point * 3] - c[o.Camera * 3], dy = xpt[o.Point * 3 + 1] - c[o.Camera * 3 + 1], dz = xpt[o.Point * 3 + 2] - c[o.Camera * 3 + 2];
-                double d = dx * bdir[k * 3] + dy * bdir[k * 3 + 1] + dz * bdir[k * 3 + 2];
-                if (d > 0) depths.Add(d);
-            }
-            depths.Sort();
-            double med = depths.Count > 0 ? depths[depths.Count / 2] : spread0;
-            for (int k = 0; k < no; k++)
-            {
-                var o = obs[k];
-                double dx = xpt[o.Point * 3] - c[o.Camera * 3], dy = xpt[o.Point * 3 + 1] - c[o.Camera * 3 + 1], dz = xpt[o.Point * 3 + 2] - c[o.Camera * 3 + 2];
-                double len = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                double d = dx * bdir[k * 3] + dy * bdir[k * 3 + 1] + dz * bdir[k * 3 + 2];
-                double ang = len > 1e-12 ? Math.Acos(Math.Clamp(d / len, -1, 1)) * 180 / Math.PI : 90;
-                // BATA's scale (1/argmin_t |(X - C) t - b|): collapse-neutral - shrinking X - C shrinks s with it.
-                s[k] = d > 0.05 * med ? (bataScale ? len * len / d : d) : med;
-                w[k] = 1 / (s[k] * s[k]) / (round == 0 || !robust ? 1 : Math.Max(ang, 0.05));
-            }
-            // The pull along the bearings only fixes scale and sign; it targets the CURRENT depths, so it adds no bias at
-            // convergence, but a strong pull slows weakly-constrained directions to a crawl (MEASURED, GlobalSfmInitTests:
-            // lambda 0.1 for 8 rounds left 3.8% from a 20% start). Strong first, weak after.
-            BuildBlocks(lambda);
-            // Assemble S = blockdiag(sum A) - sum_p A_i V_p^-1 A_j, and rhs = -sum g + sum A_i V^-1 sum g.
-            foreach (var i in Enumerable.Range(0, n)) foreach (int j in nbl[i]) Array.Clear(S, (int)(((long)i * n + j) * 9), 9);
-            Array.Clear(rhs);
-            Span<double> av = stackalloc double[9];
-            foreach (var list in pointObs)
-            {
-                if (list.Count == 0) continue;
-                int pp = obs[list[0]].Point, b9 = pp * 9;
-                double gx = 0, gy = 0, gz = 0;
-                foreach (int k in list) { gx += g[k * 3]; gy += g[k * 3 + 1]; gz += g[k * 3 + 2]; }
-                foreach (int k1 in list)
-                {
-                    int i = obs[k1].Camera, o1 = k1 * 9;
-                    // av = A_i V^-1
-                    for (int r0 = 0; r0 < 3; r0++)
-                        for (int c0 = 0; c0 < 3; c0++)
-                            av[r0 * 3 + c0] = a[o1 + r0 * 3] * vinv[b9 + c0] + a[o1 + r0 * 3 + 1] * vinv[b9 + 3 + c0] + a[o1 + r0 * 3 + 2] * vinv[b9 + 6 + c0];
-                    long d9 = ((long)i * n + i) * 9;
-                    for (int q = 0; q < 9; q++) S[d9 + q] += a[o1 + q];
-                    rhs[i * 3] += -g[k1 * 3] + av[0] * gx + av[1] * gy + av[2] * gz;
-                    rhs[i * 3 + 1] += -g[k1 * 3 + 1] + av[3] * gx + av[4] * gy + av[5] * gz;
-                    rhs[i * 3 + 2] += -g[k1 * 3 + 2] + av[6] * gx + av[7] * gy + av[8] * gz;
-                    foreach (int k2 in list)
-                    {
-                        int j = obs[k2].Camera, o2 = k2 * 9;
-                        long ij = ((long)i * n + j) * 9;
-                        for (int r0 = 0; r0 < 3; r0++)
-                            for (int c0 = 0; c0 < 3; c0++)
-                                S[ij + r0 * 3 + c0] -= av[r0 * 3] * a[o2 + c0] + av[r0 * 3 + 1] * a[o2 + 3 + c0] + av[r0 * 3 + 2] * a[o2 + 6 + c0];
-                    }
-                }
-            }
-            // The scale pin: mu (d.(C_far - C_anchor) - L)^2, d and L from the current centres.
-            if (pinScale && far != anchor && free[far])
-            {
-                double dx = c[far * 3] - c[anchor * 3], dy = c[far * 3 + 1] - c[anchor * 3 + 1], dz = c[far * 3 + 2] - c[anchor * 3 + 2];
-                double L = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                if (L > 1e-12)
-                {
-                    double[] d = { dx / L, dy / L, dz / L };
-                    long ff = ((long)far * n + far) * 9;
-                    double mu = 10 * (S[ff] + S[ff + 4] + S[ff + 8]) / 3;
-                    double proj = d[0] * c[anchor * 3] + d[1] * c[anchor * 3 + 1] + d[2] * c[anchor * 3 + 2] + L;
-                    for (int i = 0; i < 3; i++)
-                    {
-                        for (int j = 0; j < 3; j++) S[ff + i * 3 + j] += mu * d[i] * d[j];
-                        rhs[far * 3 + i] += mu * d[i] * proj;
-                    }
-                }
-            }
-            // The anchor is fixed: its column moves to the right-hand side.
-            for (int i = 0; i < n; i++)
-            {
-                if (!free[i]) continue;
-                long o = ((long)i * n + anchor) * 9;
-                if (!nb[i].Contains(anchor)) continue;
-                double ax = c[anchor * 3], ay = c[anchor * 3 + 1], az = c[anchor * 3 + 2];
-                rhs[i * 3] -= S[o] * ax + S[o + 1] * ay + S[o + 2] * az;
-                rhs[i * 3 + 1] -= S[o + 3] * ax + S[o + 4] * ay + S[o + 5] * az;
-                rhs[i * 3 + 2] -= S[o + 6] * ax + S[o + 7] * ay + S[o + 8] * az;
-            }
-            for (int i = 0; i < n; i++)
-            {
-                if (!free[i]) continue;
-                var inv = Invert3(new ReadOnlySpan<double>(S, (int)(((long)i * n + i) * 9), 9));
-                for (int q = 0; q < 9; q++) pre[i * 9 + q] = inv[q];
-            }
-            // PCG warm-started from the current centres.
-            var x0 = (double[])c.Clone();
-            ApplyS(x0, ap);
-            for (int i = 0; i < n * 3; i++) r[i] = free[i / 3] ? rhs[i] - ap[i] : 0;
-            void Pre(double[] src, double[] dst)
-            {
-                for (int i = 0; i < n; i++)
-                {
-                    if (!free[i]) { dst[i * 3] = dst[i * 3 + 1] = dst[i * 3 + 2] = 0; continue; }
-                    int o = i * 9;
-                    dst[i * 3] = pre[o] * src[i * 3] + pre[o + 1] * src[i * 3 + 1] + pre[o + 2] * src[i * 3 + 2];
-                    dst[i * 3 + 1] = pre[o + 3] * src[i * 3] + pre[o + 4] * src[i * 3 + 1] + pre[o + 5] * src[i * 3 + 2];
-                    dst[i * 3 + 2] = pre[o + 6] * src[i * 3] + pre[o + 7] * src[i * 3 + 1] + pre[o + 8] * src[i * 3 + 2];
-                }
-            }
-            Pre(r, z);
-            Array.Copy(z, pv, n * 3);
-            double rz = Dot(r, z), r0n = Math.Max(Dot(r, r), 1e-300);
-            for (int it = 0; it < 1000 && Dot(r, r) > 1e-22 * r0n; it++)
-            {
-                ApplyS(pv, ap);
-                double pap = Dot(pv, ap);
-                if (!(pap > 0)) break;
-                double alpha = rz / pap;
-                for (int i = 0; i < n * 3; i++) if (free[i / 3]) { c[i] += alpha * pv[i]; r[i] -= alpha * ap[i]; }
-                Pre(r, z);
-                double rzNew = Dot(r, z);
-                double beta = rzNew / rz;
-                rz = rzNew;
-                for (int i = 0; i < n * 3; i++) pv[i] = free[i / 3] ? z[i] + beta * pv[i] : 0;
-            }
-            BackSubstitute();
-            // Keep the spread (scale is a gauge), points with it.
-            double sp = Spread();
-            if (sp > 1e-12)
-            {
-                double k = spread0 / sp;
-                double ax = c[anchor * 3], ay = c[anchor * 3 + 1], az = c[anchor * 3 + 2];
-                for (int i = 0; i < n; i++)
-                    if (connected[i]) { c[i * 3] = ax + (c[i * 3] - ax) * k; c[i * 3 + 1] = ay + (c[i * 3 + 1] - ay) * k; c[i * 3 + 2] = az + (c[i * 3 + 2] - az) * k; }
-                for (int pp = 0; pp < np; pp++)
-                { xpt[pp * 3] = ax + (xpt[pp * 3] - ax) * k; xpt[pp * 3 + 1] = ay + (xpt[pp * 3 + 1] - ay) * k; xpt[pp * 3 + 2] = az + (xpt[pp * 3 + 2] - az) * k; }
-            }
-        }
-        var centres = new Vector3[n];
-        for (int i = 0; i < n; i++) centres[i] = new Vector3((float)c[i * 3], (float)c[i * 3 + 1], (float)c[i * 3 + 2]);
-        var points = new Vector3[np];
-        for (int pp = 0; pp < np; pp++) points[pp] = new Vector3((float)xpt[pp * 3], (float)xpt[pp * 3 + 1], (float)xpt[pp * 3 + 2]);
-        return (centres, points);
-    }
-
     static double[] Invert3(ReadOnlySpan<double> m)
     {
         double a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
@@ -724,6 +422,343 @@ public static class GlobalSfmInit
             B * id, (a * i - c * g) * id, -(a * f - c * d) * id,
             C * id, -(a * h - b * g) * id, (a * e - b * d) * id,
         };
+    }
+
+    // ── robust global positioning (GLOMAP) ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// GLOMAP's global positioning (Pan et al. 2024). With the rotations known, observation k (camera i, point j) says the
+    /// point lies along the camera's world bearing v_k. Minimise over the centres C, the points X and one scale d_k &gt;= 0
+    /// per observation
+    ///   sum_k huber(|v_k - d_k (X_j - C_i)|)
+    /// by Levenberg-Marquardt from a RANDOM start. d_k makes the residual collapse-proof (X - C -&gt; 0 leaves |v| = 1) and
+    /// the Huber loss caps the pull of a mismatched observation - what the linear formulation above lacks (5% mismatches
+    /// took it to 40% median error). Each step Schur-eliminates every d_k (1x1), then every point (3x3), leaving a dense
+    /// system over the centres, solved by Cholesky. The translation gauge is a centroid term (mu/2)|sum C|^2 / n, NOT a fixed
+    /// camera: from a random start a fixed camera sits wherever it was drawn, its observations get rejected as mismatches and
+    /// it is orphaned (MEASURED: camera 0 left 79.5% off while every other camera was within 1.2%). The scale is free (d absorbs it), so
+    /// the result is returned at the connected cameras' current centroid and spread.
+    /// Why tracks and not pairs: consecutive video frames have nearly parallel baselines, so pairwise translation directions
+    /// leave each camera free to slide along the path (MEASURED: pairwise averaging took a 20% start only to 14.5%).
+    /// </summary>
+    public static (Vector3[] Centres, Vector3[] Points, string Summary) GlobalPositioningRobust(IReadOnlyList<CameraParams> cams,
+        double[][] rot, bool[] connected, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal,
+        int maxIterations = 600, double huber = 0.003, int seed = 1)
+    {
+        int n = cams.Count, np = pointCount;
+        // Usable observations: a connected camera, a point seen by at least two connected cameras.
+        var seen = new int[np];
+        foreach (var o in obs) if (connected[o.Camera]) seen[o.Point]++;
+        var use = new List<int>();
+        for (int k = 0; k < obs.Count; k++) if (connected[obs[k].Camera] && seen[obs[k].Point] >= 2) use.Add(k);
+        int no = use.Count;
+        var oc = new int[no]; var op = new int[no]; var v = new double[no * 3];
+        for (int t = 0; t < no; t++)
+        {
+            var o = obs[use[t]]; var cam = cams[o.Camera]; var rr = rot[o.Camera];
+            oc[t] = o.Camera; op[t] = o.Point;
+            double x = (o.U - cam.CenterX) / focal, y = (o.V - cam.CenterY) / focal;
+            double bx = rr[0] * x + rr[3] * y + rr[6], by = rr[1] * x + rr[4] * y + rr[7], bz = rr[2] * x + rr[5] * y + rr[8];
+            double bn = Math.Sqrt(bx * bx + by * by + bz * bz);
+            v[t * 3] = bx / bn; v[t * 3 + 1] = by / bn; v[t * 3 + 2] = bz / bn;
+        }
+        var pointObs = new List<int>[np];
+        for (int p = 0; p < np; p++) pointObs[p] = new();
+        for (int t = 0; t < no; t++) pointObs[op[t]].Add(t);
+        var col = new int[n];
+        int nf = 0;
+        for (int i = 0; i < n; i++) col[i] = connected[i] ? nf++ : -1;
+        int dim = nf * 3;
+
+        // Random start (GLOMAP): centres and points uniform in [-1, 1]^3, every scale 1.
+        var rng = new Random(seed);
+        var c = new double[n * 3]; var xp = new double[np * 3]; var d = new double[no];
+        for (int i = 0; i < n * 3; i++) c[i] = rng.NextDouble() * 2 - 1;
+        for (int i = 0; i < np * 3; i++) xp[i] = rng.NextDouble() * 2 - 1;
+        Array.Fill(d, 1.0);
+
+        var r = new double[no * 3]; var w = new double[no];
+        // Rejected observations (w = 0, no cost) and each point's count of live ones - a point needs two.
+        var off = new bool[no]; var live = new int[np];
+        foreach (int t0 in Enumerable.Range(0, no)) live[op[t0]]++;
+        double mu = 0;   // centroid gauge weight, set from the first system's camera diagonal
+        double Evaluate(double[] cc, double[] xx, double[] dd, bool keep)
+        {
+            double cost = 0;
+            if (mu > 0)
+            {
+                double sx = 0, sy = 0, sz = 0;
+                for (int i = 0; i < n; i++) if (col[i] >= 0) { sx += cc[i * 3]; sy += cc[i * 3 + 1]; sz += cc[i * 3 + 2]; }
+                cost += 0.5 * mu * (sx * sx + sy * sy + sz * sz) / nf;
+            }
+            for (int t = 0; t < no; t++)
+            {
+                if (off[t]) { if (keep) { r[t * 3] = r[t * 3 + 1] = r[t * 3 + 2] = 0; w[t] = 0; } continue; }
+                int i = oc[t] * 3, j = op[t] * 3;
+                double r0 = v[t * 3] - dd[t] * (xx[j] - cc[i]);
+                double r1 = v[t * 3 + 1] - dd[t] * (xx[j + 1] - cc[i + 1]);
+                double r2 = v[t * 3 + 2] - dd[t] * (xx[j + 2] - cc[i + 2]);
+                double e = Math.Sqrt(r0 * r0 + r1 * r1 + r2 * r2);
+                cost += e <= huber ? 0.5 * e * e : huber * (e - 0.5 * huber);
+                if (keep) { r[t * 3] = r0; r[t * 3 + 1] = r1; r[t * 3 + 2] = r2; w[t] = e <= huber ? 1 : huber / e; }
+            }
+            return cost;
+        }
+
+        var hdd = new double[no]; var gd = new double[no]; var a = new double[no * 3]; var e2 = new double[no];
+        var hxx = new double[np * 6]; var gx = new double[np * 3];
+        var hcc = new double[n * 6]; var gc = new double[n * 3];
+        var S = new double[dim * dim]; var rhs = new double[dim];
+        var pinv = new double[np * 9];
+        var dc = new double[dim]; var cNew = new double[n * 3]; var xNew = new double[np * 3]; var dNew = new double[no];
+        double lambda = 1e-4, cost0 = Evaluate(c, xp, d, true), cost = cost0;
+        int iter = 0, accepted = 0, rejectedTotal = 0, round = 0;
+        // Rounds: converge, then reject observations whose angle to their point is far past the typical one (a
+        // mismatch in a 2-3 view track cannot be outvoted inside its track - it only shows once the cameras settle),
+        // and re-solve from where the previous round ended.
+        for (; round < 6; round++)
+        {
+        for (int roundIter = 0; roundIter < maxIterations; roundIter++, iter++)
+        {
+            // Normal equations of the IRLS-weighted linearisation, gradient g = J^T W r, step H delta = -g.
+            Array.Clear(hxx); Array.Clear(gx); Array.Clear(hcc); Array.Clear(gc);
+            for (int t = 0; t < no; t++)
+            {
+                int i = oc[t], j = op[t];
+                double ux = xp[j * 3] - c[i * 3], uy = xp[j * 3 + 1] - c[i * 3 + 1], uz = xp[j * 3 + 2] - c[i * 3 + 2];
+                double wt = w[t], dt = d[t], r0 = r[t * 3], r1 = r[t * 3 + 1], r2 = r[t * 3 + 2];
+                hdd[t] = wt * (ux * ux + uy * uy + uz * uz);
+                gd[t] = -wt * (ux * r0 + uy * r1 + uz * r2);
+                a[t * 3] = wt * dt * ux; a[t * 3 + 1] = wt * dt * uy; a[t * 3 + 2] = wt * dt * uz;   // H_Xd; H_cd = -a
+                double dd2 = wt * dt * dt;
+                e2[t] = -dd2;                                                                         // H_cX = -w d^2 I
+                hxx[j * 6] += dd2; hxx[j * 6 + 3] += dd2; hxx[j * 6 + 5] += dd2;
+                hcc[i * 6] += dd2; hcc[i * 6 + 3] += dd2; hcc[i * 6 + 5] += dd2;
+                gx[j * 3] -= wt * dt * r0; gx[j * 3 + 1] -= wt * dt * r1; gx[j * 3 + 2] -= wt * dt * r2;
+                gc[i * 3] += wt * dt * r0; gc[i * 3 + 1] += wt * dt * r1; gc[i * 3 + 2] += wt * dt * r2;
+            }
+            if (mu == 0)
+            {
+                double sum = 0;
+                for (int i = 0; i < n; i++) if (col[i] >= 0) sum += hcc[i * 6];
+                mu = Math.Max(sum / nf, 1e-12);
+                cost0 = cost = Evaluate(c, xp, d, true);
+            }
+            // Marquardt damping on the diagonal (every diagonal entry of H_XX / H_cc is the same sum).
+            for (int j = 0; j < np; j++) { double s = hxx[j * 6] * lambda; hxx[j * 6] += s; hxx[j * 6 + 3] += s; hxx[j * 6 + 5] += s; }
+            for (int i = 0; i < n; i++) { double s = hcc[i * 6] * lambda; hcc[i * 6] += s; hcc[i * 6 + 3] += s; hcc[i * 6 + 5] += s; }
+            // Eliminate every d_t: H_XX -= s a a^T, H_cc -= s a a^T, H_cX = e I + s a a^T, g_X -= s a g_d, g_c += s a g_d.
+            for (int t = 0; t < no; t++)
+            {
+                hdd[t] = hdd[t] * (1 + lambda) + 1e-300;
+                double s = 1 / hdd[t], a0 = a[t * 3], a1 = a[t * 3 + 1], a2 = a[t * 3 + 2];
+                int j = op[t] * 6, i = oc[t] * 6;
+                double q00 = s * a0 * a0, q01 = s * a0 * a1, q02 = s * a0 * a2, q11 = s * a1 * a1, q12 = s * a1 * a2, q22 = s * a2 * a2;
+                hxx[j] -= q00; hxx[j + 1] -= q01; hxx[j + 2] -= q02; hxx[j + 3] -= q11; hxx[j + 4] -= q12; hxx[j + 5] -= q22;
+                hcc[i] -= q00; hcc[i + 1] -= q01; hcc[i + 2] -= q02; hcc[i + 3] -= q11; hcc[i + 4] -= q12; hcc[i + 5] -= q22;
+                double sg = s * gd[t];
+                gx[op[t] * 3] -= sg * a0; gx[op[t] * 3 + 1] -= sg * a1; gx[op[t] * 3 + 2] -= sg * a2;
+                gc[oc[t] * 3] += sg * a0; gc[oc[t] * 3 + 1] += sg * a1; gc[oc[t] * 3 + 2] += sg * a2;
+            }
+            // Eliminate every point: S = H_cc - sum B P B^T, rhs = g_c - sum B P g_X, B = H_cX of each observation.
+            Array.Clear(S); Array.Clear(rhs);
+            for (int i = 0; i < n; i++)
+            {
+                if (col[i] < 0) continue;
+                int b = col[i] * 3;
+                S[b * dim + b] = hcc[i * 6]; S[b * dim + b + 1] = hcc[i * 6 + 1]; S[b * dim + b + 2] = hcc[i * 6 + 2];
+                S[(b + 1) * dim + b] = hcc[i * 6 + 1]; S[(b + 1) * dim + b + 1] = hcc[i * 6 + 3]; S[(b + 1) * dim + b + 2] = hcc[i * 6 + 4];
+                S[(b + 2) * dim + b] = hcc[i * 6 + 2]; S[(b + 2) * dim + b + 1] = hcc[i * 6 + 4]; S[(b + 2) * dim + b + 2] = hcc[i * 6 + 5];
+                rhs[b] = gc[i * 3]; rhs[b + 1] = gc[i * 3 + 1]; rhs[b + 2] = gc[i * 3 + 2];
+            }
+            {
+                // Centroid gauge: Hessian mu / n between every pair of cameras on each axis, gradient mu / n * sum C.
+                double sx = 0, sy = 0, sz = 0;
+                for (int i = 0; i < n; i++) if (col[i] >= 0) { sx += c[i * 3]; sy += c[i * 3 + 1]; sz += c[i * 3 + 2]; }
+                double hg = mu / nf;
+                for (int i = 0; i < nf; i++)
+                {
+                    for (int k = 0; k < nf; k++)
+                        for (int ax = 0; ax < 3; ax++) S[(i * 3 + ax) * dim + k * 3 + ax] += hg;
+                    rhs[i * 3] += hg * sx; rhs[i * 3 + 1] += hg * sy; rhs[i * 3 + 2] += hg * sz;
+                }
+            }
+            Span<double> B1 = stackalloc double[9], B2 = stackalloc double[9], Q = stackalloc double[9], H9 = stackalloc double[9];
+            for (int j = 0; j < np; j++)
+            {
+                var list = pointObs[j];
+                if (live[j] < 2) continue;
+                var h = hxx.AsSpan(j * 6, 6);
+                H9[0] = h[0]; H9[1] = h[1]; H9[2] = h[2]; H9[3] = h[1]; H9[4] = h[3]; H9[5] = h[4]; H9[6] = h[2]; H9[7] = h[4]; H9[8] = h[5];
+                var P = Invert3(H9);
+                P.CopyTo(pinv, j * 9);
+                double g0 = gx[j * 3], g1 = gx[j * 3 + 1], g2 = gx[j * 3 + 2];
+                foreach (int t1 in list)
+                {
+                    int c1 = col[oc[t1]];
+                    if (c1 < 0) continue;
+                    ObsBlock(t1, B1);
+                    Mul3(B1, P, Q);   // Q = B1 P
+                    int b1 = c1 * 3;
+                    for (int rr = 0; rr < 3; rr++) rhs[b1 + rr] -= Q[rr * 3] * g0 + Q[rr * 3 + 1] * g1 + Q[rr * 3 + 2] * g2;
+                    foreach (int t2 in list)
+                    {
+                        int c2 = col[oc[t2]];
+                        if (c2 < 0) continue;
+                        ObsBlock(t2, B2);
+                        int b2 = c2 * 3;
+                        for (int rr = 0; rr < 3; rr++)
+                            for (int cc2 = 0; cc2 < 3; cc2++)   // (Q B2^T)[rr, cc2]; B2 is symmetric
+                                S[(b1 + rr) * dim + b2 + cc2] -= Q[rr * 3] * B2[cc2 * 3] + Q[rr * 3 + 1] * B2[cc2 * 3 + 1] + Q[rr * 3 + 2] * B2[cc2 * 3 + 2];
+                    }
+                }
+            }
+            for (int k = 0; k < dim; k++) dc[k] = -rhs[k];
+            if (!CholeskySolve(S, dim, dc))
+            {
+                lambda *= 10;
+                Evaluate(c, xp, d, true);
+                if (lambda > 1e12) break;
+                continue;
+            }
+            // Back-substitution: dX = -P (g_X + sum B dc), dd = -(g_d + a.dX - a.dc) / H_dd.
+            Array.Copy(c, cNew, c.Length);
+            for (int i = 0; i < n; i++)
+                if (col[i] >= 0) { int b = col[i] * 3; cNew[i * 3] += dc[b]; cNew[i * 3 + 1] += dc[b + 1]; cNew[i * 3 + 2] += dc[b + 2]; }
+            Array.Copy(xp, xNew, xp.Length);
+            var dxAll = new double[np * 3];
+            for (int j = 0; j < np; j++)
+            {
+                var list = pointObs[j];
+                if (live[j] < 2) continue;
+                double s0 = gx[j * 3], s1 = gx[j * 3 + 1], s2 = gx[j * 3 + 2];
+                foreach (int t in list)
+                {
+                    int ci = col[oc[t]];
+                    if (ci < 0) continue;
+                    ObsBlock(t, B1);
+                    double y0 = dc[ci * 3], y1 = dc[ci * 3 + 1], y2 = dc[ci * 3 + 2];
+                    s0 += B1[0] * y0 + B1[1] * y1 + B1[2] * y2;
+                    s1 += B1[3] * y0 + B1[4] * y1 + B1[5] * y2;
+                    s2 += B1[6] * y0 + B1[7] * y1 + B1[8] * y2;
+                }
+                var P = pinv.AsSpan(j * 9, 9);
+                dxAll[j * 3] = -(P[0] * s0 + P[1] * s1 + P[2] * s2);
+                dxAll[j * 3 + 1] = -(P[3] * s0 + P[4] * s1 + P[5] * s2);
+                dxAll[j * 3 + 2] = -(P[6] * s0 + P[7] * s1 + P[8] * s2);
+                xNew[j * 3] += dxAll[j * 3]; xNew[j * 3 + 1] += dxAll[j * 3 + 1]; xNew[j * 3 + 2] += dxAll[j * 3 + 2];
+            }
+            for (int t = 0; t < no; t++)
+            {
+                int j = op[t], ci = col[oc[t]];
+                double ad = a[t * 3] * dxAll[j * 3] + a[t * 3 + 1] * dxAll[j * 3 + 1] + a[t * 3 + 2] * dxAll[j * 3 + 2];
+                if (ci >= 0) ad -= a[t * 3] * dc[ci * 3] + a[t * 3 + 1] * dc[ci * 3 + 1] + a[t * 3 + 2] * dc[ci * 3 + 2];
+                dNew[t] = Math.Max(0, d[t] - (gd[t] + ad) / hdd[t]);
+            }
+            double newCost = Evaluate(cNew, xNew, dNew, false);
+            if (newCost < cost)
+            {
+                bool converged = (cost - newCost) < 1e-10 * cost;
+                (c, cNew) = (cNew, c); (xp, xNew) = (xNew, xp); (d, dNew) = (dNew, d);
+                cost = Evaluate(c, xp, d, true);
+                lambda = Math.Max(lambda / 3, 1e-12);
+                accepted++;
+                if (converged) break;
+            }
+            else
+            {
+                lambda *= 4;
+                if (lambda > 1e12) break;
+            }
+        }
+            // Reject: angle between each live observation's bearing and its point, against max(0.1 deg, 5x median).
+            var ang = new double[no];
+            var liveAngles = new List<double>();
+            for (int t = 0; t < no; t++)
+            {
+                if (off[t]) continue;
+                int i = oc[t] * 3, j = op[t] * 3;
+                double ux = xp[j] - c[i], uy = xp[j + 1] - c[i + 1], uz = xp[j + 2] - c[i + 2];
+                double un = Math.Sqrt(ux * ux + uy * uy + uz * uz);
+                double cosA = un > 0 ? (v[t * 3] * ux + v[t * 3 + 1] * uy + v[t * 3 + 2] * uz) / un : -1;
+                ang[t] = Math.Acos(Math.Clamp(cosA, -1, 1));
+                liveAngles.Add(ang[t]);
+            }
+            liveAngles.Sort();
+            double limit = Math.Max(0.1 * Math.PI / 180, 5 * liveAngles[liveAngles.Count / 2]);
+            int rejected = 0;
+            for (int t = 0; t < no; t++)
+                if (!off[t] && ang[t] > limit) { off[t] = true; live[op[t]]--; rejected++; }
+            // A point left with one live observation carries no information: retire it.
+            for (int t = 0; t < no; t++)
+                if (!off[t] && live[op[t]] < 2) { off[t] = true; live[op[t]]--; rejected++; }
+            rejectedTotal += rejected;
+            if (rejected == 0) break;
+            cost = Evaluate(c, xp, d, true);
+            lambda = 1e-4;
+        }
+
+        void ObsBlock(int t, Span<double> m)   // H_cX of observation t after the d elimination: e I + a a^T / H_dd
+        {
+            double s = 1 / hdd[t], a0 = a[t * 3], a1 = a[t * 3 + 1], a2 = a[t * 3 + 2], ee = e2[t];
+            m[0] = ee + s * a0 * a0; m[1] = s * a0 * a1; m[2] = s * a0 * a2;
+            m[3] = m[1]; m[4] = ee + s * a1 * a1; m[5] = s * a1 * a2;
+            m[6] = m[2]; m[7] = m[5]; m[8] = ee + s * a2 * a2;
+        }
+
+        // Back to the connected cameras' current centroid and RMS spread.
+        Vector3 Centroid(Func<int, Vector3> at) { var s = Vector3.Zero; int m = 0; for (int i = 0; i < n; i++) if (connected[i]) { s += at(i); m++; } return s / m; }
+        float Spread(Func<int, Vector3> at, Vector3 mid) { double s = 0; int m = 0; for (int i = 0; i < n; i++) if (connected[i]) { s += (at(i) - mid).LengthSquared(); m++; } return (float)Math.Sqrt(s / m); }
+        Vector3 Cur(int i) => cams[i].Position;
+        Vector3 Sol(int i) => new((float)c[i * 3], (float)c[i * 3 + 1], (float)c[i * 3 + 2]);
+        var curMid = Centroid(Cur); var solMid = Centroid(Sol);
+        float scale = Spread(Cur, curMid) / Math.Max(Spread(Sol, solMid), 1e-30f);
+        var centres = new Vector3[n];
+        for (int i = 0; i < n; i++) centres[i] = connected[i] ? curMid + (Sol(i) - solMid) * scale : cams[i].Position;
+        var points = new Vector3[np];
+        for (int j = 0; j < np; j++)
+            points[j] = curMid + (new Vector3((float)xp[j * 3], (float)xp[j * 3 + 1], (float)xp[j * 3 + 2]) - solMid) * scale;
+        return (centres, points, $"robust positioning: {no} obs, {round + 1} rounds, {iter} iterations ({accepted} accepted), {rejectedTotal} rejected, cost {cost0:G4} -> {cost:G4}");
+    }
+
+    static void Mul3(ReadOnlySpan<double> x, ReadOnlySpan<double> y, Span<double> o)
+    {
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++)
+                o[i * 3 + j] = x[i * 3] * y[j] + x[i * 3 + 1] * y[3 + j] + x[i * 3 + 2] * y[6 + j];
+    }
+
+    /// <summary>In-place dense Cholesky of the symmetric positive-definite m (row-major, lower half used), then solves
+    /// m x = b into b. False when m is not positive definite.</summary>
+    static bool CholeskySolve(double[] m, int dim, double[] b)
+    {
+        for (int j = 0; j < dim; j++)
+        {
+            double s = m[j * dim + j];
+            for (int k = 0; k < j; k++) s -= m[j * dim + k] * m[j * dim + k];
+            if (!(s > 0)) return false;
+            double l = Math.Sqrt(s);
+            m[j * dim + j] = l;
+            for (int i = j + 1; i < dim; i++)
+            {
+                double t = m[i * dim + j];
+                for (int k = 0; k < j; k++) t -= m[i * dim + k] * m[j * dim + k];
+                m[i * dim + j] = t / l;
+            }
+        }
+        for (int i = 0; i < dim; i++)
+        {
+            double t = b[i];
+            for (int k = 0; k < i; k++) t -= m[i * dim + k] * b[k];
+            b[i] = t / m[i * dim + i];
+        }
+        for (int i = dim - 1; i >= 0; i--)
+        {
+            double t = b[i];
+            for (int k = i + 1; k < dim; k++) t -= m[k * dim + i] * b[k];
+            b[i] = t / m[i * dim + i];
+        }
+        return true;
     }
 
     // ── the whole initialisation ─────────────────────────────────────────────────────────────
@@ -753,7 +788,7 @@ public static class GlobalSfmInit
             for (int i = 0; i < n; i++) if (connected[i]) rot[i] = Mul(rot[i], q);
         }
         var resid = edges.Select(e => AngleDeg(rot[e.B], Mul(e.R, rot[e.A]))).OrderBy(x => x).ToList();
-        var (centres, _) = GlobalPositioning(cams, rot, connected, obs, pointCount, focal);
+        var (centres, _, positioning) = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal);
         int moved = 0;
         for (int i = 0; i < n; i++)
         {
@@ -764,6 +799,6 @@ public static class GlobalSfmInit
         }
         return $"{moved}/{n} cameras from {edges.Count} pair rotations and {obs.Count} track observations; pair rotation " +
                $"residual median {(resid.Count > 0 ? resid[resid.Count / 2] : double.NaN):F2} deg p90 " +
-               $"{(resid.Count > 0 ? resid[resid.Count * 9 / 10] : double.NaN):F2} deg";
+               $"{(resid.Count > 0 ? resid[resid.Count * 9 / 10] : double.NaN):F2} deg; {positioning}";
     }
 }

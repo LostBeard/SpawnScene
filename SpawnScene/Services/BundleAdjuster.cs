@@ -24,7 +24,18 @@ namespace SpawnScene.Services;
 /// past the Huber scale are dropped between rounds. Camera 0 is held fixed (6 of the 7 gauge freedoms);
 /// the remaining scale freedom is absorbed by the damping.
 /// </summary>
-public sealed class BundleAdjuster
+/// <summary>What a finished bundle adjustment answers: refined cameras, points and per-camera statistics (managed or GPU solver).</summary>
+public interface IBundleSolution
+{
+    double SharedFocal { get; }
+    void WriteCamera(int i, CameraParams cam);
+    Vector3 PointAt(int p);
+    (int Total, int Kept, double MedianError)[] CameraStats();
+    int[] KeptObservationsPerPoint();
+    string TimingSummary();
+}
+
+public sealed class BundleAdjuster : IBundleSolution
 {
     /// <summary>A pixel observation of <see cref="Point"/> in <see cref="Camera"/>.</summary>
     public readonly record struct Observation(int Camera, int Point, float U, float V);
@@ -631,7 +642,7 @@ public sealed class BundleAdjuster
         return _sharedFocal ? Math.Max(1e-3, _f + dCam[FocalIndex]) : _f;
     }
 
-    static void Rodrigues(double wx, double wy, double wz, Span<double> r)
+    internal static void Rodrigues(double wx, double wy, double wz, Span<double> r)
     {
         double th = Math.Sqrt(wx * wx + wy * wy + wz * wz);
         if (th < 1e-12)
@@ -659,7 +670,7 @@ public sealed class BundleAdjuster
     }
 
     /// <summary>Inverse of a small SPD matrix via Cholesky.</summary>
-    static bool InvertSpd(ReadOnlySpan<double> m, Span<double> inv, int n)
+    internal static bool InvertSpd(ReadOnlySpan<double> m, Span<double> inv, int n)
     {
         Span<double> l = stackalloc double[n * n];
         l.Clear();

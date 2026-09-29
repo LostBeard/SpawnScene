@@ -167,6 +167,21 @@ public partial class Studio
                     ? await LoadGroundTruthCamerasAsync(datasetName, images)
                     : null;
 
+                // Our own poses with COLMAP on disk: score every bundle-adjustment solve against it (which stage bends
+                // the geometry - the end-of-run number alone cannot say).
+                var gtProbe = gtCameras == null ? await LoadGroundTruthCamerasAsync(datasetName, images) : null;
+                if (gtProbe != null)
+                    _multiViewService.BundleProbe = (label, est) => ReportPoseProbe(label, est, gtProbe);
+                if (gtProbe != null && DiagnoseGlobalWithGroundTruthRotations)
+                    _multiViewService.DiagnosticGlobalGroundTruthRotations = gtProbe;
+                if (gtProbe != null && DiagnoseWithGroundTruthIntrinsics)
+                    _multiViewService.DiagnosticGroundTruthIntrinsics = gtProbe;
+                if (gtProbe != null && DiagnoseFromGroundTruthPoses > 0)
+                {
+                    _multiViewService.DiagnosticGroundTruthPoseInit = gtProbe;
+                    _multiViewService.DiagnosticGroundTruthPoseMode = DiagnoseFromGroundTruthPoses;
+                }
+
                 if (gtCameras != null)
                 {
                     Console.WriteLine(
@@ -200,6 +215,10 @@ public partial class Studio
             finally
             {
                 _multiViewService.OnStatusChanged -= OnStatus;
+                _multiViewService.BundleProbe = null;
+                _multiViewService.DiagnosticGroundTruthIntrinsics = null;
+                _multiViewService.DiagnosticGlobalGroundTruthRotations = null;
+                _multiViewService.DiagnosticGroundTruthPoseInit = null;
             }
 
             if (result == null)
@@ -523,6 +542,35 @@ public partial class Studio
                 $"alone {Fit(i => chunkOf[i] == kk)}" +
                 (k == 0 ? "" : $" | with ref {Fit(i => chunkOf[i] == kk || chunkOf[i] == 0)}"));
         }
+    }
+
+    /// <summary>&amp;gtintrinsics=1: bundle adjustment holds the dataset's COLMAP intrinsics fixed (diagnosis only).</summary>
+    public static bool DiagnoseWithGroundTruthIntrinsics { get; set; }
+
+    /// <summary>&amp;globalgtrot=1: global positioning uses the COLMAP rotations (diagnosis only).</summary>
+    public static bool DiagnoseGlobalWithGroundTruthRotations { get; set; }
+
+    /// <summary>&amp;bagtinit=1: bundle adjustment starts from the dataset's COLMAP poses (diagnosis only).</summary>
+    public static int DiagnoseFromGroundTruthPoses { get; set; }
+
+    /// <summary>One line of pose-vs-COLMAP accuracy for a bundle-adjustment stage (see MultiViewGenerationService.BundleProbe).</summary>
+    static void ReportPoseProbe(string label, CameraParams?[] estimated, IReadOnlyList<CameraParams> groundTruth)
+    {
+        if (estimated.Length != groundTruth.Count) return;
+        var gt = new CameraParams?[groundTruth.Count];
+        for (int i = 0; i < groundTruth.Count; i++) gt[i] = groundTruth[i];
+        if (!WorldSpaceGeometry.TryMeasureCameraSetAccuracy(estimated, gt, out var acc, out var posFrac, out _))
+        {
+            Console.WriteLine($"[BA-GT] {label}: could not align");
+            return;
+        }
+        int worst = -1;
+        for (int i = 0; i < posFrac.Length; i++)
+            if (estimated[i] != null && (worst < 0 || posFrac[i] > posFrac[worst])) worst = i;
+        Console.WriteLine(
+            $"[BA-GT] {label}: {acc.Compared} cams, pos RMS {(acc.Spread > 0 ? acc.PositionRms / acc.Spread : float.NaN):P2} of spread, " +
+            $"median {acc.MedianPosFrac:P2} p90 {acc.P90PosFrac:P2}, fwd median {acc.MedianForwardDeg:F2}deg p90 {acc.P90ForwardDeg:F2}deg, " +
+            $"scale {acc.Scale:F4}" + (worst >= 0 ? $", worst view {worst} {posFrac[worst]:P1}" : ""));
     }
 
     /// <summary>

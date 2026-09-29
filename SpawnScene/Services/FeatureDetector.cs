@@ -22,6 +22,41 @@ public class FeatureDetector
     // Generated with a fixed seed for reproducibility
     private static readonly (int, int, int, int)[] BriefPairs = GenerateBriefPairs(256, 42);
 
+    /// <summary>The BRIEF test pairs flattened (dx1, dy1, dx2, dy2) x 256 - shared with GpuFeatureDetector so both
+    /// detectors sample the identical pattern.</summary>
+    internal static int[] BriefPairTable()
+    {
+        var t = new int[BriefPairs.Length * 4];
+        for (int i = 0; i < BriefPairs.Length; i++)
+        {
+            var (a, b, c, d) = BriefPairs[i];
+            t[i * 4] = a; t[i * 4 + 1] = b; t[i * 4 + 2] = c; t[i * 4 + 3] = d;
+        }
+        return t;
+    }
+
+    /// <summary>The FAST circle as (dx, dy) x 16, shared with GpuFeatureDetector.</summary>
+    internal static int[] CircleTable()
+    {
+        var t = new int[32];
+        for (int i = 0; i < 16; i++) { t[i * 2] = CircleOffsets[i].dx; t[i * 2 + 1] = CircleOffsets[i].dy; }
+        return t;
+    }
+
+    /// <summary>The BRIEF pre-smoothing kernel (sigma 2, 9 taps, normalised) exactly as GaussianBlur computes it.</summary>
+    internal static float[] BlurKernel()
+    {
+        const int r = 4;
+        var k = new float[2 * r + 1];
+        float sum = 0;
+        for (int i = -r; i <= r; i++) { k[i + r] = MathF.Exp(-(i * i) / (2f * 2f * 2f)); sum += k[i + r]; }
+        for (int i = 0; i < k.Length; i++) k[i] /= sum;
+        return k;
+    }
+
+    public int MaxFeatures => _maxFeatures;
+    public int FastThreshold => _fastThreshold;
+
     private readonly int _maxFeatures;
     private readonly int _fastThreshold;
 

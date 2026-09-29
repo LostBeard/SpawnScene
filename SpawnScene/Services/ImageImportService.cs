@@ -1,3 +1,5 @@
+using ILGPU.Runtime;
+using ILGPU;
 using Microsoft.AspNetCore.Components.Forms;
 using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
@@ -13,6 +15,7 @@ namespace SpawnScene.Services;
 public class ImageImportService : IDisposable
 {
     private readonly FeatureDetector _detector = new();
+    private readonly GpuFeatureDetector _gpuDetector = new();
     private readonly GpuFeatureMatcher _gpuMatcher;
     private readonly GpuService _gpu;
     private readonly HttpClient _http;
@@ -201,6 +204,39 @@ public class ImageImportService : IDisposable
     }
 
     /// <summary>
+    /// Features for a GPU-resident / Source-backed photo, entirely on the device: decode if needed, grayscale, FAST,
+    /// NMS, smoothing, BRIEF (GpuFeatureDetector) and one colour per feature. Only the per-cell winners, the descriptors
+    /// and the colours come back. A Source-backed device copy is released afterwards (it can be re-decoded).
+    /// Features are at feature resolution (the caller scales them to the image, as for the managed path).
+    /// </summary>
+    private async Task DetectOnDeviceAsync(ImportedImage img)
+    {
+        var accel = _gpu.WebGPUAccelerator;
+        await GpuImageOps.EnsureOnDeviceAsync(accel, img);
+        try
+        {
+            using (var grayDev = GpuImageOps.GrayscaleToDevice(accel, img.GpuRgba!,
+                       img.Width, img.Height, img.FeatureWidth, img.FeatureHeight))
+                img.Features = await _gpuDetector.DetectAsync(accel, grayDev.View, img.FeatureWidth, img.FeatureHeight);
+            // Colours are sampled at IMAGE resolution after the caller's scale-back in the managed path; with the
+            // capped decode the feature and image resolutions are the same, so sampling here is the same pixel.
+            if (img.FeatureWidth == img.Width && img.FeatureHeight == img.Height)
+                await GpuImageOps.SampleFeatureColoursAsync(accel, img.GpuRgba!, img.Width, img.Height, img.Features);
+            else
+            {
+                float sx = (float)img.Width / img.FeatureWidth, sy = (float)img.Height / img.FeatureHeight;
+                var scaled = img.Features.Select(f => new ImageFeature { X = f.X * sx, Y = f.Y * sy }).ToList();
+                await GpuImageOps.SampleFeatureColoursAsync(accel, img.GpuRgba!, img.Width, img.Height, scaled);
+                for (int i = 0; i < scaled.Count; i++) img.Features[i].PackedColor = scaled[i].PackedColor;
+            }
+        }
+        finally
+        {
+            if (img.Source != null) img.DisposeGpu();
+        }
+    }
+
+    /// <summary>
     /// Import pre-loaded images (from OPFS or byte arrays). Detects features and matches pairs.
     /// Used by the multi-view pipeline where images are already decoded.
     /// </summary>
@@ -230,7 +266,7 @@ public class ImageImportService : IDisposable
                 Progress = (float)i / images.Count;
 
                 // Ensure grayscale + features exist
-                bool onDevice = img.GpuRgba != null;
+                bool onDevice = img.GpuRgba != null || img.Source != null;
                 if ((img.Features == null || img.Features.Count == 0) && (img.GrayPixels == null || img.GrayPixels.Length == 0))
                 {
                     int featureWidth = img.Width, featureHeight = img.Height;
@@ -240,11 +276,9 @@ public class ImageImportService : IDisposable
                         featureWidth = (int)(img.Width * ds);
                         featureHeight = (int)(img.Height * ds);
                     }
-                    // A GPU-resident photo is reduced to the detector's grayscale ON THE DEVICE (same formula, same
-                    // bytes); only that frame comes back, and only until the detector has run.
-                    if (onDevice)
-                        img.GrayPixels = await GpuImageOps.GrayscaleAsync(_gpu.WebGPUAccelerator, img.GpuRgba!,
-                            img.Width, img.Height, featureWidth, featureHeight);
+                    // A GPU-resident photo never produces a host grayscale frame: GpuFeatureDetector works on the
+                    // device (below). The managed path keeps its CPU grayscale.
+                    if (onDevice) { }
                     else if (featureWidth != img.Width)
                         img.GrayPixels = DownsampleGrayscale(img.RgbaPixels, img.Width, img.Height, featureWidth, featureHeight);
                     else
@@ -259,7 +293,10 @@ public class ImageImportService : IDisposable
                     NotifyChanged();
                     await Task.Yield();
 
-                    img.Features = _detector.Detect(img.GrayPixels, img.FeatureWidth, img.FeatureHeight);
+                    if (onDevice)
+                        await DetectOnDeviceAsync(img);
+                    else
+                        img.Features = _detector.Detect(img.GrayPixels, img.FeatureWidth, img.FeatureHeight);
 
                     // Scale feature coordinates back to full image resolution
                     if (img.FeatureWidth != img.Width)
@@ -273,11 +310,8 @@ public class ImageImportService : IDisposable
                         }
                     }
                     // Colour each feature now, while the photo is at hand, so nothing later needs the pixels on the host.
-                    if (onDevice)
-                        await GpuImageOps.SampleFeatureColoursAsync(_gpu.WebGPUAccelerator, img.GpuRgba!, img.Width, img.Height, img.Features);
-                    else
+                    if (!onDevice)
                         GpuImageOps.SampleFeatureColours(img.RgbaPixels, img.Width, img.Height, img.Features);
-                    if (onDevice) img.GrayPixels = []; // the detector has run; the frame goes
                     Console.WriteLine($"[Import] {img.FileName}: {img.Features.Count} features");
                 }
 
@@ -501,6 +535,9 @@ public class ImageImportService : IDisposable
     /// </summary>
     public void Clear()
     {
+        // Does NOT dispose the images: callers clear and re-import the SAME images (the multi-view overlap pass does
+        // exactly that), and project images belong to the project flow. Images this service created are released
+        // when the next dataset load replaces them (ReleaseOwnedImages).
         _images.Clear();
         _pairs.Clear();
         Status = "";
@@ -521,9 +558,20 @@ public class ImageImportService : IDisposable
     /// </summary>
     public bool SkipPairMatching { get; set; }
 
+    /// <summary>Images the dataset loader created (it owns their encoded Sources and any device copies).</summary>
+    private readonly List<ImportedImage> _ownedImages = new();
+
+    /// <summary>Release every image this service created (JS Blobs, GPU buffers). Their users must be done with them.</summary>
+    public void ReleaseOwnedImages()
+    {
+        foreach (var img in _ownedImages) img.DisposeSource();
+        _ownedImages.Clear();
+    }
+
     public async Task LoadSampleDatasetAsync(string datasetName)
     {
         Clear();
+        ReleaseOwnedImages(); // the previous dataset's photos: nothing uses them once a new load starts
         IsProcessing = true;
         NotifyChanged();
 
@@ -643,10 +691,22 @@ public class ImageImportService : IDisposable
                 NotifyChanged();
                 await Task.Yield();
 
-                byte[] bytes;
+                // The photo as a JS Blob - fetched by the BROWSER (the response body never enters .NET), or a video frame's
+                // JPEG. It stays compressed on the image (ImportedImage.Source) and is decoded straight to the device
+                // wherever its pixels are needed. This used to GetByteArrayAsync + decode + ReadBytes every photo into
+                // the managed heap and keep it there for the whole run (TruckFull: 251 x 2.3 MB).
+                SpawnDev.SpawnJS.JSObjects.Blob source;
                 try
                 {
-                    bytes = videoFrames != null ? videoFrames[fi].Jpeg : await _http.GetByteArrayAsync(basePath + fileName);
+                    if (videoFrames != null)
+                        source = new SpawnDev.SpawnJS.JSObjects.Blob(new byte[][] { videoFrames[fi].Jpeg },
+                            new BlobOptions { Type = "image/jpeg" });
+                    else
+                    {
+                        using var response = await SpawnJSRuntime.Instance.CallAsync<string, Response>("fetch", basePath + fileName);
+                        if (!response.Ok) throw new InvalidOperationException($"HTTP {response.Status}");
+                        source = await response.Blob();
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -654,25 +714,26 @@ public class ImageImportService : IDisposable
                     continue;
                 }
 
-                // Decode — detect MIME type from file extension
-                string mimeType = fileName.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/jpeg";
-                var result = await DecodeImageAsync(bytes, mimeType);
-                if (result == null) continue;
-                var (rgba, imgWidth, imgHeight) = result.Value;
+                MemoryBuffer1D<int, Stride1D.Dense> rgbaDev;
+                int imgWidth, imgHeight;
+                try
+                {
+                    (rgbaDev, imgWidth, imgHeight, _, _) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
+                        source, _gpu.WebGPUAccelerator, MaxImportDimension);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Import] Failed to decode image: {ex.Message}");
+                    source.Dispose();
+                    continue;
+                }
 
-                // Grayscale + downsample
-                byte[] grayPixels;
                 int featureWidth = imgWidth, featureHeight = imgHeight;
                 if (imgWidth > 1024 || imgHeight > 1024)
                 {
                     float ds = 1024f / Math.Max(imgWidth, imgHeight);
                     featureWidth = (int)(imgWidth * ds);
                     featureHeight = (int)(imgHeight * ds);
-                    grayPixels = DownsampleGrayscale(rgba, imgWidth, imgHeight, featureWidth, featureHeight);
-                }
-                else
-                {
-                    grayPixels = RgbaToGrayscale(rgba, imgWidth, imgHeight);
                 }
 
                 var imported = new ImportedImage
@@ -681,8 +742,9 @@ public class ImageImportService : IDisposable
                     SourceUrl = basePath + fileName,
                     Width = imgWidth,
                     Height = imgHeight,
-                    RgbaPixels = rgba,
-                    GrayPixels = grayPixels,
+                    Source = source,
+                    DecodeMaxEdge = MaxImportDimension,
+                    GpuRgba = rgbaDev,
                     FeatureWidth = featureWidth,
                     FeatureHeight = featureHeight,
                 };
@@ -691,7 +753,8 @@ public class ImageImportService : IDisposable
                 NotifyChanged();
                 await Task.Yield();
 
-                imported.Features = _detector.Detect(imported.GrayPixels, featureWidth, featureHeight);
+                _ownedImages.Add(imported);
+                await DetectOnDeviceAsync(imported); // also releases the device copy (re-decoded when needed)
                 if (featureWidth != imgWidth)
                 {
                     float scaleBackX = (float)imgWidth / featureWidth;
@@ -732,6 +795,7 @@ public class ImageImportService : IDisposable
     public void Dispose()
     {
         Clear();
+        ReleaseOwnedImages();
         GC.SuppressFinalize(this);
     }
 

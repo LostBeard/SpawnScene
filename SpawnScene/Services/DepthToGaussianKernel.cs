@@ -655,7 +655,10 @@ public class DepthToGaussianKernel
         EnsureKernelLoaded(accelerator);
 
         // Upload RGBA to GPU — justified: image data from file/picker (CPU source boundary).
-        // GPU-resident import: read its buffer in place. Only a legacy managed image is uploaded.
+        // GPU-resident / Source-backed import: read its device buffer in place (decoded now if it has none, and then
+        // released when this call ends). Only a legacy managed image is uploaded.
+        bool decodedRgba = await GpuImageOps.EnsureOnDeviceAsync(accelerator, image);
+        using var releaseDecoded = decodedRgba ? new ReleaseOnDispose(image) : null;
         using var uploadedRgba = image.GpuRgba == null
             ? accelerator.Allocate1D(MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray()) : null;
         var rgbaView = image.GpuRgba?.View ?? uploadedRgba!.View;
@@ -692,7 +695,10 @@ public class DepthToGaussianKernel
         EnsureKernelLoaded(accelerator);
 
         // Upload RGBA to GPU
-        // GPU-resident import: read its buffer in place. Only a legacy managed image is uploaded.
+        // GPU-resident / Source-backed import: read its device buffer in place (decoded now if it has none, and then
+        // released when this call ends). Only a legacy managed image is uploaded.
+        bool decodedRgba = await GpuImageOps.EnsureOnDeviceAsync(accelerator, image);
+        using var releaseDecoded = decodedRgba ? new ReleaseOnDispose(image) : null;
         using var uploadedRgba = image.GpuRgba == null
             ? accelerator.Allocate1D(MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray()) : null;
         var rgbaView = image.GpuRgba?.View ?? uploadedRgba!.View;
@@ -775,7 +781,10 @@ public class DepthToGaussianKernel
         var accelerator = _gpu.WebGPUAccelerator;
         EnsureKernelLoaded(accelerator);
 
-        // GPU-resident import: read its buffer in place. Only a legacy managed image is uploaded.
+        // GPU-resident / Source-backed import: read its device buffer in place (decoded now if it has none, and then
+        // released when this call ends). Only a legacy managed image is uploaded.
+        bool decodedRgba = await GpuImageOps.EnsureOnDeviceAsync(accelerator, image);
+        using var releaseDecoded = decodedRgba ? new ReleaseOnDispose(image) : null;
         using var uploadedRgba = image.GpuRgba == null
             ? accelerator.Allocate1D(MemoryMarshal.Cast<byte, int>(image.RgbaPixels.AsSpan()).ToArray()) : null;
         var rgbaView = image.GpuRgba?.View ?? uploadedRgba!.View;
@@ -1096,4 +1105,12 @@ public class DepthToGaussianKernel
 
         return (outPackedBuf, validCount);
     }
+}
+
+/// <summary>Releases an image's device copy when disposed (for a copy decoded for one call).</summary>
+internal sealed class ReleaseOnDispose : IDisposable
+{
+    private ImportedImage? _image;
+    public ReleaseOnDispose(ImportedImage image) => _image = image;
+    public void Dispose() { _image?.DisposeGpu(); _image = null; }
 }

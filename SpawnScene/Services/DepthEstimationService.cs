@@ -212,10 +212,21 @@ public class DepthEstimationService : IAsyncDisposable
             return null;
         }
 
-        // A GPU-resident import: preprocess reads the device buffer in place, no copy anywhere.
+        // A GPU-resident / Source-backed import: preprocess reads the device buffer in place, no copy anywhere. A
+        // copy decoded for this call is released after it (the pipeline has consumed it once the await returns).
+        bool decodedHere = await GpuImageOps.EnsureOnDeviceAsync(_gpu.WebGPUAccelerator, image);
         if (image.GpuRgba != null)
-            return await RunPipelineAsync(() => _pipe!.EstimateGpuRawAsync(
-                image.GpuRgba.View, image.Width, image.Height, image.Width, image.Height));
+        {
+            try
+            {
+                return await RunPipelineAsync(() => _pipe!.EstimateGpuRawAsync(
+                    image.GpuRgba.View, image.Width, image.Height, image.Width, image.Height));
+            }
+            finally
+            {
+                if (decodedHere) image.DisposeGpu();
+            }
+        }
 
         // Legacy managed import (feature/SfM path).
         var packedRgba = System.Runtime.InteropServices.MemoryMarshal
@@ -335,11 +346,13 @@ public class DepthEstimationService : IAsyncDisposable
             for (int i = 0; i < count; i++)
             {
                 var image = images[i];
-                // Already on the device (GPU-first import): hand out its own buffer. Not cached and not released
-                // here - the image owns it.
-                if (image.GpuRgba != null)
+                // GPU-first import: hand out the image's own device buffer, decoding it from its Source if it has
+                // none right now. A copy decoded HERE is released with the others (Release / Dispose); one the image
+                // already had is not ours to free.
+                if (image.GpuRgba != null || image.Source != null)
                 {
-                    views[i] = image.GpuRgba.View;
+                    if (await GpuImageOps.EnsureOnDeviceAsync(accelerator, image)) _decoded.Add(image);
+                    views[i] = image.GpuRgba!.View;
                     continue;
                 }
                 if (_cache.TryGetValue(image, out var existing))
@@ -373,8 +386,14 @@ public class DepthEstimationService : IAsyncDisposable
         public void Release(IEnumerable<ImportedImage> images)
         {
             foreach (var image in images)
+            {
                 if (_cache.Remove(image, out var buffer)) { buffer.Dispose(); Released++; }
+                if (_decoded.Remove(image)) { image.DisposeGpu(); Released++; }
+            }
         }
+
+        // Source-backed images this cache decoded onto the device (released like its own uploads).
+        private readonly HashSet<ImportedImage> _decoded = new();
 
         public int Released { get; private set; }
 
@@ -382,6 +401,8 @@ public class DepthEstimationService : IAsyncDisposable
         {
             foreach (var b in _cache.Values) b.Dispose();
             _cache.Clear();
+            foreach (var image in _decoded) image.DisposeGpu();
+            _decoded.Clear();
         }
     }
 
@@ -465,7 +486,7 @@ public class DepthEstimationService : IAsyncDisposable
             // once and reusing the GPU buffer removes both the copies and the repeat uploads.
             // GPU-resident images never go through BuildManagedFrames (they have no managed pixels): route them
             // through a pass-local cache, which hands out their own buffers.
-            using var localUploads = uploads == null && images.Take(n).Any(im => im.GpuRgba != null)
+            using var localUploads = uploads == null && images.Take(n).Any(im => im.GpuRgba != null || im.Source != null)
                 ? new MultiViewUploadCache(_gpu) : null;
             uploads ??= localUploads;
             using var mv = uploads != null

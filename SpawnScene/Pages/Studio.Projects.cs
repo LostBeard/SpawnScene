@@ -614,7 +614,8 @@ public partial class Studio
                 _statusMessage = $"Loading {source.FileName}...";
                 BuildProjectDetailUI();
 
-                using var file = await _projectService.GetSourceFileAsync(_activeProject.Id, source.FileName);
+                // The OPFS File IS the image's Source from here on (disposed with the image), so no using.
+                var file = await _projectService.GetSourceFileAsync(_activeProject.Id, source.FileName);
                 if (file == null) continue;
 
                 // EXIF lives in the first APP1 segment (<= 64 KB); only a prefix crosses into .NET for it.
@@ -635,7 +636,10 @@ public partial class Studio
                     (rgba, w, h, _, _) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
                         file, accel, ImageImportService.MaxImportDimension);
                 }
-                catch (Exception ex) { Console.WriteLine($"[Studio] could not decode {source.FileName} - skipped ({ex.Message})"); continue; }
+                catch (Exception ex) { Console.WriteLine($"[Studio] could not decode {source.FileName} - skipped ({ex.Message})"); file.Dispose(); continue; }
+                // Only the SIZE is needed now: release the pixels. Every consumer decodes from the Source on demand and
+                // releases after, so the GPU never holds every photo at once either.
+                rgba.Dispose();
 
                 // EXIF focal is converted to pixels AT this size (CreateFromExif scales by width/height).
                 var camera = CameraParams.CreateFromExif(w, h, exifFocal);
@@ -645,7 +649,8 @@ public partial class Studio
                     FileName = source.FileName,
                     Width = w,
                     Height = h,
-                    GpuRgba = rgba,
+                    Source = file,
+                    DecodeMaxEdge = ImageImportService.MaxImportDimension,
                     EstimatedCamera = camera,
                 });
             }
@@ -747,7 +752,7 @@ public partial class Studio
             // The device photos are only read by generation (training reloads its targets from OPFS). Every
             // dispatch that read them has completed by here - generation and training both awaited their results.
             if (gpuImages != null)
-                foreach (var im in gpuImages) im.DisposeGpu();
+                foreach (var im in gpuImages) im.DisposeSource();
         }
     }
 

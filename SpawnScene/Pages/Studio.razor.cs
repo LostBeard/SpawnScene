@@ -291,6 +291,35 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.BundleAdjust = bav is not ("0" or "false");
             if (query.TryGetValue("baiters", out var bai) && int.TryParse(bai, out var baii))
                 _multiViewService.BundleAdjustIterations = baii;
+            // &gtintrinsics=1 (dataset runs, diagnosis): BA holds the COLMAP intrinsics fixed.
+            if (query.TryGetValue("gtintrinsics", out var gtiq))
+                DiagnoseWithGroundTruthIntrinsics = gtiq is "1" or "true";
+            // &bagtinit=1 (dataset runs, diagnosis): BA starts from the COLMAP poses.
+            // 1 = full GT poses, 2 = GT rotations only, 3 = GT positions only.
+            if (query.TryGetValue("bagtinit", out var bgtq))
+                DiagnoseFromGroundTruthPoses = bgtq is "true" ? 1 : int.TryParse(bgtq, out var bgti) ? bgti : 0;
+            // &globalinit=1: bundle adjustment starts from a global SfM solution (rotation + positioning averaging).
+            if (query.TryGetValue("globalfocal", out var gsf) && double.TryParse(gsf, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var gsfd))
+                _multiViewService.GlobalSfmFocalOverride = gsfd;
+            if (query.TryGetValue("globalgtrot", out var ggr))
+                DiagnoseGlobalWithGroundTruthRotations = ggr is "1" or "true";
+            if (query.TryGetValue("globalinit", out var gsi))
+                _multiViewService.UseGlobalSfmInit = gsi is "1" or "true";
+            if (query.TryGetValue("bacg", out var bacg) && int.TryParse(bacg, out var bacgi))
+                _multiViewService.BundleAdjustCgIterations = bacgi;
+            if (query.TryGetValue("barel", out var barel) && double.TryParse(barel, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var bareld))
+                GpuBundleAdjuster.RelativeStopOverride = bareld;
+            // &gpuba=0: the managed bundle adjuster instead of GpuBundleAdjuster (A/B).
+            if (query.TryGetValue("gpuba", out var gbq))
+                _multiViewService.UseGpuBundleAdjust = gbq is not ("0" or "false");
+            // &bacapture=0: GPU BA without WebGPU dispatch capture/replay of its CG batches (A/B).
+            if (query.TryGetValue("bacapture", out var bcq))
+                GpuBundleAdjuster.UseDispatchCapture = bcq is not ("0" or "false");
+            // &batrace=1: log every GPU BA attempt that is not accepted, and the device state behind it.
+            if (query.TryGetValue("batrace", out var btq))
+                GpuBundleAdjuster.TraceAttempts = btq is "1" or "true";
             // &tracecarry=1: log each densify-carry operation before it runs.
             if (query.TryGetValue("tracecarry", out var tcq))
                 SplatTrainerGpu.TraceCarrySteps = tcq is "1" or "true";

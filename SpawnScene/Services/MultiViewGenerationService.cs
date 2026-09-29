@@ -124,6 +124,9 @@ public class MultiViewGenerationService
     /// <summary>Levenberg-Marquardt iterations per BA round.</summary>
     public int BundleAdjustIterations { get; set; } = 150;
 
+    /// <summary>CG iterations per damped solve (BundleAdjuster.Options.MaxCgIterations). &amp;bacg=N.</summary>
+    public int BundleAdjustCgIterations { get; set; } = 200;
+
     /// <summary>Pairs whose cascade cameras face further apart than this are not verified or used by BA.</summary>
     public float MaxPairAngleDeg { get; set; } = 45f;
 
@@ -131,6 +134,24 @@ public class MultiViewGenerationService
 
     /// <summary>Verify pairs on the GPU (<see cref="GpuEpipolarRansac"/>) or the CPU estimator (<c>&amp;verify=cpu</c>, A/B).</summary>
     public bool GpuPairVerification { get; set; } = true;
+
+    /// <summary>
+    /// Start bundle adjustment from a GLOBAL SfM solution (GlobalSfmInit: rotation averaging over the verified pairs, then
+    /// global positioning of cameras and track points) instead of the depth cascade's poses. &amp;globalinit=1.
+    /// MEASURED 2026-09-28 (TruckFull, pose-vs-COLMAP after every solve): from the cascade (11% median off COLMAP, smoothly
+    /// bent) the BA ended 1.9-2.5% off, run-dependent; from COLMAP's own poses, with the same tracks, 0.1%.
+    /// </summary>
+    public bool UseGlobalSfmInit { get; set; }
+
+    /// <summary>Most track points global positioning uses (tracks with 3+ views first).</summary>
+    public int GlobalSfmMaxPoints { get; set; } = 15000;
+
+    /// <summary>DIAGNOSIS: the focal (pixels) global SfM init uses instead of the DAv3 median (&amp;globalfocal=F).</summary>
+    public double? GlobalSfmFocalOverride { get; set; }
+
+    /// <summary>DIAGNOSIS: ground-truth cameras (by image index) whose ROTATIONS global positioning uses instead of the
+    /// averaged ones (&amp;globalgtrot=1) - separates rotation error from positioning.</summary>
+    public IReadOnlyList<CameraParams>? DiagnosticGlobalGroundTruthRotations { get; set; }
 
     private async Task<PointCloud?> RefineWithBundleAdjustmentAsync(
         IReadOnlyList<ImportedImage> images, CameraParams?[] cameras, IReadOnlyList<int> posed)
@@ -149,6 +170,9 @@ public class MultiViewGenerationService
         var baIndex = new Dictionary<int, int>();
         var cams = new List<CameraParams>();
         foreach (int g in posed) { baIndex[g] = cams.Count; cams.Add(cameras[g]!); }
+        _probePosed = posed;
+        _probeImageCount = cameras.Length;
+        ProbeCameras("cascade (before BA)", cams, new HashSet<int>(), null);
 
         // -- 1. Verify pairs. MEASURED on Truck: ~34 chance matches on EVERY pair (adjacent frames: median 216);
         // unverified they chained into inconsistent tracks. A pair is a candidate if its cascade cameras face
@@ -223,6 +247,57 @@ public class MultiViewGenerationService
             return (baIndex[t.Image], f.X, f.Y);
         }
 
+        // -- 1b. Global SfM initialisation: poses from the pairs and tracks alone, not from the depth cascade.
+        if (UseGlobalSfmInit)
+        {
+            var tg = System.Diagnostics.Stopwatch.StartNew();
+            var shared = cams.Select(c => 0.5 * (c.FocalX + c.FocalY)).OrderBy(x => x).ToList();
+            double focal = GlobalSfmFocalOverride ?? shared[shared.Count / 2];
+            var rel = new List<GlobalSfmInit.RelativePose>();
+            for (int c = 0; c < candidates.Count; c++)
+            {
+                var r = ransac[c];
+                if (r == null) continue;
+                var p = candidates[c];
+                int ia = baIndex[p.ImageIndexA], ib = baIndex[p.ImageIndexB];
+                var pose = GlobalSfmInit.FromFundamental(ia, ib, r.F, ransacPairs[c].A, ransacPairs[c].B, r.Inliers, focal,
+                    cams[ia].CenterX, cams[ia].CenterY, cams[ib].CenterX, cams[ib].CenterY);
+                if (pose != null) rel.Add(pose);
+            }
+            // Track observations: tracks seen by 3+ distinct views first, then 2-view tracks, up to the cap.
+            var gpObs = new List<BundleAdjuster.Observation>();
+            int gpPoints = 0;
+            var trackObs = new List<(int Camera, float U, float V)>();
+            foreach (int minViews in new[] { 3, 2 })
+                foreach (var track in tracks)
+                {
+                    if (gpPoints >= GlobalSfmMaxPoints) break;
+                    trackObs.Clear();
+                    foreach (var t in track)
+                    {
+                        var o = Ob(t);
+                        if (!trackObs.Any(x => x.Camera == o.Camera)) trackObs.Add(o);
+                    }
+                    if (minViews == 3 ? trackObs.Count < 3 : trackObs.Count != 2) continue;
+                    foreach (var (camI, u, v) in trackObs) gpObs.Add(new BundleAdjuster.Observation(camI, gpPoints, u, v));
+                    gpPoints++;
+                }
+            double[][]? gtRot = null;
+            if (DiagnosticGlobalGroundTruthRotations is { } gtR && gtR.Count == cameras.Length)
+            {
+                // COLMAP rotations expressed in the cascade frame (best rotation between the two orientation sets).
+                var gtList = cams.Select((c, i) => GlobalSfmInit.RotationOf(gtR[posed[i]])).ToArray();
+                var cur = cams.Select(GlobalSfmInit.RotationOf).ToArray();
+                var q = GlobalSfmInit.AlignFrame(gtList, cur, Enumerable.Repeat(true, cams.Count).ToArray());
+                gtRot = gtList.Select(r => GlobalSfmInit.Mul(r, q)).ToArray();
+                Console.WriteLine("[BA] DIAGNOSTIC: global positioning uses the ground-truth rotations");
+            }
+            string summary = GlobalSfmInit.Apply(cams, rel, gpObs, gpPoints, focal, gtRot);
+            Console.WriteLine($"[BA] global SfM init (focal {focal:F1}): {rel.Count} of {passed} verified pairs gave a relative pose, {gpPoints} track " +
+                $"points; {summary}; {tg.Elapsed.TotalSeconds:F1}s");
+            ProbeCameras("global SfM init", cams, new HashSet<int>(), null);
+        }
+
         // -- 2. Find cameras the cascade misplaced: triangulate each camera's tracks from the OTHER cameras and
         // reproject into it. A camera whose median miss is far above everyone else's is wrong, not noisy.
         var bad = new HashSet<int>();
@@ -267,12 +342,70 @@ public class MultiViewGenerationService
 
         bool oneCamera = cams.Select(c => (c.Width, c.Height)).Distinct().Count() == 1;
         var focals = cams.Select(c => 0.5f * (c.FocalX + c.FocalY)).OrderBy(f => f).ToList();
+        if (DiagnosticGroundTruthPoseInit is { } gtP && gtP.Count == cameras.Length)
+        {
+            // DIAGNOSIS ONLY (&bagtinit=1): start bundle adjustment from the COLMAP poses, with the SAME verified pairs,
+            // tracks and observations as a normal run and no re-registration. Stays near COLMAP -> the data supports it and
+            // the pipeline starts BA in the wrong basin; drifts to the usual ~2% -> the observations themselves bend it.
+            // Mode 1: full GT poses. 2: GT ROTATIONS only, expressed in the cascade's world frame (best rotation between the
+            // two orientation sets), cascade positions kept. 3: GT POSITIONS only (similarity-aligned into the cascade
+            // frame), cascade orientations kept. Which part of the start decides the basin.
+            int mode = DiagnosticGroundTruthPoseMode;
+            if (mode == 1)
+            {
+                for (int c = 0; c < cams.Count; c++)
+                {
+                    var g = gtP[posed[c]];
+                    cams[c].Position = g.Position; cams[c].Forward = g.Forward; cams[c].Up = g.Up;
+                }
+            }
+            else if (mode == 2)
+            {
+                var src = new List<System.Numerics.Vector3>(); var dst = new List<System.Numerics.Vector3>();
+                for (int c = 0; c < cams.Count; c++)
+                {
+                    var g = gtP[posed[c]];
+                    src.Add(g.Forward); src.Add(-g.Forward); src.Add(g.Up); src.Add(-g.Up);
+                    dst.Add(cams[c].Forward); dst.Add(-cams[c].Forward); dst.Add(cams[c].Up); dst.Add(-cams[c].Up);
+                }
+                if (WorldSpaceGeometry.TryUmeyamaSimilarity(src, dst, out _, out var rot, out _, out _))
+                    for (int c = 0; c < cams.Count; c++)
+                    {
+                        var g = gtP[posed[c]];
+                        cams[c].Forward = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Transform(g.Forward, rot));
+                        cams[c].Up = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Transform(g.Up, rot));
+                    }
+            }
+            else if (mode == 3)
+            {
+                var src = new List<System.Numerics.Vector3>(); var dst = new List<System.Numerics.Vector3>();
+                for (int c = 0; c < cams.Count; c++) { src.Add(gtP[posed[c]].Position); dst.Add(cams[c].Position); }
+                if (WorldSpaceGeometry.TryUmeyamaSimilarity(src, dst, out float sc, out var rot, out var tr, out _))
+                    for (int c = 0; c < cams.Count; c++)
+                        cams[c].Position = sc * System.Numerics.Vector3.Transform(gtP[posed[c]].Position, rot) + tr;
+            }
+            bad.Clear();
+            Console.WriteLine($"[BA] DIAGNOSTIC: bundle adjustment starts from ground-truth {(mode == 2 ? "ROTATIONS" : mode == 3 ? "POSITIONS" : "poses")} (no re-registration)");
+            ProbeCameras("ground-truth init", cams, new HashSet<int>(), null);
+        }
+        if (DiagnosticGroundTruthIntrinsics is { } gtK && gtK.Count == cameras.Length)
+        {
+            // DIAGNOSIS ONLY (&gtintrinsics=1): the dataset's COLMAP intrinsics, held fixed through every solve. Tells
+            // whether the shared square-pixel focal is what bends the geometry (TruckFull: COLMAP fx/fy = 1.006).
+            for (int c = 0; c < cams.Count; c++)
+            {
+                var k = gtK[posed[c]];
+                cams[c].FocalX = k.FocalX; cams[c].FocalY = k.FocalY; cams[c].CenterX = k.CenterX; cams[c].CenterY = k.CenterY;
+            }
+            oneCamera = false;
+            Console.WriteLine($"[BA] DIAGNOSTIC: ground-truth intrinsics held fixed (fx {gtK[0].FocalX:F2}, fy {gtK[0].FocalY:F2})");
+        }
 
         // -- 3. BA over the cameras that are right, then re-register the misplaced ones against its points
         // (PnP), then one BA over everyone. A misplaced camera inside the first BA drags its neighbours.
-        var ba = SolveBundle(cams, tracks, Ob, exclude: bad, oneCamera, out var points, out var pointTracks,
-            out var result, "BA");
-        if (ba == null) return null;
+        var solve = await SolveBundleAsync(cams, tracks, Ob, exclude: bad, oneCamera, "BA");
+        if (solve == null) return null;
+        var (ba, points, pointTracks, result) = solve;
         for (int i = 0; i < cams.Count; i++) if (!bad.Contains(i)) ba.WriteCamera(i, cams[i]);
         if (oneCamera) foreach (int c in bad) { cams[c].FocalX = (float)ba.SharedFocal; cams[c].FocalY = (float)ba.SharedFocal; }
 
@@ -333,19 +466,19 @@ public class MultiViewGenerationService
                 // Refine what is placed before placing the next ring. Without this each pass triangulated from
                 // the previous pass's raw PnP poses and error accumulated along a stretch (Truck 115 -> 117 ended
                 // 11-12% off although each agreed with 78-89% of its correspondences).
-                var passBa = SolveBundle(cams, tracks, Ob, exclude: pending, oneCamera, out _, out _, out _,
+                var passBa = await SolveBundleAsync(cams, tracks, Ob, exclude: pending, oneCamera,
                     $"BA pass {passes}", maxIterations: 40, rounds: 1);
                 if (passBa != null)
-                    for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) passBa.WriteCamera(i, cams[i]);
+                    for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) passBa.Ba.WriteCamera(i, cams[i]);
             }
             foreach (int c in pending)
             {
                 var (corr, inl) = lastTry.TryGetValue(c, out var lt) ? lt : (0, 0);
                 Console.WriteLine($"[BA]   view {posed[c]}: NOT placed ({corr} correspondences, best {inl} agree) - dropped");
             }
-            ba = SolveBundle(cams, tracks, Ob, exclude: pending, oneCamera, out points, out pointTracks,
-                out result, "BA final");
-            if (ba == null) return null;
+            solve = await SolveBundleAsync(cams, tracks, Ob, exclude: pending, oneCamera, "BA final");
+            if (solve == null) return null;
+            (ba, points, pointTracks, result) = solve;
 
             // Verify, then prune and re-adjust. P3P finds a consensus even for a camera it places WRONG, and one
             // wrong camera in the final BA bends everyone: MEASURED on Truck, 125 placed at median 3.3% of
@@ -370,9 +503,9 @@ public class MultiViewGenerationService
                         $"[BA]   verify {verify}: view {posed[c]} disagrees with the solution " +
                         $"({stats[c].Kept}/{stats[c].Total} kept, median {stats[c].MedianError:F1} px) - dropped");
                 }
-                ba = SolveBundle(cams, tracks, Ob, exclude: pending, oneCamera, out points, out pointTracks,
-                    out result, $"BA verify {verify}");
-                if (ba == null) return null;
+                solve = await SolveBundleAsync(cams, tracks, Ob, exclude: pending, oneCamera, $"BA verify {verify}");
+                if (solve == null) return null;
+                (ba, points, pointTracks, result) = solve;
             }
             for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) ba.WriteCamera(i, cams[i]);
             // A camera nobody could place is wrong by tens of degrees: leaving it in trains the scene against a
@@ -432,15 +565,63 @@ public class MultiViewGenerationService
     /// <summary>Median leave-one-out reprojection miss above which a camera counts as misplaced (pixels).</summary>
     public float MisplacedCameraPixels { get; set; } = 25f;
 
+    /// <summary>
+    /// Diagnostic: called after every bundle-adjustment solve with (label, cameras by IMAGE index) - the solve's cameras
+    /// written into COPIES (views outside the solve are null), plus once for the cascade's poses before BA. The dataset
+    /// harness scores them against ground truth. Written 2026-09-28: three GPU-BA builds ended at 0.1%, 0.7% and 2.5% of
+    /// spread vs COLMAP (deterministically, same first BA, similar reprojection RMS) - this says which stage bends it.
+    /// </summary>
+    public Action<string, CameraParams?[]>? BundleProbe { get; set; }
+
+    /// <summary>DIAGNOSIS ONLY: ground-truth cameras (by image index) whose intrinsics bundle adjustment holds fixed.</summary>
+    public IReadOnlyList<CameraParams>? DiagnosticGroundTruthIntrinsics { get; set; }
+
+    /// <summary>DIAGNOSIS ONLY: ground-truth cameras (by image index) whose POSES start bundle adjustment.</summary>
+    public IReadOnlyList<CameraParams>? DiagnosticGroundTruthPoseInit { get; set; }
+
+    /// <summary>With <see cref="DiagnosticGroundTruthPoseInit"/>: 1 full poses, 2 rotations only, 3 positions only.</summary>
+    public int DiagnosticGroundTruthPoseMode { get; set; } = 1;
+    IReadOnlyList<int>? _probePosed;
+    int _probeImageCount;
+
+    void ProbeCameras(string label, List<CameraParams> cams, HashSet<int> exclude, IBundleSolution? ba)
+    {
+        if (BundleProbe == null || _probePosed == null) return;
+        var byImage = new CameraParams?[_probeImageCount];
+        for (int c = 0; c < cams.Count; c++)
+        {
+            if (exclude.Contains(c)) continue;
+            var src = cams[c];
+            var copy = new CameraParams
+            {
+                Width = src.Width, Height = src.Height, FocalX = src.FocalX, FocalY = src.FocalY,
+                CenterX = src.CenterX, CenterY = src.CenterY, Near = src.Near, Far = src.Far,
+                Position = src.Position, Forward = src.Forward, Up = src.Up,
+            };
+            ba?.WriteCamera(c, copy);
+            byImage[_probePosed[c]] = copy;
+        }
+        BundleProbe(label, byImage);
+    }
+
+    /// <summary>A bundle adjustment's solution with the points it triangulated and the tracks behind them.</summary>
+    private sealed record BundleSolve(IBundleSolution Ba, List<System.Numerics.Vector3> Points,
+        List<List<(int Image, int Feature)>> PointTracks, BundleAdjuster.Result Result);
+
+    /// <summary>
+    /// Solve bundle adjustment on the GPU (<see cref="GpuBundleAdjuster"/>) rather than with the managed solver. MEASURED
+    /// 2026-09-28 (b24, TruckFull): the managed solver's first solve took 1,358.8 s on the browser's Mono interpreter.
+    /// </summary>
+    public bool UseGpuBundleAdjust { get; set; } = true;
+
     /// <summary>Triangulate every track from the non-excluded cameras and bundle-adjust them.</summary>
-    private BundleAdjuster? SolveBundle(
+    private async Task<BundleSolve?> SolveBundleAsync(
         List<CameraParams> cams, List<List<(int Image, int Feature)>> tracks,
         Func<(int Image, int Feature), (int Camera, float U, float V)> ob, HashSet<int> exclude, bool sharedFocal,
-        out List<System.Numerics.Vector3> points, out List<List<(int Image, int Feature)>> pointTracks,
-        out BundleAdjuster.Result result, string label, int maxIterations = 0, int rounds = 3)
+        string label, int maxIterations = 0, int rounds = 3)
     {
-        points = new List<System.Numerics.Vector3>();
-        pointTracks = new List<List<(int Image, int Feature)>>();
+        var points = new List<System.Numerics.Vector3>();
+        var pointTracks = new List<List<(int Image, int Feature)>>();
         var obs = new List<BundleAdjuster.Observation>();
         var trackObs = new List<(int Camera, float U, float V)>();
         foreach (var track in tracks)
@@ -457,7 +638,6 @@ public class MultiViewGenerationService
             pointTracks.Add(track);
             foreach (var (c, u, v) in trackObs) obs.Add(new BundleAdjuster.Observation(c, id, u, v));
         }
-        result = new BundleAdjuster.Result(0, 0, 0, 0, 0, 0, 0);
         if (points.Count < 50)
         {
             Console.WriteLine($"[{label}] SKIPPED: only {points.Count} triangulated tracks from {tracks.Count}.");
@@ -465,17 +645,34 @@ public class MultiViewGenerationService
         }
         // Keep the reference camera fixed only if it takes part; otherwise fix the first one that does.
         int fixedCam = Enumerable.Range(0, cams.Count).First(c => !exclude.Contains(c));
-        var ba = new BundleAdjuster(cams, points, obs, fixedCamera: fixedCam, sharedFocal: sharedFocal);
-        result = ba.Solve(new BundleAdjuster.Options
+        var options = new BundleAdjuster.Options
         {
             MaxIterations = maxIterations > 0 ? maxIterations : BundleAdjustIterations,
+            MaxCgIterations = BundleAdjustCgIterations,
             Rounds = rounds,
             RoundLog = (round, iters, rms, kept) => Console.WriteLine(
                 $"[{label}]   round {round}: {iters} iterations, RMS {rms:F2} px, {kept} obs kept"),
-        });
+        };
+        IBundleSolution ba;
+        BundleAdjuster.Result result;
+        if (UseGpuBundleAdjust)
+        {
+            if (!_gpu.IsInitialized) await _gpu.InitializeAsync();
+            // Frees its device buffers when the solve ends; the solution is host-side.
+            var gpuBa = new GpuBundleAdjuster(_gpu.WebGPUAccelerator, cams, points, obs, fixedCamera: fixedCam, sharedFocal: sharedFocal);
+            result = await gpuBa.SolveAsync(options);
+            ba = gpuBa;
+        }
+        else
+        {
+            var cpuBa = new BundleAdjuster(cams, points, obs, fixedCamera: fixedCam, sharedFocal: sharedFocal);
+            result = cpuBa.Solve(options);
+            ba = cpuBa;
+        }
         Console.WriteLine($"[{label}] {points.Count} points, {result.ObservationsKept}/{result.Observations} obs, " +
-            $"RMS {result.FinalRmsPixels:F2} px, {result.Seconds:F1}s ({ba.TimingSummary()})");
-        return ba;
+            $"RMS {result.FinalRmsPixels:F2} px, {result.Seconds:F1}s ({(UseGpuBundleAdjust ? "GPU: " : "")}{ba.TimingSummary()})");
+        ProbeCameras(label, cams, exclude, ba);
+        return new BundleSolve(ba, points, pointTracks, result);
     }
 
     /// <summary>Anchor views the last chunked run used, and why they were picked.</summary>

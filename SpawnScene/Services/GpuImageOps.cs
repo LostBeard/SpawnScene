@@ -7,15 +7,15 @@ namespace SpawnScene.Services;
 
 /// <summary>
 /// Per-image work the import used to do on managed pixel arrays, done on the device against
-/// <see cref="ImportedImage.GpuRgba"/>. Only the small results come back to the host: the grayscale frame the
-/// (CPU) feature detector reads, and one colour per feature.
+/// <see cref="ImportedImage.GpuRgba"/>: the detector's grayscale (which stays there - GpuFeatureDetector reads it) and
+/// one colour per feature (the only thing that comes back).
 /// </summary>
 public static class GpuImageOps
 {
     // Nearest-neighbour downsample + integer BT.601 luma: EXACTLY ImageImportService.DownsampleGrayscale /
     // RgbaToGrayscale (same float scale, same truncation, same (r*77 + g*150 + b*29) >> 8), so the detector sees
     // the same bytes it saw from the managed path and finds the same features.
-    static void GrayKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> rgba, ArrayView1D<byte, Stride1D.Dense> gray,
+    static void GrayKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> rgba, ArrayView1D<int, Stride1D.Dense> gray,
         int srcW, int srcH, int dstW, float scaleX, float scaleY)
     {
         int dy = i / dstW, dx = i - dy * dstW;
@@ -23,7 +23,7 @@ public static class GpuImageOps
         int sx = Math.Min((int)(dx * scaleX), srcW - 1);
         int p = rgba[sy * srcW + sx];
         int r = p & 0xFF, g = (p >> 8) & 0xFF, b = (p >> 16) & 0xFF;
-        gray[i] = (byte)((r * 77 + g * 150 + b * 29) >> 8);
+        gray[i] = (r * 77 + g * 150 + b * 29) >> 8;
     }
 
     static void GatherKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> rgba, ArrayView1D<int, Stride1D.Dense> index,
@@ -32,31 +32,29 @@ public static class GpuImageOps
 
     private sealed class Kernels
     {
-        public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<byte, Stride1D.Dense>, int, int, int, float, float> Gray = null!;
+        public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int, float, float> Gray = null!;
         public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>> Gather = null!;
     }
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Accelerator, Kernels> s_kernels = new();
 
     private static Kernels For(Accelerator accelerator) => s_kernels.GetValue(accelerator, a => new Kernels
     {
-        Gray = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<byte, Stride1D.Dense>, int, int, int, float, float>(GrayKernel),
+        Gray = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int, float, float>(GrayKernel),
         Gather = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>>(GatherKernel),
     });
 
     /// <summary>
-    /// The grayscale frame the feature detector reads, at <paramref name="dstW"/> x <paramref name="dstH"/>. This IS
-    /// host data - the detector runs on the CPU - but it is one frame at a time, transient, a quarter of the RGBA
-    /// size, and nothing keeps it after detection.
+    /// The feature detector's grayscale frame (one int 0..255 per pixel) at <paramref name="dstW"/> x
+    /// <paramref name="dstH"/>, ON THE DEVICE - GpuFeatureDetector reads it there; it never comes back. Caller disposes.
     /// </summary>
-    public static async Task<byte[]> GrayscaleAsync(Accelerator accelerator,
+    public static MemoryBuffer1D<int, Stride1D.Dense> GrayscaleToDevice(Accelerator accelerator,
         MemoryBuffer1D<int, Stride1D.Dense> rgba, int srcW, int srcH, int dstW, int dstH)
     {
         var k = For(accelerator);
-        using var gray = accelerator.Allocate1D<byte>((long)dstW * dstH);
+        var gray = accelerator.Allocate1D<int>((long)dstW * dstH);
         float scaleX = (float)srcW / dstW, scaleY = (float)srcH / dstH;
         k.Gray(dstW * dstH, rgba.View, gray.View, srcW, srcH, dstW, scaleX, scaleY);
-        await accelerator.SynchronizeAsync();
-        return await gray.CopyToHostAsync<byte>();
+        return gray;
     }
 
     /// <summary>
@@ -76,6 +74,27 @@ public static class GpuImageOps
         await accelerator.SynchronizeAsync();
         var colours = await colourBuf.CopyToHostAsync<int>();
         for (int f = 0; f < features.Count; f++) features[f].PackedColor = colours[f];
+    }
+
+    /// <summary>
+    /// Make sure <paramref name="img"/> has its pixels on the device: decode <see cref="ImportedImage.Source"/> (browser
+    /// decode + canvas resize + CopyFromJS - nothing through .NET) when there is no device copy yet. Returns true when
+    /// it decoded NOW, so the caller that caused the decode can release it with <see cref="ImportedImage.DisposeGpu"/>
+    /// once its dispatches have completed. A legacy managed image (no Source, no GpuRgba) returns false untouched.
+    /// </summary>
+    public static async Task<bool> EnsureOnDeviceAsync(Accelerator accelerator, ImportedImage img)
+    {
+        if (img.GpuRgba != null || img.Source == null) return false;
+        var (rgba, w, h, _, _) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
+            img.Source, accelerator, img.DecodeMaxEdge);
+        if (w != img.Width || h != img.Height)
+        {
+            rgba.Dispose();
+            throw new InvalidOperationException(
+                $"{img.FileName}: re-decoded at {w}x{h}, but the image was imported at {img.Width}x{img.Height}");
+        }
+        img.GpuRgba = rgba;
+        return true;
     }
 
     /// <summary>The same stamp from managed pixels (legacy CPU imports).</summary>

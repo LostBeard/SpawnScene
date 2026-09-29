@@ -117,6 +117,26 @@ public class ImportedImage
         GpuRgba = null;
     }
 
+    /// <summary>
+    /// The photo's ENCODED source (JPEG/PNG bytes as a JS Blob - an OPFS File, a fetched response): a few hundred KB in
+    /// the browser, never in .NET. When set, <see cref="GpuRgba"/> is a disposable, re-creatable decode of it
+    /// (GpuImageOps.EnsureOnDeviceAsync), made where the pixels are used and released after, so neither the managed
+    /// heap nor the GPU holds every photo at once (251 x 2.3 MB resident on TruckFull was deliberately avoided,
+    /// 2026-09-27). Owned by the image: <see cref="DisposeSource"/>.
+    /// </summary>
+    public SpawnDev.SpawnJS.JSObjects.Blob? Source { get; set; }
+
+    /// <summary>Longest edge <see cref="Source"/> is decoded at (so every re-decode is the same size).</summary>
+    public int DecodeMaxEdge { get; set; }
+
+    /// <summary>Release the encoded source and any device copy. Idempotent.</summary>
+    public void DisposeSource()
+    {
+        DisposeGpu();
+        Source?.Dispose();
+        Source = null;
+    }
+
     /// <summary>Resolution used for feature detection (may be downsampled).</summary>
     public int FeatureWidth { get; set; }
     public int FeatureHeight { get; set; }

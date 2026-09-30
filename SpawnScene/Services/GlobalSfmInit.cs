@@ -441,9 +441,13 @@ public static class GlobalSfmInit
     /// Why tracks and not pairs: consecutive video frames have nearly parallel baselines, so pairwise translation directions
     /// leave each camera free to slide along the path (MEASURED: pairwise averaging took a 20% start only to 14.5%).
     /// </summary>
-    public static (Vector3[] Centres, Vector3[] Points, string Summary) GlobalPositioningRobust(IReadOnlyList<CameraParams> cams,
+    /// <summary><see cref="GlobalPositioningRobust"/>'s result. Converged: the last round reached the relative-decrease stop,
+    /// not the iteration cap. Outliers: observations outside the final inlier selection (a retired point's included).</summary>
+    public sealed record PositioningResult(Vector3[] Centres, Vector3[] Points, string Summary, bool Converged, int Outliers, int Observations);
+
+    public static PositioningResult GlobalPositioningRobust(IReadOnlyList<CameraParams> cams,
         double[][] rot, bool[] connected, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal,
-        int maxIterations = 600, double huber = 0.003, int seed = 1)
+        int maxIterations = 50, double huber = 0.003, int seed = 1)
     {
         int n = cams.Count, np = pointCount;
         // Usable observations: a connected camera, a point seen by at least two connected cameras.
@@ -475,7 +479,13 @@ public static class GlobalSfmInit
         var c = new double[n * 3]; var xp = new double[np * 3]; var d = new double[no];
         for (int i = 0; i < n * 3; i++) c[i] = rng.NextDouble() * 2 - 1;
         for (int i = 0; i < np * 3; i++) xp[i] = rng.NextDouble() * 2 - 1;
-        Array.Fill(d, 1.0);
+        for (int t = 0; t < no; t++)   // each scale at its optimum (see the variable projection below)
+        {
+            int i = oc[t] * 3, j = op[t] * 3;
+            double ux = xp[j] - c[i], uy = xp[j + 1] - c[i + 1], uz = xp[j + 2] - c[i + 2];
+            double uu = ux * ux + uy * uy + uz * uz;
+            d[t] = uu > 0 ? Math.Max(0, (v[t * 3] * ux + v[t * 3 + 1] * uy + v[t * 3 + 2] * uz) / uu) : 0;
+        }
 
         var r = new double[no * 3]; var w = new double[no];
         // Rejected observations (w = 0, no cost) and each point's count of live ones - a point needs two.
@@ -512,12 +522,17 @@ public static class GlobalSfmInit
         var pinv = new double[np * 9];
         var dc = new double[dim]; var cNew = new double[n * 3]; var xNew = new double[np * 3]; var dNew = new double[no];
         double lambda = 1e-4, cost0 = Evaluate(c, xp, d, true), cost = cost0;
-        int iter = 0, accepted = 0, rejectedTotal = 0, round = 0;
+        int iter = 0, accepted = 0, rejectedTotal = 0, round = 0, roundsRun = 0;
+        var roundLog = new List<string>();
+        bool roundConverged = false;   // the last round reached the relative-decrease stop, not the iteration cap
         // Rounds: converge, then reject observations whose angle to their point is far past the typical one (a
         // mismatch in a 2-3 view track cannot be outvoted inside its track - it only shows once the cameras settle),
         // and re-solve from where the previous round ended.
         for (; round < 6; round++)
         {
+        roundsRun++;
+        int roundStart = iter, acceptedStart = accepted;
+        roundConverged = false;
         for (int roundIter = 0; roundIter < maxIterations; roundIter++, iter++)
         {
             // Normal equations of the IRLS-weighted linearisation, gradient g = J^T W r, step H delta = -g.
@@ -648,12 +663,19 @@ public static class GlobalSfmInit
                 dxAll[j * 3 + 2] = -(P[6] * s0 + P[7] * s1 + P[8] * s2);
                 xNew[j * 3] += dxAll[j * 3]; xNew[j * 3 + 1] += dxAll[j * 3 + 1]; xNew[j * 3 + 2] += dxAll[j * 3 + 2];
             }
+            // Variable projection: each d_t at its exact optimum for the candidate X, C (closed form: the scale that best
+            // stretches X - C onto the bearing; the residual is then sin of their angle, or 1 past 90 deg), NOT the
+            // linearised d step. The residual is bilinear in d and X - C, so a linearised step along a poorly
+            // constrained point depth s misses by (ds/s)^2 and LM rejects it: MEASURED 2026-09-29 (Truck, 10% mismatches)
+            // the linearised version alternated accept/reject for 600 iterations per round without converging (1,529
+            // iterations, 66.8 s, 0.278% median); projected, a round after the first rejection converges in 6-8 (45
+            // iterations at a cap of 15, 1.9 s, 0.254%). Same minimiser: d only ever sits at its optimum.
             for (int t = 0; t < no; t++)
             {
-                int j = op[t], ci = col[oc[t]];
-                double ad = a[t * 3] * dxAll[j * 3] + a[t * 3 + 1] * dxAll[j * 3 + 1] + a[t * 3 + 2] * dxAll[j * 3 + 2];
-                if (ci >= 0) ad -= a[t * 3] * dc[ci * 3] + a[t * 3 + 1] * dc[ci * 3 + 1] + a[t * 3 + 2] * dc[ci * 3 + 2];
-                dNew[t] = Math.Max(0, d[t] - (gd[t] + ad) / hdd[t]);
+                int i = oc[t] * 3, j = op[t] * 3;
+                double ux = xNew[j] - cNew[i], uy = xNew[j + 1] - cNew[i + 1], uz = xNew[j + 2] - cNew[i + 2];
+                double uu = ux * ux + uy * uy + uz * uz;
+                dNew[t] = uu > 0 ? Math.Max(0, (v[t * 3] * ux + v[t * 3 + 1] * uy + v[t * 3 + 2] * uz) / uu) : 0;
             }
             double newCost = Evaluate(cNew, xNew, dNew, false);
             if (newCost < cost)
@@ -663,7 +685,7 @@ public static class GlobalSfmInit
                 cost = Evaluate(c, xp, d, true);
                 lambda = Math.Max(lambda / 3, 1e-12);
                 accepted++;
-                if (converged) break;
+                if (converged) { roundConverged = true; iter++; break; }
             }
             else
             {
@@ -671,29 +693,74 @@ public static class GlobalSfmInit
                 if (lambda > 1e12) break;
             }
         }
-            // Reject: angle between each live observation's bearing and its point, against max(0.1 deg, 5x median).
+            // Re-select the inliers from ALL observations each round - an observation rejected by an earlier round can come
+            // back. A round stops at the iteration cap before converging, so its first selection also rejects good
+            // observations still at large angles: MEASURED 2026-09-29, with rejection permanent the CLEAN Truck tracks lost
+            // 6,353 of 30,000 observations in round 0. Retired points (fewer than two inliers, so the solve left them
+            // behind) are first re-triangulated from all their bearings: min sum |(I - v v^T)(X - C)|^2.
+            Span<double> A9 = stackalloc double[9];
+            for (int j = 0; j < np; j++)
+            {
+                if (live[j] >= 2 || pointObs[j].Count < 2) continue;
+                A9.Clear();
+                double b0 = 0, b1 = 0, b2 = 0;
+                foreach (int t in pointObs[j])
+                {
+                    double v0 = v[t * 3], v1 = v[t * 3 + 1], v2 = v[t * 3 + 2];
+                    int i = oc[t] * 3;
+                    double c0 = c[i], c1 = c[i + 1], c2 = c[i + 2];
+                    double p00 = 1 - v0 * v0, p01 = -v0 * v1, p02 = -v0 * v2, p11 = 1 - v1 * v1, p12 = -v1 * v2, p22 = 1 - v2 * v2;
+                    A9[0] += p00; A9[1] += p01; A9[2] += p02; A9[4] += p11; A9[5] += p12; A9[8] += p22;
+                    b0 += p00 * c0 + p01 * c1 + p02 * c2; b1 += p01 * c0 + p11 * c1 + p12 * c2; b2 += p02 * c0 + p12 * c1 + p22 * c2;
+                }
+                A9[3] = A9[1]; A9[6] = A9[2]; A9[7] = A9[5];
+                // Parallel bearings leave A singular along them: the scaled determinant says so, and the point keeps its X.
+                double det = A9[0] * (A9[4] * A9[8] - A9[5] * A9[7]) - A9[1] * (A9[3] * A9[8] - A9[5] * A9[6]) + A9[2] * (A9[3] * A9[7] - A9[4] * A9[6]);
+                if (!(det > 1e-12 * A9[0] * A9[4] * A9[8])) continue;
+                var ai = Invert3(A9);
+                xp[j * 3] = ai[0] * b0 + ai[1] * b1 + ai[2] * b2;
+                xp[j * 3 + 1] = ai[3] * b0 + ai[4] * b1 + ai[5] * b2;
+                xp[j * 3 + 2] = ai[6] * b0 + ai[7] * b1 + ai[8] * b2;
+            }
+            // Angle between every observation's bearing and its point, against max(0.1 deg, 5x the inliers' median).
             var ang = new double[no];
             var liveAngles = new List<double>();
             for (int t = 0; t < no; t++)
             {
-                if (off[t]) continue;
                 int i = oc[t] * 3, j = op[t] * 3;
                 double ux = xp[j] - c[i], uy = xp[j + 1] - c[i + 1], uz = xp[j + 2] - c[i + 2];
                 double un = Math.Sqrt(ux * ux + uy * uy + uz * uz);
                 double cosA = un > 0 ? (v[t * 3] * ux + v[t * 3 + 1] * uy + v[t * 3 + 2] * uz) / un : -1;
                 ang[t] = Math.Acos(Math.Clamp(cosA, -1, 1));
-                liveAngles.Add(ang[t]);
+                if (!off[t]) liveAngles.Add(ang[t]);
             }
             liveAngles.Sort();
             double limit = Math.Max(0.1 * Math.PI / 180, 5 * liveAngles[liveAngles.Count / 2]);
-            int rejected = 0;
+            var newOff = new bool[no];
+            Array.Clear(live);
+            for (int t = 0; t < no; t++) { newOff[t] = ang[t] > limit; if (!newOff[t]) live[op[t]]++; }
+            // A point with one inlier carries no information: retire it.
             for (int t = 0; t < no; t++)
-                if (!off[t] && ang[t] > limit) { off[t] = true; live[op[t]]--; rejected++; }
-            // A point left with one live observation carries no information: retire it.
+                if (!newOff[t] && live[op[t]] < 2) { newOff[t] = true; live[op[t]]--; }
+            int dropped = 0, readmitted = 0, outliers = 0;
             for (int t = 0; t < no; t++)
-                if (!off[t] && live[op[t]] < 2) { off[t] = true; live[op[t]]--; rejected++; }
-            rejectedTotal += rejected;
-            if (rejected == 0) break;
+            {
+                if (newOff[t] && !off[t]) dropped++;
+                if (!newOff[t] && off[t]) readmitted++;
+                if (newOff[t]) outliers++;
+            }
+            Array.Copy(newOff, off, no);
+            rejectedTotal = outliers;
+            roundLog.Add($"{iter - roundStart}/{accepted - acceptedStart}{(roundConverged ? "" : " (cap)")} -{dropped}+{readmitted}");
+            if (dropped == 0 && readmitted == 0) break;
+            // Every scale at its optimum again (re-triangulated points moved).
+            for (int t = 0; t < no; t++)
+            {
+                int i = oc[t] * 3, j = op[t] * 3;
+                double ux = xp[j] - c[i], uy = xp[j + 1] - c[i + 1], uz = xp[j + 2] - c[i + 2];
+                double uu = ux * ux + uy * uy + uz * uz;
+                d[t] = uu > 0 ? Math.Max(0, (v[t * 3] * ux + v[t * 3 + 1] * uy + v[t * 3 + 2] * uz) / uu) : 0;
+            }
             cost = Evaluate(c, xp, d, true);
             lambda = 1e-4;
         }
@@ -718,7 +785,7 @@ public static class GlobalSfmInit
         var points = new Vector3[np];
         for (int j = 0; j < np; j++)
             points[j] = curMid + (new Vector3((float)xp[j * 3], (float)xp[j * 3 + 1], (float)xp[j * 3 + 2]) - solMid) * scale;
-        return (centres, points, $"robust positioning: {no} obs, {round + 1} rounds, {iter} iterations ({accepted} accepted), {rejectedTotal} rejected, cost {cost0:G4} -> {cost:G4}");
+        return new PositioningResult(centres, points, $"robust positioning: {no} obs, {roundsRun} rounds [iterations/accepted -dropped+readmitted: {string.Join(", ", roundLog)}], {iter} iterations ({accepted} accepted), {rejectedTotal} outliers, cost {cost0:G4} -> {cost:G4}", roundConverged, rejectedTotal, no);
     }
 
     static void Mul3(ReadOnlySpan<double> x, ReadOnlySpan<double> y, Span<double> o)
@@ -788,7 +855,8 @@ public static class GlobalSfmInit
             for (int i = 0; i < n; i++) if (connected[i]) rot[i] = Mul(rot[i], q);
         }
         var resid = edges.Select(e => AngleDeg(rot[e.B], Mul(e.R, rot[e.A]))).OrderBy(x => x).ToList();
-        var (centres, _, positioning) = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal);
+        var gp = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal);
+        var (centres, positioning) = (gp.Centres, gp.Summary);
         int moved = 0;
         for (int i = 0; i < n; i++)
         {

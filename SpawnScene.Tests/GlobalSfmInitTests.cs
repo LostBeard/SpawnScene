@@ -230,7 +230,7 @@ public class GlobalSfmInitTests
         foreach (var c in start) c.Position += new Vector3((float)Gauss(rng), (float)Gauss(rng), (float)Gauss(rng)) * (0.2f * spread);
         var connected = Enumerable.Repeat(true, n).ToArray();
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var (centres, _, _) = GlobalSfmInit.GlobalPositioningRobust(start, truthR, connected, obs, points, focal);
+        var centres = GlobalSfmInit.GlobalPositioningRobust(start, truthR, connected, obs, points, focal).Centres;
         var est = cams.Select((c, i) => { var k = Copy(c); k.Position = centres[i]; return (CameraParams?)k; }).ToList();
         Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out _, out _), Is.True);
         TestContext.Out.WriteLine($"{points} points, {obs.Count} observations: centres {acc.PositionRms / acc.Spread:P3} of spread " +
@@ -275,7 +275,8 @@ public class GlobalSfmInitTests
         var truthR = cams.Select(GlobalSfmInit.RotationOf).ToArray();
         var connected = Enumerable.Repeat(true, n).ToArray();
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var (centres, _, summary) = GlobalSfmInit.GlobalPositioningRobust(cams, truthR, connected, obs, points, focal);
+        var gp = GlobalSfmInit.GlobalPositioningRobust(cams, truthR, connected, obs, points, focal);
+        var (centres, summary) = (gp.Centres, gp.Summary);
         var est = cams.Select((c, i) => { var k = Copy(c); k.Position = centres[i]; return (CameraParams?)k; }).ToList();
         Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out var perView, out _), Is.True);
         var perCam = new int[n];
@@ -286,6 +287,13 @@ public class GlobalSfmInitTests
         TestContext.Out.WriteLine($"[{TestContext.CurrentContext.Test.Name}] {sw.Elapsed.TotalSeconds:F1}s {summary}: " +
             $"centres {acc.PositionRms / acc.Spread:P3} of spread, median {acc.MedianPosFrac:P3}");
         Assert.That(acc.MedianPosFrac, Is.LessThan(0.01));
+        // With exact rotations the last round must CONVERGE, not stop at the cap: a solver that crawls (the linearised
+        // scale step did: 600 iterations per round, never converged) is too slow for the browser at any accuracy.
+        Assert.That(gp.Converged, Is.True, "the last round stopped at the iteration cap");
+        // The inlier selection must give back what an unconverged early round wrongly rejected: 2-view tracks lose both
+        // observations to one mismatch, so the selection may leave out up to ~2x the mismatched fraction, never more.
+        // MEASURED 2026-09-29: clean 3 of 30,000 left out (permanent rejection: 6,353), 10% mismatches 19.3%.
+        Assert.That(gp.Outliers, Is.LessThanOrEqualTo(gp.Observations * (2.2 * outliers + 0.01)), "good observations left out");
     }
 
     /// <summary>
@@ -315,7 +323,8 @@ public class GlobalSfmInitTests
         var rotErr = Enumerable.Range(0, n).Select(i => GlobalSfmInit.AngleDeg(rot[i], truthR[i])).OrderBy(x => x).ToList();
         var (obs, points, focal) = SyntheticTracks(cams, rng, 12000, 0.5, true, 0.10);
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        var (centres, _, summary) = GlobalSfmInit.GlobalPositioningRobust(cams, rot, connected, obs, points, focal);
+        var gp = GlobalSfmInit.GlobalPositioningRobust(cams, rot, connected, obs, points, focal);
+        var (centres, summary) = (gp.Centres, gp.Summary);
         var est = cams.Select((c, i) => { var k = Copy(c); k.Position = centres[i]; return (CameraParams?)k; }).ToList();
         Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out var perView, out _), Is.True);
         var worst = Enumerable.Range(0, n).OrderByDescending(i => perView[i]).Take(8).Select(i => $"#{i} {perView[i]:P1} (rot {GlobalSfmInit.AngleDeg(rot[i], truthR[i]):F2} deg)");

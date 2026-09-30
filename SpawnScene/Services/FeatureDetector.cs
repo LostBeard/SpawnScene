@@ -53,11 +53,17 @@ public class FeatureDetector
         return k;
     }
 
+    /// <summary>Features kept at full resolution (level 0).</summary>
     public int MaxFeatures => _maxFeatures;
+    /// <summary>Features added on the coarser levels, on top of <see cref="MaxFeatures"/>.</summary>
+    public int CoarseFeatures => _coarseFeatures;
     public int FastThreshold => _fastThreshold;
     public int Levels => _levels;
 
-    private readonly int _maxFeatures;
+    private readonly int _maxFeatures, _coarseFeatures;
+    private readonly bool _oriented;
+    /// <summary>Steer BRIEF to the intensity-centroid orientation (false = every feature at bin 0: plain BRIEF).</summary>
+    public bool Oriented => _oriented;
     private readonly int _fastThreshold;
     private readonly int _levels;
 
@@ -76,9 +82,23 @@ public class FeatureDetector
     /// verifiable (15+ matches correct under COLMAP's geometry); OpenCV ORB on the same data: orientation alone 19, scale
     /// alone 36, both 70 (DrJohnsonMatchingTests). <paramref name="levels"/> = 1 is single-scale FAST + steered BRIEF.
     /// </summary>
-    public FeatureDetector(int maxFeatures = 2000, int fastThreshold = 25, int levels = 8)
+    /// <remarks>
+    /// Level 0 keeps <paramref name="maxFeatures"/> and the coarser levels ADD <paramref name="coarseFeatures"/>, instead of
+    /// ORB's split of one budget over all levels. MEASURED 2026-09-30 (Truck ground truth, median Sampson of good matches
+    /// by the coarser level of the pair): level 0 0.31 px, 3 0.47, 7 0.96 - error grows ~1.2x per level. With ORB's split
+    /// only 21.7% of 2000 features sat at level 0, and the real TruckFull run lost BA accuracy (0.09% -> 2.39% of COLMAP,
+    /// held-out PSNR 21.46 -> 19.91): the precise observations BA lives on were gone.
+    /// </remarks>
+    /// <remarks>DEFAULT = single level, unoriented (plain FAST + BRIEF). The pyramid + orientation match far more true
+    /// DrJohnson pairs (7 -> 47 of 119) but in the real TruckFull run the pipeline got WORSE (ORB split: BA 0.09% -> 2.39%
+    /// of COLMAP, 21.46 -> 19.91 dB; level 0 kept + coarse: the GPU global positioning failed outright) - the default stays
+    /// the measured-best until a pipeline run says otherwise (2026-09-30).</remarks>
+    public FeatureDetector(int maxFeatures = 2000, int fastThreshold = 25, int levels = 1, int coarseFeatures = 0,
+        bool oriented = false)
     {
         _maxFeatures = maxFeatures;
+        _coarseFeatures = coarseFeatures;
+        _oriented = oriented;
         _fastThreshold = fastThreshold;
         _levels = Math.Max(1, levels);
     }
@@ -93,15 +113,19 @@ public class FeatureDetector
         return s;
     }
 
-    /// <summary>The per-level feature quota (as ORB): a geometric series in 1/scale summing to <paramref name="total"/>.</summary>
-    public static int[] LevelQuota(int total, int levels)
+    /// <summary>The per-level feature quota: <paramref name="fine"/> at level 0, and <paramref name="coarse"/> over levels
+    /// 1.. as ORB distributes a budget - a geometric series in 1/scale.</summary>
+    public static int[] LevelQuota(int fine, int coarse, int levels)
     {
         var q = new int[levels];
+        q[0] = fine;
+        int m = levels - 1;
+        if (m == 0) return q;
         double factor = 1.0 / ScaleFactor;
-        double perLevel = total * (1 - factor) / (1 - Math.Pow(factor, levels));
+        double perLevel = coarse * (1 - factor) / (1 - Math.Pow(factor, m));
         int sum = 0;
-        for (int l = 0; l < levels - 1; l++) { q[l] = (int)Math.Round(perLevel); sum += q[l]; perLevel *= factor; }
-        q[levels - 1] = Math.Max(total - sum, 0);
+        for (int l = 1; l < levels - 1; l++) { q[l] = (int)Math.Round(perLevel); sum += q[l]; perLevel *= factor; }
+        q[levels - 1] = Math.Max(coarse - sum, 0);
         return q;
     }
 
@@ -202,7 +226,7 @@ public class FeatureDetector
     public List<ImageFeature> Detect(byte[] gray, int width, int height)
     {
         var sizes = LevelSizes(width, height, _levels);
-        var quota = LevelQuota(_maxFeatures, _levels);
+        var quota = LevelQuota(_maxFeatures, _coarseFeatures, _levels);
         var result = new List<ImageFeature>();
         byte[] level = gray;
         for (int l = 0; l < _levels; l++)
@@ -234,7 +258,7 @@ public class FeatureDetector
             foreach (var c in corners)
             {
                 int fx = (int)c.X, fy = (int)c.Y;
-                int bin = OrientationBin(level, w, fx, fy);
+                int bin = _oriented ? OrientationBin(level, w, fx, fy) : 0;
                 var desc = new byte[32];
                 for (int i = 0; i < 256; i++)
                 {

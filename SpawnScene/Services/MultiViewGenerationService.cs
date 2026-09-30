@@ -165,7 +165,8 @@ public class MultiViewGenerationService
     public IReadOnlyList<CameraParams>? DiagnosticGlobalGroundTruthRotations { get; set; }
 
     private async Task<PointCloud?> RefineWithBundleAdjustmentAsync(
-        IReadOnlyList<ImportedImage> images, CameraParams?[] cameras, IReadOnlyList<int> posed)
+        IReadOnlyList<ImportedImage> images, CameraParams?[] cameras, IReadOnlyList<int> posed,
+        IReadOnlySet<int>? placeholders = null)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var pairs = _importService.MatchedPairs;
@@ -181,6 +182,10 @@ public class MultiViewGenerationService
         var baIndex = new Dictionary<int, int>();
         var cams = new List<CameraParams>();
         foreach (int g in posed) { baIndex[g] = cams.Count; cams.Add(cameras[g]!); }
+        // Views the depth cascade could not pose enter with placeholder poses (see GenerateWithChunkedDav3Async): they
+        // take no part in pair gating by angle, in the global frame, or in triangulation until SfM has placed them.
+        var trusted = cams.Select((_, i) => placeholders == null || !placeholders.Contains(posed[i])).ToArray();
+        var unplaced = new HashSet<int>();
         _probePosed = posed;
         _probeImageCount = cameras.Length;
         ProbeCameras("cascade (before BA)", cams, new HashSet<int>(), null);
@@ -204,8 +209,9 @@ public class MultiViewGenerationService
             if (!baIndex.ContainsKey(p.ImageIndexA) || !baIndex.ContainsKey(p.ImageIndexB)) continue;
             if (p.Matches.Count < 15) continue;
             var ca = cameras[p.ImageIndexA]!; var cb = cameras[p.ImageIndexB]!;
-            bool near = System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(ca.Forward),
-                System.Numerics.Vector3.Normalize(cb.Forward)) >= cosMax;
+            bool near = !trusted[baIndex[p.ImageIndexA]] || !trusted[baIndex[p.ImageIndexB]]
+                || System.Numerics.Vector3.Dot(System.Numerics.Vector3.Normalize(ca.Forward),
+                    System.Numerics.Vector3.Normalize(cb.Forward)) >= cosMax;
             if (!near && p.Matches.Count < strong) continue;
             var fa = images[p.ImageIndexA].Features; var fb = images[p.ImageIndexB].Features;
             var xa = new float[p.Matches.Count * 2]; var xb = new float[p.Matches.Count * 2];
@@ -275,24 +281,35 @@ public class MultiViewGenerationService
                     cams[ia].CenterX, cams[ia].CenterY, cams[ib].CenterX, cams[ib].CenterY);
                 if (pose != null) rel.Add(pose);
             }
-            // Track observations: tracks seen by 3+ distinct views first, then 2-view tracks, up to the cap.
+            // Track observations, up to the cap: first COVERAGE - a track is taken while any of its cameras has fewer than
+            // CoverTarget observations - then the rest, 3+-view tracks before 2-view ones in both phases. Filling the cap
+            // in track order alone left cameras with NO observation once the tracks got richer (TruckFull b63, 2026-09-30:
+            // 29k 3+-view tracks for a 15k cap); such a camera's block of the positioning system is zero, every damped
+            // step "not positive definite", and the init stayed at its random start (99.6% off COLMAP).
+            const int CoverTarget = 40;
             var gpObs = new List<BundleAdjuster.Observation>();
             int gpPoints = 0;
+            var perCam = new int[cams.Count];
+            var taken = new bool[tracks.Count];
             var trackObs = new List<(int Camera, float U, float V)>();
-            foreach (int minViews in new[] { 3, 2 })
-                foreach (var track in tracks)
-                {
-                    if (gpPoints >= GlobalSfmMaxPoints) break;
-                    trackObs.Clear();
-                    foreach (var t in track)
+            foreach (bool coverage in new[] { true, false })
+                foreach (int minViews in new[] { 3, 2 })
+                    for (int ti = 0; ti < tracks.Count; ti++)
                     {
-                        var o = Ob(t);
-                        if (!trackObs.Any(x => x.Camera == o.Camera)) trackObs.Add(o);
+                        if (gpPoints >= GlobalSfmMaxPoints) break;
+                        if (taken[ti]) continue;
+                        trackObs.Clear();
+                        foreach (var t in tracks[ti])
+                        {
+                            var o = Ob(t);
+                            if (!trackObs.Any(x => x.Camera == o.Camera)) trackObs.Add(o);
+                        }
+                        if (minViews == 3 ? trackObs.Count < 3 : trackObs.Count != 2) continue;
+                        if (coverage && !trackObs.Any(x => perCam[x.Camera] < CoverTarget)) continue;
+                        taken[ti] = true;
+                        foreach (var (camI, u, v) in trackObs) { gpObs.Add(new BundleAdjuster.Observation(camI, gpPoints, u, v)); perCam[camI]++; }
+                        gpPoints++;
                     }
-                    if (minViews == 3 ? trackObs.Count < 3 : trackObs.Count != 2) continue;
-                    foreach (var (camI, u, v) in trackObs) gpObs.Add(new BundleAdjuster.Observation(camI, gpPoints, u, v));
-                    gpPoints++;
-                }
             double[][]? gtRot = null;
             if (DiagnosticGlobalGroundTruthRotations is { } gtR && gtR.Count == cameras.Length)
             {
@@ -304,8 +321,12 @@ public class MultiViewGenerationService
                 Console.WriteLine("[BA] DIAGNOSTIC: global positioning uses the ground-truth rotations");
             }
             if (UseGpuGlobalPositioning && !_gpu.IsInitialized) await _gpu.InitializeAsync();
-            string summary = await GlobalSfmInit.ApplyAsync(cams, rel, gpObs, gpPoints, focal, gtRot,
-                UseGpuGlobalPositioning ? _gpu.WebGPUAccelerator : null);
+            var (summary, connected) = await GlobalSfmInit.ApplyAsync(cams, rel, gpObs, gpPoints, focal, gtRot,
+                UseGpuGlobalPositioning ? _gpu.WebGPUAccelerator : null, placeholders == null ? null : trusted);
+            for (int i = 0; i < cams.Count; i++) if (!trusted[i] && !connected[i]) unplaced.Add(i);
+            if (placeholders != null)
+                Console.WriteLine($"[BA] views the cascade could not pose: {trusted.Count(t => !t)}, placed by the global init " +
+                    $"{trusted.Count(t => !t) - unplaced.Count}; the rest go to re-registration");
             Console.WriteLine($"[BA] global SfM init (focal {focal:F1}): {rel.Count} of {passed} verified pairs gave a relative pose, {gpPoints} track " +
                 $"points; {summary}; {tg.Elapsed.TotalSeconds:F1}s");
             ProbeCameras("global SfM init", cams, new HashSet<int>(), null);
@@ -328,7 +349,8 @@ public class MultiViewGenerationService
                     var me = Ob(track[k]);
                     if (errs[me.Camera].Count >= 400) continue;
                     others.Clear();
-                    for (int j = 0; j < track.Count; j++) if (j != k) others.Add(Ob(track[j]));
+                    for (int j = 0; j < track.Count; j++)
+                        if (j != k) { var o = Ob(track[j]); if (!unplaced.Contains(o.Camera)) others.Add(o); }
                     if (!BundleAdjuster.Triangulate(cams, others, out var x)) continue;
                     if (!WorldSpaceGeometry.Project(cams[me.Camera], x, out var u, out var v, out _)) { errs[me.Camera].Add(1e6); continue; }
                     errs[me.Camera].Add(Math.Sqrt((u - me.U) * (u - me.U) + (v - me.V) * (v - me.V)));
@@ -361,6 +383,9 @@ public class MultiViewGenerationService
                     $"(> {limit:F1} px): [{string.Join(", ", bad.Select(c => $"{posed[c]}:{medians[c]:F0}px"))}]");
             }
         }
+        // A placeholder the global init could not connect has no pose at all: re-registration (PnP against the BA
+        // points) places it or drops it, like any misplaced camera.
+        bad.UnionWith(unplaced);
 
         bool oneCamera = cams.Select(c => (c.Width, c.Height)).Distinct().Count() == 1;
         var focals = cams.Select(c => 0.5f * (c.FocalX + c.FocalY)).OrderBy(f => f).ToList();
@@ -1242,8 +1267,36 @@ public class MultiViewGenerationService
             return null;
         }
 
-        var baCloud = BundleAdjust ? await RefineWithBundleAdjustmentAsync(images, poses.Cameras, posed) : null;
-        posed.RemoveAll(i => poses.Cameras[i] == null);   // views BA could not place were dropped
+        // With the global init, SfM places cameras from verified pairs itself: a view the depth cascade could not pose
+        // enters with a placeholder pose (a posed view's intrinsics, of the same image size), and SfM places it or drops
+        // it. DrJohnson 2026-09-30: the cascade folded 6 of 44 views, and SfM only ever saw those 6.
+        var sfmViews = new List<int>(posed);
+        var placeholders = new HashSet<int>();
+        if (BundleAdjust && UseGlobalSfmInit)
+        {
+            for (int i = 0; i < images.Count; i++)
+            {
+                if (poses.Cameras[i] != null) continue;
+                int t = posed.FirstOrDefault(p => images[p].Width == images[i].Width && images[p].Height == images[i].Height, -1);
+                if (t < 0) continue;
+                var tc = poses.Cameras[t]!;
+                poses.Cameras[i] = new CameraParams
+                {
+                    Width = tc.Width, Height = tc.Height, FocalX = tc.FocalX, FocalY = tc.FocalY,
+                    CenterX = tc.CenterX, CenterY = tc.CenterY, Near = tc.Near, Far = tc.Far,
+                    Position = tc.Position, Forward = tc.Forward, Up = tc.Up,
+                };
+                placeholders.Add(i);
+                sfmViews.Add(i);
+            }
+            sfmViews.Sort();
+        }
+        var baCloud = BundleAdjust
+            ? await RefineWithBundleAdjustmentAsync(images, poses.Cameras, sfmViews, placeholders.Count > 0 ? placeholders : null)
+            : null;
+        // A refine that returned nothing never placed a placeholder: its pose is still a copy, not a pose.
+        if (baCloud == null) foreach (int i in placeholders) poses.Cameras[i] = null;
+        posed = sfmViews.Where(i => poses.Cameras[i] != null).ToList();   // views BA could not place were dropped
 
         // Initialise from the adjusted SPARSE CLOUD, as 3DGS does from COLMAP, not from per-view depth shells.
         // Depth unprojection gives one private shell per camera (drjohnson: 91.9% of splats constrained by at
@@ -1259,6 +1312,14 @@ public class MultiViewGenerationService
             Console.WriteLine($"[MultiView] init from the bundle-adjusted sparse cloud: {baCloud.Count:N0} points");
             return await GenerateFromPointCloudAsync(packedCloud, baCloud.Count, posed.Select(i => poses.Cameras[i]!),
                 poseSource: "dav3-chunked");
+        }
+
+        // The depth-shell path unprojects each view's cascade depth map: a view SfM placed without one cannot take part.
+        posed.RemoveAll(i => poses.Depths[i] == null);
+        if (posed.Count == 0)
+        {
+            SetStatus("Error: no placed view has a depth map for the depth-shell init.");
+            return null;
         }
 
         // Depth scale composes in one order and only one. A view's raw depth is in ITS CHUNK's

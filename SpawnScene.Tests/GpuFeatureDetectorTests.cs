@@ -40,22 +40,22 @@ public class GpuFeatureDetectorTests
         return g;
     }
 
-    static async Task AssertSameAsync(byte[] gray, int w, int h)
+    static async Task AssertSameAsync(byte[] gray, int w, int h, int levels = 1, int coarse = 0, bool oriented = false)
     {
-        var expected = new FeatureDetector().Detect(gray, w, h);
+        var expected = new FeatureDetector(2000, 25, levels, coarse, oriented).Detect(gray, w, h);
 
         using var context = Context.Create(b => b.CPU());
         using var accel = context.CreateCPUAccelerator(0);
         var grayInts = new int[gray.Length];
         for (int i = 0; i < gray.Length; i++) grayInts[i] = gray[i];
         using var grayBuf = accel.Allocate1D(grayInts);
-        var actual = await new GpuFeatureDetector().DetectAsync(accel, grayBuf.View, w, h);
+        var actual = await new GpuFeatureDetector(2000, 25, levels, coarse, oriented).DetectAsync(accel, grayBuf.View, w, h);
 
         Assert.That(actual.Count, Is.EqualTo(expected.Count), "feature count");
         for (int f = 0; f < expected.Count; f++)
         {
             var e = expected[f]; var a = actual[f];
-            Assert.That((a.X, a.Y, a.Score), Is.EqualTo((e.X, e.Y, e.Score)), $"feature {f} position/score");
+            Assert.That((a.X, a.Y, a.Score, a.Octave), Is.EqualTo((e.X, e.Y, e.Score, e.Octave)), $"feature {f} position/score/level");
             Assert.That(a.Descriptor, Is.EqualTo(e.Descriptor), $"feature {f} ({e.X},{e.Y}) descriptor");
         }
         TestContext.Out.WriteLine($"{w}x{h}: {expected.Count} features identical");
@@ -66,6 +66,13 @@ public class GpuFeatureDetectorTests
     {
         // Enough texture that far more than 2,000 cells hold a corner: exercises the top-N sort and its ties.
         await AssertSameAsync(Frame(1024, 768, 7, 900, 18), 1024, 768);
+    }
+
+    [Test]
+    public async Task GpuDetector_MatchesCpuDetector_PyramidOriented()
+    {
+        // The opt-in ORB-style mode: 8 levels (level 0 kept + 2000 coarse), intensity-centroid orientation, steered BRIEF.
+        await AssertSameAsync(Frame(1024, 768, 7, 900, 18), 1024, 768, levels: 8, coarse: 2000, oriented: true);
     }
 
     [Test]

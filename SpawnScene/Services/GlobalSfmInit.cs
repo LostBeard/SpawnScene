@@ -837,17 +837,30 @@ public static class GlobalSfmInit
     /// ROBUST, because the solution can leave a few cameras wildly off. With the mean and the RMS spread (until 2026-09-30),
     /// TruckFull's 3 misplaced cameras (leave-one-out up to 1e6 px) carried nearly all the spread, the matched scale shrank the
     /// real cluster ~390x, and BA then solved that cluster 0.10% from COLMAP at 1/390 of the scene's scale: held PSNR 4.7.</summary>
-    public static Vector3[] ToCurrentFrame(IReadOnlyList<CameraParams> cams, bool[] connected, Func<int, Vector3> solution)
+    /// <param name="trusted">Cameras whose CURRENT pose means something (the depth cascade posed them); null = all. Views
+    /// the cascade could not pose enter SfM with placeholder poses (2026-09-30, DrJohnson) and must not decide the frame.
+    /// When no connected camera is trusted, the solution is matched to ALL trusted cameras' centre and spread - the scene
+    /// scale, which every scale-dependent step downstream assumes (a wrong one cost held-out PSNR 4.7, b52).</param>
+    public static Vector3[] ToCurrentFrame(IReadOnlyList<CameraParams> cams, bool[] connected, Func<int, Vector3> solution,
+        bool[]? trusted = null)
     {
         int n = cams.Count;
         var buf = new List<float>(n);
         float Median() { buf.Sort(); int m = buf.Count; return m == 0 ? 0 : (m & 1) == 1 ? buf[m / 2] : 0.5f * (buf[m / 2 - 1] + buf[m / 2]); }
-        float MedianOf(Func<int, float> f) { buf.Clear(); for (int i = 0; i < n; i++) if (connected[i]) buf.Add(f(i)); return Median(); }
-        Vector3 Centroid(Func<int, Vector3> at) => new(MedianOf(i => at(i).X), MedianOf(i => at(i).Y), MedianOf(i => at(i).Z));
-        float Spread(Func<int, Vector3> at, Vector3 mid) => MedianOf(i => (at(i) - mid).Length());
+        float MedianOver(Func<int, bool> set, Func<int, float> f) { buf.Clear(); for (int i = 0; i < n; i++) if (set(i)) buf.Add(f(i)); return Median(); }
+        Vector3 Centroid(Func<int, bool> set, Func<int, Vector3> at) =>
+            new(MedianOver(set, i => at(i).X), MedianOver(set, i => at(i).Y), MedianOver(set, i => at(i).Z));
+        float Spread(Func<int, bool> set, Func<int, Vector3> at, Vector3 mid) => MedianOver(set, i => (at(i) - mid).Length());
+        bool IsTrusted(int i) => trusted == null || trusted[i];
+        bool anyConnectedTrusted = false, anyTrusted = false;
+        for (int i = 0; i < n; i++) { anyTrusted |= IsTrusted(i); anyConnectedTrusted |= connected[i] && IsTrusted(i); }
+        // Both sides over the SAME cameras when possible (connected and trusted); otherwise the component solution onto
+        // the trusted cameras' frame; with nothing trusted at all, the old behaviour (every connected camera).
+        Func<int, bool> curSet = anyConnectedTrusted ? i => connected[i] && IsTrusted(i) : anyTrusted ? IsTrusted : i => connected[i];
+        Func<int, bool> solSet = anyConnectedTrusted ? curSet : i => connected[i];
         Vector3 Cur(int i) => cams[i].Position;
-        var curMid = Centroid(Cur); var solMid = Centroid(solution);
-        float scale = Spread(Cur, curMid) / Math.Max(Spread(solution, solMid), 1e-30f);
+        var curMid = Centroid(curSet, Cur); var solMid = Centroid(solSet, solution);
+        float scale = Spread(curSet, Cur, curMid) / Math.Max(Spread(solSet, solution, solMid), 1e-30f);
         var centres = new Vector3[n];
         for (int i = 0; i < n; i++) centres[i] = connected[i] ? curMid + (solution(i) - solMid) * scale : cams[i].Position;
         return centres;
@@ -910,6 +923,13 @@ public static class GlobalSfmInit
     public static async Task<string> ApplyAsync(List<CameraParams> cams, IReadOnlyList<RelativePose> edges,
         IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal, double[][]? fixedRotations = null,
         ILGPU.Runtime.Accelerator? accelerator = null)
+        => (await ApplyAsync(cams, edges, obs, pointCount, focal, fixedRotations, accelerator, null)).Summary;
+
+    /// <summary>As the overload above, with only the cameras whose current pose is meaningful (<paramref name="trusted"/>;
+    /// null = all) setting the frame, and returning which cameras the solution placed.</summary>
+    public static async Task<(string Summary, bool[] Connected)> ApplyAsync(List<CameraParams> cams,
+        IReadOnlyList<RelativePose> edges, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal,
+        double[][]? fixedRotations, ILGPU.Runtime.Accelerator? accelerator, bool[]? trusted)
     {
         int n = cams.Count;
         var current = cams.Select(RotationOf).ToArray();
@@ -924,10 +944,24 @@ public static class GlobalSfmInit
         else
         {
             rot = AverageRotations(n, edges, current, out connected);
-            var q = AlignFrame(rot, current, connected);
-            for (int i = 0; i < n; i++) if (connected[i]) rot[i] = Mul(rot[i], q);
+            var gauge = new bool[n];
+            bool anyGauge = false;
+            for (int i = 0; i < n; i++) { gauge[i] = connected[i] && (trusted == null || trusted[i]); anyGauge |= gauge[i]; }
+            // A placeholder rotation says nothing; with no trusted camera in the component its frame stays the root one.
+            if (anyGauge)
+            {
+                var q = AlignFrame(rot, current, gauge);
+                for (int i = 0; i < n; i++) if (connected[i]) rot[i] = Mul(rot[i], q);
+            }
         }
         var resid = edges.Select(e => AngleDeg(rot[e.B], Mul(e.R, rot[e.A]))).OrderBy(x => x).ToList();
+        // A camera the positioning has fewer than 2 observations of has an (almost) empty block in the camera system:
+        // the damped Cholesky fails on every step and NO camera moves (TruckFull b63). It is not placed here; the
+        // pipeline's re-registration places it against the adjusted points, like any unconnected camera.
+        var obsPerCam = new int[n];
+        foreach (var o in obs) obsPerCam[o.Camera]++;
+        int starved = 0;
+        for (int i = 0; i < n; i++) if (connected[i] && obsPerCam[i] < 2) { connected[i] = false; starved++; }
         PositioningResult gp;
         if (accelerator != null)
         {
@@ -936,6 +970,9 @@ public static class GlobalSfmInit
         }
         else gp = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal);
         var (centres, positioning) = (gp.Centres, gp.Summary);
+        // The positioners map onto every connected camera; re-map onto the trusted ones (a translation + scale, so
+        // this equals mapping the raw solution).
+        if (trusted != null) { var mapped = centres; centres = ToCurrentFrame(cams, connected, i => mapped[i], trusted); }
         int moved = 0;
         for (int i = 0; i < n; i++)
         {
@@ -944,8 +981,10 @@ public static class GlobalSfmInit
             cams[i].Position = centres[i];
             moved++;
         }
-        return $"{moved}/{n} cameras from {edges.Count} pair rotations and {obs.Count} track observations; pair rotation " +
+        return ($"{moved}/{n} cameras from {edges.Count} pair rotations and {obs.Count} track observations; pair rotation " +
                $"residual median {(resid.Count > 0 ? resid[resid.Count / 2] : double.NaN):F2} deg p90 " +
-               $"{(resid.Count > 0 ? resid[resid.Count * 9 / 10] : double.NaN):F2} deg; {positioning}";
+               $"{(resid.Count > 0 ? resid[resid.Count * 9 / 10] : double.NaN):F2} deg; " +
+               (starved > 0 ? $"{starved} connected camera(s) without 2 positioning observations left to re-registration; " : "") +
+               $"{positioning}", connected);
     }
 }

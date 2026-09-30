@@ -26,18 +26,36 @@ public class DrJohnsonMatchingTests
     /// pipeline's 979 px, 8,794 pairs sharing 200+ COLMAP points (_scratch/truckgt, gt_export.py).</summary>
     // MEASURED 2026-09-30 at (2000, 0.75): the replaced FAST+BRIEF 4,888 of 8,794; this detector 4,920 (1 level: 3,842).
     // The floor holds it at the old detector's level - the pyramid must not buy DrJohnson at Truck's expense.
-    [TestCase(8, 4850)]
-    public void TruckFull_TrueNeighbours_AreMatchable(int levels, int floor)
+    /// <summary>The DEFAULT detector must reproduce the replaced FAST+BRIEF on Truck: pairs and precision.</summary>
+    [Test]
+    public void TruckFull_DefaultDetector_HoldsTheOldQuality()
     {
         var dir = DataDir("truckgt");
         if (dir == null) Assert.Ignore("_scratch/truckgt not present");
-        var (ok, n, med) = Score(dir, new FeatureDetector(2000, 25, levels), new FeatureMatcher(0.75f, 64));
-        TestContext.Out.WriteLine($"TruckFull, {levels} level(s): {ok} of {n} true pairs verifiable, median correct {med}");
-        Assert.That(ok, Is.GreaterThanOrEqualTo(floor));
+        var (ok, n, med, err) = Score(dir, new FeatureDetector(), new FeatureMatcher(0.75f, 64));
+        TestContext.Out.WriteLine($"TruckFull default: {ok} of {n} true pairs verifiable, median correct {med}, median error {err:F2} px");
+        Assert.That(ok, Is.GreaterThanOrEqualTo(4850));
+        Assert.That(err, Is.LessThanOrEqualTo(0.35));
     }
 
-    internal static (int VerifiablePairs, int Pairs, double MedianCorrect) Score(string dir, FeatureDetector detector,
-        FeatureMatcher matcher)
+    // MEASURED 2026-09-30 (level 0 + coarse): 2000+1000 5,287 at 0.39 px; 2000+2000 6,076 at 0.41 px. The replaced FAST+BRIEF
+    // (all level 0): 4,888 (level-0 matches 0.31 px). ORB's single split budget: 4,920 - and the real run lost BA accuracy.
+    [TestCase(2000, 1000, 4850, 0.45)]
+    [TestCase(2000, 2000, 5500, 0.47)]
+    public void TruckFull_TrueNeighbours_AreMatchable(int fine, int coarse, int floor, double maxErrPx)
+    {
+        var dir = DataDir("truckgt");
+        if (dir == null) Assert.Ignore("_scratch/truckgt not present");
+        var (ok, n, med, err) = Score(dir, new FeatureDetector(fine, 25, 8, coarse, oriented: true), new FeatureMatcher(0.75f, 64));
+        TestContext.Out.WriteLine($"TruckFull {fine}+{coarse}: {ok} of {n} true pairs verifiable, median correct {med}, median error {err:F2} px");
+        Assert.That(ok, Is.GreaterThanOrEqualTo(floor));
+        Assert.That(err, Is.LessThanOrEqualTo(maxErrPx), "keypoint precision (BA lives on it)");
+    }
+
+    /// <returns>Pairs with 15+ correct matches; the median correct count per pair; and PRECISION - the median Sampson
+    /// error of every match under 8 px (a pair count alone cannot see keypoint precision, and BA can: 2026-09-30).</returns>
+    internal static (int VerifiablePairs, int Pairs, double MedianCorrect, double MedianErrPx) Score(string dir,
+        FeatureDetector detector, FeatureMatcher matcher)
     {
         var files = Directory.GetFiles(dir, "*.gray").OrderBy(f => f).ToArray();
         var feats = new List<ImageFeature>[files.Length];
@@ -49,6 +67,7 @@ public class DrJohnsonMatchingTests
         });
         var lines = File.ReadAllLines(Path.Combine(dir, "pairs.txt"));
         var correct = new int[lines.Length];
+        var errs = new System.Collections.Concurrent.ConcurrentBag<double>();
         Parallel.For(0, lines.Length, li =>
         {
             var t = lines[li].Split(' ');
@@ -58,12 +77,15 @@ public class DrJohnsonMatchingTests
             foreach (var m in matcher.Match(feats[a], feats[bIdx]))
             {
                 var pa = feats[a][m.IndexA]; var pb = feats[bIdx][m.IndexB];
-                if (Sampson(F, pa.X, pa.Y, pb.X, pb.Y) < 2.0) c++;
+                double e = Sampson(F, pa.X, pa.Y, pb.X, pb.Y);
+                if (e < 2.0) c++;
+                if (e < 8.0 && li % 4 == 0) errs.Add(e);
             }
             correct[li] = c;
         });
         var sorted = correct.OrderBy(x => x).ToArray();
-        return (correct.Count(c => c >= 15), correct.Length, sorted[sorted.Length / 2]);
+        var es = errs.OrderBy(x => x).ToArray();
+        return (correct.Count(c => c >= 15), correct.Length, sorted[sorted.Length / 2], es.Length > 0 ? es[es.Length / 2] : double.NaN);
     }
 
     /// <summary>Sampson distance of (xa, xb) under F, where xb^T F xa = 0.</summary>
@@ -75,18 +97,16 @@ public class DrJohnsonMatchingTests
         return Math.Abs(num) / Math.Sqrt(fx0 * fx0 + fx1 * fx1 + ftx0 * ftx0 + ftx1 * ftx1);
     }
 
-    // MEASURED 2026-09-30 (ORB-style detector): 40 / 66 / 53 / 77 of 119; the unoriented single-scale FAST+BRIEF it
-    // replaced: 7 at (2000, 0.75) and 11 at (2000, 0.9). Floors ~10% under the measurement.
-    [TestCase(2000, 0.75f, 36)]
-    [TestCase(2000, 0.9f, 60)]
-    [TestCase(4000, 0.75f, 48)]
-    [TestCase(4000, 0.9f, 70)]
-    public void DrJohnson_TrueNeighbours_AreMatchable(int features, float ratio, int floor)
+    // MEASURED 2026-09-30: 37 / 47 / 76 of 119 (median error 0.68 / 0.65 / 0.78 px); FAST+BRIEF: 7. Floors ~10% under.
+    [TestCase(2000, 1000, 0.75f, 33)]
+    [TestCase(2000, 2000, 0.75f, 42)]
+    [TestCase(2000, 2000, 0.9f, 68)]
+    public void DrJohnson_TrueNeighbours_AreMatchable(int fine, int coarse, float ratio, int floor)
     {
         var dir = DataDir();
         if (dir == null) Assert.Ignore("_scratch/djgt not present (export from the DrJohnson COLMAP model)");
-        var (ok, n, med) = Score(dir, new FeatureDetector(features), new FeatureMatcher(ratio, 64));
-        TestContext.Out.WriteLine($"{features} features, ratio {ratio}: {ok} of {n} true pairs verifiable (15+ correct matches), median correct {med}");
+        var (ok, n, med, err) = Score(dir, new FeatureDetector(fine, 25, 8, coarse, oriented: true), new FeatureMatcher(ratio, 64));
+        TestContext.Out.WriteLine($"DrJohnson {fine}+{coarse}, ratio {ratio}: {ok} of {n} true pairs verifiable (15+ correct matches), median correct {med}, median error {err:F2} px");
         Assert.That(ok, Is.GreaterThanOrEqualTo(floor), "true neighbours must stay matchable");
     }
 }

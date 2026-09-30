@@ -55,6 +55,31 @@ public class ScaleGaugedSolutionTests
             Assert.That(Vector3.Distance(g.PointAt(p), pts[p]), Is.LessThan(3e-3f), $"point {p}");
     }
 
+    /// <summary>ToCurrentFrame's trusted mask (2026-09-30): views the depth cascade could not pose enter SfM with a
+    /// placeholder pose (a copy of one posed view's). Even when they are the MAJORITY they must not set the frame; the
+    /// solution must land on the trusted cameras' own centre and scale.</summary>
+    [Test]
+    public void ToCurrentFrame_PlaceholdersDoNotSetTheFrame()
+    {
+        var rng = new Random(7);
+        Vector3 R() => new((float)rng.NextDouble() * 4 - 2, (float)rng.NextDouble() * 4 - 2, (float)rng.NextDouble() * 4 - 2);
+        int n = 70;
+        var truth = Enumerable.Range(0, n).Select(_ => R()).ToArray();
+        var cams = new List<CameraParams>();
+        var trusted = new bool[n];
+        for (int i = 0; i < n; i++)
+        {
+            trusted[i] = i < 30;
+            cams.Add(new CameraParams { Position = trusted[i] ? truth[i] : truth[0] });   // placeholders: one copied pose
+        }
+        var connected = Enumerable.Repeat(true, n).ToArray();
+        var sol = truth.Select(p => p * 0.01f + new Vector3(3, 1, -4)).ToArray();
+        var centres = GlobalSfmInit.ToCurrentFrame(cams, connected, i => sol[i], trusted);
+        var errs = Enumerable.Range(0, n).Select(i => Vector3.Distance(centres[i], truth[i])).OrderBy(e => e).ToArray();
+        Assert.That(errs[n / 2], Is.LessThan(0.1f), "median camera error (spread ~2)");
+        Assert.That(errs[^1], Is.LessThan(0.25f), "worst camera, placeholders included, lands on its true place");
+    }
+
     /// <summary>GlobalSfmInit.ToCurrentFrame (2026-09-30): the positioning left 3 of 251 TruckFull cameras wildly off; the
     /// mean/RMS frame match let them carry the spread and shrank the real cluster ~390x. A robust match must place the
     /// inliers at the current frame's scale.</summary>

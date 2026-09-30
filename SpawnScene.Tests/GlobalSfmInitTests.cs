@@ -416,6 +416,38 @@ public class GlobalSfmInitTests
         Assert.That(global, Is.LessThan(2 * floor + 0.0005), "BA from the global init must reach the floor");
     }
 
+    /// <summary>
+    /// TruckFull b63 (2026-09-30): the track sampling left some connected cameras with NO positioning observation; their
+    /// block of the camera system was zero, every damped step failed "not positive definite", and no camera moved from the
+    /// random start (99.6% off COLMAP). A starved camera must be left out and reported, and everyone else placed.
+    /// </summary>
+    [Test]
+    public void Apply_ACameraWithoutObservations_DoesNotStallTheRest()
+    {
+        var cams = TruckCameras();
+        if (cams == null) Assert.Ignore("Truck dataset not in this checkout");
+        var rng = new Random(9);
+        int n = cams.Count;
+        var edges = new List<GlobalSfmInit.RelativePose>();
+        foreach (var (a, b) in NeighbourPairs(n))
+        {
+            var (r, t) = Relative(cams[a], cams[b]);
+            edges.Add(new GlobalSfmInit.RelativePose(a, b, GlobalSfmInit.Mul(SmallRotation(rng, 0.3), r), t, 200));
+        }
+        var (obs, points, focal) = SyntheticTracks(cams, rng, 3000, 0.5);
+        const int starved = 50;
+        obs = obs.Where(o => o.Camera != starved).ToList();   // camera 50 keeps its pairs, loses every track observation
+        var start = cams.Select(Copy).ToList();
+        foreach (var c in start) c.Position += new Vector3((float)rng.NextDouble() - 0.5f, 0, (float)rng.NextDouble() - 0.5f) * 0.3f;
+        string summary = GlobalSfmInit.Apply(start, edges, obs, points, focal);
+        TestContext.Out.WriteLine(summary);
+        Assert.That(summary, Does.Contain("1 connected camera(s) without 2 positioning observations"));
+        var est = start.Cast<CameraParams?>().ToList();
+        est[starved] = null;
+        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out _, out _), Is.True);
+        Assert.That(acc.MedianPosFrac, Is.LessThan(0.01), "every other camera placed");
+    }
+
     [Test]
     public void Apply_UnbendsABentStart()
     {

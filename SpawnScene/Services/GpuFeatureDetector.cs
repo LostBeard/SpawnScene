@@ -23,10 +23,16 @@ public sealed class GpuFeatureDetector
 {
     const int Margin = 4, CellSize = 8;
 
-    private readonly int _maxFeatures, _threshold, _levels;
-    public GpuFeatureDetector(int maxFeatures = 2000, int fastThreshold = 25, int levels = 8)
+    private readonly int _maxFeatures, _threshold, _levels, _coarseFeatures;
+    private readonly bool _oriented;
+    /// <summary>See <see cref="FeatureDetector"/>'s constructor: level 0 keeps <paramref name="maxFeatures"/>, the
+    /// coarser levels add <paramref name="coarseFeatures"/>.</summary>
+    public GpuFeatureDetector(int maxFeatures = 2000, int fastThreshold = 25, int levels = 1, int coarseFeatures = 0,
+        bool oriented = false)
     {
         _maxFeatures = maxFeatures;
+        _coarseFeatures = coarseFeatures;
+        _oriented = oriented;
         _threshold = fastThreshold;
         _levels = Math.Max(1, levels);
     }
@@ -240,7 +246,7 @@ public sealed class GpuFeatureDetector
     {
         var k = For(accelerator);
         var sizes = FeatureDetector.LevelSizes(width, height, _levels);
-        var quota = FeatureDetector.LevelQuota(_maxFeatures, _levels);
+        var quota = FeatureDetector.LevelQuota(_maxFeatures, _coarseFeatures, _levels);
         var result = new List<ImageFeature>();
         var levelBufs = new List<MemoryBuffer1D<int, Stride1D.Dense>>();
         const int Edge = FeatureDetector.EdgeBorder;
@@ -295,7 +301,8 @@ public sealed class GpuFeatureDetector
                 using (var bins = accelerator.Allocate1D<int>(features.Count))
                 using (var desc = accelerator.Allocate1D<int>((long)features.Count * 8))
                 {
-                    k.Orient(features.Count, xyBuf.View, level, k.Disc.View, k.Dirs.View, bins.View, w);
+                    if (_oriented) k.Orient(features.Count, xyBuf.View, level, k.Disc.View, k.Dirs.View, bins.View, w);
+                    else bins.MemSetToZero();
                     k.BlurRows(n, level, k.Blur.View, tmp.View, w);
                     k.BlurCols(n, tmp.View, k.Blur.View, smooth.View, w, h);
                     k.Brief(features.Count, xyBuf.View, bins.View, smooth.View, k.Steered.View, desc.View, w);

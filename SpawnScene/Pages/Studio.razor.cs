@@ -306,6 +306,10 @@ public partial class Studio : IAsyncDisposable
                 DiagnoseGlobalWithGroundTruthRotations = ggr is "1" or "true";
             if (query.TryGetValue("globalinit", out var gsi))
                 _multiViewService.UseGlobalSfmInit = gsi is "1" or "true";
+            // &pairangle=N: BA pair candidates within N degrees by cascade pose (default 45; 180 = every pair with 15+ matches).
+            if (query.TryGetValue("pairangle", out var pa) && float.TryParse(pa, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var paf))
+                _multiViewService.MaxPairAngleDeg = paf;
             if (query.TryGetValue("bacg", out var bacg) && int.TryParse(bacg, out var bacgi))
                 _multiViewService.BundleAdjustCgIterations = bacgi;
             if (query.TryGetValue("barel", out var barel) && double.TryParse(barel, System.Globalization.NumberStyles.Float,

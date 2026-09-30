@@ -380,8 +380,11 @@ public class GlobalSfmInitTests
     /// real TruckFull failure (bent cascade -> 1.9-2.5%, COLMAP start -> 0.1%) needs something these tracks lack, and only a
     /// real run can show the global init fixes it. This test holds the init itself to its start and the chain to the floor.
     /// </remarks>
-    [Test]
-    public void Apply_ThenBundleAdjust_EstimatedRotations()
+    // focalScale 1.045: production has no COLMAP focal - the global init gets the DAv3 per-view median (TruckFull 609.7
+    // vs the 583.9 BA converges to, 4.5% high); every real run so far passed &globalfocal=583.7 (2026-09-30).
+    [TestCase(1.0)]
+    [TestCase(1.045)]
+    public void Apply_ThenBundleAdjust_EstimatedRotations(double focalScale)
     {
         const float bend = 2.5f;
         var problem = BundleAdjusterTruckScaleTests.BuildTruckProblem(seed: 5);
@@ -402,9 +405,11 @@ public class GlobalSfmInitTests
         var bent = Bent(cams, bend);
         TriangulateAndAdjust(bent, cams, obs, "control: BA from the bent start");
         var start = bent.Select(Copy).ToList();
-        string summary = GlobalSfmInit.Apply(start, edges, obs, points, focal);
+        double focalIn = focal * focalScale;
+        foreach (var c in start) { c.FocalX = (float)focalIn; c.FocalY = (float)focalIn; }
+        string summary = GlobalSfmInit.Apply(start, edges, obs, points, focalIn);
         TestContext.Out.WriteLine(summary);
-        var (initStart, global) = TriangulateAndAdjust(start, cams, obs, "global init + BA");
+        var (initStart, global) = TriangulateAndAdjust(start, cams, obs, $"global init (focal x{focalScale}) + BA");
         Assert.That(floor, Is.LessThan(0.005), "the data must pin the truth down, or no start can be judged");
         // ~1.1 deg rotations at ~1.4% per degree (GlobalPositioningRobust_EstimatedRotations) plus the 3% outliers: 3.35%.
         Assert.That(initStart, Is.LessThan(0.05), "the global init itself");

@@ -570,7 +570,7 @@ public partial class Studio
         Console.WriteLine(
             $"[BA-GT] {label}: {acc.Compared} cams, pos RMS {(acc.Spread > 0 ? acc.PositionRms / acc.Spread : float.NaN):P2} of spread, " +
             $"median {acc.MedianPosFrac:P2} p90 {acc.P90PosFrac:P2}, fwd median {acc.MedianForwardDeg:F2}deg p90 {acc.P90ForwardDeg:F2}deg, " +
-            $"scale {acc.Scale:F4}" + (worst >= 0 ? $", worst view {worst} {posFrac[worst]:P1}" : ""));
+            $"scale {acc.Scale:F4}, aligned on {acc.AlignedOn}/{acc.Compared}" + (worst >= 0 ? $", worst view {worst} {posFrac[worst]:P1}" : ""));
     }
 
     /// <summary>

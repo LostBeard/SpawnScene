@@ -487,7 +487,7 @@ public static class WorldSpaceGeometry
     /// </summary>
     public readonly record struct CameraSetAccuracy(
         int Compared, float Scale, float PositionRms, float Spread,
-        float MedianPosFrac, float P90PosFrac, float MedianForwardDeg, float P90ForwardDeg);
+        float MedianPosFrac, float P90PosFrac, float MedianForwardDeg, float P90ForwardDeg, int AlignedOn = 0);
 
     /// <summary>
     /// Align <paramref name="estimated"/> onto <paramref name="reference"/> by Umeyama on
@@ -520,7 +520,15 @@ public static class WorldSpaceGeometry
             refCams.Add(reference[i]!);
         }
         if (src.Count < 3) return false;
-        if (!TryUmeyamaSimilarity(src, dst, out float s, out var R, out var t, out float rms))
+        // First fit on the estimates near their coordinate-wise median centre (within 10x the median distance), so
+        // a camera thrown 1e4x the spread away cannot decide the initial alignment; the rounds below refine it.
+        var medC = new Vector3(Median(src.Select(v => v.X)), Median(src.Select(v => v.Y)), Median(src.Select(v => v.Z)));
+        float medD = Median(src.Select(v => Vector3.Distance(v, medC)));
+        var s0 = new List<Vector3>(); var d0 = new List<Vector3>();
+        for (int i = 0; i < src.Count; i++)
+            if (Vector3.Distance(src[i], medC) <= 10f * medD) { s0.Add(src[i]); d0.Add(dst[i]); }
+        if (s0.Count < 3) { s0 = src; d0 = dst; }
+        if (!TryUmeyamaSimilarity(s0, d0, out float s, out var R, out var t, out _))
             return false;
 
         float spread = 0f;
@@ -531,7 +539,30 @@ public static class WorldSpaceGeometry
         spread /= dst.Count;
         if (!(spread > 1e-8f)) return false;
 
+        // ROBUST alignment: refit on the cameras within 3x the median error, then score ALL cameras. A plain
+        // least-squares fit lets a few wildly misplaced cameras drag the whole alignment: TruckFull's global init
+        // (3 of 251 cameras thrown far off) read "median 100.66%, fwd 9.47deg" while BA from that very init landed
+        // 0.10% from COLMAP (2026-09-30). The misplaced cameras still count in every statistic below.
+        int alignedOn = src.Count;
+        for (int round = 0; round < 4; round++)
+        {
+            var fit = new Similarity3(s, R, t);
+            var err = new float[src.Count];
+            for (int i = 0; i < src.Count; i++) err[i] = Vector3.Distance(fit.Apply(src[i]), dst[i]);
+            var sortedErr = (float[])err.Clone();
+            Array.Sort(sortedErr);
+            float limit = Math.Max(3f * sortedErr[sortedErr.Length / 2], 1e-3f * spread);
+            var fs = new List<Vector3>(); var fd = new List<Vector3>();
+            for (int i = 0; i < src.Count; i++) if (err[i] <= limit) { fs.Add(src[i]); fd.Add(dst[i]); }
+            if (fs.Count == alignedOn && round > 0) break;
+            if (fs.Count < 3 || !TryUmeyamaSimilarity(fs, fd, out float s2, out var R2, out var t2, out _)) break;
+            s = s2; R = R2; t = t2; alignedOn = fs.Count;
+        }
+
         var sim = new Similarity3(s, R, t);
+        double sumSq = 0;
+        for (int i = 0; i < src.Count; i++) sumSq += Vector3.DistanceSquared(sim.Apply(src[i]), dst[i]);
+        float rms = (float)Math.Sqrt(sumSq / src.Count);
         perViewPosFrac = new float[src.Count];
         perViewForwardDeg = new float[src.Count];
         for (int i = 0; i < src.Count; i++)
@@ -549,8 +580,16 @@ public static class WorldSpaceGeometry
             posSorted[posSorted.Length / 2],
             posSorted[(int)(posSorted.Length * 0.9f)],
             fwdSorted[fwdSorted.Length / 2],
-            fwdSorted[(int)(fwdSorted.Length * 0.9f)]);
+            fwdSorted[(int)(fwdSorted.Length * 0.9f)], alignedOn);
         return true;
+    }
+
+    private static float Median(IEnumerable<float> values)
+    {
+        var a = values.ToArray();
+        if (a.Length == 0) return 0f;
+        Array.Sort(a);
+        return (a.Length & 1) == 1 ? a[a.Length / 2] : 0.5f * (a[a.Length / 2 - 1] + a[a.Length / 2]);
     }
 
     /// <summary>

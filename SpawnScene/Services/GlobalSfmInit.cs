@@ -247,6 +247,109 @@ public static class GlobalSfmInit
         return front;
     }
 
+    /// <summary>
+    /// Loop (triplet) consistency: keep an edge only when at least <paramref name="minConsistent"/> triangles through it
+    /// compose to within <paramref name="maxDeg"/> of the identity (R_ca R_bc R_ab ~ I). An edge in no triangle cannot be
+    /// checked and is dropped. Zach et al. 2010; the principle of GLOMAP's view-graph filtering.
+    /// </summary>
+    /// <remarks>
+    /// MEASURED 2026-09-30 (DrJohnson, SIFT + 5-point E against COLMAP, Research/sfm-front-end-drjohnson-2026-09-30.md):
+    /// 31% of verified pairs were off by 90-180 deg - REPEATED STRUCTURE (a wall matched to the opposite wall), which
+    /// passes every two-view check. With 1 consistent triangle at 5 deg the kept pairs were 1.4 / 3.0 deg (median / p75)
+    /// and the averaged rotations of the connected core 4.3 / 6.1 deg, against 2.8 / 110 unfiltered. The cost is
+    /// coverage: cameras outside the consistent core are left to registration against its points.
+    /// </remarks>
+    public static List<RelativePose> FilterByLoops(IReadOnlyList<RelativePose> edges, double maxDeg = 5, int minConsistent = 1)
+    {
+        var rel = new Dictionary<(int, int), double[]>();
+        var nb = new Dictionary<int, HashSet<int>>();
+        foreach (var e in edges)
+        {
+            if (e.A == e.B || rel.ContainsKey((e.A, e.B)) || rel.ContainsKey((e.B, e.A))) continue;
+            rel[(e.A, e.B)] = e.R;
+            if (!nb.TryGetValue(e.A, out var na)) nb[e.A] = na = new HashSet<int>();
+            if (!nb.TryGetValue(e.B, out var nbB)) nb[e.B] = nbB = new HashSet<int>();
+            na.Add(e.B); nbB.Add(e.A);
+        }
+        double[] Rel(int i, int j) => rel.TryGetValue((i, j), out var r) ? r : Transpose(rel[(j, i)]);
+        var identity = new double[] { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+        var kept = new List<RelativePose>();
+        foreach (var e in edges)
+        {
+            if (!rel.TryGetValue((e.A, e.B), out var rab) || !ReferenceEquals(rab, e.R)) continue;   // first of duplicates
+            int ok = 0;
+            foreach (int c in nb[e.A])
+            {
+                if (c == e.B || !nb[e.B].Contains(c)) continue;
+                var cycle = Mul(Rel(c, e.A), Mul(Rel(e.B, c), e.R));
+                if (AngleDeg(cycle, identity) <= maxDeg && ++ok >= minConsistent) break;
+            }
+            if (ok >= minConsistent) kept.Add(e);
+        }
+        return kept;
+    }
+
+    /// <summary>
+    /// View-graph focal calibration (GLOMAP view_graph_calibration.cc, after Fetzer et al.): one focal shared by every
+    /// view, the one for which each pair's E = K^T F K is closest to a valid essential matrix, under a Cauchy loss of
+    /// scale 1e-2. The per-pair residual is GLOMAP's FetzerFocalLengthSameCameraCost, ported as is. Null when too few
+    /// pairs support it or the estimate leaves [0.1, 10] x the prior (GLOMAP's thres_lower/higher_ratio).
+    /// </summary>
+    /// <remarks>
+    /// MEASURED 2026-09-30 (Python port of the same cost on SIFT F-RANSAC pairs): DrJohnson 1046.9 vs COLMAP 1035.5
+    /// (+1.1%) from DAv3's 812 (-22%); TruckFull 588.0 vs 581.9 (+1.0%) from 609.7. A 22% focal error made DrJohnson's
+    /// pair rotations 3-4x worse (Research/sfm-front-end-drjohnson-2026-09-30.md).
+    /// </remarks>
+    public static (double Focal, int Supporting, int Pairs)? CalibrateFocal(IReadOnlyList<double[]> fundamentals,
+        double cx, double cy, double prior, int minSupporting = 8)
+    {
+        if (fundamentals.Count == 0 || !(prior > 0)) return null;
+        var k = new double[] { 1, 0, cx, 0, 1, cy, 0, 0, 1 };
+        var ds = new List<(double[] D01, double[] D12)>(fundamentals.Count);
+        foreach (var f in fundamentals)
+        {
+            var g = Mul(Mul(Transpose(k), f), k);
+            var u = new double[9]; var sv = new double[3]; var v = new double[9];
+            Svd3(g, u, sv, v);
+            double v00 = v[0], v01 = v[3], v02 = v[6], v10 = v[1], v11 = v[4], v12 = v[7];   // columns 0 and 1 of V
+            double u00 = u[0], u01 = u[3], u02 = u[6], u10 = u[1], u11 = u[4], u12 = u[7];   // columns 0 and 1 of U
+            double s0 = sv[0], s1 = sv[1];
+            var ai = new[] { s0 * s0 * (v00 * v00 + v01 * v01), s0 * s1 * (v00 * v10 + v01 * v11), s1 * s1 * (v10 * v10 + v11 * v11) };
+            var aj = new[] { u10 * u10 + u11 * u11, -(u00 * u10 + u01 * u11), u00 * u00 + u01 * u01 };
+            var bi = new[] { s0 * s0 * v02 * v02, s0 * s1 * v02 * v12, s1 * s1 * v12 * v12 };
+            var bj = new[] { u12 * u12, -(u02 * u12), u02 * u02 };
+            double[] D(int a, int b) => new[] { ai[a] * aj[b] - ai[b] * aj[a], ai[a] * bj[b] - ai[b] * bj[a],
+                                                bi[a] * aj[b] - bi[b] * aj[a], bi[a] * bj[b] - bi[b] * bj[a] };
+            ds.Add((D(1, 0), D(2, 1)));
+        }
+        static double Res2(double[] d01, double[] d12, double f)
+        {
+            double ff = f * f;
+            double di = ff * d01[0] + d01[1], dj = ff * d12[0] + d12[2];
+            if (di == 0) di = 1e-6;
+            if (dj == 0) dj = 1e-6;
+            double k0 = -(ff * d01[2] + d01[3]) / di, k1 = -(ff * d12[1] + d12[3]) / dj;
+            double r0 = (ff - k0) / ff, r1 = (ff - k1) / ff;
+            return r0 * r0 + r1 * r1;
+        }
+        double Cost(double f) { double c = 0; foreach (var (a, b) in ds) c += 1e-4 * Math.Log(1 + Res2(a, b, f) / 1e-4); return c; }
+        // 1-D: a log-spaced scan over [0.3, 3] x prior, then two local refinements (the cost is cheap, the scan global).
+        double best = prior, bestCost = double.MaxValue;
+        for (int i = 0; i < 400; i++)
+        {
+            double f = prior * Math.Exp(Math.Log(0.3) + (Math.Log(3) - Math.Log(0.3)) * i / 399.0), c = Cost(f);
+            if (c < bestCost) { bestCost = c; best = f; }
+        }
+        foreach (double step in new[] { 0.01, 0.001 })
+        {
+            double center = best;
+            for (int i = -20; i <= 20; i++) { double f = center * Math.Exp(step * i), c = Cost(f); if (c < bestCost) { bestCost = c; best = f; } }
+        }
+        if (best / prior > 10 || best / prior < 0.1) return null;
+        int supporting = ds.Count(d => Math.Sqrt(Res2(d.D01, d.D12, best)) <= 2.0);
+        return supporting >= minSupporting ? (best, supporting, ds.Count) : null;
+    }
+
     // ── rotation averaging ───────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -935,6 +1038,7 @@ public static class GlobalSfmInit
         var current = cams.Select(RotationOf).ToArray();
         double[][] rot;
         bool[] connected;
+        string loopNote = "";
         if (fixedRotations != null)
         {
             // DIAGNOSIS: rotations given (already in the cameras' frame) - positioning only.
@@ -943,6 +1047,9 @@ public static class GlobalSfmInit
         }
         else
         {
+            var consistent = FilterByLoops(edges);
+            loopNote = $"loop-consistent pairs {consistent.Count} of {edges.Count}; ";
+            edges = consistent;
             rot = AverageRotations(n, edges, current, out connected);
             var gauge = new bool[n];
             bool anyGauge = false;
@@ -963,7 +1070,11 @@ public static class GlobalSfmInit
         int starved = 0;
         for (int i = 0; i < n; i++) if (connected[i] && obsPerCam[i] < 2) { connected[i] = false; starved++; }
         PositioningResult gp;
-        if (accelerator != null)
+        int connectedCount = connected.Count(c => c);
+        if (obs.Count == 0 || connectedCount < 2)
+            gp = new PositioningResult(cams.Select(c => c.Position).ToArray(),
+                $"positioning skipped: {obs.Count} observations, {connectedCount} connected camera(s)", false, 0, obs.Count);
+        else if (accelerator != null)
         {
             using var gpu = new GpuGlobalPositioner(accelerator, cams, rot, connected, obs, pointCount, focal);
             gp = await gpu.SolveAsync();
@@ -982,8 +1093,8 @@ public static class GlobalSfmInit
             moved++;
         }
         return ($"{moved}/{n} cameras from {edges.Count} pair rotations and {obs.Count} track observations; pair rotation " +
-               $"residual median {(resid.Count > 0 ? resid[resid.Count / 2] : double.NaN):F2} deg p90 " +
-               $"{(resid.Count > 0 ? resid[resid.Count * 9 / 10] : double.NaN):F2} deg; " +
+               (resid.Count > 0 ? $"residual median {resid[resid.Count / 2]:F2} deg p90 {resid[resid.Count * 9 / 10]:F2} deg; " : "residual n/a (no pairs); ") +
+               loopNote +
                (starved > 0 ? $"{starved} connected camera(s) without 2 positioning observations left to re-registration; " : "") +
                $"{positioning}", connected);
     }

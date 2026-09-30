@@ -270,6 +270,22 @@ public class MultiViewGenerationService
             var tg = System.Diagnostics.Stopwatch.StartNew();
             var shared = cams.Select(c => 0.5 * (c.FocalX + c.FocalY)).OrderBy(x => x).ToList();
             double focal = GlobalSfmFocalOverride ?? shared[shared.Count / 2];
+            // View-graph focal calibration from the verified pairs' F (one camera: every view the same size and centre).
+            // DAv3's focal was 22% off on DrJohnson (812 vs COLMAP 1035): the calibrated one, measured, is ~1%.
+            bool oneIntrinsics = cams.Select(c => (c.Width, c.Height, c.CenterX, c.CenterY)).Distinct().Count() == 1;
+            if (GlobalSfmFocalOverride == null && oneIntrinsics)
+            {
+                var fs = ransac.Where(r => r != null).Select(r => r!.F).ToList();
+                var cal = GlobalSfmInit.CalibrateFocal(fs, cams[0].CenterX, cams[0].CenterY, focal);
+                Console.WriteLine(cal is { } c0
+                    ? $"[BA] focal calibration: {c0.Focal:F1} from {c0.Supporting} of {c0.Pairs} verified pairs (DAv3 median {focal:F1})"
+                    : $"[BA] focal calibration: no estimate from {fs.Count} verified pairs - DAv3 median {focal:F1} kept");
+                if (cal is { } c1)
+                {
+                    focal = c1.Focal;
+                    foreach (var cam in cams) { cam.FocalX = (float)focal; cam.FocalY = (float)focal; }   // BA starts here too
+                }
+            }
             var rel = new List<GlobalSfmInit.RelativePose>();
             for (int c = 0; c < candidates.Count; c++)
             {
@@ -323,10 +339,13 @@ public class MultiViewGenerationService
             if (UseGpuGlobalPositioning && !_gpu.IsInitialized) await _gpu.InitializeAsync();
             var (summary, connected) = await GlobalSfmInit.ApplyAsync(cams, rel, gpObs, gpPoints, focal, gtRot,
                 UseGpuGlobalPositioning ? _gpu.WebGPUAccelerator : null, placeholders == null ? null : trusted);
-            for (int i = 0; i < cams.Count; i++) if (!trusted[i] && !connected[i]) unplaced.Add(i);
-            if (placeholders != null)
-                Console.WriteLine($"[BA] views the cascade could not pose: {trusted.Count(t => !t)}, placed by the global init " +
-                    $"{trusted.Count(t => !t) - unplaced.Count}; the rest go to re-registration");
+            // Every camera outside the global solution goes to registration against its points - a cascade pose included:
+            // the loop-consistency filter leaves out cameras whose only pairs were inconsistent (repeated structure), and
+            // on a capture like DrJohnson their cascade poses are no better (105% off COLMAP).
+            for (int i = 0; i < cams.Count; i++) if (!connected[i]) unplaced.Add(i);
+            if (unplaced.Count > 0)
+                Console.WriteLine($"[BA] global init placed {cams.Count - unplaced.Count} of {cams.Count} cameras " +
+                    $"({trusted.Count(t => !t)} entered without a cascade pose); {unplaced.Count} go to re-registration");
             Console.WriteLine($"[BA] global SfM init (focal {focal:F1}): {rel.Count} of {passed} verified pairs gave a relative pose, {gpPoints} track " +
                 $"points; {summary}; {tg.Elapsed.TotalSeconds:F1}s");
             ProbeCameras("global SfM init", cams, new HashSet<int>(), null);

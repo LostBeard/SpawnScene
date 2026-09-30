@@ -136,6 +136,11 @@ public sealed class GpuGlobalPositioner : IDisposable
 
     public void Dispose()
     {
+        // Submit whatever is still queued (the constructor's clears at least) BEFORE destroying the buffers: on WebGPU an
+        // ILGPU clear is deferred to the next submit, and a buffer destroyed first fails that submit - DrJohnson b67
+        // (2026-09-30): no observations, SolveAsync returned at once, and the 4-byte _off's pending clear broke the next
+        // unrelated dispatch ("Storage 4B used in submit while destroyed").
+        _acc.Flush();
         foreach (var b in new MemoryBuffer?[] { _oc, _op, _pStart, _pObs, _cStart, _cObs, _camOrigBuf, _off, _live, _hist, _counts,
             _v, _c, _cn, _x, _xn, _d, _dn, _ob, _rawP, _rawC, _ps, _cs, _sys, _rhs, _step, _cost, _partial, _sc, _ang })
             b?.Dispose();

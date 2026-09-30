@@ -240,16 +240,16 @@ public class GlobalSfmInitTests
 
     /// <summary>A smooth bend, the shape the depth cascade produces: each camera and its position rotated progressively about
     /// the capture centroid (up to ~15 deg across the capture) and stretched, plus a few grossly misplaced views.</summary>
-    static List<CameraParams> Bent(List<CameraParams> cams)
+    static List<CameraParams> Bent(List<CameraParams> cams, float strength = 1)
     {
         int n = cams.Count;
         var centre = cams.Aggregate(Vector3.Zero, (s, c) => s + c.Position) / n;
         var start = cams.Select(Copy).ToList();
         for (int i = 0; i < n; i++)
         {
-            float ang = 0.26f * (i / (float)n - 0.5f);
+            float ang = strength * 0.26f * (i / (float)n - 0.5f);
             var q = Quaternion.CreateFromAxisAngle(Vector3.UnitY, ang);
-            start[i].Position = centre + Vector3.Transform(start[i].Position - centre, q) * (1 + 0.1f * (i / (float)n));
+            start[i].Position = centre + Vector3.Transform(start[i].Position - centre, q) * (1 + strength * 0.1f * (i / (float)n));
             start[i].Forward = Vector3.Transform(start[i].Forward, q);
             start[i].Up = Vector3.Transform(start[i].Up, q);
         }
@@ -286,6 +286,120 @@ public class GlobalSfmInitTests
         TestContext.Out.WriteLine($"[{TestContext.CurrentContext.Test.Name}] {sw.Elapsed.TotalSeconds:F1}s {summary}: " +
             $"centres {acc.PositionRms / acc.Spread:P3} of spread, median {acc.MedianPosFrac:P3}");
         Assert.That(acc.MedianPosFrac, Is.LessThan(0.01));
+    }
+
+    /// <summary>
+    /// Robust positioning fed ESTIMATED rotations, as the pipeline does: AverageRotations over noisy pairs with 10% garbage
+    /// pairs, frame-aligned to the truth. Real TruckFull (2026-09-28): pair rotations 0.86 deg median off COLMAP (p90 17 deg),
+    /// averaged ~1.16 deg. Every observation of a camera then shares its rotation error, so this is a bias, not noise.
+    /// </summary>
+    [TestCase(0.5, TestName = "GlobalPositioningRobust_EstimatedRotations_Pair05")]
+    [TestCase(1.5, TestName = "GlobalPositioningRobust_EstimatedRotations_Pair15")]
+    public void GlobalPositioningRobust_EstimatedRotations(double pairNoiseDeg)
+    {
+        var cams = TruckCameras();
+        if (cams == null) Assert.Ignore("Truck dataset not in this checkout");
+        var rng = new Random(31);
+        int n = cams.Count;
+        var truthR = cams.Select(GlobalSfmInit.RotationOf).ToArray();
+        var edges = new List<GlobalSfmInit.RelativePose>();
+        foreach (var (a, b) in NeighbourPairs(n))
+        {
+            var (r, t) = Relative(cams[a], cams[b]);
+            r = rng.NextDouble() < 0.10 ? SmallRotation(rng, 60) : GlobalSfmInit.Mul(SmallRotation(rng, pairNoiseDeg), r);
+            edges.Add(new GlobalSfmInit.RelativePose(a, b, r, t, 100 + rng.Next(200)));
+        }
+        var rot = GlobalSfmInit.AverageRotations(n, edges, truthR, out var connected);
+        var q = GlobalSfmInit.AlignFrame(rot, truthR, connected);
+        for (int i = 0; i < n; i++) rot[i] = GlobalSfmInit.Mul(rot[i], q);
+        var rotErr = Enumerable.Range(0, n).Select(i => GlobalSfmInit.AngleDeg(rot[i], truthR[i])).OrderBy(x => x).ToList();
+        var (obs, points, focal) = SyntheticTracks(cams, rng, 12000, 0.5, true, 0.10);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var (centres, _, summary) = GlobalSfmInit.GlobalPositioningRobust(cams, rot, connected, obs, points, focal);
+        var est = cams.Select((c, i) => { var k = Copy(c); k.Position = centres[i]; return (CameraParams?)k; }).ToList();
+        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, cams.Cast<CameraParams?>().ToList(), out var acc, out var perView, out _), Is.True);
+        var worst = Enumerable.Range(0, n).OrderByDescending(i => perView[i]).Take(8).Select(i => $"#{i} {perView[i]:P1} (rot {GlobalSfmInit.AngleDeg(rot[i], truthR[i]):F2} deg)");
+        TestContext.Out.WriteLine($"  rotations: median {rotErr[n / 2]:F3} deg, p90 {rotErr[n * 9 / 10]:F3}, max {rotErr[^1]:F3}");
+        TestContext.Out.WriteLine($"  worst: {string.Join(", ", worst)}; over 2%: {perView.Count(f => f > 0.02f)}");
+        TestContext.Out.WriteLine($"[{TestContext.CurrentContext.Test.Name}] {sw.Elapsed.TotalSeconds:F1}s {summary}: " +
+            $"centres {acc.PositionRms / acc.Spread:P3} of spread, median {acc.MedianPosFrac:P3}");
+        // A camera's rotation error tilts every one of its bearings alike, so no positioning can undo it: the error is
+        // linear in it. MEASURED 2026-09-29: 0.334 deg -> 0.463% median, 1.116 deg -> 1.573% (1.39 and 1.41 % per degree).
+        // BA refines it away afterwards (Apply_ThenBundleAdjust_EstimatedRotations); the bar catches a solver that stops
+        // being limited by the rotations alone (e.g. without rejection rounds 5% mismatches left 7%).
+        Assert.That(acc.MedianPosFrac, Is.LessThan(0.02 * rotErr[n / 2] + 0.002));
+    }
+
+    /// <summary>Production's next step after the init: triangulate every track from the given poses, then bundle-adjust
+    /// with production's settings. Returns the median centre error as a fraction of spread.</summary>
+    static (double Start, double Final) TriangulateAndAdjust(List<CameraParams> start, List<CameraParams> truth, List<BundleAdjuster.Observation> obs, string label)
+    {
+        var byPoint = obs.GroupBy(o => o.Point).OrderBy(g => g.Key);
+        var points = new List<Vector3>();
+        var baObs = new List<BundleAdjuster.Observation>();
+        foreach (var g in byPoint)
+        {
+            var track = g.Select(o => (o.Camera, o.U, o.V)).ToList();
+            if (!BundleAdjuster.Triangulate(start, track, out var x)) continue;
+            int id = points.Count;
+            points.Add(x);
+            foreach (var (c, u, v) in track) baObs.Add(new BundleAdjuster.Observation(c, id, u, v));
+        }
+        var init = start.Select(Copy).ToList();
+        var (ba, result) = BundleAdjusterTruckScaleTests.SolveLikeProduction(init, points, baObs);
+        for (int i = 0; i < init.Count; i++) ba.WriteCamera(i, init[i]);
+        var truthN = truth.Cast<CameraParams?>().ToList();
+        WorldSpaceGeometry.TryMeasureCameraSetAccuracy(start.Cast<CameraParams?>().ToList(), truthN, out var acc0, out _, out _);
+        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(init.Cast<CameraParams?>().ToList(), truthN, out var acc, out _, out _), Is.True);
+        TestContext.Out.WriteLine($"[{label}] start median {acc0.MedianPosFrac:P3} fwd {acc0.MedianForwardDeg:F2} deg -> BA ({points.Count} points, " +
+            $"{result.Iterations} it, {result.Seconds:F0}s, RMS {result.InitialRmsPixels:F1} -> {result.FinalRmsPixels:F2} px, focal {ba.SharedFocal:F1}): " +
+            $"median {acc.MedianPosFrac:P3}, rms {acc.PositionRms / acc.Spread:P3}, fwd {acc.MedianForwardDeg:F3} deg");
+        return (acc0.MedianPosFrac, acc.MedianPosFrac);
+    }
+
+    /// <summary>
+    /// The whole no-COLMAP path at real-data rotation quality: a bent start, AverageRotations over pairs at 1.5 deg/axis with
+    /// 10% garbage (~1.1 deg averaged, as TruckFull measured), then production's triangulate + bundle adjustment. Tracks are
+    /// BundleAdjusterTruckScaleTests' (Truck's real COLMAP points, its measured track mix, 3% outliers), NOT SyntheticTracks:
+    /// on SyntheticTracks' shallow blob with 10% unfiltered random-pixel observations, BA started from the TRUE poses drifted
+    /// to 1.04% median at 0.72 px (a worse fit than a bent start's 0.57 px) - no sharp minimum, so no start can be judged there.
+    /// Floor: the same BA from the true poses. Control: from the bent start without the global init.
+    /// </summary>
+    /// <remarks>
+    /// MEASURED 2026-09-29: floor 0.054%; control from a 7.1% bend 0.056% and from an 18% bend (strength 2.5, used here)
+    /// 0.055%; global init start 3.35% whatever the bend -> 0.057%. So on synthetic tracks BA alone recovers any bend - the
+    /// real TruckFull failure (bent cascade -> 1.9-2.5%, COLMAP start -> 0.1%) needs something these tracks lack, and only a
+    /// real run can show the global init fixes it. This test holds the init itself to its start and the chain to the floor.
+    /// </remarks>
+    [Test]
+    public void Apply_ThenBundleAdjust_EstimatedRotations()
+    {
+        const float bend = 2.5f;
+        var problem = BundleAdjusterTruckScaleTests.BuildTruckProblem(seed: 5);
+        if (problem == null) Assert.Ignore("Truck dataset not in this checkout");
+        var (cams, _, _, obs) = problem.Value;
+        int points = obs.Max(o => o.Point) + 1;
+        double focal = cams.Select(c => 0.5 * (c.FocalX + c.FocalY)).OrderBy(x => x).ElementAt(cams.Count / 2);
+        var rng = new Random(41);
+        int n = cams.Count;
+        var edges = new List<GlobalSfmInit.RelativePose>();
+        foreach (var (a, b) in NeighbourPairs(n))
+        {
+            var (r, t) = Relative(cams[a], cams[b]);
+            r = rng.NextDouble() < 0.10 ? SmallRotation(rng, 60) : GlobalSfmInit.Mul(SmallRotation(rng, 1.5), r);
+            edges.Add(new GlobalSfmInit.RelativePose(a, b, r, t, 100 + rng.Next(200)));
+        }
+        var (_, floor) = TriangulateAndAdjust(cams.Select(Copy).ToList(), cams, obs, "floor: BA from the true poses");
+        var bent = Bent(cams, bend);
+        TriangulateAndAdjust(bent, cams, obs, "control: BA from the bent start");
+        var start = bent.Select(Copy).ToList();
+        string summary = GlobalSfmInit.Apply(start, edges, obs, points, focal);
+        TestContext.Out.WriteLine(summary);
+        var (initStart, global) = TriangulateAndAdjust(start, cams, obs, "global init + BA");
+        Assert.That(floor, Is.LessThan(0.005), "the data must pin the truth down, or no start can be judged");
+        // ~1.1 deg rotations at ~1.4% per degree (GlobalPositioningRobust_EstimatedRotations) plus the 3% outliers: 3.35%.
+        Assert.That(initStart, Is.LessThan(0.05), "the global init itself");
+        Assert.That(global, Is.LessThan(2 * floor + 0.0005), "BA from the global init must reach the floor");
     }
 
     [Test]

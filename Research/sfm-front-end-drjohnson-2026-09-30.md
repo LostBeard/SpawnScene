@@ -66,3 +66,43 @@ Measurement validated on TruckFull adjacent frames: pair rotation error median 0
 2. Front end to GLOMAP parity, measured at each step on TruckFull (must not regress) and DrJohnson: stricter inlier
    minimum (25-30), 5-point E with known K + H model selection, view-graph focal calibration, view-graph filtering.
 3. If the 44-view target stands: a learned matcher on ILGPU.ML.
+
+## Follow-up: density and loop consistency (same day)
+
+Same front end (SIFT 4000 + 5-pt E with K, >= 30 cheirality inliers, NO ground truth in the pairing):
+
+| View set | Focal | Edges | Pair error median / p75 | Averaged, all cams: abs rot median / p75 |
+|---|---|---|---|---|
+| 44 subset | 1035.5 (COLMAP) | 82 | 6.2 / 92 | 33.1 / 131 |
+| 88 (every 3rd) | 1035.5 | 387 | 7.9 / 112 | **2.8** / 110 |
+| 44 subset | 812 (DAv3) | 82 | 18.0 / 93 | 91.8 / 129 |
+| 88 | 812 | 365 | 17.4 / 111 | 11.8 / 79 |
+
+Pair-error histogram (88, COLMAP focal): 174 edges < 5 deg, 39 in 5-15, but 121 (31%) > 90 deg spread over 90-180 -
+not the E twisted-pair ambiguity (only 20 near 180): **repeated structure** (one wall matched to the opposite wall;
+geometrically consistent, so no two-view check can reject it).
+
+**Loop (triplet) consistency** (Zach et al. 2010; GLOMAP's view-graph filtering is the same principle): keep an edge only
+if some triangle through it composes to within 5 deg of the identity.
+
+| View set, focal | Filter | Edges | Kept pair error median / p75 | Cams connected | Abs rot median / p75 |
+|---|---|---|---|---|---|
+| 88, 1035.5 | >= 1 consistent triangle | 160 | **1.39 / 3.00** | 50 / 88 | 4.3 / 6.1 |
+| 88, 1035.5 | >= 2 | 102 | 1.29 / 2.48 | 17 / 88 | **1.07 / 1.72** |
+| 44, 1035.5 | >= 1 | 32 | 1.38 / 3.70 | 11 / 44 | 4.4 / 6.7 |
+| 88, 812 | >= 1 | 97 | 5.24 / 8.17 | 34 / 88 | 20.3 / 123 |
+
+Reading: the loop filter turns a garbage view graph into an accurate CORE, but not all cameras are in it. That is the
+shape of a hybrid: global rotations + positioning on the loop-consistent core, every other camera registered by PnP
+against the core's points (SpawnScene's re-registration, which since `2a57c21` also places views the cascade missed).
+Focal calibration is REQUIRED: at DAv3's 812 the kept pair error is 3-4x worse.
+
+## Revised order
+
+1. Loop-consistency filter in GlobalSfmInit before rotation averaging; cameras outside the consistent core go to
+   re-registration. Measure: TruckFull must hold 0.08% / 21.63 dB; DrJohnson core size + accuracy.
+2. Focal calibration from the view graph (GLOMAP / Sweeney et al.) - DAv3's focal is 22% off on DrJohnson.
+3. 5-point E with known K + H model selection in pair verification.
+4. SIFT-class or learned descriptors (ORB-mode pair precision is far below SIFT's on DrJohnson).
+5. Density: the 44-view subset leaves an 11-camera core even with SIFT; 88 views give 50. The product may need a
+   minimum-coverage capture guide as much as a better solver.

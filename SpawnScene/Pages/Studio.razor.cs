@@ -298,7 +298,7 @@ public partial class Studio : IAsyncDisposable
             // 1 = full GT poses, 2 = GT rotations only, 3 = GT positions only.
             if (query.TryGetValue("bagtinit", out var bgtq))
                 DiagnoseFromGroundTruthPoses = bgtq is "true" ? 1 : int.TryParse(bgtq, out var bgti) ? bgti : 0;
-            // &globalinit=1: bundle adjustment starts from a global SfM solution (rotation + positioning averaging).
+            // &globalinit=0: bundle adjustment starts from the depth cascade instead of the global SfM solution (the default).
             if (query.TryGetValue("globalfocal", out var gsf) && double.TryParse(gsf, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var gsfd))
                 _multiViewService.GlobalSfmFocalOverride = gsfd;

@@ -137,11 +137,15 @@ public class MultiViewGenerationService
 
     /// <summary>
     /// Start bundle adjustment from a GLOBAL SfM solution (GlobalSfmInit: rotation averaging over the verified pairs, then
-    /// global positioning of cameras and track points) instead of the depth cascade's poses. &amp;globalinit=1.
+    /// global positioning of cameras and track points) instead of the depth cascade's poses. ON by default; &amp;globalinit=0
+    /// starts from the cascade.
     /// MEASURED 2026-09-28 (TruckFull, pose-vs-COLMAP after every solve): from the cascade (11% median off COLMAP, smoothly
     /// bent) the BA ended 1.9-2.5% off, run-dependent; from COLMAP's own poses, with the same tracks, 0.1%.
+    /// MEASURED 2026-09-30, why it is the default: TruckFull, DAv3 focal (no override) - init 1.17% median, BA final 0.09% /
+    /// 0.07 deg, held-out PSNR 21.46 (cascade + GPU BA: 2.0%, 20.91). DrJohnson unchanged (13.15 vs 13.24): only 3 of 49
+    /// candidate pairs verify there, so the init places 2 of 44 cameras and the rest keep their cascade poses.
     /// </summary>
-    public bool UseGlobalSfmInit { get; set; }
+    public bool UseGlobalSfmInit { get; set; } = true;
 
     /// <summary>
     /// The global init's positioning on the GPU (<see cref="GpuGlobalPositioner"/>, the managed solver's algorithm - proven

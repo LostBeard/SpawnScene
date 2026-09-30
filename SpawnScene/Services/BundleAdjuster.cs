@@ -35,6 +35,62 @@ public interface IBundleSolution
     string TimingSummary();
 }
 
+/// <summary>
+/// Fixes BA's 7th gauge freedom after the solve. Holding camera 0 fixed pins 6 of the 7 (rotation + translation); the
+/// SCALE stays free, and the reprojection cost is invariant to it, so nothing stops it drifting. From the cascade start it
+/// barely moved (TruckFull b50: 5.08 vs 5.00); from the global init it shrank the scene ~400x (b52, 2026-09-30: poses
+/// 0.13% from COLMAP but held-out PSNR 4.7, because depth fusion, splat init and densification thresholds all assume the
+/// input scale). This maps the solution by the similarity that restores the solved cameras' input centroid and RMS spread:
+/// x' = C0 + (S0 / S1)(x - C1), applied alike to centres and points, so every projection is unchanged.
+/// </summary>
+public sealed class ScaleGaugedSolution : IBundleSolution
+{
+    private readonly IBundleSolution _inner;
+    private readonly Vector3 _c0, _c1;
+    private readonly float _s;
+
+    private ScaleGaugedSolution(IBundleSolution inner, Vector3 c0, Vector3 c1, float s) { _inner = inner; _c0 = c0; _c1 = c1; _s = s; }
+
+    /// <summary>Wraps <paramref name="inner"/>; <paramref name="drift"/> = solved spread / input spread (1 = none).</summary>
+    public static IBundleSolution Create(IBundleSolution inner, IReadOnlyList<CameraParams> input, ICollection<int> exclude, out double drift)
+    {
+        var before = new List<Vector3>(); var after = new List<Vector3>();
+        var tmp = new CameraParams();
+        for (int i = 0; i < input.Count; i++)
+        {
+            if (exclude.Contains(i)) continue;
+            before.Add(input[i].Position);
+            inner.WriteCamera(i, tmp);
+            after.Add(tmp.Position);
+        }
+        var (c0, s0) = CentroidSpread(before);
+        var (c1, s1) = CentroidSpread(after);
+        drift = s0 > 0 ? s1 / s0 : 1;
+        if (!(s0 > 0 && s1 > 0 && double.IsFinite(s0) && double.IsFinite(s1))) { drift = 1; return inner; }
+        return new ScaleGaugedSolution(inner, c0, c1, (float)(s0 / s1));
+    }
+
+    private static (Vector3 Centroid, double Spread) CentroidSpread(List<Vector3> p)
+    {
+        if (p.Count == 0) return (Vector3.Zero, 0);
+        double x = 0, y = 0, z = 0;
+        foreach (var v in p) { x += v.X; y += v.Y; z += v.Z; }
+        var c = new Vector3((float)(x / p.Count), (float)(y / p.Count), (float)(z / p.Count));
+        double ss = 0;
+        foreach (var v in p) ss += (v - c).LengthSquared();
+        return (c, Math.Sqrt(ss / p.Count));
+    }
+
+    private Vector3 Map(Vector3 x) => _c0 + _s * (x - _c1);
+
+    public double SharedFocal => _inner.SharedFocal;
+    public void WriteCamera(int i, CameraParams cam) { _inner.WriteCamera(i, cam); cam.Position = Map(cam.Position); }
+    public Vector3 PointAt(int p) => Map(_inner.PointAt(p));
+    public (int Total, int Kept, double MedianError)[] CameraStats() => _inner.CameraStats();
+    public int[] KeptObservationsPerPoint() => _inner.KeptObservationsPerPoint();
+    public string TimingSummary() => _inner.TimingSummary();
+}
+
 public sealed class BundleAdjuster : IBundleSolution
 {
     /// <summary>A pixel observation of <see cref="Point"/> in <see cref="Camera"/>.</summary>

@@ -832,13 +832,19 @@ public static class GlobalSfmInit
         return (oc, op, v);
     }
 
-    /// <summary>A positioning solution (free scale and translation) expressed at the connected cameras' CURRENT centroid and
-    /// RMS spread; unconnected cameras keep their position.</summary>
-    internal static Vector3[] ToCurrentFrame(IReadOnlyList<CameraParams> cams, bool[] connected, Func<int, Vector3> solution)
+    /// <summary>A positioning solution (free scale and translation) expressed at the connected cameras' CURRENT centre and
+    /// spread; unconnected cameras keep their position. Centre = coordinate-wise median, spread = median distance from it:
+    /// ROBUST, because the solution can leave a few cameras wildly off. With the mean and the RMS spread (until 2026-09-30),
+    /// TruckFull's 3 misplaced cameras (leave-one-out up to 1e6 px) carried nearly all the spread, the matched scale shrank the
+    /// real cluster ~390x, and BA then solved that cluster 0.10% from COLMAP at 1/390 of the scene's scale: held PSNR 4.7.</summary>
+    public static Vector3[] ToCurrentFrame(IReadOnlyList<CameraParams> cams, bool[] connected, Func<int, Vector3> solution)
     {
         int n = cams.Count;
-        Vector3 Centroid(Func<int, Vector3> at) { var s = Vector3.Zero; int m = 0; for (int i = 0; i < n; i++) if (connected[i]) { s += at(i); m++; } return s / m; }
-        float Spread(Func<int, Vector3> at, Vector3 mid) { double s = 0; int m = 0; for (int i = 0; i < n; i++) if (connected[i]) { s += (at(i) - mid).LengthSquared(); m++; } return (float)Math.Sqrt(s / m); }
+        var buf = new List<float>(n);
+        float Median() { buf.Sort(); int m = buf.Count; return m == 0 ? 0 : (m & 1) == 1 ? buf[m / 2] : 0.5f * (buf[m / 2 - 1] + buf[m / 2]); }
+        float MedianOf(Func<int, float> f) { buf.Clear(); for (int i = 0; i < n; i++) if (connected[i]) buf.Add(f(i)); return Median(); }
+        Vector3 Centroid(Func<int, Vector3> at) => new(MedianOf(i => at(i).X), MedianOf(i => at(i).Y), MedianOf(i => at(i).Z));
+        float Spread(Func<int, Vector3> at, Vector3 mid) => MedianOf(i => (at(i) - mid).Length());
         Vector3 Cur(int i) => cams[i].Position;
         var curMid = Centroid(Cur); var solMid = Centroid(solution);
         float scale = Spread(Cur, curMid) / Math.Max(Spread(solution, solMid), 1e-30f);

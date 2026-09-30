@@ -711,9 +711,13 @@ public partial class Studio
             }
             double total = (DateTime.UtcNow - start).TotalSeconds;
             onProgress?.Invoke(new TrainProgress(itersDone, iterations, n, total));
+            // Fewer iterations than one cycle (one pass over the supervised views: TruckFull 200 iters < 219 views) never
+            // closes a cycle, and this printed "NaN -> NaN" as if training had diverged. Report the partial cycle instead.
+            string lossText = !double.IsNaN(firstCycle) ? $"mean loss/cycle {firstCycle:F6} -> {lastCycle:F6}"
+                : cycleN > 0 ? $"mean loss {cycleSum / cycleN:F6} over {itersDone} iters (under one {supervised.Count}-view cycle)"
+                : "no finite loss";
             Console.WriteLine(
-                $"[Train] {itersDone} iters in {total:F1}s ({itersDone / Math.Max(total, 1e-6):F1} it/s), " +
-                $"mean loss/cycle {firstCycle:F6} -> {lastCycle:F6}");
+                $"[Train] {itersDone} iters in {total:F1}s ({itersDone / Math.Max(total, 1e-6):F1} it/s), {lossText}");
             if (overflowed > 0)
                 Console.WriteLine(
                     $"[Train] WARNING: {overflowed}/{iterations} iterations overflowed the key " +

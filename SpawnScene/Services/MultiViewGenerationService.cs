@@ -678,8 +678,9 @@ public class MultiViewGenerationService
             result = cpuBa.Solve(options);
             ba = cpuBa;
         }
+        ba = ScaleGaugedSolution.Create(ba, cams, exclude, out double scaleDrift);
         Console.WriteLine($"[{label}] {points.Count} points, {result.ObservationsKept}/{result.Observations} obs, " +
-            $"RMS {result.FinalRmsPixels:F2} px, {result.Seconds:F1}s ({(UseGpuBundleAdjust ? "GPU: " : "")}{ba.TimingSummary()})");
+            $"RMS {result.FinalRmsPixels:F2} px, {result.Seconds:F1}s, scale drift {scaleDrift:G4}x undone ({(UseGpuBundleAdjust ? "GPU: " : "")}{ba.TimingSummary()})");
         ProbeCameras(label, cams, exclude, ba);
         return new BundleSolve(ba, points, pointTracks, result);
     }

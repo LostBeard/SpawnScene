@@ -344,13 +344,22 @@ public class MultiViewGenerationService
                 all.Add(medians[c]);
             }
             all.Sort();
-            double typical = all.Count > 0 ? all[all.Count / 2] : double.NaN;
-            double limit = Math.Max(MisplacedCameraPixels, 4 * typical);
-            for (int c = 0; c < cams.Count; c++)
-                if (counts[c] >= 8 && medians[c] > limit) bad.Add(c);
-            Console.WriteLine(
-                $"[BA] leave-one-out reprojection: typical camera misses by {typical:F1} px; {bad.Count} misplaced " +
-                $"(> {limit:F1} px): [{string.Join(", ", bad.Select(c => $"{posed[c]}:{medians[c]:F0}px"))}]");
+            if (all.Count == 0)
+            {
+                // Only 2-view tracks (DrJohnson, 2026-09-30: 3 verified pairs): nothing to leave one out of. This used to
+                // print "misses by NaN px" - Math.Max(limit, NaN) is NaN, so the check was silently off.
+                Console.WriteLine("[BA] leave-one-out reprojection: no camera has a 3+-view track - misplacement check skipped");
+            }
+            else
+            {
+                double typical = all[all.Count / 2];
+                double limit = Math.Max(MisplacedCameraPixels, 4 * typical);
+                for (int c = 0; c < cams.Count; c++)
+                    if (counts[c] >= 8 && medians[c] > limit) bad.Add(c);
+                Console.WriteLine(
+                    $"[BA] leave-one-out reprojection: typical camera misses by {typical:F1} px; {bad.Count} misplaced " +
+                    $"(> {limit:F1} px): [{string.Join(", ", bad.Select(c => $"{posed[c]}:{medians[c]:F0}px"))}]");
+            }
         }
 
         bool oneCamera = cams.Select(c => (c.Width, c.Height)).Distinct().Count() == 1;

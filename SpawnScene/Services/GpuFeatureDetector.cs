@@ -6,7 +6,8 @@ using SpawnScene.Models;
 namespace SpawnScene.Services;
 
 /// <summary>
-/// <see cref="FeatureDetector"/> (FAST-9 + grid non-max suppression + top-N + BRIEF on a Gaussian-smoothed image) on
+/// <see cref="FeatureDetector"/> (per pyramid level: FAST-9 + grid non-max suppression + quota, intensity-centroid orientation,
+/// steered BRIEF on a Gaussian-smoothed level) on
 /// the device, reading a grayscale frame that never leaves it. Only the small results come back: the per-cell NMS
 /// winners (3 ints per 8x8 cell) and the chosen features' 256-bit descriptors.
 /// </summary>
@@ -20,13 +21,14 @@ namespace SpawnScene.Services;
 /// </remarks>
 public sealed class GpuFeatureDetector
 {
-    const int Margin = 4, CellSize = 8, PatchRadius = 15;
+    const int Margin = 4, CellSize = 8;
 
-    private readonly int _maxFeatures, _threshold;
-    public GpuFeatureDetector(int maxFeatures = 2000, int fastThreshold = 25)
+    private readonly int _maxFeatures, _threshold, _levels;
+    public GpuFeatureDetector(int maxFeatures = 2000, int fastThreshold = 25, int levels = 8)
     {
         _maxFeatures = maxFeatures;
         _threshold = fastThreshold;
+        _levels = Math.Max(1, levels);
     }
 
     // ── kernels ──────────────────────────────────────────────────────────────────────────────
@@ -140,22 +142,62 @@ public sealed class GpuFeatureDetector
         smooth[i] = (int)(r < 0 ? 0 : (r > 255 ? 255 : r));
     }
 
-    static void BriefKernel(Index1D f, ArrayView1D<int, Stride1D.Dense> xy, ArrayView1D<int, Stride1D.Dense> smooth,
-        ArrayView1D<int, Stride1D.Dense> pairs, ArrayView1D<int, Stride1D.Dense> desc, int w, int h)
+    // One pyramid level from the previous: FeatureDetector.ResizePixel's float expression, operation for operation.
+    static void ResizeKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> src, ArrayView1D<int, Stride1D.Dense> dst,
+        int sw, int sh, int dw, int dh)
     {
-        int fx = xy[f * 2], fy = xy[f * 2 + 1];
-        bool border = fx < PatchRadius || fx >= w - PatchRadius || fy < PatchRadius || fy >= h - PatchRadius;
+        int y = i / dw, x = i - y * dw;
+        float rx = sw / (float)dw, ry = sh / (float)dh;
+        float fx = (x + 0.5f) * rx - 0.5f, fy = (y + 0.5f) * ry - 0.5f;
+        int x0 = (int)MathF.Floor(fx), y0 = (int)MathF.Floor(fy);
+        float ax = fx - x0, ay = fy - y0;
+        int xa = x0 < 0 ? 0 : (x0 > sw - 1 ? sw - 1 : x0), xb = x0 + 1 < 0 ? 0 : (x0 + 1 > sw - 1 ? sw - 1 : x0 + 1);
+        int ya = y0 < 0 ? 0 : (y0 > sh - 1 ? sh - 1 : y0), yb = y0 + 1 < 0 ? 0 : (y0 + 1 > sh - 1 ? sh - 1 : y0 + 1);
+        float top = (1 - ax) * src[ya * sw + xa] + ax * src[ya * sw + xb];
+        float bot = (1 - ax) * src[yb * sw + xa] + ax * src[yb * sw + xb];
+        float r = MathF.Round((1 - ay) * top + ay * bot);
+        dst[i] = (int)(r < 0 ? 0 : (r > 255 ? 255 : r));
+    }
+
+    // Intensity-centroid orientation bin (FeatureDetector.OrientationBin): 32-bit integer moments and argmax.
+    static void OrientKernel(Index1D f, ArrayView1D<int, Stride1D.Dense> xy, ArrayView1D<int, Stride1D.Dense> img,
+        ArrayView1D<int, Stride1D.Dense> disc, ArrayView1D<int, Stride1D.Dense> dirs, ArrayView1D<int, Stride1D.Dense> bins, int w)
+    {
+        int x = xy[f * 2], y = xy[f * 2 + 1];
+        int m10 = 0, m01 = 0;
+        for (int dy = -15; dy <= 15; dy++)
+        {
+            int half = disc[dy + 15];
+            for (int dx = -half; dx <= half; dx++)
+            {
+                int v = img[(y + dy) * w + x + dx];
+                m10 += dx * v; m01 += dy * v;
+            }
+        }
+        int best = 0, bestDot = int.MinValue;
+        for (int k = 0; k < FeatureDetector.AngleBins; k++)
+        {
+            int d = m10 * dirs[k * 2] + m01 * dirs[k * 2 + 1];
+            if (d > bestDot) { bestDot = d; best = k; }
+        }
+        bins[f] = best;
+    }
+
+    // Steered BRIEF-256 on the smoothed level: the pair table rotated to the feature's bin.
+    static void SteeredBriefKernel(Index1D f, ArrayView1D<int, Stride1D.Dense> xy, ArrayView1D<int, Stride1D.Dense> bins,
+        ArrayView1D<int, Stride1D.Dense> smooth, ArrayView1D<int, Stride1D.Dense> steered, ArrayView1D<int, Stride1D.Dense> desc, int w)
+    {
+        int fx = xy[f * 2], fy = xy[f * 2 + 1], bin = bins[f];
         for (int wi = 0; wi < 8; wi++)
         {
             int word = 0;
-            if (!border)
-                for (int b = 0; b < 32; b++)
-                {
-                    int p = (wi * 32 + b) * 4;
-                    int p1 = smooth[(fy + pairs[p + 1]) * w + (fx + pairs[p])];
-                    int p2 = smooth[(fy + pairs[p + 3]) * w + (fx + pairs[p + 2])];
-                    if (p1 < p2) word |= 1 << b;
-                }
+            for (int b = 0; b < 32; b++)
+            {
+                int o = (bin * 256 + wi * 32 + b) * 4;
+                int p1 = smooth[(fy + steered[o + 1]) * w + fx + steered[o]];
+                int p2 = smooth[(fy + steered[o + 3]) * w + fx + steered[o + 2]];
+                if (p1 < p2) word |= 1 << b;
+            }
             desc[f * 8 + wi] = word;
         }
     }
@@ -166,8 +208,10 @@ public sealed class GpuFeatureDetector
         public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int> CellMax = null!;
         public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int> BlurRows = null!;
         public Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int> BlurCols = null!;
-        public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int> Brief = null!;
-        public MemoryBuffer1D<int, Stride1D.Dense> Circle = null!, Pairs = null!;
+        public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int, int> Resize = null!;
+        public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int> Orient = null!;
+        public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int> Brief = null!;
+        public MemoryBuffer1D<int, Stride1D.Dense> Circle = null!, Steered = null!, Disc = null!, Dirs = null!;
         public MemoryBuffer1D<float, Stride1D.Dense> Blur = null!;
     }
     private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Accelerator, Kernels> s_kernels = new();
@@ -178,9 +222,13 @@ public sealed class GpuFeatureDetector
         CellMax = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int>(CellMaxKernel),
         BlurRows = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(BlurRowsKernel),
         BlurCols = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int>(BlurColsKernel),
-        Brief = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int>(BriefKernel),
+        Resize = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int, int>(ResizeKernel),
+        Orient = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(OrientKernel),
+        Brief = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SteeredBriefKernel),
         Circle = acc.Allocate1D(FeatureDetector.CircleTable()),
-        Pairs = acc.Allocate1D(FeatureDetector.BriefPairTable()),
+        Steered = acc.Allocate1D(FeatureDetector.SteeredPairTable()),
+        Disc = acc.Allocate1D(FeatureDetector.DiscHalfWidthTable()),
+        Dirs = acc.Allocate1D(FeatureDetector.AngleDirTable()),
         Blur = acc.Allocate1D(FeatureDetector.BlurKernel()),
     });
 
@@ -191,50 +239,87 @@ public sealed class GpuFeatureDetector
         ArrayView1D<int, Stride1D.Dense> gray, int width, int height)
     {
         var k = For(accelerator);
-        int n = width * height;
-        int gridW = (width + CellSize - 1) / CellSize, gridH = (height + CellSize - 1) / CellSize;
-
-        // 1-3. FAST score per pixel, first strict maximum per cell - on the device; the cells come back (small).
-        int[] cells;
-        using (var score = accelerator.Allocate1D<int>(n))
-        using (var cellBuf = accelerator.Allocate1D<int>((long)gridW * gridH * 3))
+        var sizes = FeatureDetector.LevelSizes(width, height, _levels);
+        var quota = FeatureDetector.LevelQuota(_maxFeatures, _levels);
+        var result = new List<ImageFeature>();
+        var levelBufs = new List<MemoryBuffer1D<int, Stride1D.Dense>>();
+        const int Edge = FeatureDetector.EdgeBorder;
+        try
         {
-            k.Fast(n, gray, k.Circle.View, score.View, width, height, _threshold);
-            k.CellMax(gridW * gridH, score.View, cellBuf.View, width, height, gridW);
-            await accelerator.SynchronizeAsync();
-            cells = await cellBuf.CopyToHostAsync<int>();
-        }
-        var features = new List<ImageFeature>();
-        for (int c = 0; c < gridW * gridH; c++)
-            if (cells[c * 3 + 2] > 0)
-                features.Add(new ImageFeature { X = cells[c * 3], Y = cells[c * 3 + 1], Score = cells[c * 3 + 2] });
+            var level = gray;
+            for (int l = 0; l < _levels; l++)
+            {
+                var (w, h) = sizes[l];
+                // Checked BEFORE the resize: a level buffer disposed in finally while its dispatch is still queued is a
+                // use-after-free on WebGPU.
+                if (w <= 2 * Edge || h <= 2 * Edge) break;
+                if (l > 0)
+                {
+                    var (pw, ph) = sizes[l - 1];
+                    var buf = accelerator.Allocate1D<int>((long)w * h);
+                    levelBufs.Add(buf);
+                    k.Resize(w * h, level, buf.View, pw, ph, w, h);
+                    level = buf.View;
+                }
+                int n = w * h;
+                int gridW = (w + CellSize - 1) / CellSize, gridH = (h + CellSize - 1) / CellSize;
 
-        // Top-N with the CPU detector's own sort, on the same list order, so ties resolve identically.
-        features.Sort((a, b) => b.Score.CompareTo(a.Score));
-        if (features.Count > _maxFeatures) features = features.GetRange(0, _maxFeatures);
-        if (features.Count == 0) return features;
+                // FAST score per pixel, first strict maximum per cell - on the device; the cells come back (small).
+                int[] cells;
+                using (var score = accelerator.Allocate1D<int>(n))
+                using (var cellBuf = accelerator.Allocate1D<int>((long)gridW * gridH * 3))
+                {
+                    k.Fast(n, level, k.Circle.View, score.View, w, h, _threshold);
+                    k.CellMax(gridW * gridH, score.View, cellBuf.View, w, h, gridW);
+                    await accelerator.SynchronizeAsync();
+                    cells = await cellBuf.CopyToHostAsync<int>();
+                }
+                var features = new List<ImageFeature>();
+                for (int c = 0; c < gridW * gridH; c++)
+                    if (cells[c * 3 + 2] > 0)
+                        features.Add(new ImageFeature { X = cells[c * 3], Y = cells[c * 3 + 1], Score = cells[c * 3 + 2] });
 
-        // 4. BRIEF on the smoothed frame - smoothing and sampling on the device, descriptors back.
-        var xy = new int[features.Count * 2];
-        for (int f = 0; f < features.Count; f++) { xy[f * 2] = (int)features[f].X; xy[f * 2 + 1] = (int)features[f].Y; }
-        int[] words;
-        using (var tmp = accelerator.Allocate1D<float>(n))
-        using (var smooth = accelerator.Allocate1D<int>(n))
-        using (var xyBuf = accelerator.Allocate1D(xy))
-        using (var desc = accelerator.Allocate1D<int>((long)features.Count * 8))
-        {
-            k.BlurRows(n, gray, k.Blur.View, tmp.View, width);
-            k.BlurCols(n, tmp.View, k.Blur.View, smooth.View, width, height);
-            k.Brief(features.Count, xyBuf.View, smooth.View, k.Pairs.View, desc.View, width, height);
-            await accelerator.SynchronizeAsync();
-            words = await desc.CopyToHostAsync<int>();
+                // The CPU detector's own border filter, sort and quota, on the same list order: ties resolve identically.
+                features.RemoveAll(c => c.X < Edge || c.X >= w - Edge || c.Y < Edge || c.Y >= h - Edge);
+                features.Sort((a, b) => b.Score.CompareTo(a.Score));
+                if (features.Count > quota[l]) features = features.GetRange(0, quota[l]);
+                if (features.Count == 0) continue;
+
+                // Orientation on the level; steered BRIEF on its smoothed copy - on the device, descriptors back.
+                var xy = new int[features.Count * 2];
+                for (int f = 0; f < features.Count; f++) { xy[f * 2] = (int)features[f].X; xy[f * 2 + 1] = (int)features[f].Y; }
+                int[] words;
+                using (var tmp = accelerator.Allocate1D<float>(n))
+                using (var smooth = accelerator.Allocate1D<int>(n))
+                using (var xyBuf = accelerator.Allocate1D(xy))
+                using (var bins = accelerator.Allocate1D<int>(features.Count))
+                using (var desc = accelerator.Allocate1D<int>((long)features.Count * 8))
+                {
+                    k.Orient(features.Count, xyBuf.View, level, k.Disc.View, k.Dirs.View, bins.View, w);
+                    k.BlurRows(n, level, k.Blur.View, tmp.View, w);
+                    k.BlurCols(n, tmp.View, k.Blur.View, smooth.View, w, h);
+                    k.Brief(features.Count, xyBuf.View, bins.View, smooth.View, k.Steered.View, desc.View, w);
+                    await accelerator.SynchronizeAsync();
+                    words = await desc.CopyToHostAsync<int>();
+                }
+                float sx = width / (float)w, sy = height / (float)h;
+                for (int f = 0; f < features.Count; f++)
+                {
+                    var d = new byte[32];
+                    for (int j = 0; j < 32; j++) d[j] = (byte)((words[f * 8 + j / 4] >> (8 * (j % 4))) & 0xFF);
+                    var ft = features[f];
+                    ft.Descriptor = d;
+                    ft.Octave = l;
+                    ft.X = ((int)ft.X + 0.5f) * sx - 0.5f;
+                    ft.Y = ((int)ft.Y + 0.5f) * sy - 0.5f;
+                    result.Add(ft);
+                }
+            }
         }
-        for (int f = 0; f < features.Count; f++)
+        finally
         {
-            var d = new byte[32];
-            for (int j = 0; j < 32; j++) d[j] = (byte)((words[f * 8 + j / 4] >> (8 * (j % 4))) & 0xFF);
-            features[f].Descriptor = d;
+            foreach (var b in levelBufs) b.Dispose();
         }
-        return features;
+        return result;
     }
 }

@@ -106,3 +106,23 @@ Focal calibration is REQUIRED: at DAv3's 812 the kept pair error is 3-4x worse.
 4. SIFT-class or learned descriptors (ORB-mode pair precision is far below SIFT's on DrJohnson).
 5. Density: the 44-view subset leaves an 11-camera core even with SIFT; 88 views give 50. The product may need a
    minimum-coverage capture guide as much as a better solver.
+
+## Learned features (TJ, 2026-09-30: "if that is what we need, we will do it")
+
+Candidates, all as ONNX pipelines (fabio-sim/LightGlue-ONNX; images (2B,3|1,H,W) -> keypoints, matches, scores):
+
+| Model | Keypoints | Weights licence | CPU s/pair (1024x672, onnxruntime) | Ops |
+|---|---|---|---|---|
+| RaCo-ALIKED + LightGlue+ (v3.0, k2048) | 2048 | RaCo Apache-2.0, ALIKED BSD-3, LightGlue Apache-2.0 - SHIPPABLE | 3.9 | 6,680 nodes, opset 20; ALIKED's deformable conv = GridSample |
+| DISK + LightGlue (v2.0) | 1024 | DISK: verify; LightGlue Apache-2.0 | 3.4 | 2,593 nodes, opset 17 |
+| SuperPoint + LightGlue (v2.0) | 1024 | SuperPoint NON-COMMERCIAL (Magic Leap) - reference only | 1.1 | 2,866 nodes, opset 17 |
+
+Every op type in all three (incl. GridSample, Einsum, CastLike, Selu, NonZero, TopK, ScatterND) is referenced in
+SpawnDev.ILGPU.ML's source - to be proven by an actual load + run, not assumed.
+
+Production shape: these files extract features INSIDE each pair's run. TruckFull verifies ~31k raw pairs: split the
+graph into a per-image extractor (RaCo + ALIKED, once per view) and a per-candidate-pair LightGlue matcher, and keep
+candidate selection (retrieval / pose gating) so LightGlue runs on thousands of pairs, not all of them.
+
+Evaluation (running): the same downstream as the SIFT study - true-pair rotation error, all-pairs rotation averaging,
+loop-filtered core size and accuracy - on all 946 DrJohnson pairs.

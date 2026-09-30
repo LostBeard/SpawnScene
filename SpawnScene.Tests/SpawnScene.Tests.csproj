@@ -15,7 +15,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
     <PackageReference Include="NUnit" Version="4.6.1" />
     <PackageReference Include="NUnit3TestAdapter" Version="6.3.0" />
-    <PackageReference Include="SpawnDev.ILGPU" Version="5.2.21" />
+    <PackageReference Include="SpawnDev.ILGPU" Version="5.2.22-local.1" />
   </ItemGroup>
 
   <ItemGroup>
@@ -27,6 +27,7 @@
     <Compile Include="..\SpawnScene\Services\BundleAdjuster.cs" Link="Linked\BundleAdjuster.cs" />
     <Compile Include="..\SpawnScene\Services\GpuBundleAdjuster.cs" Link="Linked\GpuBundleAdjuster.cs" />
     <Compile Include="..\SpawnScene\Services\GlobalSfmInit.cs" Link="Linked\GlobalSfmInit.cs" />
+    <Compile Include="..\SpawnScene\Services\GpuGlobalPositioner.cs" Link="Linked\GpuGlobalPositioner.cs" />
     <Compile Include="..\SpawnScene\Services\SortInvalidation.cs" Link="Linked\SortInvalidation.cs" />
     <Compile Include="..\SpawnScene\Services\EpipolarRansac.cs" Link="Linked\EpipolarRansac.cs" />
     <Compile Include="..\SpawnScene\Services\CameraResection.cs" Link="Linked\CameraResection.cs" />

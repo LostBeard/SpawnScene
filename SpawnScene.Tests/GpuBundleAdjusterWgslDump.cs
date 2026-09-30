@@ -11,11 +11,17 @@ namespace SpawnScene.Tests;
 public class GpuBundleAdjusterWgslDump
 {
     [Test, Explicit("diagnostic dump")]
-    public void DumpWgsl()
+    public void DumpWgsl() => Dump(typeof(GpuBundleAdjuster), "gba_wgsl");
+
+    /// <summary>GpuGlobalPositioner's kernels (2026-09-29): validate every one with naga before a browser run.</summary>
+    [Test, Explicit("diagnostic dump")]
+    public void DumpPositionerWgsl() => Dump(typeof(GpuGlobalPositioner), "ggp_wgsl");
+
+    static void Dump(Type type, string folder)
     {
-        var dir = Path.Combine(Path.GetTempPath(), "gba_wgsl");
+        var dir = Path.Combine(Path.GetTempPath(), folder);
         Directory.CreateDirectory(dir);
-        foreach (var m in typeof(GpuBundleAdjuster).GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
+        foreach (var m in type.GetMethods(BindingFlags.NonPublic | BindingFlags.Static)
                      .Where(m => m.Name.EndsWith("Kernel", StringComparison.Ordinal)))
         {
             var src = ShaderCompiler.Generate(m, CapabilityProfiles.WebGPUBaseline).Source;

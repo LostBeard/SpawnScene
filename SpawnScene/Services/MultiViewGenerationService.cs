@@ -143,6 +143,13 @@ public class MultiViewGenerationService
     /// </summary>
     public bool UseGlobalSfmInit { get; set; }
 
+    /// <summary>
+    /// The global init's positioning on the GPU (<see cref="GpuGlobalPositioner"/>, the managed solver's algorithm - proven
+    /// equal on the ILGPU CPU accelerator) rather than managed. &amp;gpugp=0 for the managed A/B. The managed solver takes
+    /// 5-12 s natively on Truck's 126 views (2026-09-29), so far longer on the browser's Mono interpreter.
+    /// </summary>
+    public bool UseGpuGlobalPositioning { get; set; } = true;
+
     /// <summary>Most track points global positioning uses (tracks with 3+ views first).</summary>
     public int GlobalSfmMaxPoints { get; set; } = 15000;
 
@@ -292,7 +299,9 @@ public class MultiViewGenerationService
                 gtRot = gtList.Select(r => GlobalSfmInit.Mul(r, q)).ToArray();
                 Console.WriteLine("[BA] DIAGNOSTIC: global positioning uses the ground-truth rotations");
             }
-            string summary = GlobalSfmInit.Apply(cams, rel, gpObs, gpPoints, focal, gtRot);
+            if (UseGpuGlobalPositioning && !_gpu.IsInitialized) await _gpu.InitializeAsync();
+            string summary = await GlobalSfmInit.ApplyAsync(cams, rel, gpObs, gpPoints, focal, gtRot,
+                UseGpuGlobalPositioning ? _gpu.WebGPUAccelerator : null);
             Console.WriteLine($"[BA] global SfM init (focal {focal:F1}): {rel.Count} of {passed} verified pairs gave a relative pose, {gpPoints} track " +
                 $"points; {summary}; {tg.Elapsed.TotalSeconds:F1}s");
             ProbeCameras("global SfM init", cams, new HashSet<int>(), null);

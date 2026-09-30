@@ -15,7 +15,7 @@ public class GlobalSfmInitTests
 {
     const int W = 979, H = 546;
 
-    static List<CameraParams>? TruckCameras()
+    internal static List<CameraParams>? TruckCameras()
     {
         string path = Path.GetFullPath(Path.Combine(TestContext.CurrentContext.TestDirectory, "..", "..", "..", "..",
             "SpawnScene", "wwwroot", "datasets", "Truck", "poses.par"));
@@ -33,7 +33,7 @@ public class GlobalSfmInitTests
     static double Gauss(Random rng) =>
         Math.Sqrt(-2 * Math.Log(Math.Max(rng.NextDouble(), 1e-12))) * Math.Cos(2 * Math.PI * rng.NextDouble());
 
-    static double[] SmallRotation(Random rng, double sigmaDeg)
+    internal static double[] SmallRotation(Random rng, double sigmaDeg)
     {
         double s = sigmaDeg * Math.PI / 180;
         double wx = Gauss(rng) * s, wy = Gauss(rng) * s, wz = Gauss(rng) * s;
@@ -43,7 +43,7 @@ public class GlobalSfmInitTests
     }
 
     /// <summary>Exact relative pose (R_ab, unit t_ab) between two cameras.</summary>
-    static (double[] R, double[] T) Relative(CameraParams a, CameraParams b)
+    internal static (double[] R, double[] T) Relative(CameraParams a, CameraParams b)
     {
         var ra = GlobalSfmInit.RotationOf(a); var rb = GlobalSfmInit.RotationOf(b);
         var r = GlobalSfmInit.Mul(rb, GlobalSfmInit.Transpose(ra));
@@ -56,7 +56,7 @@ public class GlobalSfmInitTests
     }
 
     /// <summary>Pairs a truck capture would verify: neighbours within 6 in capture order.</summary>
-    static IEnumerable<(int A, int B)> NeighbourPairs(int n)
+    internal static IEnumerable<(int A, int B)> NeighbourPairs(int n)
     {
         for (int a = 0; a < n; a++)
             for (int b = a + 1; b <= Math.Min(n - 1, a + 6); b++)
@@ -151,7 +151,7 @@ public class GlobalSfmInitTests
     // TruckFull's measured views-per-track mix (2, 3, 4, 5, 6+ views), cumulative.
     static readonly double[] RealTrackMix = { 0.562, 0.751, 0.844, 0.897, 1.0 };
 
-    static (List<BundleAdjuster.Observation> Obs, int Points, double Focal) SyntheticTracks(List<CameraParams> cams, Random rng,
+    internal static (List<BundleAdjuster.Observation> Obs, int Points, double Focal) SyntheticTracks(List<CameraParams> cams, Random rng,
         int points, double noisePx, bool realLengths = false, double outlierFraction = 0)
     {
         // Closest point to all optical axes: sum (I - f f^T) (X - C) = 0.

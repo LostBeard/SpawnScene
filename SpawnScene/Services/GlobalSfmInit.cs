@@ -426,6 +426,53 @@ public static class GlobalSfmInit
 
     // ── robust global positioning (GLOMAP) ──────────────────────────────────────────────────
 
+    // Shared with GpuGlobalPositioner's kernels, so the two solvers run the SAME algorithm and can be proven equal. No
+    // transcendental functions: WebGPU emulates f64 as a pair of f32, where acos/log would come back at float precision
+    // (acos of a cosine within 1e-8 of 1 is meaningless in float) - these need only +, *, / and sqrt.
+
+    /// <summary>Deterministic start coordinate in [-1, 1): a 32-bit integer hash (Wellons' lowbias32) of (seed, stream,
+    /// index). Stream 0 = camera centres (index = camera * 3 + axis), 1 = points (point * 3 + axis).</summary>
+    public static double StartCoord(int seed, int stream, int index)
+    {
+        uint x = (uint)index * 0x9E3779B9u + (uint)seed * 0x85EBCA6Bu + (uint)stream * 0xC2B2AE35u;
+        x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+        return (int)(x >> 8) * (2.0 / 16777216.0) - 1;
+    }
+
+    /// <summary>tan(theta / 2) of the angle between unit bearing v and u = X - C: |v x u| / (|u| + v.u). Monotone in the angle
+    /// on [0, pi], exact for small angles, 1e30 when u is 0 or points straight back.</summary>
+    public static double TanHalfAngle(double v0, double v1, double v2, double ux, double uy, double uz)
+    {
+        double cx = v1 * uz - v2 * uy, cy = v2 * ux - v0 * uz, cz = v0 * uy - v1 * ux;
+        double un = Math.Sqrt(ux * ux + uy * uy + uz * uz);
+        double den = un + (v0 * ux + v1 * uy + v2 * uz);
+        double num = Math.Sqrt(cx * cx + cy * cy + cz * cz);
+        // num <= |u|, so past the guard num / den <= 1e30: no product can leave WebGPU double-float's (float's) range.
+        return den > 1e-30 * (un + 1e-30) ? Math.Min(num / den, 1e30) : 1e30;
+    }
+
+    /// <summary>Histogram bins for the median angle: 128 per octave of tan(theta/2) from 2^-30 up (bins 0 and 4095 catch the
+    /// ends), keyed on a float's exponent and top 7 mantissa bits - a piecewise-linear log2, identical on host and device.</summary>
+    public const int AngleBins = 4096;
+    public const int AngleKeyMin = (127 - 30) << 7;   // key of 2^-30
+
+    public static int AngleBin(double tanHalf)
+    {
+        float f = (float)Math.Min(tanHalf, 1e30);
+        int key = BitConverter.SingleToInt32Bits(Math.Max(f, 1e-30f)) >> 16;
+        return Math.Clamp(key - AngleKeyMin, 0, AngleBins - 1);
+    }
+
+    /// <summary>The upper edge of <see cref="AngleBin"/> bin b (tan(theta/2)).</summary>
+    public static double AngleBinUpper(int b) => BitConverter.Int32BitsToSingle((b + 1 + AngleKeyMin) << 16);
+
+    /// <summary>The inlier limit (tan(theta/2)) from the median bin's upper edge: max(0.1 deg, 5 x the median angle).</summary>
+    public static double InlierLimit(double medianTanHalf)
+    {
+        double median = 2 * Math.Atan(medianTanHalf);
+        return Math.Tan(0.5 * Math.Max(0.1 * Math.PI / 180, Math.Min(5 * median, 0.99 * Math.PI)));
+    }
+
     /// <summary>
     /// GLOMAP's global positioning (Pan et al. 2024). With the rotations known, observation k (camera i, point j) says the
     /// point lies along the camera's world bearing v_k. Minimise over the centres C, the points X and one scale d_k &gt;= 0
@@ -443,29 +490,15 @@ public static class GlobalSfmInit
     /// </summary>
     /// <summary><see cref="GlobalPositioningRobust"/>'s result. Converged: the last round reached the relative-decrease stop,
     /// not the iteration cap. Outliers: observations outside the final inlier selection (a retired point's included).</summary>
-    public sealed record PositioningResult(Vector3[] Centres, Vector3[] Points, string Summary, bool Converged, int Outliers, int Observations);
+    public sealed record PositioningResult(Vector3[] Centres, string Summary, bool Converged, int Outliers, int Observations);
 
     public static PositioningResult GlobalPositioningRobust(IReadOnlyList<CameraParams> cams,
         double[][] rot, bool[] connected, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal,
         int maxIterations = 50, double huber = 0.003, int seed = 1)
     {
         int n = cams.Count, np = pointCount;
-        // Usable observations: a connected camera, a point seen by at least two connected cameras.
-        var seen = new int[np];
-        foreach (var o in obs) if (connected[o.Camera]) seen[o.Point]++;
-        var use = new List<int>();
-        for (int k = 0; k < obs.Count; k++) if (connected[obs[k].Camera] && seen[obs[k].Point] >= 2) use.Add(k);
-        int no = use.Count;
-        var oc = new int[no]; var op = new int[no]; var v = new double[no * 3];
-        for (int t = 0; t < no; t++)
-        {
-            var o = obs[use[t]]; var cam = cams[o.Camera]; var rr = rot[o.Camera];
-            oc[t] = o.Camera; op[t] = o.Point;
-            double x = (o.U - cam.CenterX) / focal, y = (o.V - cam.CenterY) / focal;
-            double bx = rr[0] * x + rr[3] * y + rr[6], by = rr[1] * x + rr[4] * y + rr[7], bz = rr[2] * x + rr[5] * y + rr[8];
-            double bn = Math.Sqrt(bx * bx + by * by + bz * bz);
-            v[t * 3] = bx / bn; v[t * 3 + 1] = by / bn; v[t * 3 + 2] = bz / bn;
-        }
+        var (oc, op, v) = PositioningObservations(cams, rot, connected, obs, np, focal);
+        int no = oc.Length;
         var pointObs = new List<int>[np];
         for (int p = 0; p < np; p++) pointObs[p] = new();
         for (int t = 0; t < no; t++) pointObs[op[t]].Add(t);
@@ -474,11 +507,10 @@ public static class GlobalSfmInit
         for (int i = 0; i < n; i++) col[i] = connected[i] ? nf++ : -1;
         int dim = nf * 3;
 
-        // Random start (GLOMAP): centres and points uniform in [-1, 1]^3, every scale 1.
-        var rng = new Random(seed);
+        // Random start (GLOMAP): centres and points uniform in [-1, 1]^3.
         var c = new double[n * 3]; var xp = new double[np * 3]; var d = new double[no];
-        for (int i = 0; i < n * 3; i++) c[i] = rng.NextDouble() * 2 - 1;
-        for (int i = 0; i < np * 3; i++) xp[i] = rng.NextDouble() * 2 - 1;
+        for (int i = 0; i < n * 3; i++) c[i] = StartCoord(seed, 0, i);
+        for (int i = 0; i < np * 3; i++) xp[i] = StartCoord(seed, 1, i);
         for (int t = 0; t < no; t++)   // each scale at its optimum (see the variable projection below)
         {
             int i = oc[t] * 3, j = op[t] * 3;
@@ -722,20 +754,20 @@ public static class GlobalSfmInit
                 xp[j * 3 + 1] = ai[3] * b0 + ai[4] * b1 + ai[5] * b2;
                 xp[j * 3 + 2] = ai[6] * b0 + ai[7] * b1 + ai[8] * b2;
             }
-            // Angle between every observation's bearing and its point, against max(0.1 deg, 5x the inliers' median).
+            // Angle (as tan(theta/2)) between every observation's bearing and its point, against max(0.1 deg, 5x the
+            // inliers' median) - the median from a histogram (AngleBin), as the GPU solver computes it.
             var ang = new double[no];
-            var liveAngles = new List<double>();
+            var hist = new int[AngleBins];
+            int liveCount = 0;
             for (int t = 0; t < no; t++)
             {
                 int i = oc[t] * 3, j = op[t] * 3;
-                double ux = xp[j] - c[i], uy = xp[j + 1] - c[i + 1], uz = xp[j + 2] - c[i + 2];
-                double un = Math.Sqrt(ux * ux + uy * uy + uz * uz);
-                double cosA = un > 0 ? (v[t * 3] * ux + v[t * 3 + 1] * uy + v[t * 3 + 2] * uz) / un : -1;
-                ang[t] = Math.Acos(Math.Clamp(cosA, -1, 1));
-                if (!off[t]) liveAngles.Add(ang[t]);
+                ang[t] = TanHalfAngle(v[t * 3], v[t * 3 + 1], v[t * 3 + 2], xp[j] - c[i], xp[j + 1] - c[i + 1], xp[j + 2] - c[i + 2]);
+                if (!off[t]) { hist[AngleBin(ang[t])]++; liveCount++; }
             }
-            liveAngles.Sort();
-            double limit = Math.Max(0.1 * Math.PI / 180, 5 * liveAngles[liveAngles.Count / 2]);
+            int medianBin = 0;
+            for (int acc = 0; medianBin < AngleBins; medianBin++) { acc += hist[medianBin]; if (acc > liveCount / 2) break; }
+            double limit = InlierLimit(AngleBinUpper(Math.Min(medianBin, AngleBins - 1)));
             var newOff = new bool[no];
             Array.Clear(live);
             for (int t = 0; t < no; t++) { newOff[t] = ang[t] > limit; if (!newOff[t]) live[op[t]]++; }
@@ -773,19 +805,46 @@ public static class GlobalSfmInit
             m[6] = m[2]; m[7] = m[5]; m[8] = ee + s * a2 * a2;
         }
 
-        // Back to the connected cameras' current centroid and RMS spread.
+        var centres = ToCurrentFrame(cams, connected, i => new Vector3((float)c[i * 3], (float)c[i * 3 + 1], (float)c[i * 3 + 2]));
+        return new PositioningResult(centres, $"robust positioning: {no} obs, {roundsRun} rounds [iterations/accepted -dropped+readmitted: {string.Join(", ", roundLog)}], {iter} iterations ({accepted} accepted), {rejectedTotal} outliers, cost {cost0:G4} -> {cost:G4}", roundConverged, rejectedTotal, no);
+    }
+
+    /// <summary>The positioning's observations (shared by the managed and GPU solvers): those of a connected camera on a
+    /// point seen by at least two connected cameras, each as its camera, point and unit WORLD bearing R^T K^-1 [u v 1].</summary>
+    internal static (int[] Oc, int[] Op, double[] V) PositioningObservations(IReadOnlyList<CameraParams> cams, double[][] rot,
+        bool[] connected, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal)
+    {
+        var seen = new int[pointCount];
+        foreach (var o in obs) if (connected[o.Camera]) seen[o.Point]++;
+        var use = new List<int>();
+        for (int k = 0; k < obs.Count; k++) if (connected[obs[k].Camera] && seen[obs[k].Point] >= 2) use.Add(k);
+        int no = use.Count;
+        var oc = new int[no]; var op = new int[no]; var v = new double[no * 3];
+        for (int t = 0; t < no; t++)
+        {
+            var o = obs[use[t]]; var cam = cams[o.Camera]; var rr = rot[o.Camera];
+            oc[t] = o.Camera; op[t] = o.Point;
+            double x = (o.U - cam.CenterX) / focal, y = (o.V - cam.CenterY) / focal;
+            double bx = rr[0] * x + rr[3] * y + rr[6], by = rr[1] * x + rr[4] * y + rr[7], bz = rr[2] * x + rr[5] * y + rr[8];
+            double bn = Math.Sqrt(bx * bx + by * by + bz * bz);
+            v[t * 3] = bx / bn; v[t * 3 + 1] = by / bn; v[t * 3 + 2] = bz / bn;
+        }
+        return (oc, op, v);
+    }
+
+    /// <summary>A positioning solution (free scale and translation) expressed at the connected cameras' CURRENT centroid and
+    /// RMS spread; unconnected cameras keep their position.</summary>
+    internal static Vector3[] ToCurrentFrame(IReadOnlyList<CameraParams> cams, bool[] connected, Func<int, Vector3> solution)
+    {
+        int n = cams.Count;
         Vector3 Centroid(Func<int, Vector3> at) { var s = Vector3.Zero; int m = 0; for (int i = 0; i < n; i++) if (connected[i]) { s += at(i); m++; } return s / m; }
         float Spread(Func<int, Vector3> at, Vector3 mid) { double s = 0; int m = 0; for (int i = 0; i < n; i++) if (connected[i]) { s += (at(i) - mid).LengthSquared(); m++; } return (float)Math.Sqrt(s / m); }
         Vector3 Cur(int i) => cams[i].Position;
-        Vector3 Sol(int i) => new((float)c[i * 3], (float)c[i * 3 + 1], (float)c[i * 3 + 2]);
-        var curMid = Centroid(Cur); var solMid = Centroid(Sol);
-        float scale = Spread(Cur, curMid) / Math.Max(Spread(Sol, solMid), 1e-30f);
+        var curMid = Centroid(Cur); var solMid = Centroid(solution);
+        float scale = Spread(Cur, curMid) / Math.Max(Spread(solution, solMid), 1e-30f);
         var centres = new Vector3[n];
-        for (int i = 0; i < n; i++) centres[i] = connected[i] ? curMid + (Sol(i) - solMid) * scale : cams[i].Position;
-        var points = new Vector3[np];
-        for (int j = 0; j < np; j++)
-            points[j] = curMid + (new Vector3((float)xp[j * 3], (float)xp[j * 3 + 1], (float)xp[j * 3 + 2]) - solMid) * scale;
-        return new PositioningResult(centres, points, $"robust positioning: {no} obs, {roundsRun} rounds [iterations/accepted -dropped+readmitted: {string.Join(", ", roundLog)}], {iter} iterations ({accepted} accepted), {rejectedTotal} outliers, cost {cost0:G4} -> {cost:G4}", roundConverged, rejectedTotal, no);
+        for (int i = 0; i < n; i++) centres[i] = connected[i] ? curMid + (solution(i) - solMid) * scale : cams[i].Position;
+        return centres;
     }
 
     static void Mul3(ReadOnlySpan<double> x, ReadOnlySpan<double> y, Span<double> o)
@@ -836,7 +895,15 @@ public static class GlobalSfmInit
     /// centres and keeps their spread. Returns a one-line summary.
     /// </summary>
     public static string Apply(List<CameraParams> cams, IReadOnlyList<RelativePose> edges,
-        IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal, double[][]? fixedRotations = null)
+        IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal, double[][]? fixedRotations = null) =>
+        // No accelerator: the managed positioning, which completes synchronously.
+        ApplyAsync(cams, edges, obs, pointCount, focal, fixedRotations).GetAwaiter().GetResult();
+
+    /// <summary><see cref="Apply"/>, with the positioning on <paramref name="accelerator"/> (<see cref="GpuGlobalPositioner"/>,
+    /// the same algorithm) when one is given.</summary>
+    public static async Task<string> ApplyAsync(List<CameraParams> cams, IReadOnlyList<RelativePose> edges,
+        IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal, double[][]? fixedRotations = null,
+        ILGPU.Runtime.Accelerator? accelerator = null)
     {
         int n = cams.Count;
         var current = cams.Select(RotationOf).ToArray();
@@ -855,7 +922,13 @@ public static class GlobalSfmInit
             for (int i = 0; i < n; i++) if (connected[i]) rot[i] = Mul(rot[i], q);
         }
         var resid = edges.Select(e => AngleDeg(rot[e.B], Mul(e.R, rot[e.A]))).OrderBy(x => x).ToList();
-        var gp = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal);
+        PositioningResult gp;
+        if (accelerator != null)
+        {
+            using var gpu = new GpuGlobalPositioner(accelerator, cams, rot, connected, obs, pointCount, focal);
+            gp = await gpu.SolveAsync();
+        }
+        else gp = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal);
         var (centres, positioning) = (gp.Centres, gp.Summary);
         int moved = 0;
         for (int i = 0; i < n; i++)

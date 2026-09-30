@@ -311,6 +311,11 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("barel", out var barel) && double.TryParse(barel, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var bareld))
                 GpuBundleAdjuster.RelativeStopOverride = bareld;
+            // &gpugp=0: the global init's managed positioning instead of GpuGlobalPositioner (A/B); &gptrace=1 logs its attempts.
+            if (query.TryGetValue("gpugp", out var ggq))
+                _multiViewService.UseGpuGlobalPositioning = ggq is not ("0" or "false");
+            if (query.TryGetValue("gptrace", out var gtq) && gtq is "1" or "true")
+                GpuGlobalPositioner.Trace = m => Console.WriteLine($"[GlobalPos] {m}");
             // &gpuba=0: the managed bundle adjuster instead of GpuBundleAdjuster (A/B).
             if (query.TryGetValue("gpuba", out var gbq))
                 _multiViewService.UseGpuBundleAdjust = gbq is not ("0" or "false");

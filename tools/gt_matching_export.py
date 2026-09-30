@@ -1,5 +1,5 @@
 # Export a dataset's views (grayscale, optionally resized) + GT-overlapping pairs with their TRUE F, for the C#
-# matching workbench (SpawnScene.Tests *MatchingTests). Usage: python tools/gt_matching_export.py <src> <manifest> <outdir> <maxdim|0> [minShared]
+# matching workbench (SpawnScene.Tests *MatchingTests). pairs.txt: a b shared F[9] Rrel[9] (Rrel = R_b R_a^T). Usage: python tools/gt_matching_export.py <src> <manifest> <outdir> <maxdim|0> [minShared]
 import json, os, struct, sys
 import numpy as np, cv2
 
@@ -78,5 +78,7 @@ with open(os.path.join(out, "pairs.txt"), "w") as f:
             s = len(P3[names[i]] & P3[names[j]])
             if s >= min_shared:
                 F = F_of(names[i], names[j])
-                f.write(f"{i} {j} {s} " + " ".join(f"{v:.17g}" for v in F.ravel()) + "\n"); n += 1
+                Rr = R[names[j]] @ R[names[i]].T   # relative rotation, world->camera: x_b = Rr x_a + t
+                f.write(f"{i} {j} {s} " + " ".join(f"{v:.17g}" for v in F.ravel()) + " "
+                        + " ".join(f"{v:.17g}" for v in Rr.ravel()) + "\n"); n += 1
 print(len(names), "images,", n, "GT pairs ->", out, "size", g.shape[::-1])

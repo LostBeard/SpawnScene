@@ -10,7 +10,7 @@ namespace SpawnScene.Tests;
 /// gives, for every pair that truly overlaps, the TRUE fundamental matrix; a match is correct when its Sampson distance
 /// under it is below 2 px. Measured with OpenCV on the same data: FAST+BRIEF 7 of 119 pairs verifiable (15+ correct
 /// matches), ORB 5000 70, SIFT 8000 79 - orientation alone 19, scale alone 36.
-/// Data: _scratch/djgt (grayscale views + pairs.txt: a b shared F[9]), exported from the dataset's COLMAP sparse model;
+/// Data: _scratch/djgt (grayscale views + pairs.txt: a b shared F[9]), exported by tools/gt_matching_export.py from the dataset COLMAP sparse model;
 /// the test is skipped without it.
 /// </summary>
 public class DrJohnsonMatchingTests

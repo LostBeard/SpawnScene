@@ -15,11 +15,25 @@ namespace SpawnScene.Tests;
 /// </summary>
 public class DrJohnsonMatchingTests
 {
-    static string? DataDir()
+    static string? DataDir(string name = "djgt")
     {
         var d = new DirectoryInfo(TestContext.CurrentContext.TestDirectory);
-        while (d != null && !Directory.Exists(Path.Combine(d.FullName, "_scratch", "djgt"))) d = d.Parent;
-        return d == null ? null : Path.Combine(d.FullName, "_scratch", "djgt");
+        while (d != null && !Directory.Exists(Path.Combine(d.FullName, "_scratch", name))) d = d.Parent;
+        return d == null ? null : Path.Combine(d.FullName, "_scratch", name);
+    }
+
+    /// <summary>TruckFull (video, small baselines) must not lose what the pyramid gains on DrJohnson: 251 views at the
+    /// pipeline's 979 px, 8,794 pairs sharing 200+ COLMAP points (_scratch/truckgt, gt_export.py).</summary>
+    // MEASURED 2026-09-30 at (2000, 0.75): the replaced FAST+BRIEF 4,888 of 8,794; this detector 4,920 (1 level: 3,842).
+    // The floor holds it at the old detector's level - the pyramid must not buy DrJohnson at Truck's expense.
+    [TestCase(8, 4850)]
+    public void TruckFull_TrueNeighbours_AreMatchable(int levels, int floor)
+    {
+        var dir = DataDir("truckgt");
+        if (dir == null) Assert.Ignore("_scratch/truckgt not present");
+        var (ok, n, med) = Score(dir, new FeatureDetector(2000, 25, levels), new FeatureMatcher(0.75f, 64));
+        TestContext.Out.WriteLine($"TruckFull, {levels} level(s): {ok} of {n} true pairs verifiable, median correct {med}");
+        Assert.That(ok, Is.GreaterThanOrEqualTo(floor));
     }
 
     internal static (int VerifiablePairs, int Pairs, double MedianCorrect) Score(string dir, FeatureDetector detector,

@@ -955,12 +955,16 @@ public static class GlobalSfmInit
             new(MedianOver(set, i => at(i).X), MedianOver(set, i => at(i).Y), MedianOver(set, i => at(i).Z));
         float Spread(Func<int, bool> set, Func<int, Vector3> at, Vector3 mid) => MedianOver(set, i => (at(i) - mid).Length());
         bool IsTrusted(int i) => trusted == null || trusted[i];
-        bool anyConnectedTrusted = false, anyTrusted = false;
-        for (int i = 0; i < n; i++) { anyTrusted |= IsTrusted(i); anyConnectedTrusted |= connected[i] && IsTrusted(i); }
-        // Both sides over the SAME cameras when possible (connected and trusted); otherwise the component solution onto
-        // the trusted cameras' frame; with nothing trusted at all, the old behaviour (every connected camera).
-        Func<int, bool> curSet = anyConnectedTrusted ? i => connected[i] && IsTrusted(i) : anyTrusted ? IsTrusted : i => connected[i];
-        Func<int, bool> solSet = anyConnectedTrusted ? curSet : i => connected[i];
+        int connectedTrusted = 0, trustedCount = 0;
+        for (int i = 0; i < n; i++) { if (IsTrusted(i)) trustedCount++; if (connected[i] && IsTrusted(i)) connectedTrusted++; }
+        // Both sides over the SAME cameras when there are enough of them to have a spread (connected and trusted, 3+);
+        // otherwise the component solution onto the trusted cameras' frame; with nothing trusted at all, the old
+        // behaviour (every connected camera). One shared camera has spread 0: scale 0 put every connected camera on one
+        // point (DrJohnson b73/b75, 2026-10-01: cascade posed 6 of 44, global init connected 23, overlap 1).
+        const int MinSharedCameras = 3;
+        bool shared = connectedTrusted >= MinSharedCameras;
+        Func<int, bool> curSet = shared ? i => connected[i] && IsTrusted(i) : trustedCount >= 2 ? IsTrusted : i => connected[i];
+        Func<int, bool> solSet = shared ? curSet : i => connected[i];
         Vector3 Cur(int i) => cams[i].Position;
         var curMid = Centroid(curSet, Cur); var solMid = Centroid(solSet, solution);
         float scale = Spread(curSet, Cur, curMid) / Math.Max(Spread(solSet, solution, solMid), 1e-30f);

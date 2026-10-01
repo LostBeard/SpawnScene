@@ -80,6 +80,36 @@ public class ScaleGaugedSolutionTests
         Assert.That(errs[^1], Is.LessThan(0.25f), "worst camera, placeholders included, lands on its true place");
     }
 
+    /// <summary>ToCurrentFrame with ONE camera both connected and trusted (2026-10-01, DrJohnson b73/b75: the depth cascade
+    /// posed 6 of 44 views, the global init connected 23, and they overlapped in one). The frame match used that single
+    /// camera's spread - zero - so the scale was 0 and every connected camera landed on one point (leave-one-out 1e6 px,
+    /// BA collapsed). Too few shared cameras must fall back to the trusted cameras' centre and spread.</summary>
+    [Test]
+    public void ToCurrentFrame_OneSharedCamera_DoesNotCollapse()
+    {
+        var rng = new Random(11);
+        Vector3 R() => new((float)rng.NextDouble() * 4 - 2, (float)rng.NextDouble() * 4 - 2, (float)rng.NextDouble() * 4 - 2);
+        int n = 44;
+        var truth = Enumerable.Range(0, n).Select(_ => R()).ToArray();
+        var cams = new List<CameraParams>();
+        var trusted = new bool[n];
+        var connected = new bool[n];
+        for (int i = 0; i < n; i++)
+        {
+            trusted[i] = i < 6;
+            connected[i] = i >= 5 && i < 28;   // 23 connected; only camera 5 is also trusted
+            cams.Add(new CameraParams { Position = trusted[i] ? truth[i] : truth[0] });
+        }
+        var sol = truth.Select(p => p * 0.01f + new Vector3(3, 1, -4)).ToArray();
+        var centres = GlobalSfmInit.ToCurrentFrame(cams, connected, i => sol[i], trusted);
+        var placed = Enumerable.Range(0, n).Where(i => connected[i]).Select(i => centres[i]).ToArray();
+        var mid = placed.Aggregate(Vector3.Zero, (a, b) => a + b) / placed.Length;
+        var spread = placed.Select(p => (p - mid).Length()).OrderBy(d => d).ToArray()[placed.Length / 2];
+        // The truth's own median spread is ~1.6; mapped onto the 6 trusted cameras' spread it stays the same order.
+        Assert.That(spread, Is.GreaterThan(0.3f), "connected cameras must keep a spread (scale 0 collapsed them to a point)");
+        Assert.That(centres.All(c => float.IsFinite(c.X) && float.IsFinite(c.Y) && float.IsFinite(c.Z)), "finite centres");
+    }
+
     /// <summary>GlobalSfmInit.ToCurrentFrame (2026-09-30): the positioning left 3 of 251 TruckFull cameras wildly off; the
     /// mean/RMS frame match let them carry the spread and shrank the real cluster ~390x. A robust match must place the
     /// inliers at the current frame's scale.</summary>

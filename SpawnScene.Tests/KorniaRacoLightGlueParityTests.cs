@@ -40,9 +40,12 @@ public class KorniaRacoLightGlueParityTests
         return f;
     }
 
-    [TestCase(1024)]
-    [TestCase(3072)]
-    public async Task Extractor_MatchesOnnxRuntime(int K)
+    // stream: through InferenceSession.CreateFromStreamAsync, the loader the app's hub path (IModelSource) uses. It
+    // threw at load on optimizer-folded constants (ML 5.3.1-local.9) while the byte-array loader worked.
+    [TestCase(1024, false)]
+    [TestCase(3072, false)]
+    [TestCase(1024, true)]
+    public async Task Extractor_MatchesOnnxRuntime(int K, bool stream)
     {
         var dir = Dir();
         if (dir == null) Assert.Ignore("_scratch/kornia not present");
@@ -53,8 +56,16 @@ public class KorniaRacoLightGlueParityTests
 
         using var context = Context.Create(b => b.CPU().EnableAlgorithms());
         using var accel = context.CreateCPUAccelerator(0);
-        using var session = InferenceSession.CreateFromFile(accel, File.ReadAllBytes(Path.Combine(dir, "kornia", $"raco_aliked_extractor_k{K}.onnx")),
-            null, new Dictionary<string, int[]> { ["images"] = new[] { 2, 3, 416, 640 } });
+        var shapes = new Dictionary<string, int[]> { ["images"] = new[] { 2, 3, 416, 640 } };
+        var modelPath = Path.Combine(dir, "kornia", $"raco_aliked_extractor_k{K}.onnx");
+        InferenceSession session;
+        if (stream)
+        {
+            await using var fs = File.OpenRead(modelPath);
+            session = await InferenceSession.CreateFromStreamAsync(accel, fs, inputShapes: shapes);
+        }
+        else session = InferenceSession.CreateFromFile(accel, File.ReadAllBytes(modelPath), null, shapes);
+        using var _ = session;
         using var inBuf = accel.Allocate1D(images);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var outs = await session.RunAsync(new Dictionary<string, Tensor> { ["images"] = new Tensor(inBuf.View, new[] { 2, 3, 416, 640 }) });

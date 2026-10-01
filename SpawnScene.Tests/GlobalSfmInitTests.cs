@@ -517,4 +517,43 @@ public class GlobalSfmInitTests
         Assert.That(placed.Count, Is.GreaterThan(cams.Count / 2));
         Assert.That(placed[placed.Count / 2], Is.LessThan(3.0), "typical placed camera misses by ~noise");
     }
+
+    /// <summary>
+    /// DrJohnson b73-b77 shape (2026-10-01): the depth cascade posed 6 views; the rest entered as PLACEHOLDERS (one copied
+    /// pose). The global init connected 23 cameras, only one of them trusted, and its result was degenerate in the browser
+    /// (every placed camera reprojected behind itself, no alignment to COLMAP possible). Truck problem: trusted = 6 spread
+    /// cameras, placeholders = camera 0's pose, exact relative poses among cameras 0-22 only, so the connected set is 23
+    /// cameras sharing ONE trusted camera (5). The placed cameras must match the truth up to a similarity.
+    /// </summary>
+    [Test]
+    public async Task ApplyAsync_PlaceholdersAndOneSharedTrustedCamera_PlacesTheConnected()
+    {
+        var problem = BundleAdjusterTruckScaleTests.BuildTruckProblem(seed: 5);
+        if (problem == null) Assert.Ignore("Truck dataset not in this checkout");
+        var (cams, _, _, obs) = problem.Value;
+        int points = obs.Max(o => o.Point) + 1;
+        int n = cams.Count;
+        double focal = cams.Select(c => 0.5 * (c.FocalX + c.FocalY)).OrderBy(x => x).ElementAt(n / 2);
+        var trusted = new bool[n];
+        foreach (int t in new[] { 5, 30, 60, 90, 110, 120 }) if (t < n) trusted[t] = true;
+        var start = new List<CameraParams>();
+        for (int i = 0; i < n; i++) start.Add(Copy(trusted[i] ? cams[i] : cams[0]));
+        var edges = new List<GlobalSfmInit.RelativePose>();
+        foreach (var (a, b) in NeighbourPairs(23))
+        {
+            var (r, t) = Relative(cams[a], cams[b]);
+            edges.Add(new GlobalSfmInit.RelativePose(a, b, r, t, 200));
+        }
+        var (summary, connected) = await GlobalSfmInit.ApplyAsync(start, edges, obs, points, focal, null, null, trusted);
+        TestContext.Out.WriteLine(summary);
+        Assert.That(connected.Count(c => c), Is.EqualTo(23), "cameras 0-22 are connected");
+        var est = new CameraParams?[n];
+        var truth = new CameraParams?[n];
+        for (int i = 0; i < n; i++) if (connected[i]) { est[i] = start[i]; truth[i] = cams[i]; }
+        Assert.That(WorldSpaceGeometry.TryMeasureCameraSetAccuracy(est, truth, out var acc, out _, out _), Is.True,
+            "the placed cameras must be alignable to the truth (DrJohnson: 'could not align')");
+        TestContext.Out.WriteLine($"placed: median {acc.MedianPosFrac:P2}, fwd {acc.MedianForwardDeg:F2} deg");
+        Assert.That(acc.MedianPosFrac, Is.LessThan(0.05), "median position error of the placed cameras");
+        Assert.That(acc.MedianForwardDeg, Is.LessThan(1.0), "median orientation error of the placed cameras");
+    }
 }

@@ -595,9 +595,11 @@ public static class GlobalSfmInit
     /// not the iteration cap. Outliers: observations outside the final inlier selection (a retired point's included).</summary>
     public sealed record PositioningResult(Vector3[] Centres, string Summary, bool Converged, int Outliers, int Observations);
 
+    /// <param name="trusted">Cameras whose CURRENT pose sets the frame the result is expressed in (see
+    /// <see cref="ToCurrentFrame"/>); null = all.</param>
     public static PositioningResult GlobalPositioningRobust(IReadOnlyList<CameraParams> cams,
         double[][] rot, bool[] connected, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal,
-        int maxIterations = 50, double huber = 0.003, int seed = 1)
+        int maxIterations = 50, double huber = 0.003, int seed = 1, bool[]? trusted = null)
     {
         int n = cams.Count, np = pointCount;
         var (oc, op, v) = PositioningObservations(cams, rot, connected, obs, np, focal);
@@ -908,7 +910,7 @@ public static class GlobalSfmInit
             m[6] = m[2]; m[7] = m[5]; m[8] = ee + s * a2 * a2;
         }
 
-        var centres = ToCurrentFrame(cams, connected, i => new Vector3((float)c[i * 3], (float)c[i * 3 + 1], (float)c[i * 3 + 2]));
+        var centres = ToCurrentFrame(cams, connected, i => new Vector3((float)c[i * 3], (float)c[i * 3 + 1], (float)c[i * 3 + 2]), trusted);
         return new PositioningResult(centres, $"robust positioning: {no} obs, {roundsRun} rounds [iterations/accepted -dropped+readmitted: {string.Join(", ", roundLog)}], {iter} iterations ({accepted} accepted), {rejectedTotal} outliers, cost {cost0:G4} -> {cost:G4}", roundConverged, rejectedTotal, no);
     }
 
@@ -1122,14 +1124,15 @@ public static class GlobalSfmInit
                 $"positioning skipped: {obs.Count} observations, {connectedCount} connected camera(s)", false, 0, obs.Count);
         else if (accelerator != null)
         {
-            using var gpu = new GpuGlobalPositioner(accelerator, cams, rot, connected, obs, pointCount, focal);
+            using var gpu = new GpuGlobalPositioner(accelerator, cams, rot, connected, obs, pointCount, focal, trusted: trusted);
             gp = await gpu.SolveAsync();
         }
-        else gp = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal);
+        else gp = GlobalPositioningRobust(cams, rot, connected, obs, pointCount, focal, trusted: trusted);
         var (centres, positioning) = (gp.Centres, gp.Summary);
-        // The positioners map onto every connected camera; re-map onto the trusted ones (a translation + scale, so
-        // this equals mapping the raw solution).
-        if (trusted != null) { var mapped = centres; centres = ToCurrentFrame(cams, connected, i => mapped[i], trusted); }
+        // The positioners express the solution in the TRUSTED cameras' frame themselves. They used to map onto every
+        // connected camera and this re-mapped onto the trusted ones - but when the connected cameras' current poses are
+        // mostly placeholders (one copied pose), that first map had spread 0, scale 0, and put every camera on one point
+        // before the re-map could help (DrJohnson b73-b77, 2026-10-01: 22 of 23 connected were placeholders).
         int moved = 0;
         for (int i = 0; i < n; i++)
         {

@@ -60,12 +60,15 @@ public sealed class GpuGlobalPositioner : IDisposable
     MemoryBuffer1D<double, Stride1D.Dense>? _v, _c, _cn, _x, _xn, _d, _dn, _ob, _rawP, _rawC, _ps, _cs, _sys, _rhs, _step,
         _cost, _partial, _sc, _ang;
 
+    private readonly bool[]? _trusted;
+
     /// <summary>Same inputs as <see cref="GlobalSfmInit.GlobalPositioningRobust"/>.</summary>
     public GpuGlobalPositioner(Accelerator accelerator, IReadOnlyList<CameraParams> cams, double[][] rot, bool[] connected,
         IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal, int maxIterations = 50,
-        double huber = 0.003, int seed = 1)
+        double huber = 0.003, int seed = 1, bool[]? trusted = null)
     {
         _acc = accelerator;
+        _trusted = trusted;
         _cams = cams;
         _connected = connected;
         _n = cams.Count;
@@ -793,7 +796,7 @@ public sealed class GpuGlobalPositioner : IDisposable
         var compact = new int[_n];
         for (int i = 0; i < _nf; i++) compact[_camOrig[i]] = i;
         var centres = GlobalSfmInit.ToCurrentFrame(_cams, _connected,
-            i => new Vector3((float)cc[compact[i] * 3], (float)cc[compact[i] * 3 + 1], (float)cc[compact[i] * 3 + 2]));
+            i => new Vector3((float)cc[compact[i] * 3], (float)cc[compact[i] * 3 + 1], (float)cc[compact[i] * 3 + 2]), _trusted);
         _tTotal = System.Diagnostics.Stopwatch.GetTimestamp() - tStart;
         return new GlobalSfmInit.PositioningResult(centres,
             $"robust positioning [GPU]: {_no} obs, {roundsRun} rounds [iterations/accepted -dropped+readmitted: {string.Join(", ", roundLog)}], " +

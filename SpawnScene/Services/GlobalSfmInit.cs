@@ -179,7 +179,38 @@ public static class GlobalSfmInit
     {
         var ka = new double[] { focal, 0, cxA, 0, focal, cyA, 0, 0, 1 };
         var kb = new double[] { focal, 0, cxB, 0, focal, cyB, 0, 0, 1 };
-        var e = Mul(Mul(Transpose(kb), f), ka);
+        return FromEssential(a, b, Mul(Mul(Transpose(kb), f), ka), xa, xb, inliers, focal, cxA, cyA, cxB, cyB);
+    }
+
+    /// <summary>
+    /// The calibrated relative pose of a pair from ALL its matches (pixels): five-point E-RANSAC
+    /// (<see cref="FivePoint.Ransac"/>) at <paramref name="thresholdPx"/>, then <see cref="FromEssential"/> on its inliers.
+    /// Null when no essential matrix gathers <paramref name="minInliers"/>. See <see cref="FivePoint"/> for why this replaces
+    /// the F-based pose (DrJohnson: 0.94 deg vs 8.25 deg median on true pairs).
+    /// </summary>
+    public static RelativePose? FromMatchesCalibrated(int a, int b, float[] xa, float[] xb, double focal,
+        double cxA, double cyA, double cxB, double cyB, double thresholdPx = 2.0, int minInliers = 15, int seed = 1)
+    {
+        int n = xa.Length / 2;
+        var ra = new (double X, double Y)[n]; var rb = new (double X, double Y)[n];
+        for (int i = 0; i < n; i++)
+        {
+            ra[i] = ((xa[i * 2] - cxA) / focal, (xa[i * 2 + 1] - cyA) / focal);
+            rb[i] = ((xb[i * 2] - cxB) / focal, (xb[i * 2 + 1] - cyB) / focal);
+        }
+        var r = FivePoint.Ransac(ra, rb, focal, thresholdPx, minInliers, seed: seed);
+        if (r == null) return null;
+        return FromEssential(a, b, r.Value.E, xa, xb, r.Value.Inliers, focal, cxA, cyA, cxB, cyB);
+    }
+
+    /// <summary>
+    /// The relative pose from an essential matrix (row-major, x_b^T E x_a = 0 on normalized rays): its four (R, t)
+    /// candidates, the one putting most inlier points in front of BOTH cameras kept, refined on the inliers
+    /// (<see cref="RefineRelativePose"/>). Null when the pair is degenerate (too few points in front, or no clear winner).
+    /// </summary>
+    public static RelativePose? FromEssential(int a, int b, double[] e, float[] xa, float[] xb, bool[] inliers,
+        double focal, double cxA, double cyA, double cxB, double cyB)
+    {
         var u = new double[9]; var s = new double[3]; var v = new double[9];
         Svd3(e, u, s, v);
         if (Det(u) < 0) { u[2] = -u[2]; u[5] = -u[5]; u[8] = -u[8]; }

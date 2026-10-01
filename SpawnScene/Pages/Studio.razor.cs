@@ -304,6 +304,9 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.GlobalSfmFocalOverride = gsfd;
             if (query.TryGetValue("globalgtrot", out var ggr))
                 DiagnoseGlobalWithGroundTruthRotations = ggr is "1" or "true";
+            // &relpose=f: relative poses decomposed from the verification's F instead of a calibrated five-point E-RANSAC (A/B).
+            if (query.TryGetValue("relpose", out var rpq))
+                _multiViewService.CalibratedRelativePoses = rpq is not ("f" or "F" or "0");
             // &relposefilter=0: tracks from every verified pair, not only the rotation-consistent ones (A/B).
             if (query.TryGetValue("relposefilter", out var rpf))
                 _multiViewService.FilterPairsByRotation = rpf is not ("0" or "false");

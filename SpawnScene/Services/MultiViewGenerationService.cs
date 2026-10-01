@@ -161,6 +161,14 @@ public class MultiViewGenerationService
     /// </summary>
     public bool FilterPairsByRotation { get; set; } = true;
 
+    /// <summary>
+    /// Relative poses from a calibrated five-point E-RANSAC on each verified pair's matches (<see cref="FivePoint"/>), at the
+    /// calibrated focal, instead of decomposing the verification's F. &amp;relpose=f restores the F path (A/B).
+    /// MEASURED 2026-10-01 offline on DrJohnson's real k1024 matches: true-pair rotations 0.94 deg median (p75 3.6) vs 1.30
+    /// (p75 21.8) from F + refinement; through rotation averaging 35 cameras at 1.15 deg vs 30 at 3.11.
+    /// </summary>
+    public bool CalibratedRelativePoses { get; set; } = true;
+
     /// <summary>Most track points global positioning uses (tracks with 3+ views first).</summary>
     public int GlobalSfmMaxPoints { get; set; } = 15000;
 
@@ -296,6 +304,7 @@ public class MultiViewGenerationService
                     foreach (var cam in cams) { cam.FocalX = (float)focal; cam.FocalY = (float)focal; }   // BA starts here too
                 }
             }
+            var trel = System.Diagnostics.Stopwatch.StartNew();
             var rel = new List<GlobalSfmInit.RelativePose>();
             var relCandidate = new Dictionary<GlobalSfmInit.RelativePose, int>(ReferenceEqualityComparer.Instance);
             for (int c = 0; c < candidates.Count; c++)
@@ -304,10 +313,15 @@ public class MultiViewGenerationService
                 if (r == null) continue;
                 var p = candidates[c];
                 int ia = baIndex[p.ImageIndexA], ib = baIndex[p.ImageIndexB];
-                var pose = GlobalSfmInit.FromFundamental(ia, ib, r.F, ransacPairs[c].A, ransacPairs[c].B, r.Inliers, focal,
-                    cams[ia].CenterX, cams[ia].CenterY, cams[ib].CenterX, cams[ib].CenterY);
+                var pose = CalibratedRelativePoses
+                    ? GlobalSfmInit.FromMatchesCalibrated(ia, ib, ransacPairs[c].A, ransacPairs[c].B, focal,
+                        cams[ia].CenterX, cams[ia].CenterY, cams[ib].CenterX, cams[ib].CenterY, seed: ransacPairs[c].Seed)
+                    : GlobalSfmInit.FromFundamental(ia, ib, r.F, ransacPairs[c].A, ransacPairs[c].B, r.Inliers, focal,
+                        cams[ia].CenterX, cams[ia].CenterY, cams[ib].CenterX, cams[ib].CenterY);
                 if (pose != null) { rel.Add(pose); relCandidate[pose] = c; }
             }
+            Console.WriteLine($"[BA] relative poses: {rel.Count} of {passed} verified pairs " +
+                $"({(CalibratedRelativePoses ? "five-point E-RANSAC" : "from F")}, {trel.Elapsed.TotalSeconds:F1}s)");
             // Rotations first, then GLOMAP's relative-pose filter, and only THEN tracks: a pair whose relative rotation
             // disagrees with the averaged rotations is a wrong pair (DrJohnson: repeated structure, 25.5 deg median off
             // COLMAP over all verified pairs, b79) and its matches must not join a track. Tracks from every verified

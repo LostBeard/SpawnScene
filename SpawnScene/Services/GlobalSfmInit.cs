@@ -216,7 +216,134 @@ public static class GlobalSfmInit
             }
         // A clear cheirality winner, and most points in front: otherwise the pair is (near) pure rotation or bad.
         if (bestR == null || best < 0.75 * ra.Count || best - second < 0.25 * ra.Count) return null;
+        if (RefineRelativePoses)
+        {
+            var (rr, rt) = RefineRelativePose(bestR, bestT!, ra, rb, focal);
+            // Keep the refinement only if the cheirality winner is still the winner (a continuous refinement from a clear
+            // winner should never flip it; guard anyway).
+            if (CountInFront(rr, rt, ra, rb) >= best) (bestR, bestT) = (rr, rt);
+        }
         return new RelativePose(a, b, bestR, bestT!, count);
+    }
+
+    /// <summary>
+    /// Refine each pair's relative pose on its inliers (<see cref="FromFundamental"/>). OFF until 2026-10-01: the pose was the
+    /// decomposition of E = K^T F K with F from 7/8-point RANSAC on PIXELS - 7 degrees of freedom fitted where the calibrated
+    /// pair has 5, and never refined. COLMAP/GLOMAP refine calibrated two-view geometry; the research harness that put 37 of
+    /// DrJohnson's 44 cameras in its loop-consistent core used E with known K, where SpawnScene's F-based rotations left 49
+    /// of 242 pairs loop-consistent and 23 cameras.
+    /// </summary>
+    public static bool RefineRelativePoses { get; set; } = true;
+
+    /// <summary>
+    /// Levenberg-Marquardt on the essential manifold: R = R0 exp([w]) (3 parameters) and a unit t moved in its tangent plane
+    /// (2), minimizing the Sampson error of x_b^T [t]x R x_a = 0 over the normalized inlier rays, in PIXELS (x focal) under a
+    /// Huber loss of <paramref name="huberPx"/>. Numeric Jacobian (5 x 300 at most): cheap next to the RANSAC that found them.
+    /// </summary>
+    public static (double[] R, double[] T) RefineRelativePose(double[] r0, double[] t0, List<(double X, double Y)> ra,
+        List<(double X, double Y)> rb, double focal, int iterations = 30, double huberPx = 1.5)
+    {
+        var r = (double[])r0.Clone();
+        var t = Normalize3((double[])t0.Clone());
+        int m = ra.Count;
+        if (m < 6) return (r, t);
+        var res = new double[m];
+        var resTry = new double[m];
+        var jac = new double[m * 5];
+        double lambda = 1e-3;
+
+        double Cost(double[] rr, double[] tt, double[] outRes)
+        {
+            // E = [t]x R
+            var tx = new double[] { 0, -tt[2], tt[1], tt[2], 0, -tt[0], -tt[1], tt[0], 0 };
+            var e = Mul(tx, rr);
+            double c = 0;
+            for (int i = 0; i < m; i++)
+            {
+                double ax = ra[i].X, ay = ra[i].Y, bx = rb[i].X, by = rb[i].Y;
+                double ex0 = e[0] * ax + e[1] * ay + e[2], ex1 = e[3] * ax + e[4] * ay + e[5], ex2 = e[6] * ax + e[7] * ay + e[8];
+                double etx0 = e[0] * bx + e[3] * by + e[6], etx1 = e[1] * bx + e[4] * by + e[7];
+                double num = bx * ex0 + by * ex1 + ex2;
+                double den = ex0 * ex0 + ex1 * ex1 + etx0 * etx0 + etx1 * etx1;
+                double d = den > 1e-30 ? num / Math.Sqrt(den) * focal : 0;   // signed Sampson distance, pixels
+                // Huber as an IRLS weight folded into the residual: |d| <= h -> d; else sign(d) sqrt(2h|d| - h^2).
+                double ad = Math.Abs(d);
+                outRes[i] = ad <= huberPx ? d : Math.Sign(d) * Math.Sqrt(2 * huberPx * ad - huberPx * huberPx);
+                c += outRes[i] * outRes[i];
+            }
+            return c;
+        }
+
+        (double[] R, double[] T) Step(double[] rr, double[] tt, ReadOnlySpan<double> p)
+        {
+            var dr = new double[9];
+            BundleAdjuster.Rodrigues(p[0], p[1], p[2], dr);
+            var (u1, u2) = TangentBasis(tt);
+            var tn = new double[3];
+            for (int k = 0; k < 3; k++) tn[k] = tt[k] + p[3] * u1[k] + p[4] * u2[k];
+            return (Mul(rr, dr), Normalize3(tn));
+        }
+
+        double cost = Cost(r, t, res);
+        Span<double> p = stackalloc double[5];
+        var jtj = new double[25];
+        var jtr = new double[5];
+        for (int it = 0; it < iterations; it++)
+        {
+            const double h = 1e-6;
+            for (int k = 0; k < 5; k++)
+            {
+                p.Clear(); p[k] = h;
+                var (rk, tk) = Step(r, t, p);
+                Cost(rk, tk, resTry);
+                for (int i = 0; i < m; i++) jac[i * 5 + k] = (resTry[i] - res[i]) / h;
+            }
+            Array.Clear(jtj); Array.Clear(jtr);
+            for (int i = 0; i < m; i++)
+                for (int k = 0; k < 5; k++)
+                {
+                    jtr[k] += jac[i * 5 + k] * res[i];
+                    for (int l = 0; l <= k; l++) jtj[k * 5 + l] += jac[i * 5 + k] * jac[i * 5 + l];
+                }
+            for (int k = 0; k < 5; k++) for (int l = k + 1; l < 5; l++) jtj[k * 5 + l] = jtj[l * 5 + k];
+            bool accepted = false;
+            for (int attempt = 0; attempt < 10 && !accepted; attempt++)
+            {
+                var sys = (double[])jtj.Clone();
+                var rhs = new double[5];
+                for (int k = 0; k < 5; k++) { sys[k * 5 + k] *= 1 + lambda; rhs[k] = -jtr[k]; }
+                if (!CholeskySolve(sys, 5, rhs)) { lambda *= 10; continue; }
+                for (int k = 0; k < 5; k++) p[k] = rhs[k];
+                var (rn, tn) = Step(r, t, p);
+                double cn = Cost(rn, tn, resTry);
+                if (cn < cost)
+                {
+                    (r, t, cost) = (rn, tn, cn);
+                    Array.Copy(resTry, res, m);
+                    lambda = Math.Max(lambda / 10, 1e-9);
+                    accepted = true;
+                }
+                else lambda *= 10;
+            }
+            if (!accepted) break;
+        }
+        return (r, t);
+    }
+
+    static double[] Normalize3(double[] v)
+    {
+        double n = Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        if (n > 0) { v[0] /= n; v[1] /= n; v[2] /= n; }
+        return v;
+    }
+
+    /// <summary>Two unit vectors spanning the plane perpendicular to the unit vector <paramref name="t"/>.</summary>
+    static (double[] U1, double[] U2) TangentBasis(double[] t)
+    {
+        var a = Math.Abs(t[0]) < 0.9 ? new double[] { 1, 0, 0 } : new double[] { 0, 1, 0 };
+        var u1 = Normalize3(new[] { a[1] * t[2] - a[2] * t[1], a[2] * t[0] - a[0] * t[2], a[0] * t[1] - a[1] * t[0] });
+        var u2 = new[] { t[1] * u1[2] - t[2] * u1[1], t[2] * u1[0] - t[0] * u1[2], t[0] * u1[1] - t[1] * u1[0] };
+        return (u1, u2);
     }
 
     /// <summary>Points triangulated (midpoint) with positive depth in both cameras; camera A at the origin.</summary>

@@ -602,4 +602,61 @@ public class GlobalSfmInitTests
         Assert.That(keptTrue, Is.GreaterThanOrEqualTo(trueTotal * 95 / 100), "true pairs must be kept");
         Assert.That(keptLong, Is.EqualTo(longRange.Count), "true pairs in no triangle come back when they agree with the solution");
     }
+
+    /// <summary>
+    /// Refining each pair's relative pose on its inliers (2026-10-01). FromFundamental decomposed E = K^T F K from a 7/8-point
+    /// F fitted on pixels (7 DoF where the calibrated pair has 5) and never refined it; DrJohnson kept 49 of 242 pairs
+    /// loop-consistent at 5 deg, the E-with-known-K research harness a 92-edge core. Truck poses, square pixels, points in
+    /// front, 0.7 px noise, F from the production RANSAC (2 px): the refined rotations must be clearly closer to the truth.
+    /// </summary>
+    [Test]
+    public void FromFundamental_RefinedOnInliers_RotationCloserToTruth()
+    {
+        var cams = TruckCameras();
+        if (cams == null) Assert.Ignore("Truck dataset not in this checkout");
+        var rng = new Random(23);
+        var raw = new List<double>(); var refined = new List<double>();
+        bool old = GlobalSfmInit.RefineRelativePoses;
+        try
+        {
+            for (int ia = 0; ia + 6 < cams.Count; ia += 6)
+                foreach (int gap in new[] { 1, 3, 6 })
+                {
+                    var a = cams[ia]; var b = cams[ia + gap];
+                    double f = 0.5 * (a.FocalX + a.FocalY);
+                    var sa = new CameraParams { Width = W, Height = H, FocalX = (float)f, FocalY = (float)f, CenterX = a.CenterX, CenterY = a.CenterY, Position = a.Position, Forward = a.Forward, Up = a.Up };
+                    var sb = new CameraParams { Width = W, Height = H, FocalX = (float)f, FocalY = (float)f, CenterX = b.CenterX, CenterY = b.CenterY, Position = b.Position, Forward = b.Forward, Up = b.Up };
+                    var centre = a.Position + Vector3.Normalize(a.Forward) * 4f;
+                    var xa = new List<float>(); var xb = new List<float>();
+                    for (int k = 0; k < 600 && xa.Count < 2 * 300; k++)
+                    {
+                        var pt = centre + new Vector3((float)Gauss(rng), (float)Gauss(rng), (float)Gauss(rng)) * 1.5f;
+                        if (!WorldSpaceGeometry.Project(sa, pt, out var u1, out var v1, out var z1) || z1 <= 0) continue;
+                        if (!WorldSpaceGeometry.Project(sb, pt, out var u2, out var v2, out var z2) || z2 <= 0) continue;
+                        if (u1 < 0 || v1 < 0 || u1 >= W || v1 >= H || u2 < 0 || v2 < 0 || u2 >= W || v2 >= H) continue;
+                        xa.Add(u1 + (float)(Gauss(rng) * 0.7)); xa.Add(v1 + (float)(Gauss(rng) * 0.7));
+                        xb.Add(u2 + (float)(Gauss(rng) * 0.7)); xb.Add(v2 + (float)(Gauss(rng) * 0.7));
+                    }
+                    if (xa.Count / 2 < 80) continue;
+                    var ransac = EpipolarRansac.Estimate(xa.ToArray(), xb.ToArray(), thresholdPx: 2.0, minInliers: 15, seed: ia * 31 + gap);
+                    if (ransac == null) continue;
+                    var (truthR, _) = Relative(a, b);
+                    GlobalSfmInit.RefineRelativePoses = false;
+                    var p0 = GlobalSfmInit.FromFundamental(ia, ia + gap, ransac.F, xa.ToArray(), xb.ToArray(), ransac.Inliers, f, a.CenterX, a.CenterY, b.CenterX, b.CenterY);
+                    GlobalSfmInit.RefineRelativePoses = true;
+                    var p1 = GlobalSfmInit.FromFundamental(ia, ia + gap, ransac.F, xa.ToArray(), xb.ToArray(), ransac.Inliers, f, a.CenterX, a.CenterY, b.CenterX, b.CenterY);
+                    if (p0 == null || p1 == null) continue;
+                    raw.Add(GlobalSfmInit.AngleDeg(p0.R, truthR));
+                    refined.Add(GlobalSfmInit.AngleDeg(p1.R, truthR));
+                }
+        }
+        finally { GlobalSfmInit.RefineRelativePoses = old; }
+        raw.Sort(); refined.Sort();
+        double rawMed = raw[raw.Count / 2], refMed = refined[refined.Count / 2];
+        double rawP90 = raw[raw.Count * 9 / 10], refP90 = refined[refined.Count * 9 / 10];
+        TestContext.Out.WriteLine($"{raw.Count} pairs: rotation error vs truth F-only median {rawMed:F3} p90 {rawP90:F3} deg; refined median {refMed:F3} p90 {refP90:F3} deg");
+        Assert.That(raw.Count, Is.GreaterThan(30));
+        Assert.That(refMed, Is.LessThan(0.7 * rawMed), "refinement must cut the median rotation error");
+        Assert.That(refP90, Is.LessThan(rawP90), "and must not make the tail worse");
+    }
 }

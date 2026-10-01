@@ -260,6 +260,9 @@ public class MultiViewGenerationService
             $"[BA] verification: {considered} candidate pairs (within {MaxPairAngleDeg} deg, or >= {strong} raw matches; " +
             $"noise floor {noiseFloor}), {passed} verified, {verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s {(GpuPairVerification ? "GPU" : "CPU")})");
         var tracks = BundleAdjuster.BuildTracks(verified);
+        // Every verified pair with its relative rotation, when the global init filtered the tracks to rotation-consistent
+        // pairs: re-registration reaches unplaced cameras through them and re-admits their consistent pairs once placed.
+        List<GlobalSfmInit.PairMatch>? pairMatches = null;
         {
             var hist = tracks.GroupBy(t => Math.Min(t.Count, 6)).OrderBy(g => g.Key)
                 .Select(g => $"{(g.Key == 6 ? "6+" : g.Key.ToString())}:{g.Count()}");
@@ -328,6 +331,15 @@ public class MultiViewGenerationService
                         if (inl[k]) keptVerified.Add((p.ImageIndexA, p.Matches[k].IndexA, p.ImageIndexB, p.Matches[k].IndexB));
                 }
                 tracks = BundleAdjuster.BuildTracks(keptVerified);
+                pairMatches = rel.Select(e =>
+                {
+                    int c = relCandidate[e];
+                    var p = candidates[c]; var inl = ransac[c]!.Inliers;
+                    var fa = new List<(int, int)>(); var fb = new List<(int, int)>();
+                    for (int k = 0; k < p.Matches.Count; k++)
+                        if (inl[k]) { fa.Add((p.ImageIndexA, p.Matches[k].IndexA)); fb.Add((p.ImageIndexB, p.Matches[k].IndexB)); }
+                    return new GlobalSfmInit.PairMatch(e.A, e.B, e.R, fa.ToArray(), fb.ToArray());
+                }).ToList();
                 var hist = tracks.GroupBy(t => Math.Min(t.Count, 6)).OrderBy(g => g.Key)
                     .Select(g => $"{(g.Key == 6 ? "6+" : g.Key.ToString())}:{g.Count()}");
                 relNote = $"{solved.Note}rotation-consistent pairs {consistentPairs.Count} of {rel.Count} (<= 10 deg; tracks rebuilt from " +
@@ -504,11 +516,17 @@ public class MultiViewGenerationService
             {
                 var w = new Dictionary<int, List<System.Numerics.Vector3>>();
                 var px = new Dictionary<int, List<System.Numerics.Vector2>>();
-                foreach (var track in tracks)
+                var trackPoint = new Dictionary<int, System.Numerics.Vector3>();
+                var trackOfFeature = new Dictionary<(int Image, int Feature), int>();
+                var tracksWith = new Dictionary<int, HashSet<int>>();   // pending camera -> tracks it is already on
+                for (int ti = 0; ti < tracks.Count; ti++)
                 {
+                    var track = tracks[ti];
+                    foreach (var t in track) trackOfFeature[t] = ti;
                     obsBuf.Clear();
                     foreach (var t in track) { var o = Ob(t); if (good.Contains(o.Camera)) obsBuf.Add(o); }
                     if (obsBuf.Count < 2 || !BundleAdjuster.Triangulate(cams, obsBuf, out var x)) continue;
+                    trackPoint[ti] = x;
                     foreach (var t in track)
                     {
                         int c = baIndex[t.Image];
@@ -516,8 +534,19 @@ public class MultiViewGenerationService
                         var f = images[t.Image].Features[t.Feature];
                         (w.TryGetValue(c, out var wl) ? wl : w[c] = new()).Add(x);
                         (px.TryGetValue(c, out var pl) ? pl : px[c] = new()).Add(new System.Numerics.Vector2(f.X, f.Y));
+                        (tracksWith.TryGetValue(c, out var tw) ? tw : tracksWith[c] = new()).Add(ti);
                     }
                 }
+                if (pairMatches != null)
+                    foreach (int c in pending)
+                    {
+                        var (pw, pp) = GlobalSfmInit.PairCorrespondences(c, pairMatches, good.Contains, trackOfFeature, trackPoint,
+                            t => { var f = images[t.Image].Features[t.Feature]; return new System.Numerics.Vector2(f.X, f.Y); },
+                            tracksWith.TryGetValue(c, out var skip) ? skip : null);
+                        if (pw.Count == 0) continue;
+                        (w.TryGetValue(c, out var wl) ? wl : w[c] = new()).AddRange(pw);
+                        (px.TryGetValue(c, out var pl) ? pl : px[c] = new()).AddRange(pp);
+                    }
                 int thisPass = 0;
                 foreach (int c in w.Keys.OrderByDescending(c => w[c].Count).ToList())
                 {
@@ -542,6 +571,16 @@ public class MultiViewGenerationService
                     Console.WriteLine($"[BA]   pass {passes}: registered view {posed[c]} ({inl}/{n} agree)");
                 }
                 if (thisPass == 0) break;
+
+                // The newly placed cameras' pairs that agree with their poses join the tracks, so BA refines them and the
+                // next ring triangulates from them (without this they would carry no observation at all).
+                if (pairMatches != null)
+                {
+                    var consistent = GlobalSfmInit.PairsConsistentWithPoses(pairMatches, cams, i => !pending.Contains(i));
+                    tracks = BundleAdjuster.BuildTracks(consistent.SelectMany(p => p.FeatA.Zip(p.FeatB,
+                        (a, b) => (a.Image, a.Feature, b.Image, b.Feature))).ToList());
+                    Console.WriteLine($"[BA]   pass {passes}: tracks rebuilt from {consistent.Count} pose-consistent pairs ({tracks.Count} tracks)");
+                }
 
                 // Refine what is placed before placing the next ring. Without this each pass triangulated from
                 // the previous pass's raw PnP poses and error accumulated along a stretch (Truck 115 -> 117 ended

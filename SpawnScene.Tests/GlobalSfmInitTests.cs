@@ -659,4 +659,61 @@ public class GlobalSfmInitTests
         Assert.That(refMed, Is.LessThan(0.7 * rawMed), "refinement must cut the median rotation error");
         Assert.That(refP90, Is.LessThan(rawP90), "and must not make the tail worse");
     }
+
+    /// <summary>
+    /// Re-registration through verified pairs (2026-10-01, DrJohnson b82: tracks come only from rotation-consistent pairs
+    /// between placed cameras, so the 11 unplaced cameras had 0 correspondences). Truck poses, synthetic tracks; cameras
+    /// 0-11 placed, 12 not. Camera 12's pairs: two TRUE ones with 10 and 11, and a WRONG one with 3 (matches scrambled,
+    /// rotation 90 deg off - repeated structure). Its pair correspondences must place it by resection; only the true pairs
+    /// are pose-consistent once it is placed.
+    /// </summary>
+    [Test]
+    public void PairCorrespondences_RegisterAnUnplacedCamera_WrongPairRejected()
+    {
+        var cams = TruckCameras();
+        if (cams == null) Assert.Ignore("Truck poses not present");
+        var rng = new Random(29);
+        var (obs, points, focal) = SyntheticTracks(cams, rng, 6000, 0.5);
+        foreach (var c in cams) { c.FocalX = (float)focal; c.FocalY = (float)focal; }
+        const int target = 12;
+        Func<int, bool> placed = c => c < target;
+        var byPoint = obs.GroupBy(o => o.Point).ToDictionary(g => g.Key, g => g.ToList());
+        // Tracks among the placed cameras: feature key = (camera, point).
+        var trackOfFeature = new Dictionary<(int Image, int Feature), int>();
+        var trackPoint = new Dictionary<int, Vector3>();
+        foreach (var (pid, list) in byPoint)
+        {
+            var mine = list.Where(o => placed(o.Camera)).ToList();
+            if (mine.Count < 2) continue;
+            if (!BundleAdjuster.Triangulate(cams, mine.Select(o => (o.Camera, o.U, o.V)).ToList(), out var x)) continue;
+            foreach (var o in mine) trackOfFeature[(o.Camera, pid)] = pid;
+            trackPoint[pid] = x;
+        }
+        GlobalSfmInit.PairMatch Pair(int other, bool wrong)
+        {
+            var common = byPoint.Where(kv => kv.Value.Any(o => o.Camera == target) && kv.Value.Any(o => o.Camera == other)).Select(kv => kv.Key).ToList();
+            var fa = common.Select(pid => (other, pid)).ToArray();
+            var fb = common.Select(pid => (target, pid)).ToArray();
+            if (wrong) fb = fb.OrderBy(_ => rng.Next()).ToArray();
+            var (r, _) = Relative(cams[other], cams[target]);
+            if (wrong) r = GlobalSfmInit.Mul(SmallRotation(rng, 90), r);
+            return new GlobalSfmInit.PairMatch(other, target, r, fa, fb);
+        }
+        var pairs = new List<GlobalSfmInit.PairMatch> { Pair(3, true), Pair(10, false), Pair(11, false) };   // the wrong pair FIRST: its matches claim the tracks they reach
+        Assume.That(pairs[0].FeatA.Length, Is.GreaterThan(10), "camera 3 must share points with camera 12 for the wrong pair to bite");
+        var pixelOf = obs.ToDictionary(o => (o.Camera, o.Point), o => new Vector2(o.U, o.V));
+        var (world, px) = GlobalSfmInit.PairCorrespondences(target, pairs, placed, trackOfFeature, trackPoint, k => pixelOf[k]);
+        TestContext.Out.WriteLine($"camera {target}: {world.Count} correspondences through {pairs.Count} pairs");
+        Assert.That(world.Count, Is.GreaterThan(30), "the pairs must reach the placed cameras' points");
+        var start = Copy(cams[target]);
+        Assert.That(CameraResection.ResectRansac(world, px, start, out var reg, out int inl, thresholdPx: 8, seed: 3), Is.True);
+        float spread = cams.Take(target).Select(c => Vector3.Distance(c.Position, cams[0].Position)).Max();
+        float posErr = Vector3.Distance(reg.Position, cams[target].Position) / spread;
+        TestContext.Out.WriteLine($"resection: {inl}/{world.Count} agree, position error {posErr:P2} of spread");
+        Assert.That(posErr, Is.LessThan(0.02f), "registered position");
+        var regCams = cams.Select(Copy).ToList();
+        regCams[target] = reg;
+        var consistent = GlobalSfmInit.PairsConsistentWithPoses(pairs, regCams, c => c <= target);
+        Assert.That(consistent.Select(p => p.CamA).OrderBy(c => c), Is.EqualTo(new[] { 10, 11 }), "only the true pairs agree with the poses");
+    }
 }

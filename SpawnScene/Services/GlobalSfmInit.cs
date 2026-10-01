@@ -1233,6 +1233,51 @@ public static class GlobalSfmInit
         double maxDeg = 10)
         => edges.Where(e => connected[e.A] && connected[e.B] && AngleDeg(rot[e.B], Mul(e.R, rot[e.A])) <= maxDeg).ToList();
 
+    /// <summary>A verified pair's relative rotation (x_b = R x_a + t) and its inlier matches as (image, feature) keys.</summary>
+    public sealed record PairMatch(int CamA, int CamB, double[] R, (int Image, int Feature)[] FeatA, (int Image, int Feature)[] FeatB);
+
+    /// <summary>
+    /// The pairs between PLACED cameras whose relative rotation agrees with the cameras' current rotations to within
+    /// <paramref name="maxDeg"/> - <see cref="FilterByRotations"/> against the current poses, so cameras placed after the
+    /// global init (re-registration) bring their consistent pairs into the tracks.
+    /// </summary>
+    public static List<PairMatch> PairsConsistentWithPoses(IReadOnlyList<PairMatch> pairs, IReadOnlyList<CameraParams> cams,
+        Func<int, bool> placed, double maxDeg = 10)
+        => pairs.Where(p => placed(p.CamA) && placed(p.CamB)
+            && AngleDeg(RotationOf(cams[p.CamB]), Mul(p.R, RotationOf(cams[p.CamA]))) <= maxDeg).ToList();
+
+    /// <summary>
+    /// 2D-3D correspondences for a camera not yet placed, through its verified pairs with PLACED cameras: a match whose
+    /// placed-side feature lies on a triangulated track gives (that track's point, this camera's pixel), once per (track,
+    /// feature): a wrong pair's candidate for a track does not shut out a true pair's, resection's RANSAC decides. The pairs
+    /// are not merged into the tracks (a wrong pair would chain into them). 2026-10-01, DrJohnson b82: with tracks built only from rotation-consistent pairs between placed
+    /// cameras, the 11 unplaced cameras had 0 correspondences and re-registration placed none.
+    /// </summary>
+    public static (List<Vector3> World, List<Vector2> Pixels) PairCorrespondences(int cam, IReadOnlyList<PairMatch> pairs,
+        Func<int, bool> placed, IReadOnlyDictionary<(int Image, int Feature), int> trackOfFeature,
+        IReadOnlyDictionary<int, Vector3> trackPoint, Func<(int Image, int Feature), Vector2> pixel, ISet<int>? skipTracks = null)
+    {
+        var world = new List<Vector3>();
+        var px = new List<Vector2>();
+        var used = new HashSet<(int Track, (int Image, int Feature) Mine)>();
+        foreach (var p in pairs)
+        {
+            (int Image, int Feature)[] mine, theirs;
+            if (p.CamA == cam && placed(p.CamB)) { mine = p.FeatA; theirs = p.FeatB; }
+            else if (p.CamB == cam && placed(p.CamA)) { mine = p.FeatB; theirs = p.FeatA; }
+            else continue;
+            for (int k = 0; k < mine.Length; k++)
+            {
+                if (!trackOfFeature.TryGetValue(theirs[k], out int ti) || !trackPoint.TryGetValue(ti, out var x)) continue;
+                if (skipTracks != null && skipTracks.Contains(ti)) continue;
+                if (!used.Add((ti, mine[k]))) continue;
+                world.Add(x);
+                px.Add(pixel(mine[k]));
+            }
+        }
+        return (world, px);
+    }
+
     /// <summary><see cref="Apply"/>, with the positioning on <paramref name="accelerator"/> (<see cref="GpuGlobalPositioner"/>,
     /// the same algorithm) when one is given.</summary>
     public static async Task<string> ApplyAsync(List<CameraParams> cams, IReadOnlyList<RelativePose> edges,

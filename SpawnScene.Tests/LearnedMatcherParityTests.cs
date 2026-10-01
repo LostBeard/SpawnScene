@@ -82,4 +82,54 @@ public class LearnedMatcherParityTests
         Assert.That(posMax, Is.LessThan(1e-3), "coinciding keypoints must agree to sub-millipixel");
         Assert.That(descMax, Is.LessThan(1e-4), "descriptors of coinciding keypoints must match onnxruntime");
     }
+
+    [Test]
+    public async Task Matcher_MatchesOnnxRuntime()
+    {
+        var dir = Dir();
+        if (dir == null) Assert.Ignore("_scratch/lg not present");
+        var kp = ReadF32(Path.Combine(dir, "ref", "keypoints_2x2048x2.f32"));
+        var desc = ReadF32(Path.Combine(dir, "ref", "desc_2x2048x128.f32"));
+        var mb = File.ReadAllBytes(Path.Combine(dir, "ref", "matches_495x3.i64"));
+        var refM = new long[mb.Length / 8];
+        Buffer.BlockCopy(mb, 0, refM, 0, mb.Length);
+        var refS = ReadF32(Path.Combine(dir, "ref", "mscores_495.f32"));
+
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var accel = context.CreateCPUAccelerator(0);
+        using var session = InferenceSession.CreateFromFile(accel, File.ReadAllBytes(Path.Combine(dir, "lightglue_plus_aliked_k2048_matcher.onnx")),
+            null, new Dictionary<string, int[]> { ["keypoints"] = new[] { 2, 2048, 2 }, ["div_87"] = new[] { 2, 2048, 128 } });
+        using var kB = accel.Allocate1D(kp);
+        using var dB = accel.Allocate1D(desc);
+        using var s0 = accel.Allocate1D(new float[] { 2 });
+        using var s1 = accel.Allocate1D(new float[] { 1 });
+        using var s2 = accel.Allocate1D(new float[] { 416 });
+        using var s3 = accel.Allocate1D(new float[] { 640 });
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var outs = await session.RunAsync(new Dictionary<string, Tensor>
+        {
+            ["keypoints"] = new Tensor(kB.View, new[] { 2, 2048, 2 }),
+            ["div_87"] = new Tensor(dB.View, new[] { 2, 2048, 128 }),
+            ["sym_size_int_2"] = new Tensor(s0.View, Array.Empty<int>()),
+            ["floordiv_7"] = new Tensor(s1.View, Array.Empty<int>()),
+            ["select"] = new Tensor(s2.View, Array.Empty<int>()),
+            ["select_1"] = new Tensor(s3.View, Array.Empty<int>()),
+        });
+        await accel.SynchronizeAsync();
+        TestContext.Out.WriteLine($"ran in {sw.Elapsed.TotalSeconds:F1}s");
+        var m = outs["matches"]; var sc = outs["mscores"];
+        int n = m.Shape[0];
+        var mv = m.Data.SubView(0, n * 3).GetAsArray1D();
+        var sv = sc.Data.SubView(0, n).GetAsArray1D();
+        var refSet = new Dictionary<(long, long, long), float>();
+        for (int i = 0; i < refM.Length / 3; i++) refSet[(refM[3 * i], refM[3 * i + 1], refM[3 * i + 2])] = refS[i];
+        int same = 0; double sMax = 0;
+        for (int i = 0; i < n; i++)
+            if (refSet.TryGetValue(((long)mv[3 * i], (long)mv[3 * i + 1], (long)mv[3 * i + 2]), out var rs)) { same++; sMax = Math.Max(sMax, Math.Abs(rs - sv[i])); }
+        TestContext.Out.WriteLine($"matches: ours {n}, onnxruntime {refM.Length / 3}, identical {same}; score max |diff| {sMax:G3}");
+        // The matcher runs on onnxruntime's own extractor output, so the match set must be IDENTICAL.
+        Assert.That(n, Is.EqualTo(refM.Length / 3), "match count");
+        Assert.That(same, Is.EqualTo(n), "every match must be one onnxruntime found");
+        Assert.That(sMax, Is.LessThan(1e-4), "match scores must agree");
+    }
 }

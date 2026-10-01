@@ -511,9 +511,26 @@ public class ImageImportService : IDisposable
     /// Match features across all image pairs.
     /// Yields to UI between pairs to prevent freezing.
     /// </summary>
+    // The last full match: which images, in which order, by which front end - and the result. The multi-view overlap pass
+    // clears and re-imports the SAME images (BuildOverlapMatrixAsync); matching is deterministic for given features, so it
+    // reuses the pairs. MEASURED 2026-10-01: DrJohnson's learned matching ran twice, 559 s + 645 s.
+    private List<ImportedImage>? _matchedImages;
+    private string? _matchedBy;
+    private List<ImagePair>? _matchedResult;
+
+    private string FrontEndKey => UseLearnedFeatures ? $"learned K={LearnedFeatureMatcher.KeypointBudget}" : "BRIEF";
+
     private async Task MatchAllPairsAsync()
     {
         _pairs.Clear();
+        if (_matchedResult != null && _matchedBy == FrontEndKey && _matchedImages != null
+            && _matchedImages.Count == _images.Count && _matchedImages.Zip(_images).All(t => ReferenceEquals(t.First, t.Second)))
+        {
+            _pairs.AddRange(_matchedResult);
+            Console.WriteLine($"[Import] reused the {_pairs.Count} matched pairs of these {_images.Count} images ({FrontEndKey})");
+            NotifyChanged();
+            return;
+        }
         var pairs = new List<(int A, int B)>();
         for (int i = 0; i < _images.Count - 1; i++)
             for (int j = i + 1; j < _images.Count; j++)
@@ -534,8 +551,16 @@ public class ImageImportService : IDisposable
             });
             Console.WriteLine($"[Import] Matched {_images[i].FileName} ↔ {_images[j].FileName}: {matches.Count} matches");
         }
+        bool firstBatch = true;
         async Task OnProgress(int done)
         {
+            if (firstBatch)
+            {
+                // The learned matcher's attention is O(K^2) per pair: its first batch's footprint is the number that decides
+                // pairs-per-run (8 pairs x K=1024 lost the device on DrJohnson, 2026-10-01).
+                firstBatch = false;
+                Console.WriteLine($"[Import] first match batch ({done} pairs) after {sw.Elapsed.TotalSeconds:F1}s; [GPU] {GpuService.MemoryReport(4)}");
+            }
             Status = $"Matching pairs {done}/{totalPairs}...";
             Progress = (float)done / totalPairs;
             NotifyChanged();
@@ -543,12 +568,22 @@ public class ImageImportService : IDisposable
         }
 
         if (UseLearnedFeatures)
-            await _learned.MatchPairsAsync(_images, pairs, OnPair, OnProgress);
+        {
+            // Every image is extracted by now: free the extractors before the matcher allocates, and the matcher after,
+            // so the depth model that runs next has the device (4.6 GB of model pools held there lost it, 2026-10-01).
+            _learned.ReleaseExtractors();
+            try { await _learned.MatchPairsAsync(_images, pairs, OnPair, OnProgress); }
+            finally { _learned.ReleaseMatcher(); }
+            Console.WriteLine($"[Import] learned models released; [GPU] {GpuService.MemoryReport(4)}");
+        }
         else
             // Batched on the device: every image's descriptors uploaded once, hundreds of pairs per dispatch. Pair by
             // pair this was 212.5 s for Truck's 7,875 pairs (~27 ms of round trips each); the matches are identical.
             await _gpuMatcher.MatchPairsAsync(
                 _images.Select(im => (IReadOnlyList<ImageFeature>)im.Features).ToList(), pairs, OnPair, OnProgress);
+        _matchedImages = new List<ImportedImage>(_images);
+        _matchedBy = FrontEndKey;
+        _matchedResult = new List<ImagePair>(_pairs);
         Console.WriteLine($"[Import] {(UseLearnedFeatures ? $"LightGlue+ (K={LearnedFeatureMatcher.KeypointBudget})" : "BRIEF")} matched {totalPairs} pairs in {sw.Elapsed.TotalSeconds:F1}s ({_pairs.Count} with >= 8 matches); {HeapReport()}");
 
         NotifyChanged();
@@ -601,6 +636,8 @@ public class ImageImportService : IDisposable
     /// <summary>Release every image this service created (JS Blobs, GPU buffers). Their users must be done with them.</summary>
     public void ReleaseOwnedImages()
     {
+        _matchedImages = null;
+        _matchedResult = null;
         foreach (var img in _ownedImages) img.DisposeSource();
         _ownedImages.Clear();
     }

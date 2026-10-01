@@ -231,13 +231,31 @@ public sealed class LearnedFeatureMatcher : IDisposable
         }
     }
 
-    public void Dispose()
+    /// <summary>
+    /// Free the extractor sessions and their buffer pools (reloaded on the next <see cref="ExtractAsync"/>). The images'
+    /// <see cref="ImageDescriptors"/> are separate and stay. MEASURED 2026-10-01 (DrJohnson, K=1024, 1 pair per run): the
+    /// extractor + matcher sessions held 4.6 GB of WebGPU buffers after matching, and DAv3's first multi-view pass then
+    /// lost the device. Call once every ExtractAsync has completed (each one ends synchronized).
+    /// </summary>
+    public void ReleaseExtractors()
     {
         foreach (var s in _extractors.Values) s.Dispose();
         _extractors.Clear();
-        _matcher?.Dispose();
-        _matcher = null;
         _preprocess?.Dispose();
         _preprocess = null;
+    }
+
+    /// <summary>Free the matcher session and its buffer pool (reloaded on the next <see cref="MatchPairsAsync"/>, which
+    /// ends synchronized).</summary>
+    public void ReleaseMatcher()
+    {
+        _matcher?.Dispose();
+        _matcher = null;
+    }
+
+    public void Dispose()
+    {
+        ReleaseExtractors();
+        ReleaseMatcher();
     }
 }

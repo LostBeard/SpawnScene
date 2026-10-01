@@ -126,3 +126,18 @@ candidate selection (retrieval / pose gating) so LightGlue runs on thousands of 
 
 Evaluation (running): the same downstream as the SIFT study - true-pair rotation error, all-pairs rotation averaging,
 loop-filtered core size and accuracy - on all 946 DrJohnson pairs.
+
+### RESULT - learned matchers on DrJohnson (44 views, all 946 pairs, 1024x672 input, COLMAP K; same downstream)
+
+| Matcher | Edges (true) | True-pair rot err median / p75 | Rotation averaging, ALL edges | Loop-filtered core |
+|---|---|---|---|---|
+| SIFT 4000 (above) | 82 | 6.2 / 92 | 43/44 cams, 33.1 / 131 | 32 edges, 11/44 cams, 4.4 / 6.7 |
+| DISK + LightGlue | 123 (57) | 6.4 / 91 | 40/44, 82.5 / 92.6 | 24 edges, 12/44, 4.9 / 6.7 |
+| SuperPoint + LightGlue (non-commercial) | 141 (63) | 2.7 / 22 | 41/44, 8.2 / 95 | 42 edges, 16/44, 2.1 / 2.8 |
+| **RaCo-ALIKED + LightGlue+ (k2048)** | **200 (94)** | **2.1 / 5.8** | **43/44, 1.9 / 3.3** | **92 edges, 37/44, 1.6 / 2.1** |
+
+**Decision: RaCo-ALIKED + LightGlue+** - best on every measure AND shippable (Apache-2.0 / BSD-3 / Apache-2.0). It makes
+the 44-view subset solvable by the existing global pipeline: 43 of 44 cameras at a 1.9 deg median before any loop filter.
+DISK + LightGlue is no better than SIFT here. Plan: run it through SpawnDev.ILGPU.ML on WebGPU (prove the load + parity
+vs onnxruntime first), split extractor / matcher, feed its matches into the existing verification -> loop filter ->
+focal calibration -> global init -> BA; TruckFull must hold 0.08% / 21.63 dB.

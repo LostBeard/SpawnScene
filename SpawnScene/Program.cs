@@ -37,6 +37,8 @@ builder.Services.AddScoped<ProjectService>();
 builder.Services.AddScoped<XRService>();
 builder.Services.AddScoped<GpuFeatureMatcher>();
 builder.Services.AddScoped<VideoFrameExtractor>();
+builder.Services.AddScoped(sp => new LearnedFeatureMatcher(
+    () => sp.GetRequiredService<GpuService>().WebGPUAccelerator, sp.GetRequiredService<IModelSource>()));
 builder.Services.AddScoped<ImageImportService>();
 builder.Services.AddScoped<SfmReconstructor>();
 builder.Services.AddScoped<MultiViewGenerationService>();

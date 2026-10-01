@@ -23,14 +23,25 @@ public class ImageImportService : IDisposable
     private readonly List<ImagePair> _pairs = [];
 
     private readonly VideoFrameExtractor _video;
+    private readonly LearnedFeatureMatcher _learned;
 
-    public ImageImportService(GpuFeatureMatcher gpuMatcher, GpuService gpu, HttpClient http, VideoFrameExtractor video)
+    public ImageImportService(GpuFeatureMatcher gpuMatcher, GpuService gpu, HttpClient http, VideoFrameExtractor video,
+        LearnedFeatureMatcher learned)
     {
         _gpuMatcher = gpuMatcher;
         _gpu = gpu;
         _video = video;
         _http = http;
+        _learned = learned;
+        _learned.OnStatus = line => { Status = line; Console.WriteLine($"[Import] {line}"); NotifyChanged(); };
     }
+
+    /// <summary>
+    /// Features and pair matches from the learned front end (<see cref="LearnedFeatureMatcher"/>: RaCo-ALIKED +
+    /// LightGlue+) instead of FAST/BRIEF + Hamming matching. &amp;features=learned. Pair verification and everything after
+    /// it are the same for both.
+    /// </summary>
+    public bool UseLearnedFeatures { get; set; }
 
     /// <summary>All imported images.</summary>
     public IReadOnlyList<ImportedImage> Images => _images;
@@ -160,7 +171,9 @@ public class ImageImportService : IDisposable
                 NotifyChanged();
                 await Task.Yield(); // Critical: let UI render before CPU work
 
-                imported.Features = _detector.Detect(imported.GrayPixels, featureWidth, featureHeight);
+                imported.Features = UseLearnedFeatures
+                    ? await DetectLearnedFromManagedAsync(imported)
+                    : _detector.Detect(imported.GrayPixels, featureWidth, featureHeight);
 
                 // Scale feature coordinates back to full image resolution
                 if (featureWidth != imgWidth)
@@ -215,9 +228,13 @@ public class ImageImportService : IDisposable
         await GpuImageOps.EnsureOnDeviceAsync(accel, img);
         try
         {
-            using (var grayDev = GpuImageOps.GrayscaleToDevice(accel, img.GpuRgba!,
-                       img.Width, img.Height, img.FeatureWidth, img.FeatureHeight))
-                img.Features = await _gpuDetector.DetectAsync(accel, grayDev.View, img.FeatureWidth, img.FeatureHeight);
+            if (UseLearnedFeatures)
+                img.Features = await _learned.ExtractAsync(img, img.GpuRgba!, img.Width, img.Height,
+                    img.FeatureWidth, img.FeatureHeight);
+            else
+                using (var grayDev = GpuImageOps.GrayscaleToDevice(accel, img.GpuRgba!,
+                           img.Width, img.Height, img.FeatureWidth, img.FeatureHeight))
+                    img.Features = await _gpuDetector.DetectAsync(accel, grayDev.View, img.FeatureWidth, img.FeatureHeight);
             // Colours are sampled at IMAGE resolution after the caller's scale-back in the managed path; with the
             // capped decode the feature and image resolutions are the same, so sampling here is the same pixel.
             if (img.FeatureWidth == img.Width && img.FeatureHeight == img.Height)
@@ -234,6 +251,20 @@ public class ImageImportService : IDisposable
         {
             if (img.Source != null) img.DisposeGpu();
         }
+    }
+
+    /// <summary>
+    /// Learned features for a legacy MANAGED image (file picker / byte arrays: its pixels are on the host already).
+    /// At feature resolution, like <see cref="FeatureDetector.Detect"/>.
+    /// </summary>
+    private async Task<List<ImageFeature>> DetectLearnedFromManagedAsync(ImportedImage img)
+    {
+        var accel = _gpu.WebGPUAccelerator;
+        // CPU transfer: the decoded photo, uploaded once for the extractor (this path's pixels only exist on the host).
+        using var rgba = accel.Allocate1D(System.Runtime.InteropServices.MemoryMarshal.Cast<byte, int>(img.RgbaPixels).ToArray());
+        var features = await _learned.ExtractAsync(img, rgba, img.Width, img.Height, img.FeatureWidth, img.FeatureHeight);
+        await accel.SynchronizeAsync();
+        return features;
     }
 
     /// <summary>
@@ -295,6 +326,8 @@ public class ImageImportService : IDisposable
 
                     if (onDevice)
                         await DetectOnDeviceAsync(img);
+                    else if (UseLearnedFeatures)
+                        img.Features = await DetectLearnedFromManagedAsync(img);
                     else
                         img.Features = _detector.Detect(img.GrayPixels, img.FeatureWidth, img.FeatureHeight);
 
@@ -488,31 +521,35 @@ public class ImageImportService : IDisposable
         int totalPairs = pairs.Count;
         var sw = System.Diagnostics.Stopwatch.StartNew();
 
-        // Batched on the device: every image's descriptors uploaded once, hundreds of pairs per dispatch. Pair by
-        // pair this was 212.5 s for Truck's 7,875 pairs (~27 ms of round trips each); the matches are identical.
-        await _gpuMatcher.MatchPairsAsync(
-            _images.Select(im => (IReadOnlyList<ImageFeature>)im.Features).ToList(), pairs,
-            (p, matches) =>
+        void OnPair(int p, List<FeatureMatch> matches)
+        {
+            if (matches.Count < 8) return;
+            var (i, j) = pairs[p];
+            _pairs.Add(new ImagePair
             {
-                if (matches.Count < 8) return;
-                var (i, j) = pairs[p];
-                _pairs.Add(new ImagePair
-                {
-                    ImageIndexA = i,
-                    ImageIndexB = j,
-                    Matches = matches,
-                    InlierCount = matches.Count,
-                });
-                Console.WriteLine($"[Import] Matched {_images[i].FileName} ↔ {_images[j].FileName}: {matches.Count} matches");
-            },
-            async done =>
-            {
-                Status = $"Matching pairs {done}/{totalPairs}...";
-                Progress = (float)done / totalPairs;
-                NotifyChanged();
-                await Task.Yield();
+                ImageIndexA = i,
+                ImageIndexB = j,
+                Matches = matches,
+                InlierCount = matches.Count,
             });
-        Console.WriteLine($"[Import] matched {totalPairs} pairs in {sw.Elapsed.TotalSeconds:F1}s ({_pairs.Count} with >= 8 matches); {HeapReport()}");
+            Console.WriteLine($"[Import] Matched {_images[i].FileName} ↔ {_images[j].FileName}: {matches.Count} matches");
+        }
+        async Task OnProgress(int done)
+        {
+            Status = $"Matching pairs {done}/{totalPairs}...";
+            Progress = (float)done / totalPairs;
+            NotifyChanged();
+            await Task.Yield();
+        }
+
+        if (UseLearnedFeatures)
+            await _learned.MatchPairsAsync(_images, pairs, OnPair, OnProgress);
+        else
+            // Batched on the device: every image's descriptors uploaded once, hundreds of pairs per dispatch. Pair by
+            // pair this was 212.5 s for Truck's 7,875 pairs (~27 ms of round trips each); the matches are identical.
+            await _gpuMatcher.MatchPairsAsync(
+                _images.Select(im => (IReadOnlyList<ImageFeature>)im.Features).ToList(), pairs, OnPair, OnProgress);
+        Console.WriteLine($"[Import] {(UseLearnedFeatures ? $"LightGlue+ (K={LearnedFeatureMatcher.KeypointBudget})" : "BRIEF")} matched {totalPairs} pairs in {sw.Elapsed.TotalSeconds:F1}s ({_pairs.Count} with >= 8 matches); {HeapReport()}");
 
         NotifyChanged();
     }

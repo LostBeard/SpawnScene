@@ -133,4 +133,69 @@ public class KorniaRacoLightGlueParityTests
         Assert.That(diffMatches, Is.EqualTo(0), "matches0 must be identical");
         Assert.That(sMax, Is.LessThan(1e-4), "mscores0 must agree");
     }
+
+    /// <summary>The model files from _scratch/kornia, as the hub would serve them.</summary>
+    sealed class ScratchModels(string dir) : SpawnDev.ILGPU.ML.Hub.IModelSource
+    {
+        public Task<Stream> OpenAsync(string repoId, string filePath, CancellationToken cancellationToken = default)
+            => Task.FromResult<Stream>(File.OpenRead(Path.Combine(dir, filePath)));
+        public Task<byte[]> FetchBytesAsync(string repoId, string filePath, CancellationToken cancellationToken = default)
+            => File.ReadAllBytesAsync(Path.Combine(dir, filePath), cancellationToken);
+    }
+
+    /// <summary>
+    /// The app's batched matching (LearnedFeatureMatcher.MatchPairsAsync, 2 pairs per run) on onnxruntime's extractor
+    /// output: pair (0, 1) must give onnxruntime's matches0 exactly, and pair (0, 0) - image 0 against itself - must
+    /// match keypoints to themselves. Pairing the 2P rows the wrong way (interleaved vs halves) swaps those two answers.
+    /// </summary>
+    [Test]
+    public async Task Matcher_PairLayout_BatchedPairsMatchOnnxRuntime()
+    {
+        const int K = 1024;
+        var dir = Dir();
+        if (dir == null) Assert.Ignore("_scratch/kornia not present");
+        var nkp = ReadF32(Path.Combine(dir, "kornia", "ref", $"k{K}_nkp.f32"));
+        var desc = ReadF32(Path.Combine(dir, "kornia", "ref", $"k{K}_desc.f32"));
+        var refM = ReadI32(Path.Combine(dir, "kornia", "ref", $"k{K}_matches0.i32"));
+
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var accel = context.CreateCPUAccelerator(0);
+        using var matcher = new SpawnScene.Services.LearnedFeatureMatcher(() => accel, new ScratchModels(Path.Combine(dir, "kornia")));
+        int oldK = SpawnScene.Services.LearnedFeatureMatcher.KeypointBudget, oldP = SpawnScene.Services.LearnedFeatureMatcher.PairsPerRun;
+        SpawnScene.Services.LearnedFeatureMatcher.KeypointBudget = K;
+        SpawnScene.Services.LearnedFeatureMatcher.PairsPerRun = 2;
+        var images = new List<SpawnScene.Models.ImportedImage>();
+        try
+        {
+            for (int b = 0; b < 2; b++)
+                images.Add(new SpawnScene.Models.ImportedImage
+                {
+                    FileName = $"ref{b}",
+                    LearnedDescriptors = new SpawnScene.Services.LearnedFeatureMatcher.ImageDescriptors
+                    {
+                        K = K,
+                        Normalized = accel.Allocate1D(nkp[(b * K * 2)..((b + 1) * K * 2)]),
+                        Descriptors = accel.Allocate1D(desc[(b * K * 128)..((b + 1) * K * 128)]),
+                    },
+                });
+            var results = new Dictionary<int, List<SpawnScene.Models.FeatureMatch>>();
+            await matcher.MatchPairsAsync(images, new[] { (0, 1), (0, 0) }, (p, list) => results[p] = list);
+
+            var m01 = new int[K];
+            Array.Fill(m01, -1);
+            foreach (var fm in results[0]) m01[fm.IndexA] = fm.IndexB;
+            int diff = 0;
+            for (int i = 0; i < K; i++) if (m01[i] != refM[i]) diff++;
+            int self = results[1].Count(fm => fm.IndexA == fm.IndexB);
+            TestContext.Out.WriteLine($"pair (0,1): {results[0].Count} matches, {diff} differ from onnxruntime; pair (0,0): {results[1].Count} matches, {self} to themselves");
+            Assert.That(diff, Is.EqualTo(0), "pair (0, 1) must be onnxruntime's matches0");
+            Assert.That(self, Is.GreaterThanOrEqualTo(K * 9 / 10), "image 0 against itself must match keypoints to themselves");
+        }
+        finally
+        {
+            SpawnScene.Services.LearnedFeatureMatcher.KeypointBudget = oldK;
+            SpawnScene.Services.LearnedFeatureMatcher.PairsPerRun = oldP;
+            foreach (var im in images) im.DisposeSource();
+        }
+    }
 }

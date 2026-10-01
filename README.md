@@ -136,6 +136,9 @@ Navigate to `https://localhost:5001` (or the URL shown in the terminal).
 
 MIT License — see [LICENSE](LICENSE) for details.
 
+Models downloaded at run time carry their own licences (RaCo, ALIKED BSD-3-Clause, LightGlue): see
+[THIRD-PARTY-NOTICES](SpawnScene/wwwroot/licenses/THIRD-PARTY-NOTICES.md).
+
 ## 👤 Author
 
 **Todd Tanner** ([@LostBeard](https://github.com/LostBeard))

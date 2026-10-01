@@ -129,13 +129,22 @@ public class ImportedImage
     /// <summary>Longest edge <see cref="Source"/> is decoded at (so every re-decode is the same size).</summary>
     public int DecodeMaxEdge { get; set; }
 
-    /// <summary>Release the encoded source and any device copy. Idempotent.</summary>
+    /// <summary>Release the encoded source, any device copy and the learned descriptors. Idempotent.</summary>
     public void DisposeSource()
     {
         DisposeGpu();
         Source?.Dispose();
         Source = null;
+        LearnedDescriptors?.Dispose();
+        LearnedDescriptors = null;
     }
+
+    /// <summary>
+    /// The learned front end's matcher inputs for this image, on the device (<see cref="Services.LearnedFeatureMatcher"/>):
+    /// null for the FAST/BRIEF front end. Kept across a re-import of the same image (the overlap pass clears and
+    /// re-imports), released by <see cref="DisposeSource"/>.
+    /// </summary>
+    public Services.LearnedFeatureMatcher.ImageDescriptors? LearnedDescriptors { get; set; }
 
     /// <summary>Resolution used for feature detection (may be downsampled).</summary>
     public int FeatureWidth { get; set; }

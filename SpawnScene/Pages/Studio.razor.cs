@@ -349,6 +349,14 @@ public partial class Studio : IAsyncDisposable
             // &unloaddepth=1: unload the depth model before training (A/B for the densify-carry device loss).
             if (query.TryGetValue("unloaddepth", out var udq))
                 _unloadDepthBeforeTraining = udq is "1" or "true";
+            // &features=learned: RaCo-ALIKED + LightGlue+ (LearnedFeatureMatcher) instead of FAST/BRIEF for features and pair
+            // matches; &lgk=1024|3072 its keypoint budget, &lgpairs=N pairs per matcher run.
+            if (query.TryGetValue("features", out var ftq))
+                _importService.UseLearnedFeatures = ftq is "learned" or "lightglue";
+            if (query.TryGetValue("lgk", out var lgk) && int.TryParse(lgk, out var lgki))
+                LearnedFeatureMatcher.KeypointBudget = lgki;
+            if (query.TryGetValue("lgpairs", out var lgp) && int.TryParse(lgp, out var lgpi))
+                LearnedFeatureMatcher.PairsPerRun = Math.Max(1, lgpi);
             // &verify=cpu: verify matched pairs with the CPU estimator instead of GpuEpipolarRansac (A/B).
             if (query.TryGetValue("verify", out var vq))
                 _multiViewService.GpuPairVerification = vq != "cpu";

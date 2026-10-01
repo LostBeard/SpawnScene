@@ -935,6 +935,48 @@ public static class GlobalSfmInit
         return (oc, op, v);
     }
 
+    /// <summary>
+    /// Leave-one-out reprojection per camera: each 3+-view track is triangulated from its OTHER placed cameras and
+    /// reprojected into this one (at most <paramref name="maxPerCamera"/> samples each); a point behind the camera counts
+    /// 1e6 px. Returns each camera's median miss (NaN: no sample) and the sample counts. Cameras in
+    /// <paramref name="unplaced"/> have no pose: they are neither evaluated nor used to triangulate. Evaluating them (until
+    /// 2026-10-01) let 21 placeholder cameras of DrJohnson's 44 set the "typical" miss to 1e6 px, so the misplaced limit
+    /// (4x typical) was 4e6 px and the check was silently off.
+    /// </summary>
+    public static (double[] Medians, int[] Counts) LeaveOneOutMedians(IReadOnlyList<CameraParams> cams,
+        IReadOnlyList<IReadOnlyList<(int Camera, float U, float V)>> tracks, ISet<int> unplaced, int maxPerCamera = 400)
+    {
+        int n = cams.Count;
+        var errs = new List<double>[n];
+        for (int c = 0; c < n; c++) errs[c] = new List<double>();
+        var others = new List<(int Camera, float U, float V)>();
+        foreach (var track in tracks)
+        {
+            if (track.Count < 3) continue;
+            for (int k = 0; k < track.Count; k++)
+            {
+                var me = track[k];
+                if (unplaced.Contains(me.Camera) || errs[me.Camera].Count >= maxPerCamera) continue;
+                others.Clear();
+                for (int j = 0; j < track.Count; j++)
+                    if (j != k && !unplaced.Contains(track[j].Camera)) others.Add(track[j]);
+                if (others.Count < 2 || !BundleAdjuster.Triangulate(cams, others, out var x)) continue;
+                if (!WorldSpaceGeometry.Project(cams[me.Camera], x, out var u, out var v, out _)) { errs[me.Camera].Add(1e6); continue; }
+                errs[me.Camera].Add(Math.Sqrt((u - me.U) * (u - me.U) + (v - me.V) * (v - me.V)));
+            }
+        }
+        var medians = new double[n];
+        var counts = new int[n];
+        for (int c = 0; c < n; c++)
+        {
+            counts[c] = errs[c].Count;
+            if (counts[c] == 0) { medians[c] = double.NaN; continue; }
+            errs[c].Sort();
+            medians[c] = errs[c][errs[c].Count / 2];
+        }
+        return (medians, counts);
+    }
+
     /// <summary>A positioning solution (free scale and translation) expressed at the connected cameras' CURRENT centre and
     /// spread; unconnected cameras keep their position. Centre = coordinate-wise median, spread = median distance from it:
     /// ROBUST, because the solution can leave a few cameras wildly off. With the mean and the RMS spread (until 2026-09-30),

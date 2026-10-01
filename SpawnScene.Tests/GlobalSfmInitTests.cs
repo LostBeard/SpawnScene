@@ -486,4 +486,35 @@ public class GlobalSfmInitTests
         Assert.That(acc.PositionRms / acc.Spread, Is.LessThan(0.01));
         Assert.That(acc.MedianForwardDeg, Is.LessThan(0.3));
     }
+
+    /// <summary>
+    /// Leave-one-out reprojection skips cameras with no pose (2026-10-01, DrJohnson b73/b75/b76): 21 of 44 cameras were
+    /// placeholders the global init could not place. Evaluated, they missed by 1e6 px (behind the camera), the median
+    /// "typical" miss became 1e6 px and the misplaced limit 4e6 px - every real misplacement passed. Truck poses,
+    /// synthetic tracks; cameras 0-11 get a placeholder pose (camera 40's, turned around).
+    /// </summary>
+    [Test]
+    public void LeaveOneOut_SkipsUnplacedCameras()
+    {
+        var cams = TruckCameras();
+        if (cams == null) Assert.Ignore("Truck poses not present");
+        var rng = new Random(3);
+        var (obs, points, _) = SyntheticTracks(cams, rng, 4000, 0.5, realLengths: true);
+        var unplaced = new HashSet<int>(Enumerable.Range(0, 12));
+        var posed = cams.Select(Copy).ToList();
+        foreach (int i in unplaced)
+        {
+            var p = Copy(cams[40]);
+            p.Forward = -p.Forward;
+            posed[i] = p;
+        }
+        var tracks = obs.GroupBy(o => o.Point)
+            .Select(g => (IReadOnlyList<(int Camera, float U, float V)>)g.Select(o => (o.Camera, o.U, o.V)).ToList()).ToList();
+        var (medians, counts) = GlobalSfmInit.LeaveOneOutMedians(posed, tracks, unplaced);
+        foreach (int i in unplaced)
+            Assert.That(double.IsNaN(medians[i]), $"camera {i} has no pose and must not be evaluated (median {medians[i]})");
+        var placed = Enumerable.Range(0, cams.Count).Where(i => !unplaced.Contains(i) && counts[i] > 0).Select(i => medians[i]).OrderBy(m => m).ToList();
+        Assert.That(placed.Count, Is.GreaterThan(cams.Count / 2));
+        Assert.That(placed[placed.Count / 2], Is.LessThan(3.0), "typical placed camera misses by ~noise");
+    }
 }

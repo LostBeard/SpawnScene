@@ -348,42 +348,18 @@ public class MultiViewGenerationService
                     $"({trusted.Count(t => !t)} entered without a cascade pose); {unplaced.Count} go to re-registration");
             Console.WriteLine($"[BA] global SfM init (focal {focal:F1}): {rel.Count} of {passed} verified pairs gave a relative pose, {gpPoints} track " +
                 $"points; {summary}; {tg.Elapsed.TotalSeconds:F1}s");
-            ProbeCameras("global SfM init", cams, new HashSet<int>(), null);
+            // Without the unplaced cameras: their placeholder poses share one position and can make the alignment
+            // degenerate ("could not align" on DrJohnson b73/b75/b76, where 21 of 44 were unplaced).
+            ProbeCameras("global SfM init", cams, unplaced, null);
         }
 
         // -- 2. Find cameras the cascade misplaced: triangulate each camera's tracks from the OTHER cameras and
         // reproject into it. A camera whose median miss is far above everyone else's is wrong, not noisy.
         var bad = new HashSet<int>();
         {
-            var medians = new double[cams.Count];
-            var counts = new int[cams.Count];
-            var errs = new List<double>[cams.Count];
-            for (int c = 0; c < cams.Count; c++) errs[c] = new List<double>();
-            var others = new List<(int Camera, float U, float V)>();
-            foreach (var track in tracks)
-            {
-                if (track.Count < 3) continue;
-                for (int k = 0; k < track.Count; k++)
-                {
-                    var me = Ob(track[k]);
-                    if (errs[me.Camera].Count >= 400) continue;
-                    others.Clear();
-                    for (int j = 0; j < track.Count; j++)
-                        if (j != k) { var o = Ob(track[j]); if (!unplaced.Contains(o.Camera)) others.Add(o); }
-                    if (!BundleAdjuster.Triangulate(cams, others, out var x)) continue;
-                    if (!WorldSpaceGeometry.Project(cams[me.Camera], x, out var u, out var v, out _)) { errs[me.Camera].Add(1e6); continue; }
-                    errs[me.Camera].Add(Math.Sqrt((u - me.U) * (u - me.U) + (v - me.V) * (v - me.V)));
-                }
-            }
-            var all = new List<double>();
-            for (int c = 0; c < cams.Count; c++)
-            {
-                counts[c] = errs[c].Count;
-                if (counts[c] == 0) { medians[c] = double.NaN; continue; }
-                errs[c].Sort();
-                medians[c] = errs[c][errs[c].Count / 2];
-                all.Add(medians[c]);
-            }
+            var obsTracks = tracks.Select(t => (IReadOnlyList<(int Camera, float U, float V)>)t.Select(Ob).ToList()).ToList();
+            var (medians, counts) = GlobalSfmInit.LeaveOneOutMedians(cams, obsTracks, unplaced);
+            var all = medians.Where(m => !double.IsNaN(m)).ToList();
             all.Sort();
             if (all.Count == 0)
             {

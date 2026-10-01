@@ -556,4 +556,50 @@ public class GlobalSfmInitTests
         Assert.That(acc.MedianPosFrac, Is.LessThan(0.05), "median position error of the placed cameras");
         Assert.That(acc.MedianForwardDeg, Is.LessThan(1.0), "median orientation error of the placed cameras");
     }
+
+    /// <summary>
+    /// GLOMAP's relative-pose filter (2026-10-01, DrJohnson b79: over all 242 verified pairs the relative rotations were
+    /// 25.5 deg median off COLMAP - repeated structure - and tracks from every pair put the positioning ~100% off). Truck
+    /// poses: neighbour pairs at 1 deg noise, 25% of them replaced by wrong rotations, plus long-range TRUE pairs that are
+    /// in no triangle (FilterByLoops must drop those). The filter must drop the wrong pairs and keep the true ones,
+    /// including the long-range ones the loop check could not test.
+    /// </summary>
+    [Test]
+    public void FilterByRotations_DropsWrongPairs_ReadmitsUntestedTrueOnes()
+    {
+        var cams = TruckCameras();
+        if (cams == null) Assert.Ignore("Truck poses not present");
+        var rng = new Random(17);
+        int n = cams.Count;
+        var edges = new List<GlobalSfmInit.RelativePose>();
+        var wrong = new HashSet<GlobalSfmInit.RelativePose>(ReferenceEqualityComparer.Instance);
+        var longRange = new HashSet<GlobalSfmInit.RelativePose>(ReferenceEqualityComparer.Instance);
+        foreach (var (a, b) in NeighbourPairs(n))
+        {
+            var (r, t) = Relative(cams[a], cams[b]);
+            bool bad = rng.NextDouble() < 0.25;
+            var e = new GlobalSfmInit.RelativePose(a, b, bad ? SmallRotation(rng, 90) : GlobalSfmInit.Mul(SmallRotation(rng, 1), r), t, 100);
+            edges.Add(e);
+            if (bad) wrong.Add(e);
+        }
+        for (int a = 0; a + 40 < n; a += 7)
+        {
+            var (r, t) = Relative(cams[a], cams[a + 40]);
+            var e = new GlobalSfmInit.RelativePose(a, a + 40, GlobalSfmInit.Mul(SmallRotation(rng, 1), r), t, 100);
+            edges.Add(e);
+            longRange.Add(e);
+        }
+        var solved = GlobalSfmInit.SolveRotations(cams, edges, null);
+        Assert.That(solved.Consistent.Count(e => longRange.Contains(e)), Is.EqualTo(0), "the loop check cannot test pairs in no triangle");
+        var kept = GlobalSfmInit.FilterByRotations(edges, solved.Rot, solved.Connected);
+        int keptWrong = kept.Count(e => wrong.Contains(e));
+        int keptTrue = kept.Count - keptWrong;
+        int trueTotal = edges.Count - wrong.Count;
+        int keptLong = kept.Count(e => longRange.Contains(e));
+        TestContext.Out.WriteLine($"{edges.Count} pairs ({wrong.Count} wrong, {longRange.Count} long-range true): loop-consistent " +
+            $"{solved.Consistent.Count}; kept {kept.Count} = {keptTrue} true ({keptLong} long-range) + {keptWrong} wrong");
+        Assert.That(keptWrong, Is.LessThanOrEqualTo(wrong.Count / 50), "wrong pairs must be dropped");
+        Assert.That(keptTrue, Is.GreaterThanOrEqualTo(trueTotal * 95 / 100), "true pairs must be kept");
+        Assert.That(keptLong, Is.EqualTo(longRange.Count), "true pairs in no triangle come back when they agree with the solution");
+    }
 }

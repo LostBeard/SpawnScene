@@ -304,6 +304,9 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.GlobalSfmFocalOverride = gsfd;
             if (query.TryGetValue("globalgtrot", out var ggr))
                 DiagnoseGlobalWithGroundTruthRotations = ggr is "1" or "true";
+            // &relposefilter=0: tracks from every verified pair, not only the rotation-consistent ones (A/B).
+            if (query.TryGetValue("relposefilter", out var rpf))
+                _multiViewService.FilterPairsByRotation = rpf is not ("0" or "false");
             if (query.TryGetValue("globalinit", out var gsi))
                 _multiViewService.UseGlobalSfmInit = gsi is "1" or "true";
             // &pairangle=N: BA pair candidates within N degrees by cascade pose (default 45; 180 = every pair with 15+ matches).

@@ -154,6 +154,13 @@ public class MultiViewGenerationService
     /// </summary>
     public bool UseGpuGlobalPositioning { get; set; } = true;
 
+    /// <summary>
+    /// GLOMAP's relative-pose filter before tracks are built (<see cref="GlobalSfmInit.FilterByRotations"/>): only pairs whose
+    /// relative rotation agrees with the averaged rotations contribute matches to the global positioning and to BA.
+    /// &amp;relposefilter=0 builds tracks from every verified pair (the behaviour until 2026-10-01).
+    /// </summary>
+    public bool FilterPairsByRotation { get; set; } = true;
+
     /// <summary>Most track points global positioning uses (tracks with 3+ views first).</summary>
     public int GlobalSfmMaxPoints { get; set; } = 15000;
 
@@ -287,6 +294,7 @@ public class MultiViewGenerationService
                 }
             }
             var rel = new List<GlobalSfmInit.RelativePose>();
+            var relCandidate = new Dictionary<GlobalSfmInit.RelativePose, int>(ReferenceEqualityComparer.Instance);
             for (int c = 0; c < candidates.Count; c++)
             {
                 var r = ransac[c];
@@ -295,7 +303,35 @@ public class MultiViewGenerationService
                 int ia = baIndex[p.ImageIndexA], ib = baIndex[p.ImageIndexB];
                 var pose = GlobalSfmInit.FromFundamental(ia, ib, r.F, ransacPairs[c].A, ransacPairs[c].B, r.Inliers, focal,
                     cams[ia].CenterX, cams[ia].CenterY, cams[ib].CenterX, cams[ib].CenterY);
-                if (pose != null) rel.Add(pose);
+                if (pose != null) { rel.Add(pose); relCandidate[pose] = c; }
+            }
+            // Rotations first, then GLOMAP's relative-pose filter, and only THEN tracks: a pair whose relative rotation
+            // disagrees with the averaged rotations is a wrong pair (DrJohnson: repeated structure, 25.5 deg median off
+            // COLMAP over all verified pairs, b79) and its matches must not join a track. Tracks from every verified
+            // pair put the global positioning ~100% off COLMAP even with COLMAP's rotations (b79), and fed BA the same.
+            double[][]? solvedRot = null;
+            bool[]? solvedConnected = null;
+            var keptEdges = (IReadOnlyList<GlobalSfmInit.RelativePose>)rel;
+            string relNote = "";
+            if (FilterPairsByRotation && DiagnosticGlobalGroundTruthRotations == null)
+            {
+                var solved = GlobalSfmInit.SolveRotations(cams, rel, placeholders == null ? null : trusted);
+                (solvedRot, solvedConnected) = (solved.Rot, solved.Connected);
+                var consistentPairs = GlobalSfmInit.FilterByRotations(rel, solved.Rot, solved.Connected);
+                keptEdges = consistentPairs;
+                var keptVerified = new List<(int, int, int, int)>();
+                foreach (var e in consistentPairs)
+                {
+                    int c = relCandidate[e];
+                    var p = candidates[c]; var inl = ransac[c]!.Inliers;
+                    for (int k = 0; k < p.Matches.Count; k++)
+                        if (inl[k]) keptVerified.Add((p.ImageIndexA, p.Matches[k].IndexA, p.ImageIndexB, p.Matches[k].IndexB));
+                }
+                tracks = BundleAdjuster.BuildTracks(keptVerified);
+                var hist = tracks.GroupBy(t => Math.Min(t.Count, 6)).OrderBy(g => g.Key)
+                    .Select(g => $"{(g.Key == 6 ? "6+" : g.Key.ToString())}:{g.Count()}");
+                relNote = $"{solved.Note}rotation-consistent pairs {consistentPairs.Count} of {rel.Count} (<= 10 deg; tracks rebuilt from " +
+                    $"their {keptVerified.Count} matches, lengths {string.Join(" ", hist)}); ";
             }
             // Track observations, up to the cap: first COVERAGE - a track is taken while any of its cameras has fewer than
             // CoverTarget observations - then the rest, 3+-view tracks before 2-view ones in both phases. Filling the cap
@@ -337,8 +373,10 @@ public class MultiViewGenerationService
                 Console.WriteLine("[BA] DIAGNOSTIC: global positioning uses the ground-truth rotations");
             }
             if (UseGpuGlobalPositioning && !_gpu.IsInitialized) await _gpu.InitializeAsync();
-            var (summary, connected) = await GlobalSfmInit.ApplyAsync(cams, rel, gpObs, gpPoints, focal, gtRot,
-                UseGpuGlobalPositioning ? _gpu.WebGPUAccelerator : null, placeholders == null ? null : trusted);
+            var (summary, connected) = await GlobalSfmInit.ApplyAsync(cams, keptEdges, gpObs, gpPoints, focal, gtRot ?? solvedRot,
+                UseGpuGlobalPositioning ? _gpu.WebGPUAccelerator : null, placeholders == null ? null : trusted,
+                gtRot == null ? solvedConnected : null);
+            summary = relNote + summary;
             // Every camera outside the global solution goes to registration against its points - a cascade pose included:
             // the loop-consistency filter leaves out cameras whose only pairs were inconsistent (repeated structure), and
             // on a capture like DrJohnson their cascade poses are no better (105% off COLMAP).

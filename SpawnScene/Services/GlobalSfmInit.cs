@@ -1069,6 +1069,43 @@ public static class GlobalSfmInit
         // No accelerator: the managed positioning, which completes synchronously.
         ApplyAsync(cams, edges, obs, pointCount, focal, fixedRotations).GetAwaiter().GetResult();
 
+    /// <summary>
+    /// The global init's rotation stage: loop-consistent pairs (<see cref="FilterByLoops"/>), rotation averaging over them,
+    /// and the result rotated onto the TRUSTED cameras' current orientations (a placeholder rotation says nothing; with no
+    /// trusted camera in the component its frame stays the root one).
+    /// </summary>
+    public static (double[][] Rot, bool[] Connected, List<RelativePose> Consistent, string Note) SolveRotations(
+        IReadOnlyList<CameraParams> cams, IReadOnlyList<RelativePose> edges, bool[]? trusted)
+    {
+        int n = cams.Count;
+        var current = cams.Select(RotationOf).ToArray();
+        var consistent = FilterByLoops(edges);
+        var rot = AverageRotations(n, consistent, current, out var connected);
+        var gauge = new bool[n];
+        bool anyGauge = false;
+        for (int i = 0; i < n; i++) { gauge[i] = connected[i] && (trusted == null || trusted[i]); anyGauge |= gauge[i]; }
+        if (anyGauge)
+        {
+            var q = AlignFrame(rot, current, gauge);
+            for (int i = 0; i < n; i++) if (connected[i]) rot[i] = Mul(rot[i], q);
+        }
+        return (rot, connected, consistent, $"loop-consistent pairs {consistent.Count} of {edges.Count}; ");
+    }
+
+    /// <summary>
+    /// GLOMAP's relative-pose filter (RelPoseFilter::FilterRotations, max_rotation_error 10 deg): of ALL
+    /// <paramref name="edges"/>, the pairs between placed cameras whose relative rotation agrees with the averaged
+    /// <paramref name="rot"/> to within <paramref name="maxDeg"/>. The rest are wrong pairs - on DrJohnson repeated
+    /// structure, a wall matched to the opposite wall, which passes every two-view check: 2026-10-01 b79, over all 242
+    /// verified pairs the relative rotations were 25.5 deg (median) off COLMAP's. Their matches must not become tracks: the
+    /// positioning built from every verified pair dropped 41% of its observations and still landed ~100% off COLMAP, even
+    /// with COLMAP's own rotations. Pairs in no triangle (which <see cref="FilterByLoops"/> must drop) come back here when
+    /// they agree with the solution.
+    /// </summary>
+    public static List<RelativePose> FilterByRotations(IReadOnlyList<RelativePose> edges, double[][] rot, bool[] connected,
+        double maxDeg = 10)
+        => edges.Where(e => connected[e.A] && connected[e.B] && AngleDeg(rot[e.B], Mul(e.R, rot[e.A])) <= maxDeg).ToList();
+
     /// <summary><see cref="Apply"/>, with the positioning on <paramref name="accelerator"/> (<see cref="GpuGlobalPositioner"/>,
     /// the same algorithm) when one is given.</summary>
     public static async Task<string> ApplyAsync(List<CameraParams> cams, IReadOnlyList<RelativePose> edges,
@@ -1078,36 +1115,27 @@ public static class GlobalSfmInit
 
     /// <summary>As the overload above, with only the cameras whose current pose is meaningful (<paramref name="trusted"/>;
     /// null = all) setting the frame, and returning which cameras the solution placed.</summary>
+    /// <param name="fixedRotations">Rotations already solved (<see cref="SolveRotations"/>, or ground truth for a
+    /// diagnosis), in the cameras' frame: positioning only.</param>
+    /// <param name="fixedConnected">With <paramref name="fixedRotations"/>: which cameras they place (null = all).</param>
     public static async Task<(string Summary, bool[] Connected)> ApplyAsync(List<CameraParams> cams,
         IReadOnlyList<RelativePose> edges, IReadOnlyList<BundleAdjuster.Observation> obs, int pointCount, double focal,
-        double[][]? fixedRotations, ILGPU.Runtime.Accelerator? accelerator, bool[]? trusted)
+        double[][]? fixedRotations, ILGPU.Runtime.Accelerator? accelerator, bool[]? trusted, bool[]? fixedConnected = null)
     {
         int n = cams.Count;
-        var current = cams.Select(RotationOf).ToArray();
         double[][] rot;
         bool[] connected;
         string loopNote = "";
         if (fixedRotations != null)
         {
-            // DIAGNOSIS: rotations given (already in the cameras' frame) - positioning only.
             rot = fixedRotations.Select(r => (double[])r.Clone()).ToArray();
-            connected = Enumerable.Repeat(true, n).ToArray();
+            connected = fixedConnected != null ? (bool[])fixedConnected.Clone() : Enumerable.Repeat(true, n).ToArray();
         }
         else
         {
-            var consistent = FilterByLoops(edges);
-            loopNote = $"loop-consistent pairs {consistent.Count} of {edges.Count}; ";
-            edges = consistent;
-            rot = AverageRotations(n, edges, current, out connected);
-            var gauge = new bool[n];
-            bool anyGauge = false;
-            for (int i = 0; i < n; i++) { gauge[i] = connected[i] && (trusted == null || trusted[i]); anyGauge |= gauge[i]; }
-            // A placeholder rotation says nothing; with no trusted camera in the component its frame stays the root one.
-            if (anyGauge)
-            {
-                var q = AlignFrame(rot, current, gauge);
-                for (int i = 0; i < n; i++) if (connected[i]) rot[i] = Mul(rot[i], q);
-            }
+            var solved = SolveRotations(cams, edges, trusted);
+            (rot, connected, edges) = (solved.Rot, solved.Connected, solved.Consistent);
+            loopNote = solved.Note;
         }
         var resid = edges.Select(e => AngleDeg(rot[e.B], Mul(e.R, rot[e.A]))).OrderBy(x => x).ToList();
         // A camera the positioning has fewer than 2 observations of has an (almost) empty block in the camera system:

@@ -15,13 +15,20 @@ dotnet run
 dotnet publish ./SpawnScene/ --nologo -c:Release --output publish
 ```
 
-There are no tests or linting tools configured.
+**Tests:** `dotnet test SpawnScene.Tests -c Release` (NUnit; links app sources, CPU). GPU checks run in the browser through
+`tools/_cdp_*.js` against a served publish: `_cdp_trainer_gate.js` (trainer shaders vs CPU oracles), `_cdp_dataset.js`
+(datasets, `AUTOTEST=project` for the user path, `AUTOTEST=textlab` for text rendering), `_cdp_page.js` (screenshot any
+page; from Git Bash pass `MSYS_NO_PATHCONV=1`). Score captured views with `tools/score_views.py`.
 
 ## Project Overview
 
 SpawnScene is a fully client-side Blazor WebAssembly Gaussian Splatting application. It generates 3D scenes from a single photo using monocular depth estimation (DepthAnything V2), with the entire pipeline running on the GPU via WebGPU and SpawnDev.ILGPU. No server backend.
 
-**Stack:** .NET 10 / C# 13, Blazor WASM, SpawnDev.ILGPU 4.16.2 (WebGPU compute), SpawnDev.BlazorJS 3.5.13, SpawnDev.BlazorJS.OnnxRuntimeWeb 1.3.0 (WebGPU EP, DistillAnyDepth + DepthAnything V2/V3), SpawnDev.ILGPU.ML (project reference, native GPU inference - depth + future ML), native WebGPU (WGSL shaders).
+**Stack (2026-10-02):** .NET 10 / C# 13, Blazor WASM (AOT by default, IL kept), SpawnDev.SpawnJS.Blazor 3.x (browser
+interop), SpawnDev.ILGPU 5.3.x (WebGPU compute), SpawnDev.ILGPU.ML 5.3.x (GPU inference: Depth Anything V3, RaCo-ALIKED +
+LightGlue+ learned matching), SpawnDev.GameUI (the WebGPU UI), native WebGPU (WGSL training and rendering shaders). Exact
+versions: SpawnScene/SpawnScene.csproj. Multi-photo scenes: learned matching -> GPU SfM (five-point, rotation averaging,
+GPU bundle adjustment) -> Gaussian splat training against the photos; one photo: monocular depth -> splats.
 
 **Browser requirement:** WebGPU-capable (Chrome 113+, Edge 113+, Safari 18+). No fallbacks exist.
 

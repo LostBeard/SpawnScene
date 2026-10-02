@@ -136,6 +136,14 @@ public partial class Studio
             await LoadProjectSceneAsync(saved);
             await CaptureProjectViewAsync("reloaded", seat);
 
+            // The viewer as a user sees it, its HUD (back, view buttons, stats) on.
+            _state = StudioState.SceneViewer;
+            _hideUiOverlay = false;
+            BuildViewerHudUI();
+            await Task.Delay(1500);
+            Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_viewer_hud");
+            await Task.Delay(2500);
+
             // Red checks on the same loaded scene.
             if (saved.ColoursAreShDc)
             {

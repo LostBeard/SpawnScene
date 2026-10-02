@@ -37,10 +37,21 @@ public partial class Studio
             });
         }
 
+        // A translucent bar under the top controls: they sat straight on the scene and vanished over bright areas.
+        _uiRoot.AddChild(new UIPanel
+        {
+            X = 0, Y = 0, Width = _canvasWidth, Height = 56,
+            BackgroundColor = Color.FromArgb(150, 10, 13, 18), BorderWidth = 0, CornerRadius = 0, Padding = 0,
+        });
+
+        // The stats panel is as wide as its help line, measured with the real font (it clipped "ESC release").
+        const string hudHelp = "Click the scene to look  ·  WASD to move  ·  Esc to release";
+        float hudW = _gameUI.Renderer.MeasureText(hudHelp, FontSize.Caption);
+        hudW = hudW > 0 ? hudW + 28 : 360;
         var hud = _uiRoot.AddChild(new UIPanel
         {
             X = 12, Y = _canvasHeight - 88,
-            Width = 280, Height = 76,
+            Width = hudW, Height = 76,
             BackgroundColor = Color.FromArgb(180, 12, 16, 22),
         });
 
@@ -61,7 +72,7 @@ public partial class Studio
         hud.AddChild(new UILabel
         {
             X = 12, Y = 50,
-            Text = "Click scene to look · WASD move · ESC release",
+            Text = hudHelp,
             FontSize = FontSize.Caption,
             Color = UITheme.Current.TextMuted,
         });
@@ -99,11 +110,15 @@ public partial class Studio
             });
         }
 
+        // Back names where it goes; the project is the context the scene belongs to.
+        string backTo = _activeProject?.Name ?? "Projects";
+        if (backTo.Length > 28) backTo = backTo[..25] + "...";
+        float backW = _gameUI.Renderer.MeasureText("< " + backTo, FontSize.Caption);
         _uiRoot.AddChild(new UIButton
         {
             X = 12, Y = 12,
-            Width = 100, Height = 32,
-            Text = "< Back",
+            Width = backW > 0 ? Math.Max(100, backW + 32) : 220, Height = 32,
+            Text = "< " + backTo,
             FontSize = FontSize.Caption,
             OnClick = async () =>
             {
@@ -171,8 +186,6 @@ public partial class Studio
             Width = 68, Height = 32,
             Text = "VR",
             FontSize = FontSize.Caption,
-            NormalColor = Color.FromArgb(255, 40, 100, 180),
-            HoverColor = Color.FromArgb(255, 50, 120, 210),
             OnClick = () => _ = EnterXRAsync("immersive-vr"),
         });
 
@@ -183,8 +196,6 @@ public partial class Studio
             Width = 64, Height = 32,
             Text = "AR",
             FontSize = FontSize.Caption,
-            NormalColor = Color.FromArgb(255, 40, 150, 100),
-            HoverColor = Color.FromArgb(255, 50, 180, 120),
             OnClick = () => _ = EnterXRAsync("immersive-ar"),
         });
 

@@ -103,6 +103,11 @@ public sealed class LearnedFeatureMatcher : IDisposable
     private async Task<InferenceSession> ExtractorAsync(int k, int w, int h)
     {
         if (_extractors.TryGetValue((k, w, h), out var s)) return s;
+        // One extractor session at a time: each holds ~4 GB of WebGPU pool at 1024 px, and a capture that mixes portrait
+        // and landscape photos needs two input shapes - two resident sessions lost the device on the Bathroom set
+        // (34 portrait + 1 landscape, 2026-10-02). Every ExtractAsync ends synchronized, so the old one is idle here; a
+        // reload costs ~1 s (the model streams from the OPFS cache).
+        ReleaseExtractors();
         s = await LoadAsync(ExtractorRepo, $"raco_aliked_extractor_k{k}.onnx",
             new Dictionary<string, int[]> { ["images"] = new[] { 1, 3, h, w } });
         _extractors[(k, w, h)] = s;
@@ -267,6 +272,9 @@ public sealed class LearnedFeatureMatcher : IDisposable
     /// extractor + matcher sessions held 4.6 GB of WebGPU buffers after matching, and DAv3's first multi-view pass then
     /// lost the device. Call once every ExtractAsync has completed (each one ends synchronized).
     /// </summary>
+    /// <summary>Extractor sessions currently loaded (at most one - see ExtractorAsync).</summary>
+    public int ExtractorSessionsResident => _extractors.Count;
+
     public void ReleaseExtractors()
     {
         foreach (var s in _extractors.Values) s.Dispose();

@@ -209,4 +209,42 @@ public class KorniaRacoLightGlueParityTests
             foreach (var im in images) im.DisposeSource();
         }
     }
+
+    /// <summary>
+    /// One extractor session at a time (2026-10-02): a capture mixing portrait and landscape photos needs two input shapes,
+    /// and two resident sessions (~4 GB of WebGPU pool each at 1024 px) lost the device on the Bathroom set. Extract a
+    /// landscape and then a portrait image (random pixels): one session may remain, and both extractions must work.
+    /// </summary>
+    [Test]
+    public async Task Extract_TwoInputShapes_KeepsOneSessionResident()
+    {
+        var dir = Dir();
+        if (dir == null) Assert.Ignore("_scratch/kornia not present");
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var accel = context.CreateCPUAccelerator(0);
+        using var matcher = new SpawnScene.Services.LearnedFeatureMatcher(() => accel, new ScratchModels(Path.Combine(dir, "kornia")));
+        int old = SpawnScene.Services.LearnedFeatureMatcher.KeypointBudget;
+        SpawnScene.Services.LearnedFeatureMatcher.KeypointBudget = 1024;
+        var rng = new Random(1);
+        var images = new List<SpawnScene.Models.ImportedImage>();
+        try
+        {
+            foreach (var (w, h) in new[] { (320, 224), (224, 320) })
+            {
+                var px = new int[w * h];
+                for (int i = 0; i < px.Length; i++) px[i] = rng.Next() | unchecked((int)0xFF000000);
+                using var rgba = accel.Allocate1D(px);
+                var img = new SpawnScene.Models.ImportedImage { FileName = $"{w}x{h}", Width = w, Height = h };
+                images.Add(img);
+                var feats = await matcher.ExtractAsync(img, rgba, w, h, w, h);
+                Assert.That(feats.Count, Is.EqualTo(1024), $"{w}x{h} keypoints");
+                Assert.That(matcher.ExtractorSessionsResident, Is.EqualTo(1), $"after {w}x{h}: one extractor session resident");
+            }
+        }
+        finally
+        {
+            SpawnScene.Services.LearnedFeatureMatcher.KeypointBudget = old;
+            foreach (var im in images) im.DisposeSource();
+        }
+    }
 }

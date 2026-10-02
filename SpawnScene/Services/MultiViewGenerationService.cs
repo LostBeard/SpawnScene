@@ -803,10 +803,13 @@ public class MultiViewGenerationService
     public bool DenseInitFromBriefFeatures { get; set; } = true;
 
     /// <summary>Dense init: largest reprojection error an observation may keep (pixels). &amp;densepx=N.</summary>
-    public double DenseReprojectionPixels { get; set; } = 2.0;
+    /// <remarks>MEASURED 2026-10-02, TruckFull learned: 2 px / 1.5 deg gave 25,769 dense points and held-out 19.48 dB;
+    /// 3 px / 0.5 deg 34,951 points and 19.63 dB / SSIM 0.666 (FAST/BRIEF front end: 19.78 / 0.668). Low-parallax points
+    /// have depth noise, but as splat seeds that is what training corrects; a missing seed it cannot.</remarks>
+    public double DenseReprojectionPixels { get; set; } = 3.0;
 
     /// <summary>Dense init: smallest widest-ray-pair angle a point needs (degrees). &amp;denseangle=N.</summary>
-    public double DenseMinParallaxDeg { get; set; } = 1.5;
+    public double DenseMinParallaxDeg { get; set; } = 0.5;
 
     /// <summary>Shared points (within 4 px of the final solution) that link a camera to the core. &amp;coremin=N.</summary>
     public int CoreSharedPoints { get; set; } = 50;

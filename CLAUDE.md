@@ -130,8 +130,9 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
 
 ### Build Constraints (csproj)
 
-- `PublishTrimmed = false` — ILGPU kernel methods are invoked via reflection
-- `RunAOTCompilation = false` — ILGPU needs IL at runtime
+- AOT by default (`SpawnSceneAot`, 2026-10-02): `RunAOTCompilation = true` with `WasmStripILAfterAOT = false` (ILGPU
+  compiles kernels from IL at runtime) and `PublishTrimmed = true` (WASM AOT requires it; the SpawnScene assembly is
+  rooted). The AOT publish takes about an hour; `-p:SpawnSceneAot=false` for a fast interpreted dev publish
 - `CompressionEnabled = false`
 - `TrimmerRootAssembly` entries for ILGPU, ILGPU.Algorithms, SpawnDev.ILGPU
 

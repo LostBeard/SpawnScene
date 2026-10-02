@@ -20,11 +20,13 @@
 		  Appending here keeps the SDK defaults and needs no command-line flag.
 		-->
 		<DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
-		<!-- AOT opt-in (-p:SpawnSceneAot=true) while it is measured: the managed SfM (five-point RANSAC, rotation averaging,
-		     dense triangulation, BA host code) runs in the Mono interpreter otherwise; Anaglyphohol measured AOT at 2.0x on
-		     its per-frame host cost (2026-10-01). WasmStripILAfterAOT=false is REQUIRED: ILGPU compiles kernels from IL at
-		     runtime. The AOT build takes over an hour on one core. -->
-		<SpawnSceneAot Condition="'$(SpawnSceneAot)' == ''">false</SpawnSceneAot>
+		<!-- AOT BY DEFAULT (TJ 2026-10-02). The managed SfM (five-point RANSAC, rotation averaging, dense triangulation, BA
+		     host code) runs in the Mono interpreter otherwise. MEASURED on Bathroom, interpreter -> AOT: five-point 1.4 -> 0.2 s,
+		     BA total 30.1 -> 19.5 s, import 66 -> 49 s, training 55.1 -> 59.6 it/s, identical results.
+		     WasmStripILAfterAOT=false is REQUIRED: ILGPU compiles kernels from IL at runtime. Costs: dotnet.native.wasm is
+		     53 MB (3 MB interpreted), and the build takes about an hour on one core. For a fast dev publish use
+		     -p:SpawnSceneAot=false. -->
+		<SpawnSceneAot Condition="'$(SpawnSceneAot)' == ''">true</SpawnSceneAot>
 		<RunAOTCompilation>$(SpawnSceneAot)</RunAOTCompilation>
 		<WasmStripILAfterAOT>false</WasmStripILAfterAOT>
 		<!-- WASM AOT requires trimming (WasmApp.Common.targets: "AOT is not supported without IL trimming"). The SpawnDev

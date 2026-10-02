@@ -25,6 +25,10 @@ public partial class Studio
     /// tile instead of rebuilding the page (35 photos used to mean 35 rebuilds).</summary>
     private readonly Dictionary<string, UIImage> _thumbTiles = new();
 
+    /// <summary>The project page's open tab, and the project it belongs to (another project starts on its default).</summary>
+    private string? _projectTab;
+    private string? _projectTabProjectId;
+
     /// <summary>Photos selected on the project page (by file name): click tiles to select, then Remove.</summary>
     private readonly HashSet<string> _selectedSources = new();
 
@@ -48,28 +52,73 @@ public partial class Studio
 
         shell.AddChild(new UIPanel { X = 0, Y = bodyTop - 1, Width = panelW, Height = 1, BackgroundColor = SectionRule, BorderWidth = 0, CornerRadius = 0 });
 
-        // One column pins Generate at the foot of the page (as the sidebar does), so the scroll area stops above it.
+        // One column pins Generate at the foot of the page (as the sidebar does), so the main area stops above it.
         float mainH = twoColumns ? bodyH : bodyH - ProjectGenerateFooterH;
-        var main = shell.AddChild(new UIScrollView
-        {
-            X = 0, Y = bodyTop, Width = mainW, Height = mainH,
-            Padding = 0, BackgroundColor = Color.Transparent, BorderWidth = 0,
-        });
-        _projectDetailScroll = main;
 
-        // Nothing to act on may sit below the photo grid (TJ 2026-10-02: with many photos, controls under the images meant
-        // scrolling to the bottom every time). Both layouts put the generated scenes - what you come back for - first;
-        // one column follows them with the settings, then the photos, and pins Generate at the foot.
-        float y = 18;
-        float scenesTop = y;
-        y = BuildScenesSection(main, y, mainW);
-        if (y > scenesTop) y += 20;
-        if (!twoColumns)
+        // Tabs, not a stack (TJ 2026-10-02): with the sections stacked, whatever came after a long photo grid needed a
+        // scroll to the bottom. Scenes | Photos, plus Settings when there is no sidebar; each tab scrolls on its own.
+        var tabNames = new List<string> { "Scenes", "Photos" };
+        if (!twoColumns) tabNames.Add("Settings");
+        int sceneCount = _activeProject!.Scenes.Count, photoCount = _activeProject.Sources.Count;
+        string Label(string n) => n switch
         {
-            y = BuildSettingsSections(main, y, mainW) + 12;
-            BuildGenerateFooter(shell, bodyTop + mainH, mainW);
+            "Scenes" => sceneCount > 0 ? $"Scenes  {sceneCount}" : "Scenes",
+            "Photos" => photoCount > 0 ? $"Photos  {photoCount}" : "Photos",
+            _ => n,
+        };
+        // The tab survives rebuilds (selecting a photo, a thumbnail arriving); a new project opens on Scenes when it has
+        // any, else Photos.
+        if (_projectTabProjectId != _activeProject.Id || !tabNames.Contains(_projectTab ?? ""))
+        {
+            _projectTab = sceneCount > 0 ? "Scenes" : "Photos";
+            _projectTabProjectId = _activeProject.Id;
         }
-        y = BuildPhotosSection(main, y, mainW);
+        const float tabH = 44;
+        float tabsW = mainW - ProjectPageGutter * 2;
+        var tabs = shell.AddChild(new UITabPanel
+        {
+            X = ProjectPageGutter, Y = bodyTop + 8, Width = tabsW, Height = mainH - 8,
+            Padding = 0, TabHeight = tabH, TabWidth = 150, TabFontSize = FontSize.Body,
+            BackgroundColor = Color.Transparent, BorderWidth = 0, CornerRadius = 0,
+            TabColor = Color.Transparent, HoverTabColor = Color.FromArgb(40, 255, 255, 255),
+            ActiveTabColor = Color.FromArgb(255, 26, 31, 39),
+        });
+        float contentH = mainH - 8 - tabH;
+        foreach (var name in tabNames)
+        {
+            var scroll = new UIScrollView
+            {
+                Width = tabsW, Height = contentH,
+                Padding = 0, BackgroundColor = Color.Transparent, BorderWidth = 0,
+            };
+            // Leave the scrollbar its own strip on the right.
+            float contentW = tabsW - 12;
+            switch (name)
+            {
+                case "Scenes":
+                    if (sceneCount > 0) BuildScenesSection(scroll, 18, contentW, 0);
+                    else
+                        scroll.AddChild(new UITextBlock
+                        {
+                            X = 0, Y = 22, Width = Math.Min(contentW, 560), Height = 40,
+                            Text = photoCount >= 2 ? "No scenes yet. Generate scene builds one from the photos."
+                                : "No scenes yet. Add photos (two or more of the same place, or one for a depth scene), then Generate scene.",
+                            FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
+                        });
+                    break;
+                case "Photos":
+                    BuildPhotosSection(scroll, 18, contentW, 0);
+                    break;
+                case "Settings":
+                    BuildSettingsSections(scroll, 18, contentW, 0);
+                    break;
+            }
+            tabs.AddTab(Label(name), scroll);
+            if (name == (twoColumns ? "Photos" : "Settings")) _projectDetailScroll = scroll;
+        }
+        tabs.ActiveIndex = tabNames.IndexOf(_projectTab!);
+        tabs.OnTabChanged = (i, _) => _projectTab = tabNames[i];
+        if (!twoColumns) BuildGenerateFooter(shell, bodyTop + mainH, mainW);
 
         if (twoColumns)
         {
@@ -150,9 +199,9 @@ public partial class Studio
         return y + 40;
     }
 
-    private float BuildPhotosSection(UIElement parent, float y, float width)
+    private float BuildPhotosSection(UIElement parent, float y, float width, float gutter = ProjectPageGutter)
     {
-        float x = ProjectPageGutter, w = width - ProjectPageGutter * 2;
+        float x = gutter, w = width - gutter * 2;
         var sources = _activeProject!.Sources;
         _selectedSources.RemoveWhere(n => !sources.Any(src => src.FileName == n));
         float hx = x + w - 132;
@@ -185,7 +234,8 @@ public partial class Studio
                 OnClick = () => { _selectedSources.Clear(); BuildProjectDetailUI(); },
             });
         }
-        y = AddSectionHeading(parent, x, y, w, "Photos", sources.Count > 0 ? $"{sources.Count}" : null);
+        // No "Photos" heading: the tab already says it (with the count); this row is the Add / Remove actions.
+        y += 40;
 
         if (sources.Count >= 2)
         {
@@ -291,12 +341,12 @@ public partial class Studio
         BuildProjectDetailUI();
     }
 
-    private float BuildScenesSection(UIElement parent, float y, float width)
+    private float BuildScenesSection(UIElement parent, float y, float width, float gutter = ProjectPageGutter)
     {
         var scenes = _activeProject!.Scenes;
         if (scenes.Count == 0) return y;
-        float x = ProjectPageGutter, w = width - ProjectPageGutter * 2;
-        y = AddSectionHeading(parent, x, y, w, "Scenes", $"{scenes.Count}");
+        float x = gutter, w = width - gutter * 2;
+        // No "Scenes" heading: the tab already says it.
 
         const float cardH = 112, gap = 12;
         int cols = Math.Max(1, (int)((w + gap) / (420 + gap)));
@@ -344,9 +394,9 @@ public partial class Studio
         return y + rows * (cardH + gap);
     }
 
-    private float BuildSettingsSections(UIElement parent, float y, float width)
+    private float BuildSettingsSections(UIElement parent, float y, float width, float gutter = ProjectPageGutter)
     {
-        float x = ProjectPageGutter, w = width - ProjectPageGutter * 2;
+        float x = gutter, w = width - gutter * 2;
         var s = _activeProject!.Settings;
 
         // -- Quality preset: one choice sets the reconstruction rows below; changing a row makes it "Custom" --

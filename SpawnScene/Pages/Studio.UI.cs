@@ -135,6 +135,7 @@ public partial class Studio
                 if (_activeProject != null)
                 {
                     _state = StudioState.ProjectDetail;
+                    _projectTab = "Scenes"; // back from a scene: show the scenes (a new one after Generate)
                     _projects = await _projectService.ListProjectsAsync();
                     _activeProject = _projects?.FirstOrDefault(p => p.Id == _activeProject.Id) ?? _activeProject;
                     BuildProjectDetailUI();

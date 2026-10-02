@@ -172,6 +172,7 @@ public partial class Studio
             _hideUiOverlay = false;
             _projects = await _projectService.ListProjectsAsync();
             _activeProject = _projects.First(p => p.Id == project.Id);
+            _projectTab = "Scenes"; // as Back from the viewer opens it
             BuildProjectDetailUI();
             await Task.Delay(2000);
             Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_page_with_scene");

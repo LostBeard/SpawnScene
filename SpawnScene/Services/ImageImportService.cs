@@ -520,6 +520,16 @@ public class ImageImportService : IDisposable
 
     private string FrontEndKey => UseLearnedFeatures ? $"learned K={LearnedFeatureMatcher.KeypointBudget}" : "BRIEF";
 
+    /// <summary>
+    /// The learned front end matches every pair up to this many images; above it, only each image's
+    /// <see cref="LearnedRetrievalTopK"/> best partners by <see cref="LearnedFeatureMatcher.PairScoresAsync"/> (LightGlue is
+    /// ~0.6 s a pair in the browser: TruckFull's 31,375 pairs would be ~5 h). &amp;lgretrieval=N sets it (0 = always all pairs).
+    /// </summary>
+    public int LearnedAllPairsUpTo { get; set; } = 60;
+
+    /// <summary>Partners per image when retrieval chooses the pairs (&amp;lgtopk=N).</summary>
+    public int LearnedRetrievalTopK { get; set; } = 30;
+
     private async Task MatchAllPairsAsync()
     {
         _pairs.Clear();
@@ -535,6 +545,17 @@ public class ImageImportService : IDisposable
         for (int i = 0; i < _images.Count - 1; i++)
             for (int j = i + 1; j < _images.Count; j++)
                 pairs.Add((i, j));
+        if (UseLearnedFeatures && LearnedAllPairsUpTo > 0 && _images.Count > LearnedAllPairsUpTo)
+        {
+            var tr = System.Diagnostics.Stopwatch.StartNew();
+            Status = $"Choosing image pairs ({_images.Count} images)...";
+            NotifyChanged();
+            var scores = await _learned.PairScoresAsync(_images);
+            int all = pairs.Count;
+            pairs = LearnedFeatureMatcher.TopPartnerPairs(scores, LearnedRetrievalTopK);
+            Console.WriteLine($"[Import] retrieval: {pairs.Count} of {all} pairs (top {LearnedRetrievalTopK} partners per image) " +
+                $"in {tr.Elapsed.TotalSeconds:F1}s");
+        }
         int totalPairs = pairs.Count;
         var sw = System.Diagnostics.Stopwatch.StartNew();
 

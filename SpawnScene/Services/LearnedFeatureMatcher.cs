@@ -1,4 +1,5 @@
 using ILGPU;
+using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.ML;
@@ -251,6 +252,122 @@ public sealed class LearnedFeatureMatcher : IDisposable
     {
         _matcher?.Dispose();
         _matcher = null;
+    }
+
+    // ---- Pair retrieval -------------------------------------------------------------------------------------------------
+
+    /// <summary>Lowe ratio for <see cref="PairScoresAsync"/>: a mutual nearest neighbour counts when its distance is below
+    /// this fraction of the second-nearest's.</summary>
+    public const float RetrievalRatio = 0.9f;
+
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int,
+        ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>? _nearest;
+    Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+        ArrayView1D<int, Stride1D.Dense>, int, float, ArrayView1D<int, Stride1D.Dense>>? _countMutual;
+
+    /// <summary>For descriptor i of image pa[p] (t = p * k + i): its nearest and second-nearest descriptor of image pb[p] by
+    /// dot product (descriptors are unit length, so the largest dot is the nearest), and the nearest's index.</summary>
+    static void NearestKernel(Index1D t, ArrayView1D<float, Stride1D.Dense> desc, ArrayView1D<int, Stride1D.Dense> pa,
+        ArrayView1D<int, Stride1D.Dense> pb, int k, ArrayView1D<int, Stride1D.Dense> bestIdx, ArrayView1D<float, Stride1D.Dense> best,
+        ArrayView1D<float, Stride1D.Dense> second)
+    {
+        int p = t / k, i = t - p * k;
+        int ai = (pa[p] * k + i) * 128, b0 = pb[p] * k * 128;
+        float s1 = -2f, s2 = -2f; int arg = -1;
+        for (int j = 0; j < k; j++)
+        {
+            int bj = b0 + j * 128;
+            float dot = 0f;
+            for (int d = 0; d < 128; d++) dot += desc[ai + d] * desc[bj + d];
+            if (dot > s1) { s2 = s1; s1 = dot; arg = j; }
+            else if (dot > s2) s2 = dot;
+        }
+        bestIdx[t] = arg; best[t] = s1; second[t] = s2;
+    }
+
+    /// <summary>Per pair p: descriptors whose nearest neighbour in the other image points back (mutual) and passes the ratio
+    /// test on Euclidean distance (|a - b| = sqrt(2 - 2 a.b) for unit vectors).</summary>
+    static void CountMutualKernel(Index1D p, ArrayView1D<int, Stride1D.Dense> bestAB, ArrayView1D<float, Stride1D.Dense> best,
+        ArrayView1D<float, Stride1D.Dense> second, ArrayView1D<int, Stride1D.Dense> bestBA, int k, float ratio,
+        ArrayView1D<int, Stride1D.Dense> count)
+    {
+        int c = 0;
+        for (int i = 0; i < k; i++)
+        {
+            int t = p * k + i;
+            int j = bestAB[t];
+            if (j < 0 || bestBA[p * k + j] != i) continue;
+            float d1 = XMath.Sqrt(XMath.Max(0f, 2f - 2f * best[t]));
+            float d2 = XMath.Sqrt(XMath.Max(0f, 2f - 2f * second[t]));
+            if (d1 < ratio * d2) c++;
+        }
+        count[p] = c;
+    }
+
+    /// <summary>
+    /// How strongly each pair of images is likely to overlap, for choosing which pairs LightGlue matches: per pair, the
+    /// ALIKED descriptors that are MUTUAL nearest neighbours and pass a <see cref="RetrievalRatio"/> ratio test, on the
+    /// device (descriptors stay there). Symmetric n x n; the diagonal is 0. MEASURED offline 2026-10-01 (TruckFull, 251
+    /// images, COLMAP truth): each image's top 20 partners by this score are ~98% true pairs (3,104 pairs of 31,375) - the
+    /// coverage SfM needs at a tenth of LightGlue's all-pairs cost; on DrJohnson's wide baselines it is weaker (top 15:
+    /// 72% of true pairs), which is why small sets still match every pair.
+    /// </summary>
+    public async Task<int[,]> PairScoresAsync(IReadOnlyList<ImportedImage> images, int batchPairs = 256)
+    {
+        int n = images.Count;
+        var scores = new int[n, n];
+        if (n < 2) return scores;
+        int k = images[0].LearnedDescriptors?.K ?? throw new InvalidOperationException("no learned descriptors");
+        _nearest ??= Accel.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+            ArrayView1D<int, Stride1D.Dense>, int, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>>(NearestKernel);
+        _countMutual ??= Accel.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, float, ArrayView1D<int, Stride1D.Dense>>(CountMutualKernel);
+        using var desc = Accel.Allocate1D<float>((long)n * k * 128);
+        for (int i = 0; i < n; i++)
+        {
+            var d = images[i].LearnedDescriptors ?? throw new InvalidOperationException($"{images[i].FileName} has no learned descriptors");
+            if (d.K != k) throw new InvalidOperationException($"{images[i].FileName}: K={d.K}, expected {k}");
+            await desc.View.SubView((long)i * k * 128, k * 128).CopyFromAsync(d.Descriptors.View);
+        }
+        var pairs = new List<(int A, int B)>();
+        for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++) pairs.Add((a, b));
+        int batch = Math.Max(1, batchPairs);
+        using var pa = Accel.Allocate1D<int>(batch); using var pb = Accel.Allocate1D<int>(batch);
+        using var bestAB = Accel.Allocate1D<int>((long)batch * k); using var simAB = Accel.Allocate1D<float>((long)batch * k);
+        using var secAB = Accel.Allocate1D<float>((long)batch * k);
+        using var bestBA = Accel.Allocate1D<int>((long)batch * k); using var simBA = Accel.Allocate1D<float>((long)batch * k);
+        using var secBA = Accel.Allocate1D<float>((long)batch * k);
+        using var count = Accel.Allocate1D<int>(batch);
+        var ha = new int[batch]; var hb = new int[batch];
+        for (int start = 0; start < pairs.Count; start += batch)
+        {
+            int m = Math.Min(batch, pairs.Count - start);
+            for (int q = 0; q < batch; q++) { var (a, b) = pairs[start + Math.Min(q, m - 1)]; ha[q] = a; hb[q] = b; }
+            pa.View.CopyFromCPU(ha); pb.View.CopyFromCPU(hb);
+            _nearest(batch * k, desc.View, pa.View, pb.View, k, bestAB.View, simAB.View, secAB.View);
+            _nearest(batch * k, desc.View, pb.View, pa.View, k, bestBA.View, simBA.View, secBA.View);
+            _countMutual(batch, bestAB.View, simAB.View, secAB.View, bestBA.View, k, RetrievalRatio, count.View);
+            await Accel.SynchronizeAsync();
+            // CPU transfer: one int per pair - the pair choice is made on the host.
+            var c = await count.View.SubView(0, m).CopyToHostAsync();
+            for (int q = 0; q < m; q++) { var (a, b) = pairs[start + q]; scores[a, b] = scores[b, a] = c[q]; }
+        }
+        return scores;
+    }
+
+    /// <summary>The union of each image's <paramref name="topK"/> highest-scoring partners (<see cref="PairScoresAsync"/>),
+    /// as (a, b) with a &lt; b, in ascending order.</summary>
+    public static List<(int A, int B)> TopPartnerPairs(int[,] scores, int topK)
+    {
+        int n = scores.GetLength(0);
+        var sel = new SortedSet<(int, int)>();
+        for (int a = 0; a < n; a++)
+        {
+            foreach (int b in Enumerable.Range(0, n).Where(b => b != a).OrderByDescending(b => scores[a, b]).ThenBy(b => b).Take(topK))
+                sel.Add((Math.Min(a, b), Math.Max(a, b)));
+        }
+        return sel.ToList();
     }
 
     public void Dispose()

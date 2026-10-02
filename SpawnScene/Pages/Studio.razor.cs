@@ -366,6 +366,10 @@ public partial class Studio : IAsyncDisposable
                 _importService.UseLearnedFeatures = ftq is "learned" or "lightglue";
             if (query.TryGetValue("lgk", out var lgk) && int.TryParse(lgk, out var lgki))
                 LearnedFeatureMatcher.KeypointBudget = lgki;
+            if (query.TryGetValue("lgretrieval", out var lgr) && int.TryParse(lgr, out var lgri))
+                _importService.LearnedAllPairsUpTo = Math.Max(0, lgri);
+            if (query.TryGetValue("lgtopk", out var lgt) && int.TryParse(lgt, out var lgti))
+                _importService.LearnedRetrievalTopK = Math.Max(1, lgti);
             if (query.TryGetValue("lgpairs", out var lgp) && int.TryParse(lgp, out var lgpi))
                 LearnedFeatureMatcher.PairsPerRun = Math.Max(1, lgpi);
             // &verify=cpu: verify matched pairs with the CPU estimator instead of GpuEpipolarRansac (A/B).

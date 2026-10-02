@@ -68,6 +68,13 @@ public partial class Studio
                 $"{(DateTime.UtcNow - t0).TotalSeconds:F1}s ({names.First()} .. {names.Last()})");
 
             _projects = await _projectService.ListProjectsAsync();
+            // The project browser as a user lands on it, with this project in the list.
+            _hideUiOverlay = false;
+            _state = StudioState.ProjectBrowser;
+            BuildProjectBrowserUI();
+            await Task.Delay(1500);
+            Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_browser");
+            await Task.Delay(2500);
             _activeProject = _projects.First(p => p.Id == project.Id);
             _state = StudioState.ProjectDetail;
             // The project page as a user sees it, settings included.

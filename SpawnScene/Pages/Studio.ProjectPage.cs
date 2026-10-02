@@ -242,7 +242,7 @@ public partial class Studio
         {
             var src = sources[i];
             float tx = x + (i % cols) * (tile + gap), ty = y + (i / cols) * (tile + captionH + gap);
-            string key = $"source:{src.FileName}";
+            string key = SourceThumbKey(_activeProject.Id, src.FileName);
             bool selected = _selectedSources.Contains(src.FileName);
             if (selected)
                 parent.AddChild(new UIPanel

@@ -57,7 +57,7 @@ public partial class Studio
             await _projectService.RemoveSourceAsync(_activeProject.Id, source.FileName);
 
             // Remove cached thumbnail
-            string srcKey = $"source:{source.FileName}";
+            string srcKey = SourceThumbKey(_activeProject.Id, source.FileName);
             if (_thumbnailCache.TryGetValue(srcKey, out var cached))
             {
                 cached.view.Dispose();
@@ -1121,7 +1121,10 @@ public partial class Studio
             // OPFS → byte[] is the file-I/O boundary; upload that straight to the GPU texture.
             UploadThumbnailToCache(key, pixels, 320, 200);
 
-            if (_state == StudioState.ProjectBrowser)
+            // In place when the page shows a tile for it (the browser's cards), else rebuild that page.
+            if (_thumbTiles.TryGetValue(key, out var tile) && _thumbnailCache.TryGetValue(key, out var cachedThumb))
+                tile.TextureView = cachedThumb.view;
+            else if (_state == StudioState.ProjectBrowser)
                 BuildProjectBrowserUI();
             else if (_state == StudioState.ProjectDetail && _activeProject?.Id == projectId)
                 BuildProjectDetailUI();
@@ -1174,9 +1177,9 @@ public partial class Studio
         return (tex, tex.CreateView());
     }
 
-    private async void LoadThumbnailAsync(string projectId, string fileName)
+    private async void LoadThumbnailAsync(string projectId, string fileName, int thumbW = 256, int thumbH = 256)
     {
-        string key = $"source:{fileName}";
+        string key = SourceThumbKey(projectId, fileName, thumbW, thumbH);
         if (_thumbnailCache.ContainsKey(key) || _device == null || _queue == null) return;
         try
         {
@@ -1185,23 +1188,23 @@ public partial class Studio
             if (file == null) return;
             using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", file);
 
-            // A centre-cropped SQUARE: the project page shows square tiles, and stretching the whole photo into a fixed
-            // 240x160 squashed every portrait photo.
-            const int thumb = 256;
-            int bw = (int)bitmap.Width, bh = (int)bitmap.Height, side = Math.Min(bw, bh);
-            using var osc = new OffscreenCanvas(thumb, thumb);
+            // A centre "cover" crop to the tile's own aspect (square tiles on the project page, 16:10 cards in the browser):
+            // stretching the whole photo into a fixed 240x160 squashed every portrait photo.
+            int bw = (int)bitmap.Width, bh = (int)bitmap.Height;
+            double tileAspect = (double)thumbW / thumbH;
+            double cropW = Math.Min(bw, bh * tileAspect), cropH = cropW / tileAspect;
+            using var osc = new OffscreenCanvas(thumbW, thumbH);
             using var ctx = osc.Get2DContext();
-            ctx.DrawImage(bitmap, (bw - side) / 2.0, (bh - side) / 2.0, side, side, 0, 0, thumb, thumb);
-            using var imageData = ctx.GetImageData(0, 0, thumb, thumb);
+            ctx.DrawImage(bitmap, (bw - cropW) / 2.0, (bh - cropH) / 2.0, cropW, cropH, 0, 0, thumbW, thumbH);
+            using var imageData = ctx.GetImageData(0, 0, thumbW, thumbH);
             using var dataArray = imageData.Data; // Uint8ClampedArray — writeTexture directly, no ReadBytes
 
-            UploadThumbnailToCache(key, dataArray, thumb, thumb);
+            UploadThumbnailToCache(key, dataArray, thumbW, thumbH);
 
-            if (_state != StudioState.ProjectDetail || _activeProject?.Id != projectId) return;
-            // Update the tile in place; rebuild only when the page has no tile for it.
+            // Update the tile in place (the project page or the browser); rebuild only when the page has no tile for it.
             if (_thumbTiles.TryGetValue(key, out var tile) && _thumbnailCache.TryGetValue(key, out var cachedThumb))
                 tile.TextureView = cachedThumb.view;
-            else
+            else if (_state == StudioState.ProjectDetail && _activeProject?.Id == projectId)
                 BuildProjectDetailUI();
         }
         catch (Exception ex)

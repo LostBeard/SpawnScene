@@ -428,12 +428,18 @@ public partial class Studio
         y += ((choices.Length + perRow - 1) / perRow) * (h + gap) + 2;
         if (hint != null)
         {
-            parent.AddChild(new UITextBlock
+            // Height from the real wrap (GameUI MeasureHeight, the same font and word breaks Draw uses). A character-count
+            // estimate either ran a three-line hint into the next heading or left gaps; it stays only as the fallback for a
+            // font atlas that is not ready yet.
+            var block = parent.AddChild(new UITextBlock
             {
-                X = x, Y = y, Width = width, Height = 34,
+                X = x, Y = y, Width = width,
                 Text = hint, FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted,
             });
-            y += 38;
+            float hintH = block.MeasureHeight(_gameUI.Renderer);
+            if (hintH <= 0) hintH = Math.Max(1, (int)Math.Ceiling(hint.Length * 5.6f / Math.Max(1f, width))) * 18;
+            block.Height = hintH;
+            y += hintH + 4;
         }
         return y + 10;
     }

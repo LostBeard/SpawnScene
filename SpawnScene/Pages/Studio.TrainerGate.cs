@@ -29,6 +29,44 @@ public partial class Studio
     const int GateHeight = 96;
     const int GateSplats = 240;
 
+    /// <summary>
+    /// The loss TrainStepAsync reports must be the L1 term it optimises: LambdaL1 * mean |render - target| over every
+    /// channel of every pixel, at the gate size AND at 1600x1200. The per-pixel fixed-point sum it replaced rounded each
+    /// pixel's share to 0 at large sizes and reported 0.000000 for a whole 1200x1600 run (2026-10-02).
+    /// </summary>
+    async Task<bool> LossReadoutGateAsync(float[] packedDc, int n, CameraParams cam, float depthNear, float depthFar)
+    {
+        var accel = _gpuService.WebGPUAccelerator;
+        foreach (var (w, h) in new[] { (GateWidth, GateHeight), (1600, 1200) })
+        {
+            using var trainer = new SplatTrainerGpu(_gpuService);
+            trainer.Initialize();
+            await trainer.ResizeAsync(w, h, n);
+            var c = cam.ScaledTo(w, h);
+            using var buf = accel.Allocate1D<float>(packedDc.Length);
+            buf.CopyFromCPU(packedDc);
+            await accel.SynchronizeAsync();
+            float[] rendered = await trainer.RenderForwardAsync(buf, n, c, depthNear, depthFar);
+            var target = new float[w * h * 3];
+            Array.Fill(target, 0.5f);
+            trainer.SetTarget(target);
+            double sum = 0;
+            for (int i = 0; i < rendered.Length; i++) sum += Math.Abs(rendered[i] - 0.5f);
+            float expected = (float)(ImageQuality.LambdaL1 * sum / rendered.Length);
+            trainer.InitOptimizerState(buf, n);
+            float reported = await trainer.TrainStepAsync(buf, n, c, depthNear, depthFar);
+            float rel = MathF.Abs(reported - expected) / MathF.Max(expected, 1e-9f);
+            Console.WriteLine($"[TrainerGate] loss readout {w}x{h}: reported {reported:F6}, expected {expected:F6} (rel {rel:E2})");
+            if (!(expected > 1e-4f) || !(rel < 1e-3f))
+            {
+                Console.WriteLine($"[TrainerGate] FAIL: loss readout at {w}x{h}");
+                return false;
+            }
+        }
+        Console.WriteLine("[TrainerGate] loss readout PASS");
+        return true;
+    }
+
     async Task RunTrainerGateAsync()
     {
         Console.WriteLine("[TrainerGate] starting");
@@ -149,6 +187,9 @@ public partial class Studio
                 Console.WriteLine("[TrainerGate] forward PASS");
 
             if (!hasContent || !close) return;
+
+            // -- The reported loss: the GPU sum vs the mean computed here from the same render, small AND large --
+            if (!await LossReadoutGateAsync(packedDc, n, cam, depthNear, depthFar)) return;
 
             if (!await SsimGateAsync(trainer, accel, gpuColour)) return;
 

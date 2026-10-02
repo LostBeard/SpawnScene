@@ -37,6 +37,7 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _rasterBackward;
     GPUComputePipeline? _scatterGrad;
     GPUComputePipeline? _lossL1;
+    GPUComputePipeline? _lossReduce;
     GPUComputePipeline? _adamStep;
     GPUComputePipeline? _initLogits;
     GPUComputePipeline? _adamGeometry;
@@ -104,7 +105,10 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<int, Stride1D.Dense>? _gradShRest;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamShM;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamShV;
-    MemoryBuffer1D<int, Stride1D.Dense>? _lossFixed;
+    // Sum of per-step losses since the last read (float, LossReduce) and the per-workgroup partial sums of one step.
+    MemoryBuffer1D<float, Stride1D.Dense>? _lossSum;
+    MemoryBuffer1D<float, Stride1D.Dense>? _lossPartial;
+    GPUBuffer? _lossDimsBuf;
     GPUBuffer? _dimsBuf;
     GPUBuffer? _ssimDimsBuf;
     GPUBuffer? _ssimCfgBuf;
@@ -217,11 +221,11 @@ public sealed class SplatTrainerGpu : IDisposable
         return line;
     }
 
-    // Steps added into _lossFixed since it was last read. 0 = the buffer must be cleared before the next add.
+    // Steps added into _lossSum since it was last read. 0 = the buffer must be cleared before the next add.
     int _lossStepsPending;
 
-    // The accumulator is fixed point, 2^20 per unit of per-step loss, in an int32: 2,048 steps of loss 1.0
-    // would overflow it. Real losses are 0.02-0.3, so reading at least this often leaves a wide margin.
+    // The accumulator is a float sum of per-step losses (LossReduce). Reading at least this often keeps it a sum of
+    // similar magnitudes.
     const int MaxLossStepsBetweenReads = 1024;
 
     /// <summary>True when the last render overflowed the key buffer and is therefore incomplete.</summary>
@@ -256,6 +260,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _rasterBackward = MakePipeline(SplatTrainerShaders.RasterBackward, "raster_backward");
         _scatterGrad = MakePipeline(SplatTrainerShaders.ScatterGradients, "scatter_gradients");
         _lossL1 = MakePipeline(SplatTrainerShaders.LossL1, "loss_l1");
+        _lossReduce = MakePipeline(SplatTrainerShaders.LossReduce, "loss_reduce");
         _adamStep = MakePipeline(SplatTrainerShaders.AdamStep, "adam_step");
         _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
         _adamGeometry = MakePipeline(SplatTrainerShaders.GeometryAdam, "adam_geometry");
@@ -331,6 +336,11 @@ public sealed class SplatTrainerGpu : IDisposable
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
         _lossWeightsBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        _lossDimsBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
             Size = 16,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
@@ -552,6 +562,7 @@ public sealed class SplatTrainerGpu : IDisposable
             Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
         });
         _dLdPix = accel.Allocate1D<float>((long)width * height * 3);
+        _lossPartial = accel.Allocate1D<float>(Math.Max(1L, ((long)width * height + 63) / 64));
         _gradKeyA = accel.Allocate1D<float>((long)_keyCapacity * 3);
         _gradKeyB = accel.Allocate1D<float>((long)_keyCapacity * 3);
         _gradKeyC = accel.Allocate1D<float>((long)_keyCapacity * 3);
@@ -599,7 +610,7 @@ public sealed class SplatTrainerGpu : IDisposable
             _adamStepCount = 0;
             await stage("adam+sh");
         }
-        _lossFixed = accel.Allocate1D<int>(1);
+        _lossSum = accel.Allocate1D<float>(1);
         _lossStepsPending = 0;
 
         _radixSort ??= new GpuRadixSort(_device!, _queue!);
@@ -1652,7 +1663,7 @@ public sealed class SplatTrainerGpu : IDisposable
 
         // The loss accumulates across unread steps; clear it only when a fresh sum starts. The forward's
         // flush submits this clear ahead of the loss pass.
-        if (_lossStepsPending == 0) _lossFixed!.MemSetToZero();
+        if (_lossStepsPending == 0) _lossSum!.MemSetToZero();
 
         // Forward also refreshes the tile binning for this view.
         await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false);
@@ -1673,11 +1684,20 @@ public sealed class SplatTrainerGpu : IDisposable
         // ── Loss and dL/d(pixel): 0.8 L1 + 0.2 D-SSIM, matching the reference ──
         WriteU32(_dimsBuf!, (uint)pixels);
         WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaL1, ImageQuality.LambdaDssim, 0f, 0f);
-        Dispatch(_lossL1!, (pixels + 63) / 64, 1, new[]
+        // A 2D grid of 64-pixel workgroups: one dimension caps at 65,535 (4.2 MP), and the photos' own size is above it.
+        int lossGroups = (pixels + 63) / 64;
+        int lossGroupsX = Math.Min(lossGroups, 32768), lossGroupsY = (lossGroups + lossGroupsX - 1) / lossGroupsX;
+        WriteU32x4(_lossDimsBuf!, (uint)pixels, (uint)lossGroupsX, (uint)lossGroups, 0);
+        Dispatch(_lossL1!, lossGroupsX, lossGroupsY, new[]
         {
             Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
-            Buf(2, _dLdPix!.GetGPUBuffer()!), Buf(3, _lossFixed!.GetGPUBuffer()!),
-            Buf(4, _dimsBuf!), Buf(5, _lossWeightsBuf!),
+            Buf(2, _dLdPix!.GetGPUBuffer()!), Buf(3, _lossPartial!.GetGPUBuffer()!),
+            Buf(4, _lossDimsBuf!), Buf(5, _lossWeightsBuf!),
+        });
+        Dispatch(_lossReduce!, 1, 1, new[]
+        {
+            Buf(0, _lossPartial!.GetGPUBuffer()!), Buf(1, _lossSum!.GetGPUBuffer()!),
+            Buf(2, _lossDimsBuf!), Buf(3, _lossWeightsBuf!),
         });
 
         // Per channel: the same four passes three times, one-hot channel weights at lambda / 3 each, which sums to
@@ -1827,10 +1847,10 @@ public sealed class SplatTrainerGpu : IDisposable
         if (!readLoss && _lossStepsPending < MaxLossStepsBetweenReads) return float.NaN;
 
         // CPU transfer: 4 bytes, the loss sum. Maps behind all the step's submitted work.
-        int[] lossRaw = await _lossFixed!.CopyToHostAsync<int>(0, 1);
+        float[] lossRaw = await _lossSum!.CopyToHostAsync<float>(0, 1);
         LastLossSteps = _lossStepsPending;
         _lossStepsPending = 0;
-        return lossRaw[0] / 1048576f / LastLossSteps;
+        return lossRaw[0] / LastLossSteps;
     }
 
     /// <summary>
@@ -2045,6 +2065,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _radixSort?.ReleaseScratch();
         _target?.Dispose(); _target = null;
         _dLdPix?.Dispose(); _dLdPix = null;
+        _lossPartial?.Dispose(); _lossPartial = null;
         _gradKeyA?.Dispose(); _gradKeyA = null;
         _gradKeyB?.Dispose(); _gradKeyB = null;
         _gradKeyC?.Dispose(); _gradKeyC = null;
@@ -2066,7 +2087,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
         _gradShRest?.Dispose(); _gradShRest = null;
-        _lossFixed?.Dispose(); _lossFixed = null;
+        _lossSum?.Dispose(); _lossSum = null;
         if (keepOptimizerRows) return;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
@@ -2090,6 +2111,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimDimsBuf?.Destroy(); _ssimDimsBuf?.Dispose();
         _ssimCfgBuf?.Destroy(); _ssimCfgBuf?.Dispose();
         _lossWeightsBuf?.Destroy(); _lossWeightsBuf?.Dispose();
+        _lossDimsBuf?.Destroy(); _lossDimsBuf?.Dispose();
         _scratch4?.Dispose();
         _emitKeys?.Dispose();
         _tileRanges?.Dispose();
@@ -2097,6 +2119,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _rasterBackward?.Dispose();
         _scatterGrad?.Dispose();
         _lossL1?.Dispose();
+        _lossReduce?.Dispose();
         _ssimRowsPipe?.Dispose();
         _ssimReducePipe?.Dispose();
         _ssimWinGradPipe?.Dispose();

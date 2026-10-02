@@ -788,36 +788,77 @@ fn scatter_gradients(
     /// written for the backward kernel. Weighted by <c>weights.x</c> (= ImageQuality.LambdaL1)
     /// so the D-SSIM term can add the remaining share into the same buffer.
     ///
-    /// The loss itself is accumulated in fixed point because WebGPU has no float atomics; it is
-    /// only a scalar for reporting, so precision there is not load-bearing.
+    /// The loss is reduced per workgroup in float and summed by <see cref="LossReduce"/> (WebGPU has no float atomics,
+    /// and a per-pixel fixed-point atomic rounded every pixel's share to nothing at high resolution).
     /// </summary>
     public const string LossL1 = @"
 @group(0) @binding(0) var<storage, read>       rendered : array<f32>;   // 3 per pixel
 // 'target' is a RESERVED KEYWORD in WGSL; the binding has to be named something else.
 @group(0) @binding(1) var<storage, read>       ref_image : array<f32>;  // 3 per pixel
 @group(0) @binding(2) var<storage, read_write> dL_dpix  : array<f32>;   // 3 per pixel
-@group(0) @binding(3) var<storage, read_write> loss_fixed : atomic<i32>;
-@group(0) @binding(4) var<uniform>             dims     : vec4<u32>;    // x = pixel count
+@group(0) @binding(3) var<storage, read_write> loss_partial : array<f32>; // one per workgroup: sum of |d| over its pixels
+@group(0) @binding(4) var<uniform>             dims     : vec4<u32>;    // x = pixels, y = workgroups per grid row, z = workgroups
 @group(0) @binding(5) var<uniform>             weights  : vec4<f32>;    // x = L1 weight (0.8)
 
-const LOSS_SCALE : f32 = 1048576.0;
+var<workgroup> wg_sum : array<f32, 64>;
 
+// A 2D grid of 64-pixel workgroups (one dimension caps at 65,535 workgroups = 4.2 MP). Every invocation reaches the
+// barriers; out-of-range pixels contribute 0.
 @compute @workgroup_size(64)
-fn loss_l1(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let p = gid.x;
-    if (p >= dims.x) { return; }
-
+fn loss_l1(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_index) lid : u32) {
+    let group = wid.y * dims.y + wid.x;
+    let p = group * 64u + lid;
     let n = f32(dims.x * 3u);
     let w = weights.x;
     var total = 0.0;
-    for (var c = 0u; c < 3u; c = c + 1u) {
-        let i = p * 3u + c;
-        let d = rendered[i] - ref_image[i];
-        total = total + abs(d);
-        // d|x|/dx = sign(x), averaged over every channel of every pixel, scaled by lambda_L1.
-        dL_dpix[i] = w * sign(d) / n;
+    if (p < dims.x) {
+        for (var c = 0u; c < 3u; c = c + 1u) {
+            let i = p * 3u + c;
+            let d = rendered[i] - ref_image[i];
+            total = total + abs(d);
+            // d|x|/dx = sign(x), averaged over every channel of every pixel, scaled by lambda_L1.
+            dL_dpix[i] = w * sign(d) / n;
+        }
     }
-    atomicAdd(&loss_fixed, i32(round(w * total / n * LOSS_SCALE)));
+    wg_sum[lid] = total;
+    workgroupBarrier();
+    for (var s = 32u; s > 0u; s = s >> 1u) {
+        if (lid < s) { wg_sum[lid] = wg_sum[lid] + wg_sum[lid + s]; }
+        workgroupBarrier();
+    }
+    if (lid == 0u && group < dims.z) { loss_partial[group] = wg_sum[0]; }
+}
+";
+
+    /// <summary>
+    /// Pass 7b: the step's L1 loss from <see cref="LossL1"/>'s per-workgroup partial sums, added (float) to the running
+    /// sum the host reads every so many steps. One workgroup.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 The loss used to be added per PIXEL into an int32 in 2^20 fixed point: w * |d| / (3 * pixels) * 2^20, rounded.
+    /// At 1200x1600 a typical pixel's share is ~0.03 and rounded to 0, so the reported loss was 0.000000 for the whole
+    /// run, and lower resolutions read biased low late in training (MEASURED 2026-10-02, Bathroom: 0.0035 at 720,
+    /// 0.00014 at 1024, 0 at 1600). Only the REPORT was wrong; the gradients are separate.
+    /// </remarks>
+    public const string LossReduce = @"
+@group(0) @binding(0) var<storage, read>       loss_partial : array<f32>;
+@group(0) @binding(1) var<storage, read_write> loss_sum     : array<f32>;   // [0] = sum of per-step losses since the last read
+@group(0) @binding(2) var<uniform>             dims         : vec4<u32>;    // x = pixels, z = partial count
+@group(0) @binding(3) var<uniform>             weights      : vec4<f32>;    // x = L1 weight
+
+var<workgroup> red : array<f32, 256>;
+
+@compute @workgroup_size(256)
+fn loss_reduce(@builtin(local_invocation_index) lid : u32) {
+    var s = 0.0;
+    for (var i = lid; i < dims.z; i = i + 256u) { s = s + loss_partial[i]; }
+    red[lid] = s;
+    workgroupBarrier();
+    for (var k = 128u; k > 0u; k = k >> 1u) {
+        if (lid < k) { red[lid] = red[lid] + red[lid + k]; }
+        workgroupBarrier();
+    }
+    if (lid == 0u) { loss_sum[0] = loss_sum[0] + weights.x * red[0] / f32(dims.x * 3u); }
 }
 ";
 

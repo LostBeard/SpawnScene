@@ -20,9 +20,16 @@
 		  Appending here keeps the SDK defaults and needs no command-line flag.
 		-->
 		<DefaultItemExcludes>$(DefaultItemExcludes);obj/**;bin/**</DefaultItemExcludes>
-		<PublishTrimmed>false</PublishTrimmed>
-		<!-- Disable AOT compilation - ILGPU needs IL reflection to work -->
-		<RunAOTCompilation>false</RunAOTCompilation>
+		<!-- AOT opt-in (-p:SpawnSceneAot=true) while it is measured: the managed SfM (five-point RANSAC, rotation averaging,
+		     dense triangulation, BA host code) runs in the Mono interpreter otherwise; Anaglyphohol measured AOT at 2.0x on
+		     its per-frame host cost (2026-10-01). WasmStripILAfterAOT=false is REQUIRED: ILGPU compiles kernels from IL at
+		     runtime. The AOT build takes over an hour on one core. -->
+		<SpawnSceneAot Condition="'$(SpawnSceneAot)' == ''">false</SpawnSceneAot>
+		<RunAOTCompilation>$(SpawnSceneAot)</RunAOTCompilation>
+		<WasmStripILAfterAOT>false</WasmStripILAfterAOT>
+		<!-- WASM AOT requires trimming (WasmApp.Common.targets: "AOT is not supported without IL trimming"). The SpawnDev
+		     libraries are trim safe (2026-10-01); SpawnScene itself is rooted whole below (System.Text.Json project files). -->
+		<PublishTrimmed>$(SpawnSceneAot)</PublishTrimmed>
 	</PropertyGroup>
 	<!-- GpuBundleAdjuster device precision: double unless built with -p:BaFloat=true (f32 A/B timing). -->
 	<PropertyGroup Condition="'$(BaFloat)' == 'true'">
@@ -37,7 +44,7 @@
 		     (early return from nested loops), helpers taking LocalMemory views (GpuEpipolarRansac), and compiles one pipeline per kernel instead of one per dispatch size. local.3-.5 add WebGPUBufferAccounting (live buffers, creation sites). -->
 		<PackageReference Include="SpawnDev.ILGPU" Version="5.3.1" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.12" PrivateAssets="all" />
-		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="3.0.0" />
+		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="3.0.1-local.1" />
 	</ItemGroup>
 
 
@@ -46,6 +53,7 @@
 		<TrimmerRootAssembly Include="ILGPU" />
 		<TrimmerRootAssembly Include="ILGPU.Algorithms" />
 		<TrimmerRootAssembly Include="SpawnDev.ILGPU" />
+		<TrimmerRootAssembly Include="SpawnScene" />
 	</ItemGroup>
 
 

@@ -1125,7 +1125,9 @@ public partial class Studio
         // Wait for the device after Resize on its own, so a loss caused by the allocations is
         // reported here and not blamed on the first dispatch that follows.
         await accel.SynchronizeAsync();
-        Console.WriteLine($"[{logTag}] resized trainer to {m:N0} splats");
+        // Live GPU memory with the splat count: what a device memory budget has to cover (bytes per splat, measured).
+        Console.WriteLine($"[{logTag}] resized trainer to {m:N0} splats; " +
+            $"{SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes / 1048576.0:F0} MB live storage");
         _trainer.ResetPeakKeyDemand();
         // Logits and log scales come from the packed splats; the moments were just carried and
         // must NOT be zeroed here (InitOptimizerState would).

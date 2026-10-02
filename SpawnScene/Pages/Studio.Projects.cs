@@ -787,8 +787,15 @@ public partial class Studio
         DensifyEveryIters = 100;
         OpacityResetEveryIters = 3000;
         SplatDensityControl.GrowthSelectFraction = 1f;
-        MaxDensifiedSplats = maxSplats;
-        MaxTargetStackBytes = 640L * 1024 * 1024;
+        // From the device's GPU memory budget (Device settings) and its binding limit, not constants: the photo stack
+        // was a fixed 640 MB and the splat cap was the preset's whatever the GPU (GpuMemoryBudget).
+        var (targetBytes, splatCap) = GpuMemoryBudget.Derive(GpuMemoryGB, DeviceBindingLimitBytes, maxSplats);
+        MaxDensifiedSplats = splatCap;
+        MaxTargetStackBytes = targetBytes;
+        Console.WriteLine(
+            $"[Train] GPU memory budget {(GpuMemoryGB > 0 ? $"{GpuMemoryGB} GB" : $"Auto ({GpuMemoryBudget.AutoGB} GB)")}: " +
+            $"photos up to {targetBytes >> 20} MB, up to {splatCap:N0} splats (preset {maxSplats:N0}; device binding " +
+            $"limit {DeviceBindingLimitBytes >> 20} MB)");
         HeldOutEveryCycles = 0;           // no held-out views to score, so no mid-run evaluation passes
         _unloadDepthBeforeTraining = true; // give the trainer the depth model's GPU memory
 

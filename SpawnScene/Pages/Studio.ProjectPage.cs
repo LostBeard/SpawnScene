@@ -367,6 +367,16 @@ public partial class Studio
             s.TrainMaxSplats, v => { s.TrainMaxSplats = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
             "Upper bound on scene size while training grows it. Lower it on a GPU with less memory.");
 
+        // -- Device: this machine's GPU memory budget (localStorage, all projects) --
+        var (budgetTargets, budgetSplats) = GpuMemoryBudget.Derive(GpuMemoryGB, DeviceBindingLimitBytes, s.TrainMaxSplats);
+        y = AddSectionHeading(parent, x, y + 8, w, "Device", "this computer");
+        y = AddChoiceRow(parent, x, y, w, "GPU memory",
+            GpuMemoryBudget.ChoicesGB.Select(gb => (gb == 0 ? $"Auto" : $"{gb} GB", gb)).ToArray(),
+            GpuMemoryGB, v => GpuMemoryGB = v,
+            $"Training uses up to {budgetTargets >> 20} MB for photos and {budgetSplats:N0} splats" +
+            (budgetSplats < s.TrainMaxSplats ? $" (the preset allows {s.TrainMaxSplats:N0})" : "") +
+            $". Auto assumes {GpuMemoryBudget.AutoGB} GB; set yours if it differs.");
+
         y = AddSectionHeading(parent, x, y + 8, w, "Single photo", "depth");
         var presets = new[] { ("Fast", 4, 0f), ("Standard", 2, 0.3f), ("High", 1, 0.3f) };
         y = AddChoiceRow(parent, x, y, w, "Quality",

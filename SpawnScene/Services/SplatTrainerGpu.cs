@@ -399,31 +399,13 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         const long Guaranteed = 128L * 1024 * 1024;
         if (_maxBindingBytes > 0) return _maxBindingBytes;
-        _maxBindingBytes = Guaranteed;
-        try
-        {
-            using var limits = _device?.JSRef?.Get<SpawnDev.SpawnJS.SpawnJSObject>("limits");
-            double? reported = limits?.JSRef?.Get<double?>("maxStorageBufferBindingSize");
-            if (reported is > 0)
-            {
-                long bytes = (long)reported.Value;
-                if (bytes > _maxBindingBytes)
-                {
-                    _maxBindingBytes = bytes;
-                    Console.WriteLine(
-                        $"[Trainer] device maxStorageBufferBindingSize is " +
-                        $"{bytes / (1024 * 1024)} MiB, not the {Guaranteed / (1024 * 1024)} MiB " +
-                        $"guarantee - key capacity scales with it");
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            // A device that will not answer keeps the guarantee. Never fatal: this is an
-            // optimisation over a value that is already correct.
-            Console.WriteLine($"[Trainer] could not read device limits ({ex.Message}); " +
-                              "using the 128 MiB guarantee");
-        }
+        // A device that will not answer keeps the guarantee (GpuMemoryBudget.ReadMaxStorageBindingBytes never throws).
+        _maxBindingBytes = GpuMemoryBudget.ReadMaxStorageBindingBytes(_device);
+        if (_maxBindingBytes > Guaranteed)
+            Console.WriteLine(
+                $"[Trainer] device maxStorageBufferBindingSize is " +
+                $"{_maxBindingBytes / (1024 * 1024)} MiB, not the {Guaranteed / (1024 * 1024)} MiB " +
+                $"guarantee - key capacity scales with it");
         return _maxBindingBytes;
     }
 

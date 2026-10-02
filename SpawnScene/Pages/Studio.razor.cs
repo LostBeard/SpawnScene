@@ -304,6 +304,11 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.GlobalSfmFocalOverride = gsfd;
             if (query.TryGetValue("globalgtrot", out var ggr))
                 DiagnoseGlobalWithGroundTruthRotations = ggr is "1" or "true";
+            // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
+            if (query.TryGetValue("core", out var coq))
+                _multiViewService.KeepStrongCore = coq is not ("0" or "false");
+            if (query.TryGetValue("coremin", out var cmq) && int.TryParse(cmq, out var cmi))
+                _multiViewService.CoreSharedPoints = Math.Max(1, cmi);
             // &relpose=f: relative poses decomposed from the verification's F instead of a calibrated five-point E-RANSAC (A/B).
             if (query.TryGetValue("relpose", out var rpq))
                 _multiViewService.CalibratedRelativePoses = rpq is not ("f" or "F" or "0");

@@ -446,6 +446,7 @@ public class MultiViewGenerationService
         // points) places it or drops it, like any misplaced camera.
         bad.UnionWith(unplaced);
 
+        var dropped = new HashSet<int>();   // cameras not in the final solution (unplaced, failed verification, outside the core)
         bool oneCamera = cams.Select(c => (c.Width, c.Height)).Distinct().Count() == 1;
         var focals = cams.Select(c => 0.5f * (c.FocalX + c.FocalY)).OrderBy(f => f).ToList();
         if (DiagnosticGroundTruthPoseInit is { } gtP && gtP.Count == cameras.Length)
@@ -641,13 +642,58 @@ public class MultiViewGenerationService
                 (ba, points, pointTracks, result) = solve;
             }
             for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) ba.WriteCamera(i, cams[i]);
-            // A camera nobody could place is wrong by tens of degrees: leaving it in trains the scene against a
-            // photo from the wrong viewpoint. Drop it (the caller skips null cameras) and say so.
-            foreach (int c in pending) cameras[posed[c]] = null;
+            dropped.UnionWith(pending);
             Console.WriteLine(
                 $"[BA] misplaced cameras: {bad.Count}; re-registered {registered} in {passes + 1} pass(es); " +
                 $"dropped {pending.Count} (incl. any failing verification); adjusted the rest");
         }
+
+        // -- 4. Keep the strongly connected core (GlobalSfmInit.LargestStrongComponent): cameras the final solution joins only
+        // through a few shared points can sit in a self-consistent but WRONG place (DrJohnson: clusters right internally,
+        // misplaced against each other). Training against a photo from the wrong viewpoint corrupts the scene; leaving the
+        // photo out costs only its coverage.
+        if (KeepStrongCore)
+        {
+            var shared = new int[cams.Count, cams.Count];
+            var seenCams = new List<int>();
+            for (int p = 0; p < points.Count; p++)
+            {
+                var x = ba.PointAt(p);
+                seenCams.Clear();
+                foreach (var t in pointTracks[p])
+                {
+                    var o = Ob(t);
+                    if (dropped.Contains(o.Camera) || seenCams.Contains(o.Camera)) continue;
+                    if (!WorldSpaceGeometry.Project(cams[o.Camera], x, out var u, out var v, out var zc) || zc <= 0) continue;
+                    if ((u - o.U) * (u - o.U) + (v - o.V) * (v - o.V) > 16) continue;
+                    seenCams.Add(o.Camera);
+                }
+                for (int a = 0; a < seenCams.Count; a++)
+                    for (int b = a + 1; b < seenCams.Count; b++) { shared[seenCams[a], seenCams[b]]++; shared[seenCams[b], seenCams[a]]++; }
+            }
+            var core = GlobalSfmInit.LargestStrongComponent(cams.Count, shared, CoreSharedPoints, dropped);
+            var coreSet = core.ToHashSet();
+            var outside = Enumerable.Range(0, cams.Count).Where(c => !dropped.Contains(c) && !coreSet.Contains(c)).ToList();
+            if (outside.Count > 0 && core.Count >= 2)
+            {
+                foreach (int c in outside)
+                {
+                    int best = core.Select(q => shared[c, q]).DefaultIfEmpty(0).Max();
+                    Console.WriteLine($"[BA]   core: view {posed[c]} joins the core through at most {best} shared points (< {CoreSharedPoints}) - dropped");
+                }
+                dropped.UnionWith(outside);
+                var coreSolve = await SolveBundleAsync(cams, tracks, Ob, exclude: dropped, oneCamera, "BA core");
+                if (coreSolve != null)
+                {
+                    (ba, points, pointTracks, result) = coreSolve;
+                    for (int i = 0; i < cams.Count; i++) if (!dropped.Contains(i)) ba.WriteCamera(i, cams[i]);
+                }
+            }
+            Console.WriteLine($"[BA] strong core: {core.Count} cameras linked by >= {CoreSharedPoints} shared points; {outside.Count} outside it dropped");
+        }
+        // A camera nobody could place reliably is wrong: leaving it in trains the scene against a photo from the wrong
+        // viewpoint. Drop it (the caller skips null cameras) and say so.
+        foreach (int c in dropped) cameras[posed[c]] = null;
 
         Console.WriteLine(
             $"[BA] focal: DAv3 per-view median {focals[focals.Count / 2]:F1} (p10 {focals[focals.Count / 10]:F1}, " +
@@ -687,6 +733,15 @@ public class MultiViewGenerationService
         Console.WriteLine($"[BA] sparse cloud: {pos.Count:N0} points with >= 2 surviving observations");
         return new PointCloud { Positions = pos.ToArray(), Colors = col.ToArray() };
     }
+
+    /// <summary>
+    /// Keep only the largest set of cameras the final solution links by at least <see cref="CoreSharedPoints"/> shared points
+    /// each (<see cref="GlobalSfmInit.LargestStrongComponent"/>); &amp;core=0 keeps every placed camera (A/B).
+    /// </summary>
+    public bool KeepStrongCore { get; set; } = true;
+
+    /// <summary>Shared points (within 4 px of the final solution) that link a camera to the core. &amp;coremin=N.</summary>
+    public int CoreSharedPoints { get; set; } = 50;
 
     /// <summary>Log the correspondences of the first two rich views resection could not place (diagnostic).</summary>
     public bool DumpFailedResections { get; set; }

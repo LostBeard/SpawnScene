@@ -716,4 +716,27 @@ public class GlobalSfmInitTests
         var consistent = GlobalSfmInit.PairsConsistentWithPoses(pairs, regCams, c => c <= target);
         Assert.That(consistent.Select(p => p.CamA).OrderBy(c => c), Is.EqualTo(new[] { 10, 11 }), "only the true pairs agree with the poses");
     }
+
+    /// <summary>
+    /// The strong core (2026-10-01, DrJohnson: clusters right internally, misplaced against each other through weak links).
+    /// Two groups linked internally by 200 shared points, to each other by one 20-point link; camera 9 excluded. The larger
+    /// group is the core at a 50-point threshold; at 10 the weak link joins everything (the old behaviour).
+    /// </summary>
+    [Test]
+    public void LargestStrongComponent_SplitsWeaklyLinkedGroups()
+    {
+        int n = 10;
+        var shared = new int[n, n];
+        void Link(int a, int b, int w) { shared[a, b] = w; shared[b, a] = w; }
+        int[] big = { 0, 1, 2, 3, 4, 5 }, small = { 6, 7, 8 };
+        foreach (var g in new[] { big, small })
+            for (int i = 0; i < g.Length; i++) for (int j = i + 1; j < g.Length; j++) Link(g[i], g[j], 200);
+        Link(5, 6, 20);
+        Link(9, 0, 500);
+        var exclude = new HashSet<int> { 9 };
+        var core = GlobalSfmInit.LargestStrongComponent(n, shared, 50, exclude);
+        Assert.That(core.OrderBy(c => c), Is.EqualTo(big), "the larger strongly linked group");
+        var all = GlobalSfmInit.LargestStrongComponent(n, shared, 10, exclude);
+        Assert.That(all.OrderBy(c => c), Is.EqualTo(big.Concat(small)), "a weak threshold joins through the 20-point link");
+    }
 }

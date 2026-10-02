@@ -1264,6 +1264,31 @@ public static class GlobalSfmInit
         double maxDeg = 10)
         => edges.Where(e => connected[e.A] && connected[e.B] && AngleDeg(rot[e.B], Mul(e.R, rot[e.A])) <= maxDeg).ToList();
 
+    /// <summary>
+    /// The largest set of cameras connected through pairs that share at least <paramref name="minShared"/> points
+    /// (<paramref name="shared"/>[a, b]), ignoring <paramref name="exclude"/>d cameras. 2026-10-01, the DrJohnson 44-view subset
+    /// (which COLMAP's own SIFT pipeline cannot reconstruct either - incremental registered 8 of 44, GLOMAP placed 43 at 97%
+    /// off): bundle adjustment converged to a SELF-CONSISTENT wrong layout (RMS 1.1 px) - clusters right internally but placed
+    /// wrongly against each other through weak links (few shared points, some of them wrong matches). Joined through every
+    /// link the cameras were 76% off COLMAP; the core linked by >= 60 shared points was 0.46%. COLMAP splits such data into
+    /// separate models; SpawnScene keeps the largest strong core and reports the rest as not placed.
+    /// </summary>
+    public static List<int> LargestStrongComponent(int n, int[,] shared, int minShared, ISet<int>? exclude = null)
+    {
+        var parent = Enumerable.Range(0, n).ToArray();
+        int Find(int a) { while (parent[a] != a) a = parent[a] = parent[parent[a]]; return a; }
+        for (int a = 0; a < n; a++)
+        {
+            if (exclude != null && exclude.Contains(a)) continue;
+            for (int b = a + 1; b < n; b++)
+                if ((exclude == null || !exclude.Contains(b)) && shared[a, b] >= minShared) parent[Find(a)] = Find(b);
+        }
+        long Weight(IEnumerable<int> g) { long w = 0; foreach (int i in g) for (int j = 0; j < n; j++) w += shared[i, j]; return w; }
+        return Enumerable.Range(0, n).Where(i => exclude == null || !exclude.Contains(i))
+            .GroupBy(Find).OrderByDescending(g => g.Count()).ThenByDescending(g => Weight(g))
+            .FirstOrDefault()?.ToList() ?? new List<int>();
+    }
+
     /// <summary>A verified pair's relative rotation (x_b = R x_a + t) and its inlier matches as (image, feature) keys.</summary>
     public sealed record PairMatch(int CamA, int CamB, double[] R, (int Image, int Feature)[] FeatA, (int Image, int Feature)[] FeatB);
 

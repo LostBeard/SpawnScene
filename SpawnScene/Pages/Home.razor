@@ -6,13 +6,13 @@
     <div class="hero animate-in">
         <h1 class="hero-title">SpawnScene</h1>
         <p class="hero-subtitle" style="font-size: var(--font-size-lg); max-width: 700px;">
-            Transform any photograph into an immersive 3D world you can walk through.
-            Your browser becomes a portal — no servers, no uploads, no limits.
+            Turn your photos into a 3D scene you can walk through.
+            Everything runs on your GPU, in your browser: no servers, no uploads.
         </p>
         <p style="color: var(--text-muted); max-width: 600px; margin-top: var(--space-sm); line-height: 1.6;">
-            SpawnScene uses AI depth estimation and Gaussian Splatting to reconstruct photorealistic 3D environments
-            from a single image. Explore your memories in full 3D, with VR support coming soon.
-            Every computation runs on your GPU, entirely in your browser.
+            Add a set of overlapping photos of a place: SpawnScene finds where each one was taken and trains a
+            Gaussian splat scene against them. A single photo works too, as a depth-based scene.
+            Explore the result in 3D on your desktop, or in WebXR VR and AR on supported devices.
         </p>
         <div style="margin-top: var(--space-xl); display: flex; gap: var(--space-md); flex-wrap: wrap; align-items: center;">
             <a href="studio" class="btn btn-primary" style="font-size: var(--font-size-lg); padding: var(--space-md) var(--space-xl);">
@@ -37,19 +37,19 @@
     <div class="feature-grid" style="margin: 0 auto;">
         <div class="card feature-card animate-in animate-in-delay-1">
             <div class="feature-icon">🌌</div>
-            <div class="feature-title">Step Inside Your Photos</div>
+            <div class="feature-title">From Photos to a 3D Scene</div>
             <div class="feature-desc">
-                A single photograph becomes a 3D environment you can explore freely.
-                Walk through rooms, orbit around objects, see the world from any angle.
+                Overlapping photos from different positions become one 3D scene. Learned feature matching
+                finds the cameras; training fits millions of Gaussian splats to your photos.
             </div>
         </div>
 
         <div class="card feature-card animate-in animate-in-delay-2">
             <div class="feature-icon">⚡</div>
-            <div class="feature-title">Real-Time, GPU-First</div>
+            <div class="feature-title">GPU-First, Real-Time</div>
             <div class="feature-desc">
-                Stochastic rasterization renders 14 million+ Gaussian splats at 60 FPS.
-                AI depth estimation, scene generation, and rendering — all on your GPU via WebGPU.
+                Matching, camera solving, training and rendering all run on your GPU through WebGPU.
+                Trained scenes render at interactive frame rates.
             </div>
         </div>
 
@@ -66,8 +66,8 @@
             <div class="feature-icon">🥽</div>
             <div class="feature-title">Built for Immersion</div>
             <div class="feature-desc">
-                The interface is rendered entirely via WebGPU — ready for VR headsets.
-                Explore your 3D scenes on desktop today, in virtual reality tomorrow.
+                The whole interface is drawn on the GPU, so it works in a headset as it does on a desktop.
+                Step into your scenes with WebXR VR and AR where your device supports them.
             </div>
         </div>
     </div>
@@ -78,8 +78,8 @@
             <a href="/studio" class="pipeline-step step-ready">
                 <div class="step-number">1</div>
                 <div class="step-content">
-                    <div class="step-name">Add a Photo</div>
-                    <div class="step-desc">Any image from your camera roll</div>
+                    <div class="step-name">Add Photos</div>
+                    <div class="step-desc">Many overlapping shots of one place, or a single photo</div>
                 </div>
                 <div class="step-arrow">→</div>
             </a>
@@ -87,8 +87,8 @@
             <a href="/studio" class="pipeline-step step-ready">
                 <div class="step-number">2</div>
                 <div class="step-content">
-                    <div class="step-name">AI Depth Estimation</div>
-                    <div class="step-desc">DistillAnyDepth via ONNX on your GPU</div>
+                    <div class="step-name">Find the Cameras</div>
+                    <div class="step-desc">Learned matching and structure from motion on your GPU</div>
                 </div>
                 <div class="step-arrow">→</div>
             </a>
@@ -96,8 +96,8 @@
             <a href="/studio" class="pipeline-step step-ready">
                 <div class="step-number">3</div>
                 <div class="step-content">
-                    <div class="step-name">Generate 3D Scene</div>
-                    <div class="step-desc">Millions of Gaussian splats in seconds</div>
+                    <div class="step-name">Train the Scene</div>
+                    <div class="step-desc">Gaussian splats fitted to your photos, on your GPU</div>
                 </div>
                 <div class="step-arrow">→</div>
             </a>
@@ -106,7 +106,7 @@
                 <div class="step-number">4</div>
                 <div class="step-content">
                     <div class="step-name">Explore in 3D</div>
-                    <div class="step-desc">Walk through your scene at 60 FPS</div>
+                    <div class="step-desc">Walk through it, or step in with VR and AR</div>
                 </div>
             </a>
         </div>
@@ -115,10 +115,10 @@
     <div style="text-align: center; margin: var(--space-2xl) 0 var(--space-xl);" class="animate-in animate-in-delay-5">
         <h3 style="color: var(--text-primary); margin-bottom: var(--space-sm);">The Vision</h3>
         <p style="color: var(--text-muted); max-width: 650px; margin: 0 auto; line-height: 1.7;">
-            Imagine pointing your phone at a room and instantly creating a 3D space you can revisit anytime —
-            from any device, in any browser, even in VR. SpawnScene is building toward that future:
-            multi-image reconstruction, collaborative scanning, and fully immersive spatial computing,
-            all running client-side with zero infrastructure.
+            Point your phone at a room, and come back to it in 3D any time, from any device, in any browser,
+            even in VR. SpawnScene already reconstructs scenes from your photos entirely on your own machine;
+            next come video capture, collaborative scanning and fully immersive spatial computing, all
+            client-side with zero infrastructure.
         </p>
     </div>
 
@@ -128,7 +128,8 @@
             <span class="tech-badge">Blazor WebAssembly</span>
             <span class="tech-badge">SpawnDev.SpawnJS</span>
             <span class="tech-badge">SpawnDev.ILGPU</span>
-            <span class="tech-badge">ONNX Runtime Web</span>
+            <span class="tech-badge">SpawnDev.ILGPU.ML</span>
+            <span class="tech-badge">SpawnDev.GameUI</span>
             <span class="tech-badge">WebGPU</span>
             <span class="tech-badge">.NET 10</span>
             <span class="tech-badge">C# 13</span>

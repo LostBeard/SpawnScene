@@ -19,6 +19,9 @@ images at 1024x673:
 The published reconstruction (sparse/0) uses all 263 full-resolution images. Neighbours in the 44 subset are 66-88 deg
 apart. The scorer (Umeyama similarity on camera centres, error / median spread) scores sparse/0 against itself at 0.00%.
 
+TruckFull regression with all of it (b86): BA final 0.07% / 0.05 deg on 251 of 251 cameras (b81 0.09%), strong core drops
+none, held-out 19.78 dB (b81 19.77). Cost: the five-point stage took 141 s for 4,624 pairs in the browser (interpreter).
+
 ## Fixes, in the order they mattered (SpawnScene commits)
 
 | Commit | Fix | DrJohnson k1024 |

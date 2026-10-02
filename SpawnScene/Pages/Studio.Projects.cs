@@ -1173,22 +1173,28 @@ public partial class Studio
         if (_thumbnailCache.ContainsKey(key) || _device == null || _queue == null) return;
         try
         {
-            var bytes = await _projectService.GetSourceAsync(projectId, fileName);
-            if (bytes == null) return;
+            // The OPFS File straight to the browser decoder: the photo (several MB) never enters the .NET heap.
+            using var file = await _projectService.GetSourceFileAsync(projectId, fileName);
+            if (file == null) return;
+            using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", file);
 
-            using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = "image/jpeg" });
-            using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
-
-            const int thumbW = 240, thumbH = 160;
-            using var osc = new OffscreenCanvas(thumbW, thumbH);
+            // A centre-cropped SQUARE: the project page shows square tiles, and stretching the whole photo into a fixed
+            // 240x160 squashed every portrait photo.
+            const int thumb = 256;
+            int bw = (int)bitmap.Width, bh = (int)bitmap.Height, side = Math.Min(bw, bh);
+            using var osc = new OffscreenCanvas(thumb, thumb);
             using var ctx = osc.Get2DContext();
-            ctx.DrawImage(bitmap, 0, 0, thumbW, thumbH);
-            using var imageData = ctx.GetImageData(0, 0, thumbW, thumbH);
+            ctx.DrawImage(bitmap, (bw - side) / 2.0, (bh - side) / 2.0, side, side, 0, 0, thumb, thumb);
+            using var imageData = ctx.GetImageData(0, 0, thumb, thumb);
             using var dataArray = imageData.Data; // Uint8ClampedArray — writeTexture directly, no ReadBytes
 
-            UploadThumbnailToCache(key, dataArray, thumbW, thumbH);
+            UploadThumbnailToCache(key, dataArray, thumb, thumb);
 
-            if (_state == StudioState.ProjectDetail && _activeProject?.Id == projectId)
+            if (_state != StudioState.ProjectDetail || _activeProject?.Id != projectId) return;
+            // Update the tile in place; rebuild only when the page has no tile for it.
+            if (_thumbTiles.TryGetValue(key, out var tile) && _thumbnailCache.TryGetValue(key, out var cachedThumb))
+                tile.TextureView = cachedThumb.view;
+            else
                 BuildProjectDetailUI();
         }
         catch (Exception ex)

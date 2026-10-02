@@ -143,6 +143,14 @@ public partial class Studio
             await Task.Delay(1500);
             Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_viewer_hud");
             await Task.Delay(2500);
+            // ...and with its render settings open.
+            _showSettings = true;
+            BuildViewerHudUI();
+            await Task.Delay(1000);
+            Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_viewer_settings");
+            await Task.Delay(2500);
+            _showSettings = false;
+            BuildViewerHudUI();
 
             // Red checks on the same loaded scene.
             if (saved.ColoursAreShDc)

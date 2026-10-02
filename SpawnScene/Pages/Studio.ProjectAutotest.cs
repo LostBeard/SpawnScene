@@ -167,6 +167,15 @@ public partial class Studio
                 _gpuRenderer.RepackForDisplay();
                 await CaptureProjectViewAsync("no_sh", seat);
             }
+            // The project page again, now with its generated scene: scenes sit above the photo grid.
+            _state = StudioState.ProjectDetail;
+            _hideUiOverlay = false;
+            _projects = await _projectService.ListProjectsAsync();
+            _activeProject = _projects.First(p => p.Id == project.Id);
+            BuildProjectDetailUI();
+            await Task.Delay(2000);
+            Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_page_with_scene");
+            await Task.Delay(2500);
             Console.WriteLine("[Dataset] DONE");
         }
         catch (Exception ex)

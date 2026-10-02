@@ -48,16 +48,28 @@ public partial class Studio
 
         shell.AddChild(new UIPanel { X = 0, Y = bodyTop - 1, Width = panelW, Height = 1, BackgroundColor = SectionRule, BorderWidth = 0, CornerRadius = 0 });
 
+        // One column pins Generate at the foot of the page (as the sidebar does), so the scroll area stops above it.
+        float mainH = twoColumns ? bodyH : bodyH - ProjectGenerateFooterH;
         var main = shell.AddChild(new UIScrollView
         {
-            X = 0, Y = bodyTop, Width = mainW, Height = bodyH,
+            X = 0, Y = bodyTop, Width = mainW, Height = mainH,
             Padding = 0, BackgroundColor = Color.Transparent, BorderWidth = 0,
         });
         _projectDetailScroll = main;
 
+        // Nothing to act on may sit below the photo grid (TJ 2026-10-02: with many photos, controls under the images meant
+        // scrolling to the bottom every time). Both layouts put the generated scenes - what you come back for - first;
+        // one column follows them with the settings, then the photos, and pins Generate at the foot.
         float y = 18;
+        float scenesTop = y;
+        y = BuildScenesSection(main, y, mainW);
+        if (y > scenesTop) y += 20;
+        if (!twoColumns)
+        {
+            y = BuildSettingsSections(main, y, mainW) + 12;
+            BuildGenerateFooter(shell, bodyTop + mainH, mainW);
+        }
         y = BuildPhotosSection(main, y, mainW);
-        y = BuildScenesSection(main, y + 20, mainW);
 
         if (twoColumns)
         {
@@ -74,11 +86,6 @@ public partial class Studio
             });
             BuildSettingsSections(sideScroll, 18, sideW);
             BuildGenerateFooter(side, bodyH - ProjectGenerateFooterH, sideW);
-        }
-        else
-        {
-            y = BuildSettingsSections(main, y + 20, mainW);
-            BuildGenerateFooter(main, y + 8, mainW);
         }
 
         shell.AddChild(new UIPanel { X = 0, Y = panelH - ProjectPageStatusH, Width = panelW, Height = 1, BackgroundColor = SectionRule, BorderWidth = 0, CornerRadius = 0 });

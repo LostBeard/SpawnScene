@@ -59,6 +59,7 @@
     <Compile Include="..\SpawnScene\Services\GpuEpipolarRansac.cs" Link="Linked\GpuEpipolarRansac.cs" />
     <Compile Include="..\SpawnScene\Services\LearnedFeatureMatcher.cs" Link="Linked\LearnedFeatureMatcher.cs" />
     <Compile Include="..\SpawnScene\Services\FivePoint.cs" Link="Linked\FivePoint.cs" />
+    <Compile Include="..\SpawnScene\Services\DenseTriangulation.cs" Link="Linked\DenseTriangulation.cs" />
   </ItemGroup>
 
   <ItemGroup>

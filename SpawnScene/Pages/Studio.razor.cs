@@ -304,6 +304,9 @@ public partial class Studio : IAsyncDisposable
                 _multiViewService.GlobalSfmFocalOverride = gsfd;
             if (query.TryGetValue("globalgtrot", out var ggr))
                 DiagnoseGlobalWithGroundTruthRotations = ggr is "1" or "true";
+            // &denseinit=0: with the learned front end, no dense FAST/BRIEF triangulation for the initial cloud (A/B).
+            if (query.TryGetValue("denseinit", out var dinq))
+                _multiViewService.DenseInitFromBriefFeatures = dinq is not ("0" or "false");
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");

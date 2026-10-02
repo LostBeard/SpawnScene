@@ -229,8 +229,21 @@ public class ImageImportService : IDisposable
         try
         {
             if (UseLearnedFeatures)
+            {
                 img.Features = await _learned.ExtractAsync(img, img.GpuRgba!, img.Width, img.Height,
                     img.FeatureWidth, img.FeatureHeight);
+                // FAST/BRIEF too, at IMAGE resolution with colours: once the learned features have fixed the poses, these
+                // triangulate the dense initial cloud (DenseTriangulation) - 1,024 learned keypoints a view are too few.
+                using (var grayDense = GpuImageOps.GrayscaleToDevice(accel, img.GpuRgba!,
+                           img.Width, img.Height, img.FeatureWidth, img.FeatureHeight))
+                {
+                    var dense = await _gpuDetector.DetectAsync(accel, grayDense.View, img.FeatureWidth, img.FeatureHeight);
+                    float dsx = (float)img.Width / img.FeatureWidth, dsy = (float)img.Height / img.FeatureHeight;
+                    foreach (var f in dense) { f.X *= dsx; f.Y *= dsy; }
+                    await GpuImageOps.SampleFeatureColoursAsync(accel, img.GpuRgba!, img.Width, img.Height, dense);
+                    img.DenseFeatures = dense;
+                }
+            }
             else
                 using (var grayDev = GpuImageOps.GrayscaleToDevice(accel, img.GpuRgba!,
                            img.Width, img.Height, img.FeatureWidth, img.FeatureHeight))
@@ -609,6 +622,11 @@ public class ImageImportService : IDisposable
 
         NotifyChanged();
     }
+
+    /// <summary>Match the images' <see cref="ImportedImage.DenseFeatures"/> on the given pairs (indices into the imported
+    /// images), batched on the device like the FAST/BRIEF front end's all-pairs matching.</summary>
+    public Task MatchDensePairsAsync(IReadOnlyList<(int A, int B)> pairs, Action<int, List<FeatureMatch>> onPair)
+        => _gpuMatcher.MatchPairsAsync(_images.Select(im => (IReadOnlyList<ImageFeature>)im.DenseFeatures).ToList(), pairs, onPair);
 
     private void NotifyChanged() => OnStateChanged?.Invoke();
 

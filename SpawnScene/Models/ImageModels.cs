@@ -156,6 +156,13 @@ public class ImportedImage
     /// <summary>Detected features (keypoints + descriptors).</summary>
     public List<ImageFeature> Features { get; set; } = [];
 
+    /// <summary>
+    /// The learned front end's companion: FAST/BRIEF features at IMAGE resolution (colours sampled), for triangulating a dense
+    /// initial cloud once the learned features have fixed the poses (DenseTriangulation). Empty for the FAST/BRIEF front end,
+    /// whose <see cref="Features"/> are these already.
+    /// </summary>
+    public List<ImageFeature> DenseFeatures { get; set; } = [];
+
     /// <summary>Whether features have been detected.</summary>
     public bool HasFeatures => Features.Count > 0;
 

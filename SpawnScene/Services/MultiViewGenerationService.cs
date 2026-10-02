@@ -648,7 +648,35 @@ public class MultiViewGenerationService
                 $"dropped {pending.Count} (incl. any failing verification); adjusted the rest");
         }
 
-        // -- 4. Keep the strongly connected core (GlobalSfmInit.LargestStrongComponent): cameras the final solution joins only
+        // -- 4. Dense cloud from FAST/BRIEF features with the cameras FIXED (DenseTriangulation): the learned front end's
+        // poses, a dense cloud to start the splats from (TruckFull: 8,405 learned BA points vs 41,734 FAST/BRIEF). Before
+        // the core test, which counts these points too: a correct but thinly matched camera gains many points consistent
+        // with its pose; a wrong one's dense matches fail the epipolar check against its pose and add nothing.
+        DenseTriangulation.Result? dense = null;
+        if (DenseInitFromBriefFeatures && images.Any(im => im.DenseFeatures.Count > 0))
+        {
+            var td = System.Diagnostics.Stopwatch.StartNew();
+            var camOfImage = new Dictionary<int, int>();
+            for (int c = 0; c < cams.Count; c++) if (!dropped.Contains(c)) camOfImage[posed[c]] = c;
+            // Pairs: the camera pairs the final solution links (shared points), by image index.
+            var linked = new HashSet<(int, int)>();
+            for (int p = 0; p < points.Count; p++)
+            {
+                var camsOfPoint = pointTracks[p].Select(t => t.Image).Where(camOfImage.ContainsKey).Distinct().OrderBy(i => i).ToList();
+                for (int a = 0; a < camsOfPoint.Count; a++) for (int b = a + 1; b < camsOfPoint.Count; b++) linked.Add((camsOfPoint[a], camsOfPoint[b]));
+            }
+            var densePairs = linked.OrderBy(x => x).ToList();
+            var denseMatches = new List<(int, int, IReadOnlyList<FeatureMatch>)>();
+            await _importService.MatchDensePairsAsync(densePairs, (pi, m) =>
+            {
+                var (ia, ib) = densePairs[pi];
+                denseMatches.Add((camOfImage[ia], camOfImage[ib], m));
+            });
+            dense = DenseTriangulation.Triangulate(cams, c => images[posed[c]].DenseFeatures, denseMatches);
+            Console.WriteLine($"[BA] dense init: {densePairs.Count} linked pairs; {dense.Summary}; {td.Elapsed.TotalSeconds:F1}s");
+        }
+
+        // -- 5. Keep the strongly connected core (GlobalSfmInit.LargestStrongComponent): cameras the final solution joins only
         // through a few shared points can sit in a self-consistent but WRONG place (DrJohnson: clusters right internally,
         // misplaced against each other). Training against a photo from the wrong viewpoint corrupts the scene; leaving the
         // photo out costs only its coverage.
@@ -671,6 +699,13 @@ public class MultiViewGenerationService
                 for (int a = 0; a < seenCams.Count; a++)
                     for (int b = a + 1; b < seenCams.Count; b++) { shared[seenCams[a], seenCams[b]]++; shared[seenCams[b], seenCams[a]]++; }
             }
+            if (dense != null)
+                foreach (var track in dense.Tracks)
+                {
+                    var tc = track.Select(t => t.Camera).Where(c => !dropped.Contains(c)).Distinct().ToList();
+                    for (int a = 0; a < tc.Count; a++)
+                        for (int b = a + 1; b < tc.Count; b++) { shared[tc[a], tc[b]]++; shared[tc[b], tc[a]]++; }
+                }
             var core = GlobalSfmInit.LargestStrongComponent(cams.Count, shared, CoreSharedPoints, dropped);
             var coreSet = core.ToHashSet();
             var outside = Enumerable.Range(0, cams.Count).Where(c => !dropped.Contains(c) && !coreSet.Contains(c)).ToList();
@@ -694,6 +729,15 @@ public class MultiViewGenerationService
         // A camera nobody could place reliably is wrong: leaving it in trains the scene against a photo from the wrong
         // viewpoint. Drop it (the caller skips null cameras) and say so.
         foreach (int c in dropped) cameras[posed[c]] = null;
+        if (dense != null && dropped.Count > 0)
+        {
+            var keepPts = new List<System.Numerics.Vector3>(); var keepCol = new List<int>(); var keepTracks = new List<List<(int Camera, int Feature)>>();
+            for (int i = 0; i < dense.Points.Count; i++)
+                if (dense.Tracks[i].Count(t => !dropped.Contains(t.Camera)) >= 2)
+                { keepPts.Add(dense.Points[i]); keepCol.Add(dense.Colors[i]); keepTracks.Add(dense.Tracks[i]); }
+            dense = dense with { Points = keepPts, Colors = keepCol, Tracks = keepTracks };
+        }
+
 
         Console.WriteLine(
             $"[BA] focal: DAv3 per-view median {focals[focals.Count / 2]:F1} (p10 {focals[focals.Count / 10]:F1}, " +
@@ -731,6 +775,17 @@ public class MultiViewGenerationService
             col.Add(n > 0 ? sum / n : new System.Numerics.Vector3(0.5f));
         }
         Console.WriteLine($"[BA] sparse cloud: {pos.Count:N0} points with >= 2 surviving observations");
+        if (dense != null)
+        {
+            for (int i = 0; i < dense.Points.Count; i++)
+            {
+                int pc = dense.Colors[i];
+                pos.Add(dense.Points[i]);
+                col.Add(pc == 0 ? new System.Numerics.Vector3(0.5f)
+                    : new System.Numerics.Vector3((pc & 0xFF) / 255f, ((pc >> 8) & 0xFF) / 255f, ((pc >> 16) & 0xFF) / 255f));
+            }
+            Console.WriteLine($"[BA] + {dense.Points.Count:N0} dense points -> {pos.Count:N0} in the initial cloud");
+        }
         return new PointCloud { Positions = pos.ToArray(), Colors = col.ToArray() };
     }
 
@@ -739,6 +794,12 @@ public class MultiViewGenerationService
     /// each (<see cref="GlobalSfmInit.LargestStrongComponent"/>); &amp;core=0 keeps every placed camera (A/B).
     /// </summary>
     public bool KeepStrongCore { get; set; } = true;
+
+    /// <summary>
+    /// With the learned front end: triangulate the FAST/BRIEF <see cref="ImportedImage.DenseFeatures"/> against the final
+    /// cameras and add them to the initial cloud (<see cref="DenseTriangulation"/>). &amp;denseinit=0 for the A/B.
+    /// </summary>
+    public bool DenseInitFromBriefFeatures { get; set; } = true;
 
     /// <summary>Shared points (within 4 px of the final solution) that link a camera to the core. &amp;coremin=N.</summary>
     public int CoreSharedPoints { get; set; } = 50;

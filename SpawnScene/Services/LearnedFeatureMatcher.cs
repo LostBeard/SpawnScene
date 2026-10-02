@@ -33,6 +33,13 @@ public sealed class LearnedFeatureMatcher : IDisposable
     /// 3072 RaCo's ranker is bypassed). The matcher costs O(K^2) per pair. &amp;lgk=N.</summary>
     public static int KeypointBudget { get; set; } = 1024;
 
+    /// <summary>
+    /// DIAGNOSIS (&amp;lgprofile=1): time every node of the SECOND matcher run (the first compiles shaders) with a GPU sync
+    /// after each (SpawnDev.ILGPU.ML GraphExecutor.PerOpSync + CapturedNodeTimingsMs), then log the cost by op type and the
+    /// slowest nodes. The synced total is larger than an unsynced run; the split is what it is for.
+    /// </summary>
+    public static bool ProfileSecondRun { get; set; }
+
     /// <summary>Image pairs per matcher run (the graph takes [2P, 1, K, ...]). A short final batch is padded.</summary>
     public static int PairsPerRun { get; set; } = 8;
 
@@ -201,11 +208,33 @@ public sealed class LearnedFeatureMatcher : IDisposable
                     await descIn.View.SubView((long)row * k * 128, k * 128).CopyFromAsync(d.Descriptors.View);
                 }
             }
+            bool profile = ProfileSecondRun && start == p;
+            if (profile)
+            {
+                await Accel.SynchronizeAsync();
+                SpawnDev.ILGPU.ML.Graph.GraphExecutor.PerOpSync = true;
+                SpawnDev.ILGPU.ML.Graph.GraphExecutor.CapturedNodeTimingsMs = new Dictionary<string, double>();
+            }
+            var swRun = System.Diagnostics.Stopwatch.StartNew();
             var outs = await session.RunAsync(new Dictionary<string, Tensor>
             {
                 ["normalized_keypoints"] = new Tensor(nkpIn.View, nkpShape),
                 ["descriptors"] = new Tensor(descIn.View, descShape),
             });
+            if (profile)
+            {
+                await Accel.SynchronizeAsync();
+                var t = SpawnDev.ILGPU.ML.Graph.GraphExecutor.CapturedNodeTimingsMs!;
+                SpawnDev.ILGPU.ML.Graph.GraphExecutor.PerOpSync = false;
+                SpawnDev.ILGPU.ML.Graph.GraphExecutor.CapturedNodeTimingsMs = null;
+                string OpOf(string key) { var parts = key.Split('_', 3); return parts.Length > 1 ? parts[1] : key; }
+                double total = t.Values.Sum();
+                Console.WriteLine($"[LightGlue profile] run {swRun.Elapsed.TotalMilliseconds:F0} ms wall with a sync per op; {t.Count} nodes, {total:F0} ms in nodes");
+                foreach (var g in t.GroupBy(kv => OpOf(kv.Key)).OrderByDescending(g => g.Sum(kv => kv.Value)).Take(12))
+                    Console.WriteLine($"[LightGlue profile]   {g.Key,-22} {g.Sum(kv => kv.Value),8:F1} ms ({g.Sum(kv => kv.Value) / total:P0}) over {g.Count()} nodes");
+                foreach (var kv in t.OrderByDescending(kv => kv.Value).Take(12))
+                    Console.WriteLine($"[LightGlue profile]   slowest {kv.Key}: {kv.Value:F2} ms");
+            }
             await matchesOut.View.CopyFromAsync(outs["matches0"].Data.SubView(0, p * k));
             await scoresOut.View.CopyFromAsync(outs["mscores0"].Data.SubView(0, p * k));
             await Accel.SynchronizeAsync();

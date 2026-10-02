@@ -370,6 +370,8 @@ public partial class Studio : IAsyncDisposable
                 _importService.LearnedAllPairsUpTo = Math.Max(0, lgri);
             if (query.TryGetValue("lgtopk", out var lgt) && int.TryParse(lgt, out var lgti))
                 _importService.LearnedRetrievalTopK = Math.Max(1, lgti);
+            if (query.TryGetValue("lgprofile", out var lgpr))
+                LearnedFeatureMatcher.ProfileSecondRun = lgpr is "1" or "true";
             if (query.TryGetValue("lgpairs", out var lgp) && int.TryParse(lgp, out var lgpi))
                 LearnedFeatureMatcher.PairsPerRun = Math.Max(1, lgpi);
             // &verify=cpu: verify matched pairs with the CPU estimator instead of GpuEpipolarRansac (A/B).

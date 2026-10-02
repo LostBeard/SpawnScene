@@ -313,6 +313,11 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("denseangle", out var dangq) && double.TryParse(dangq, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var dangv))
                 _multiViewService.DenseMinParallaxDeg = dangv;
+            // &densefast=N / &densemax=N: FAST threshold and feature cap of the dense FAST/BRIEF pass (learned front end).
+            if (query.TryGetValue("densefast", out var dfastq) && int.TryParse(dfastq, out var dfastv))
+                _importService.DenseFastThreshold = Math.Clamp(dfastv, 1, 255);
+            if (query.TryGetValue("densemax", out var dmaxq) && int.TryParse(dmaxq, out var dmaxv))
+                _importService.DenseMaxFeatures = Math.Max(1, dmaxv);
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");

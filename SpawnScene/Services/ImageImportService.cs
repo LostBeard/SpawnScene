@@ -16,6 +16,31 @@ public class ImageImportService : IDisposable
 {
     private readonly FeatureDetector _detector = new();
     private readonly GpuFeatureDetector _gpuDetector = new();
+    private GpuFeatureDetector? _denseDetector;
+    private (int Threshold, int Max) _denseDetectorKey;
+
+    /// <summary>
+    /// FAST threshold for the learned front end's dense FAST/BRIEF features (<see cref="ImportedImage.DenseFeatures"/>).
+    /// They only triangulate points against cameras the learned features already posed, where a wrong match fails the
+    /// epipolar check against the FIXED poses, so they can afford a lower threshold than the pose front end's 25.
+    /// MEASURED 2026-10-02, Bathroom at 768x1024 (OpenCV FAST-9, one winner per 8x8 cell, per image): median 545 corners at
+    /// 25 (ours: 487), 944 at 15, 1,443 at 10. &amp;densefast=N.
+    /// </summary>
+    public int DenseFastThreshold { get; set; } = 25;
+
+    /// <summary>Most dense FAST/BRIEF features kept per image. &amp;densemax=N.</summary>
+    public int DenseMaxFeatures { get; set; } = 2000;
+
+    private GpuFeatureDetector DenseDetector()
+    {
+        var key = (DenseFastThreshold, DenseMaxFeatures);
+        if (_denseDetector == null || _denseDetectorKey != key)
+        {
+            _denseDetector = new GpuFeatureDetector(maxFeatures: key.DenseMaxFeatures, fastThreshold: key.DenseFastThreshold);
+            _denseDetectorKey = key;
+        }
+        return _denseDetector;
+    }
     private readonly GpuFeatureMatcher _gpuMatcher;
     private readonly GpuService _gpu;
     private readonly HttpClient _http;
@@ -234,12 +259,13 @@ public class ImageImportService : IDisposable
             {
                 img.Features = await _learned.ExtractAsync(img, img.GpuRgba!, img.Width, img.Height,
                     img.FeatureWidth, img.FeatureHeight);
-                // FAST/BRIEF too, at IMAGE resolution with colours: once the learned features have fixed the poses, these
-                // triangulate the dense initial cloud (DenseTriangulation) - 1,024 learned keypoints a view are too few.
+                // FAST/BRIEF too (at feature resolution, scaled to the image, with colours): once the learned features have
+                // fixed the poses, these triangulate the dense initial cloud (DenseTriangulation) - 1,024 learned keypoints
+                // a view are too few. Their own detector settings (DenseFastThreshold, DenseMaxFeatures).
                 using (var grayDense = GpuImageOps.GrayscaleToDevice(accel, img.GpuRgba!,
                            img.Width, img.Height, img.FeatureWidth, img.FeatureHeight))
                 {
-                    var dense = await _gpuDetector.DetectAsync(accel, grayDense.View, img.FeatureWidth, img.FeatureHeight);
+                    var dense = await DenseDetector().DetectAsync(accel, grayDense.View, img.FeatureWidth, img.FeatureHeight);
                     float dsx = (float)img.Width / img.FeatureWidth, dsy = (float)img.Height / img.FeatureHeight;
                     foreach (var f in dense) { f.X *= dsx; f.Y *= dsy; }
                     await GpuImageOps.SampleFeatureColoursAsync(accel, img.GpuRgba!, img.Width, img.Height, dense);

@@ -33,8 +33,11 @@ const get = u => new Promise((res, rej) =>
     if (m.id && pend.has(m.id)) pend.get(m.id)(m);
     // Errors and exceptions while the page loads (a blank page usually says why here).
     if (m.method === 'Runtime.exceptionThrown') console.log('EXC ' + JSON.stringify(m.params.exceptionDetails).slice(0, 400));
-    if (m.method === 'Runtime.consoleAPICalled' && /error|warn/.test(m.params.type))
-      console.log('CON ' + (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ').slice(0, 300));
+    if (m.method === 'Runtime.consoleAPICalled') {
+      const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
+      // Errors and warnings, and the app's autotest verdicts (?autotest=... pages report PASS / FAIL on the console).
+      if (/error|warn/.test(m.params.type) || /\[Autotest\]/.test(t)) console.log('CON ' + t.slice(0, 300));
+    }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
   try {
@@ -53,8 +56,12 @@ const get = u => new Promise((res, rej) =>
     fs.writeFileSync(out, Buffer.from(png.result.data, 'base64'));
     console.log('captured ' + out);
   } finally {
-    try { await send('Page.close'); } catch { }
-    ws.close();
-    if (chrome.kill) chrome.kill();
+    // Page.close is fire-and-forget: closing the page drops this socket before any reply comes back, so awaiting it hung
+    // the process forever after the capture (the stochastic gate's calls timed out at 600 s, 2026-10-02).
+    try { ws.send(JSON.stringify({ id: id++, method: 'Page.close', params: {} })); } catch { }
+    await new Promise(r => setTimeout(r, 300));
+    try { ws.close(); } catch { }
+    // The harness handle's close() shuts down the Chrome this run launched (it attaches to nothing it did not start).
+    if (chrome.close) await chrome.close();
   }
-})().catch(e => { console.error(e); process.exit(1); });
+})().then(() => process.exit(0), e => { console.error(e); process.exit(1); });

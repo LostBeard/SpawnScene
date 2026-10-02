@@ -49,6 +49,14 @@ public class GpuGaussianRenderer : IDisposable
     // 7K/1.2M: the viewer scored 0.7-3.6 dB under the trainer on the same views, growing with splat count.
     private const string SortedTargetFormat = "rgba16float";
 
+    /// <summary>
+    /// The stochastic accumulation texture's format. It was the canvas format (bgra8unorm): a running average at weight
+    /// 1/n stops moving in 8 bits once 1/n is below a quantisation step, so a still camera froze on an early, under-
+    /// converged average - a regular crosshatch at the splat grid, darker than the scene (MEASURED 2026-10-02, the single-
+    /// photo Room sample: 320 samples accumulated, still crosshatched). Half floats keep averaging.
+    /// </summary>
+    private const string AccumTargetFormat = "rgba16float";
+
     // Gaussian vertex buffer: packed format (position f32x3 + color_alpha u8x4 + scale f16x4 + quat f16x4)
     private GPUBuffer? _splatBuffer;
     private int _splatCount;
@@ -490,13 +498,13 @@ public class GpuGaussianRenderer : IDisposable
             Vertex = new GPUVertexState
             {
                 Module = stochasticShader,
-                EntryPoint = "vs_main",
+                EntryPoint = "vs_trainer", // the trainer's footprint, as the sorted path
                 Buffers = splatVertexBuffers,
             },
             Fragment = new GPUFragmentState
             {
                 Module = stochasticShader,
-                EntryPoint = "fs_main",
+                EntryPoint = "fs_stochastic_trainer",
                 Targets = new[]
                 {
                     new GPUColorTargetState { Format = _canvasFormat } // No blend — opaque writes
@@ -540,7 +548,7 @@ public class GpuGaussianRenderer : IDisposable
                 {
                     new GPUColorTargetState
                     {
-                        Format = _canvasFormat,
+                        Format = AccumTargetFormat,
                         Blend = new GPUBlendState
                         {
                             Color = new GPUBlendComponent
@@ -716,7 +724,12 @@ public class GpuGaussianRenderer : IDisposable
 
         _stochasticTexture = _device!.CreateTexture(desc);
         _stochasticView = _stochasticTexture.CreateView();
-        _accumTexture = _device.CreateTexture(desc);
+        _accumTexture = _device.CreateTexture(new GPUTextureDescriptor
+        {
+            Size = new[] { _canvasWidth, _canvasHeight },
+            Format = AccumTargetFormat,
+            Usage = GPUTextureUsage.RenderAttachment | GPUTextureUsage.TextureBinding,
+        });
         _accumView = _accumTexture.CreateView();
 
         _accumFrameCount = 0;
@@ -1164,6 +1177,11 @@ public class GpuGaussianRenderer : IDisposable
         }
         FramesSubmitted++;
     }
+
+    /// <summary>Stochastic mode: samples accumulated into the current image (resets while the camera moves), and the
+    /// smoothed camera velocity that decides "moving". Diagnostics for convergence.</summary>
+    public int StochasticAccumulatedSamples => _accumFrameCount;
+    public float SmoothedCameraVelocity => _sorter.SmoothedVelocity;
 
     /// <summary>Frames submitted by <see cref="Render"/> so far (a capture waits for frames AFTER a camera jump).</summary>
     public long FramesSubmitted { get; private set; }
@@ -2234,6 +2252,30 @@ fn hash_u32(x_in: u32) -> u32 {
     x *= 0x45d9f3bu;
     x ^= x >> 16u;
     return x;
+}
+
+// The trainer's footprint and alpha (as fs_trainer, the sorted path's), then the stochastic test.
+//
+// The random number must be independent PER FRAGMENT. It was seeded by pixel and frame only, so every splat over a pixel
+// drew the same u: the pixel came out empty whenever u >= the LARGEST alpha there, i.e. with probability 1 - max(a_i)
+// instead of compositing's prod(1 - a_i) (four splats of alpha 0.5: covered 50% of the time, not 94%). The converged
+// image was darker and patterned at the splat grid (MEASURED 2026-10-02, single-photo Room sample: PSNR 17.1 dB against
+// the sorted render, mean brightness 81 vs 109). The splat's own projected centre now enters the seed.
+@fragment
+fn fs_stochastic_trainer(input : VertexOutput) -> @location(0) vec4<f32> {
+    let d = input.clip_pos.xy - input.centre_px;
+    let c = input.conic;
+    let power = -0.5 * (c.x * d.x * d.x + c.z * d.y * d.y) - c.y * d.x * d.y;
+    if (power > 0.0) { discard; }
+    let alpha = min(VIEW_MAX_ALPHA, input.opacity * exp(power));
+    if (alpha < VIEW_MIN_ALPHA) { discard; }
+    let effective_alpha = max(alpha, u.min_alpha);
+    let pixel = vec2<u32>(input.clip_pos.xy);
+    let splat_id = hash_u32((bitcast<u32>(input.centre_px.x) * 73856093u) ^ (bitcast<u32>(input.centre_px.y) * 19349663u));
+    let seed = hash_u32(pixel.x + pixel.y * 65537u + u.frame_index * 2654435761u) ^ splat_id;
+    let u_rand = f32(hash_u32(seed)) / 4294967295.0;
+    if (u_rand >= effective_alpha) { discard; }
+    return vec4<f32>(input.color, 1.0);
 }
 
 @fragment

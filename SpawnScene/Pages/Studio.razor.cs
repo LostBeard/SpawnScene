@@ -560,6 +560,19 @@ public partial class Studio : IAsyncDisposable
                 _sceneManager.OnSceneChanged -= OnDone;
             }
 
+            // &render=sorted|stochastic: draw the generated scene with that renderer (A/B the single-photo look).
+            if (query.TryGetValue("render", out var rmq))
+            {
+                _gpuRenderer.RenderMode = rmq == "sorted" ? SplatRenderMode.Sorted : SplatRenderMode.Stochastic;
+                Console.WriteLine($"[Autotest] render mode {_gpuRenderer.RenderMode}");
+            }
+            // Convergence diagnostics: a still camera should accumulate samples (stochastic mode).
+            for (int k = 0; k < 3; k++)
+            {
+                await Task.Delay(1500);
+                Console.WriteLine($"[Autotest] stochastic accumulated {_gpuRenderer.StochasticAccumulatedSamples} samples, " +
+                    $"velocity {_gpuRenderer.SmoothedCameraVelocity:E2}, frames {_gpuRenderer.FramesSubmitted}");
+            }
             Console.WriteLine($"[Autotest] PASS — scene with {_sceneManager.ActiveScene?.Count ?? 0} splats");
         }
         catch (Exception ex)

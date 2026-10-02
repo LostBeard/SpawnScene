@@ -24,6 +24,19 @@ All scored with `tools/score_views.py` at a fixed viewport against the original 
 | Learned keypoints 1024 / 3072 | Models exist; not yet measured end to end | Measure before exposing. |
 | More / better-placed photos | Bathroom held-out views between 24 supervised photos stay ~15 dB whatever the trainer does | Say so in the UI: the single biggest lever for a small room is coverage. |
 
+## Iterations measured (TruckFull, 2026-10-02, b108 / b121 / b122)
+
+| Iterations | Trainer held-out | Captured held-out @1600x892 | SSIM | Sharpness | Splats |
+|---|---|---|---|---|---|
+| 7K (Standard) | 23.20 dB | 23.10 dB | 0.831 | 0.98 | ~1.6M |
+| 15K (High) | 24.11 dB | 23.38 dB | 0.845 | 1.09 | 1.74M |
+| 30K (Max) | 24.51 dB | 23.44 dB | 0.845 | 1.24 | 1.73M |
+
+- Captured views are rendered at 1600 px from a 979 px training size, which caps that metric. The trainer's own held-out
+  number tracks the iterations better.
+- 15K and 30K ran beside another GPU job (16 it/s against 24), so time is quoted only as ratios.
+- 1.74M splats measured 2.98 GB live, inside Auto's 4 GB budget.
+
 ## Presets (multi-photo)
 
 | Preset | Iterations | Resolution | Max splats | Front end | Use |

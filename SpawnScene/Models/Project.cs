@@ -64,7 +64,8 @@ public class ProjectScene
 /// Multi-photo quality presets: one choice sets iterations, training resolution and the splat cap together
 /// (Research/project-settings-presets-2026-10-02.md). Iterations are the main time/quality dial (TruckFull 7K: 23.1 dB,
 /// sharpness 0.98); resolution is capped at the photos' own size, so <see cref="PhotoSize"/> means "as large as the
-/// photos are".
+/// photos are". MEASURED 2026-10-02, TruckFull trainer held-out: 7K 23.20, 15K 24.11, 30K 24.51 dB (captured at 1600x892:
+/// 23.10 / 23.38 / 23.44, SSIM .831 / .845 / .845).
 /// </summary>
 public static class ReconstructionPresets
 {
@@ -75,8 +76,8 @@ public static class ReconstructionPresets
     {
         ("Draft", 3000, 720, 500_000, "A quick look: about a third of Standard's training."),
         ("Standard", 7000, 1024, 3_000_000, "The reference's first checkpoint. Right for most captures."),
-        ("High", 15000, 1600, 3_000_000, "Longer training at up to 1600 px. Pays off when the photos cover the scene densely."),
-        ("Max", 30000, PhotoSize, 3_000_000, "The reference's full run at the photos' own size. Slowest."),
+        ("High", 15000, 1600, 3_000_000, "About twice Standard's training. On a well-covered scene (TruckFull) it measured ~0.9 dB sharper."),
+        ("Max", 30000, PhotoSize, 3_000_000, "The full reference run at the photos' own size: about twice High's time, for a little more (+0.4 dB)."),
     };
 
     /// <summary>Apply preset <paramref name="name"/> to <paramref name="s"/>; false if there is no such preset.</summary>

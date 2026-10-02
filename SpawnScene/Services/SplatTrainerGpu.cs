@@ -613,7 +613,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _lossSum = accel.Allocate1D<float>(1);
         _lossStepsPending = 0;
 
-        _radixSort ??= new GpuRadixSort(_device!, _queue!);
+        _radixSort ??= new GpuRadixSort(_device!, _queue!, _gpu.WebGPUAccelerator);
         _radixSort.EnsureCapacity(_keyCapacity);
         await stage($"sort scratch for {_keyCapacity:N0} keys");
     }
@@ -680,7 +680,7 @@ public sealed class SplatTrainerGpu : IDisposable
             pass.DispatchWorkgroups((uint)ekX, (uint)ekY, 1);
             pass.End();
             using var cmd = enc.Finish();
-            _queue!.Submit(new[] { cmd });
+            RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
         }
 
         // 4 bytes back to learn how many keys exist. A scalar, not bulk data. The readback maps behind
@@ -734,7 +734,7 @@ public sealed class SplatTrainerGpu : IDisposable
             pass.DispatchWorkgroups((uint)trX, (uint)trY, 1);
             pass.End();
             using var cmd = enc.Finish();
-            _queue!.Submit(new[] { cmd });
+            RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
         }
 
         // ── 4. Rasterise: one workgroup per tile ──
@@ -762,7 +762,7 @@ public sealed class SplatTrainerGpu : IDisposable
             pass.DispatchWorkgroups((uint)_tilesX, (uint)_tilesY, 1);
             pass.End();
             using var cmd = enc.Finish();
-            _queue!.Submit(new[] { cmd });
+            RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
         }
         await PhaseAsync("ranges+raster");
 
@@ -1580,7 +1580,7 @@ public sealed class SplatTrainerGpu : IDisposable
         using var encoder = _device.CreateCommandEncoder();
         encoder.CopyBufferToBuffer(src, 0, dst, 0, bytes);
         using var cmd = encoder.Finish();
-        _queue.Submit(new[] { cmd });
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, new[] { cmd });
         return dst;
     }
 
@@ -1682,7 +1682,6 @@ public sealed class SplatTrainerGpu : IDisposable
         int pixels = _width * _height;
 
         // ── Loss and dL/d(pixel): 0.8 L1 + 0.2 D-SSIM, matching the reference ──
-        WriteU32(_dimsBuf!, (uint)pixels);
         WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaL1, ImageQuality.LambdaDssim, 0f, 0f);
         // A 2D grid of 64-pixel workgroups: one dimension caps at 65,535 (4.2 MP), and the photos' own size is above it.
         int lossGroups = (pixels + 63) / 64;
@@ -1935,7 +1934,7 @@ public sealed class SplatTrainerGpu : IDisposable
         pass.DispatchWorkgroups((uint)Math.Max(1, wgX), (uint)Math.Max(1, wgY), 1);
         pass.End();
         using var cmd = enc.Finish();
-        _queue!.Submit(new[] { cmd });
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
     }
 
     void WriteU32x4(GPUBuffer buf, uint x, uint y, uint z, uint w)

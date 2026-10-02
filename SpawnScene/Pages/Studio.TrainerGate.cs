@@ -46,7 +46,18 @@ public partial class Studio
             using var buf = accel.Allocate1D<float>(packedDc.Length);
             buf.CopyFromCPU(packedDc);
             await accel.SynchronizeAsync();
+            // Size the key budget from a measured frame, as training does (Studio.Training's demand probe). At
+            // 1600x1200 these splats span far more tiles than the default 8 keys each, and an overflowing frame
+            // drops keys in atomic order, so two renders differ and the comparison below means nothing.
+            await trainer.RenderForwardAsync(buf, n, c, depthNear, depthFar, readback: false);
+            if (trainer.LastOverflowed)
+                await trainer.ResizeAsync(w, h, n, (int)Math.Ceiling(trainer.LastKeyDemand * 1.25 / n));
             float[] rendered = await trainer.RenderForwardAsync(buf, n, c, depthNear, depthFar);
+            if (trainer.LastOverflowed)
+            {
+                Console.WriteLine($"[TrainerGate] FAIL: loss readout at {w}x{h}: key overflow after resizing");
+                return false;
+            }
             var target = new float[w * h * 3];
             Array.Fill(target, 0.5f);
             trainer.SetTarget(target);
@@ -55,6 +66,11 @@ public partial class Studio
             float expected = (float)(ImageQuality.LambdaL1 * sum / rendered.Length);
             trainer.InitOptimizerState(buf, n);
             float reported = await trainer.TrainStepAsync(buf, n, c, depthNear, depthFar);
+            if (trainer.LastOverflowed)
+            {
+                Console.WriteLine($"[TrainerGate] FAIL: loss readout at {w}x{h}: the step's frame overflowed");
+                return false;
+            }
             float rel = MathF.Abs(reported - expected) / MathF.Max(expected, 1e-9f);
             Console.WriteLine($"[TrainerGate] loss readout {w}x{h}: reported {reported:F6}, expected {expected:F6} (rel {rel:E2})");
             if (!(expected > 1e-4f) || !(rel < 1e-3f))

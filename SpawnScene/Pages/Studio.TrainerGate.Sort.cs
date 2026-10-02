@@ -20,7 +20,7 @@ public partial class Studio
         var accel = _gpuService.WebGPUAccelerator;
         var device = accel.NativeAccelerator.NativeDevice!;
         var queue = accel.NativeAccelerator.Queue!;
-        using var sorter = new GpuRadixSort(device, queue);
+        using var sorter = new GpuRadixSort(device, queue, accel);
         var rng = new Random(1234);
         bool ok = true;
 

@@ -587,7 +587,7 @@ public class GpuSplatSorter : IDisposable
     void EnsureRadixSort(WebGPUAccelerator accelerator, int count)
     {
         var native = accelerator.NativeAccelerator;
-        _radixSort ??= new GpuRadixSort(native.NativeDevice!, native.Queue!);
+        _radixSort ??= new GpuRadixSort(native.NativeDevice!, native.Queue!, accelerator);
         _radixSort.EnsureCapacity(count);
     }
 }

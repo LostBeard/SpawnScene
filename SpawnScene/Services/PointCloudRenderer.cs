@@ -17,6 +17,7 @@ public class PointCloudRenderer : IDisposable
 
     private GPUDevice? _device;
     private GPUQueue? _queue;
+    private SpawnDev.ILGPU.WebGPU.WebGPUAccelerator? _accelerator; // RawSubmit flushes its pending work first
     private GPUCanvasContext? _context;
     private GPURenderPipeline? _pipeline;
     private GPUShaderModule? _shaderModule;
@@ -81,6 +82,7 @@ public class PointCloudRenderer : IDisposable
         if (accelerator is not WebGPUAccelerator webGpuAccel)
             throw new InvalidOperationException("PointCloudRenderer requires a WebGPU accelerator");
 
+        _accelerator = webGpuAccel;
         var nativeAccel = webGpuAccel.NativeAccelerator;
         _device = nativeAccel.NativeDevice
             ?? throw new InvalidOperationException("WebGPU native device is null");
@@ -412,7 +414,7 @@ public class PointCloudRenderer : IDisposable
 
         using var commandBuffer = encoder.Finish();
         _submitArray[0] = commandBuffer;
-        _queue!.Submit(_submitArray);
+        RawSubmit.Submit(_accelerator, _queue!, _submitArray);
     }
 
     private Matrix4x4 BuildOrbitMvp(float aspect)

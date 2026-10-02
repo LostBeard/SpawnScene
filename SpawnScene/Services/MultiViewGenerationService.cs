@@ -1144,7 +1144,7 @@ public class MultiViewGenerationService
                 using var encoder = device.CreateCommandEncoder();
                 encoder.CopyBufferToBuffer(srcGpuBuf, 0, mergedGpuBuf, byteOffset, byteCount);
                 using var cmdBuf = encoder.Finish();
-                queue.Submit(new[] { cmdBuf });
+                RawSubmit.Submit(_gpu.WebGPUAccelerator, queue, new[] { cmdBuf });
             }
 
             byteOffset += byteCount;
@@ -1438,7 +1438,7 @@ public class MultiViewGenerationService
                     buf.GetGPUBuffer()!, 0,
                     merged.GetGPUBuffer()!, (ulong)offsetBytes,
                     byteCount);
-                queue.Submit(new[] { encoder.Finish() });
+                RawSubmit.Submit(_gpu.WebGPUAccelerator, queue, new[] { encoder.Finish() });
             }
             offsetBytes += (long)byteCount;
             actualTotal += count;
@@ -1638,7 +1638,7 @@ public class MultiViewGenerationService
             {
                 encoder.CopyBufferToBuffer(
                     buf.GetGPUBuffer()!, 0, merged.GetGPUBuffer()!, (ulong)offsetBytes, byteCount);
-                queue.Submit(new[] { encoder.Finish() });
+                RawSubmit.Submit(_gpu.WebGPUAccelerator, queue, new[] { encoder.Finish() });
             }
             offsetBytes += (long)byteCount;
             actualTotal += count;
@@ -3012,7 +3012,7 @@ public class MultiViewGenerationService
             using (var encoder = device.CreateCommandEncoder())
             {
                 encoder.CopyBufferToBuffer(buf.GetGPUBuffer()!, 0, merged.GetGPUBuffer()!, (ulong)offsetBytes, byteCount);
-                queue.Submit(new[] { encoder.Finish() });
+                RawSubmit.Submit(_gpu.WebGPUAccelerator, queue, new[] { encoder.Finish() });
             }
             offsetBytes += (long)byteCount;
             actualTotal += count;
@@ -3154,7 +3154,7 @@ public class MultiViewGenerationService
             using (var encoder = device.CreateCommandEncoder())
             {
                 encoder.CopyBufferToBuffer(buf.GetGPUBuffer()!, 0, merged.GetGPUBuffer()!, (ulong)offsetBytes, byteCount);
-                queue.Submit(new[] { encoder.Finish() });
+                RawSubmit.Submit(_gpu.WebGPUAccelerator, queue, new[] { encoder.Finish() });
             }
             offsetBytes += (long)byteCount;
             actualTotal += count;

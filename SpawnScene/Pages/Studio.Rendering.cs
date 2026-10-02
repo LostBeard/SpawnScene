@@ -136,7 +136,7 @@ public partial class Studio
         _gameUI.EndRender(encoder, colorView);
 
         using var cmdBuf = encoder.Finish();
-        _queue!.Submit(new[] { cmdBuf });
+        RawSubmit.Submit(_gpuService.IsInitialized ? _gpuService.WebGPUAccelerator : null, _queue!, new[] { cmdBuf });
     }
 
     // ─── Canvas Sizing ───

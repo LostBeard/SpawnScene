@@ -1049,7 +1049,7 @@ public class GpuGaussianRenderer : IDisposable
         AppendPackComputePass(encoder, dataBuf, idxBuf, _splatCount);
         using var cmdBuf = encoder.Finish();
         _submitArray[0] = cmdBuf;
-        _queue!.Submit(_submitArray);
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
 
         Console.WriteLine($"[GpuRenderer] Pack-at-upload complete: {_splatCount:N0} splats packed");
     }
@@ -1247,7 +1247,7 @@ public class GpuGaussianRenderer : IDisposable
 
         using var commandBuffer = encoder.Finish();
         _submitArray[0] = commandBuffer;
-        _queue.Submit(_submitArray);
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
     }
 
     /// <summary>
@@ -1349,7 +1349,7 @@ public class GpuGaussianRenderer : IDisposable
 
             using var cmdBuf = encoder.Finish();
             _submitArray[0] = cmdBuf;
-            _queue.Submit(_submitArray);
+            RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
         }
 
         // ── Display pass (once per frame): CAS reads _accumTexture → canvas ──
@@ -1375,7 +1375,7 @@ public class GpuGaussianRenderer : IDisposable
 
             using var displayCmdBuf = displayEncoder.Finish();
             _submitArray[0] = displayCmdBuf;
-            _queue.Submit(_submitArray);
+            RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
         }
     }
 
@@ -1451,7 +1451,7 @@ public class GpuGaussianRenderer : IDisposable
 
         using var cmdBuf = encoder.Finish();
         _submitArray[0] = cmdBuf;
-        _queue.Submit(_submitArray);
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
     }
 
     /// <summary>
@@ -1571,7 +1571,7 @@ public class GpuGaussianRenderer : IDisposable
 
         using var xrCmdBuf = encoder.Finish();
         _submitArray[0] = xrCmdBuf;
-        _queue.Submit(_submitArray);
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
     }
 
     /// <summary>Lazily create or resize the XR bridge OffscreenCanvas + associated resources.</summary>

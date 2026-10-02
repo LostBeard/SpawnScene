@@ -28,15 +28,18 @@ public sealed class GpuRadixSort : IDisposable
 
     readonly GPUDevice _device;
     readonly GPUQueue _queue;
+    // ILGPU's pending work is flushed before every raw submit (RawSubmit): the keys may come from an ILGPU kernel.
+    readonly SpawnDev.ILGPU.WebGPU.WebGPUAccelerator? _accelerator;
     GPUComputePipeline? _histogram, _scanReduce, _scanSums, _scanDown, _scatter;
     readonly GPUBuffer?[] _params = new GPUBuffer?[MaxPasses];
     GPUBuffer? _hist, _sums, _keysAlt, _valuesAlt;
     int _capacity;
 
-    public GpuRadixSort(GPUDevice device, GPUQueue queue)
+    public GpuRadixSort(GPUDevice device, GPUQueue queue, SpawnDev.ILGPU.WebGPU.WebGPUAccelerator? accelerator = null)
     {
         _device = device;
         _queue = queue;
+        _accelerator = accelerator;
     }
 
     /// <summary>Keys this sorter can take without reallocating.</summary>
@@ -108,7 +111,7 @@ public sealed class GpuRadixSort : IDisposable
             enc.CopyBufferToBuffer(srcV, 0, values, 0, (ulong)count * 4);
         }
         using var cmd = enc.Finish();
-        _queue.Submit(new[] { cmd });
+        RawSubmit.Submit(_accelerator, _queue, new[] { cmd });
     }
 
     void Pass(GPUCommandEncoder enc, GPUComputePipeline pipeline, int workgroups, params GPUBuffer[] buffers)

@@ -28,7 +28,7 @@ apart. The scorer (Umeyama similarity on camera centres, error / median spread) 
 | `4b5a86b` | Relative pose refined on inliers (Sampson LM, 5 DoF) | loop-consistent 49 -> 79, cams 23 -> 33 |
 | `1b2771f` | Re-registration through verified pairs (tracks had none for unplaced cameras) | 5 more registered |
 | `afe677b` | Calibrated five-point E-RANSAC (Nister) instead of decomposing F | loop-consistent 101, BA 29/37 at 0.71% |
-| `9aaace5` | Keep the strongly connected camera core | (b85 pending) |
+| `9aaace5` | Keep the strongly connected camera core (>= 50 shared points) | b85: 27 cameras at 0.55% (p90 1.23%, worst 1.2%), none wrong; 9 dropped |
 
 Relative-pose estimators on DrJohnson's real k1024 matches, true pairs (>= 30 shared COLMAP points):
 

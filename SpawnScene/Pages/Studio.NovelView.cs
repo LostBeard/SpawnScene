@@ -229,6 +229,37 @@ public partial class Studio
         return MathF.Max(100f, far * 1.05f);
     }
 
+    /// <summary>
+    /// Wait until the canvas shows <paramref name="position"/>: the sorted path's draw order is packed for it, two more
+    /// frames have been submitted, and the queue has finished them.
+    /// </summary>
+    /// <remarks>
+    /// This was a fixed 1.2 s delay (the sorted path's sort is asynchronous and self-throttles, so the first frames after
+    /// a jump draw the previous order). On a shared GPU frames slowed and the delay was not enough: Bathroom b104
+    /// (2026-10-02) saved "view-held-19" showing the PREVIOUS view (a toilet instead of the shower), scored 10.98 dB
+    /// where the same pose scored 20.9 elsewhere, and dragged that run's held-out mean to 9.01 dB.
+    /// </remarks>
+    private async Task WaitForFrameAtPoseAsync(Vector3 position, string viewName, int timeoutMs = 30000)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        float tol = 1e-4f * MathF.Max(1f, position.Length());
+        long packedAt = -1;
+        bool ready = false;
+        while (sw.ElapsedMilliseconds < timeoutMs)
+        {
+            bool packed = _gpuRenderer.RenderMode != SplatRenderMode.Sorted
+                || Vector3.Distance(_gpuRenderer.PackCameraPosition, position) <= tol;
+            if (packed && packedAt < 0) packedAt = _gpuRenderer.FramesSubmitted;
+            if (packedAt >= 0 && _gpuRenderer.FramesSubmitted >= packedAt + 2) { ready = true; break; }
+            await Task.Delay(16);
+        }
+        if (!ready)
+            Console.WriteLine($"[NovelView] WARNING: {viewName}: no frame at the pose after {timeoutMs / 1000} s " +
+                $"(packed {(packedAt >= 0 ? "yes" : "no")}, frames {_gpuRenderer.FramesSubmitted}) - the capture may be stale");
+        if (_queue != null) await _queue.OnSubmittedWorkDone();
+        await Task.Delay(50); // the compositor presents the finished frame
+    }
+
     private async Task ParkOnGroundTruthPoseAsync(string viewName, CameraParams gt)
     {
         var cam = _sceneManager.Camera;
@@ -252,9 +283,7 @@ public partial class Studio
         // yaw/pitch-only camera cannot represent.
         _cameraController?.SetPose(gt.Position, gt.Forward, gt.Up, exact: true);
 
-        // The sorted path runs its radix sort asynchronously and self-throttles to ~50ms, so the
-        // first frames after a camera jump are drawn against a stale ordering.
-        await Task.Delay(1200);
+        await WaitForFrameAtPoseAsync(gt.Position, viewName);
 
         var sc = _sceneManager.ActiveScene;
         int splats = sc == null ? 0 : Math.Max(sc.GpuSplatCount, sc.Count);

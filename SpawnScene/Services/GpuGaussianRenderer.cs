@@ -1171,7 +1171,18 @@ public class GpuGaussianRenderer : IDisposable
         {
             RenderSorted(camera, mvp);
         }
+        FramesSubmitted++;
     }
+
+    /// <summary>Frames submitted by <see cref="Render"/> so far (a capture waits for frames AFTER a camera jump).</summary>
+    public long FramesSubmitted { get; private set; }
+
+    /// <summary>
+    /// The camera position the sorted path's current draw order was packed for. After a camera jump the sorted path
+    /// keeps drawing the previous order until its asynchronous sort catches up; a frame shows the new pose only once
+    /// this equals it.
+    /// </summary>
+    public Vector3 PackCameraPosition => _packCameraPos;
 
     /// <summary>
     /// Fill the shared uniform slots from a view/projection pair. Every render path goes through

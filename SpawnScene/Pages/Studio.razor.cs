@@ -310,9 +310,9 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("densepx", out var dpq) && double.TryParse(dpq, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var dpv))
                 _multiViewService.DenseReprojectionPixels = dpv;
-            if (query.TryGetValue("denseangle", out var daq) && double.TryParse(daq, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var dav))
-                _multiViewService.DenseMinParallaxDeg = dav;
+            if (query.TryGetValue("denseangle", out var dangq) && double.TryParse(dangq, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var dangv))
+                _multiViewService.DenseMinParallaxDeg = dangv;
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");

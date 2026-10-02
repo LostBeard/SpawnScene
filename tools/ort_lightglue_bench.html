@@ -1,0 +1,44 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>ORT-web LightGlue bench</title></head>
+<body><pre id="out"></pre>
+<script type="module">
+// onnxruntime-web 1.30.0 (WebGPU) on Kornia's LightGlue+ k1024 matcher, one pair [2,1,1024,...] - the same model
+// and inputs SpawnScene runs through SpawnDev.ILGPU.ML (~550-590 ms a pair in the app). Logs "[ortbench] ..." lines.
+import * as ort from './ort.all.min.mjs';
+const log = (s) => { console.log('[ortbench] ' + s); document.getElementById('out').textContent += s + '\n'; };
+ort.env.wasm.numThreads = self.crossOriginIsolated ? navigator.hardwareConcurrency : 1;
+console.log('[ortbench] crossOriginIsolated ' + self.crossOriginIsolated + ', wasm threads ' + ort.env.wasm.numThreads);
+ort.env.logLevel = 'warning';
+ort.env.debug = false;
+ort.env.wasm.wasmPaths = './';
+const f32 = async (u) => new Float32Array(await (await fetch(u)).arrayBuffer());
+try {
+  const nkp = await f32('k1024_nkp.f32'), desc = await f32('k1024_desc.f32');
+  const model = new Uint8Array(await (await fetch('lightglue_matcher_k1024.onnx')).arrayBuffer());
+  for (const [ep, opt] of [['wasm', 'all']]) {
+   try {
+    const t0 = performance.now();
+    const s = await ort.InferenceSession.create(model, { executionProviders: [ep], graphOptimizationLevel: opt });
+    log(`${ep}/${opt}: session created in ${(performance.now() - t0).toFixed(0)} ms`);
+    const feeds = {
+      normalized_keypoints: new ort.Tensor('float32', nkp, [2, 1, 1024, 2]),
+      descriptors: new ort.Tensor('float32', desc, [2, 1, 1024, 128]),
+    };
+    const times = [];
+    const runs = ep === 'webgpu' ? 12 : 5;
+    let matches = -1;
+    for (let r = 0; r < runs; r++) {
+      const t = performance.now();
+      const out = await s.run(feeds);
+      const m = out.matches0.data;   // reading it back is part of a real pair (the app reads matches back too)
+      times.push(performance.now() - t);
+      if (r === 0) { matches = 0; for (let i = 0; i < m.length; i++) if (Number(m[i]) >= 0) matches++; }
+    }
+    const warm = times.slice(2).sort((a, b) => a - b);
+    log(`${ep}/${opt}: first ${times[0].toFixed(0)} ms, warm median ${warm[Math.floor(warm.length / 2)].toFixed(1)} ms (min ${warm[0].toFixed(1)}) over ${warm.length}; matches ${matches}`);
+    await s.release();
+   } catch (e) { log(`${ep}/${opt}: ERROR ` + (e && (e.message || e.stack) || String(e)) + ' | ' + typeof e); }
+  }
+  log('DONE');
+} catch (e) { log('ERROR ' + (e && e.stack || e)); log('DONE'); }
+</script></body></html>

@@ -307,6 +307,12 @@ public partial class Studio : IAsyncDisposable
             // &denseinit=0: with the learned front end, no dense FAST/BRIEF triangulation for the initial cloud (A/B).
             if (query.TryGetValue("denseinit", out var dinq))
                 _multiViewService.DenseInitFromBriefFeatures = dinq is not ("0" or "false");
+            if (query.TryGetValue("densepx", out var dpq) && double.TryParse(dpq, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var dpv))
+                _multiViewService.DenseReprojectionPixels = dpv;
+            if (query.TryGetValue("denseangle", out var daq) && double.TryParse(daq, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var dav))
+                _multiViewService.DenseMinParallaxDeg = dav;
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");

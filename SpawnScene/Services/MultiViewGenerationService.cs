@@ -672,7 +672,8 @@ public class MultiViewGenerationService
                 var (ia, ib) = densePairs[pi];
                 denseMatches.Add((camOfImage[ia], camOfImage[ib], m));
             });
-            dense = DenseTriangulation.Triangulate(cams, c => images[posed[c]].DenseFeatures, denseMatches);
+            dense = DenseTriangulation.Triangulate(cams, c => images[posed[c]].DenseFeatures, denseMatches,
+                reprojPx: DenseReprojectionPixels, minAngleDeg: DenseMinParallaxDeg);
             Console.WriteLine($"[BA] dense init: {densePairs.Count} linked pairs; {dense.Summary}; {td.Elapsed.TotalSeconds:F1}s");
         }
 
@@ -800,6 +801,12 @@ public class MultiViewGenerationService
     /// cameras and add them to the initial cloud (<see cref="DenseTriangulation"/>). &amp;denseinit=0 for the A/B.
     /// </summary>
     public bool DenseInitFromBriefFeatures { get; set; } = true;
+
+    /// <summary>Dense init: largest reprojection error an observation may keep (pixels). &amp;densepx=N.</summary>
+    public double DenseReprojectionPixels { get; set; } = 2.0;
+
+    /// <summary>Dense init: smallest widest-ray-pair angle a point needs (degrees). &amp;denseangle=N.</summary>
+    public double DenseMinParallaxDeg { get; set; } = 1.5;
 
     /// <summary>Shared points (within 4 px of the final solution) that link a camera to the core. &amp;coremin=N.</summary>
     public int CoreSharedPoints { get; set; } = 50;

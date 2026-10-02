@@ -275,7 +275,10 @@ public partial class Studio
             //
             // The targets are float RGB and every supervised AND held-out view is resident, so
             // the bound is views x pixels x 3 x 4 bytes.
-            var (tw, th) = views[0].Camera.FitWithin(maxTrainDimension);
+            // The photos' own size caps training, not the cameras' import size (TrainingSize may scale up). The stack shares
+            // one size, so the smallest photo sets it.
+            int sourceLongest = views.Min(v => v.SourceLongestSide);
+            var (tw, th) = views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest);
             long TargetBytes(int pw, int ph) => (long)views.Count * pw * ph * sizeof(uint);
             if (TargetBytes(tw, th) > MaxTargetStackBytes)
             {
@@ -283,19 +286,19 @@ public partial class Studio
                 while (shrunk > 128 && TargetBytes(tw, th) > MaxTargetStackBytes)
                 {
                     shrunk = shrunk * 3 / 4;
-                    (tw, th) = views[0].Camera.FitWithin(shrunk);
+                    (tw, th) = views[0].Camera.TrainingSize(shrunk, sourceLongest);
                 }
                 Console.WriteLine(
                     $"[Train] {views.Count} views would need " +
-                    $"{TargetBytes(views[0].Camera.FitWithin(maxTrainDimension).Width, views[0].Camera.FitWithin(maxTrainDimension).Height) / (1024 * 1024)} MiB " +
+                    $"{TargetBytes(views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest).Width, views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest).Height) / (1024 * 1024)} MiB " +
                     $"of target stack at {maxTrainDimension}px; training at {tw}x{th} to fit " +
                     $"{MaxTargetStackBytes / (1024 * 1024)} MiB");
             }
             else if (tw != w || th != h)
             {
                 Console.WriteLine(
-                    $"[Train] training at {tw}x{th} instead of {w}x{h} " +
-                    $"({(long)w * h / 1_000_000.0:F1} MP per view is too much target memory)");
+                    $"[Train] training at {tw}x{th} (cameras {w}x{h}, photos {(sourceLongest > 0 ? sourceLongest + " px" : "of unknown size")} " +
+                    $"on the longest side, setting {maxTrainDimension} px)");
             }
             w = tw; h = th;
 

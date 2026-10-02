@@ -856,10 +856,10 @@ public class ImageImportService : IDisposable
                 }
 
                 MemoryBuffer1D<int, Stride1D.Dense> rgbaDev;
-                int imgWidth, imgHeight;
+                int imgWidth, imgHeight, srcWidth, srcHeight;
                 try
                 {
-                    (rgbaDev, imgWidth, imgHeight, _, _) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
+                    (rgbaDev, imgWidth, imgHeight, srcWidth, srcHeight) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
                         source, _gpu.WebGPUAccelerator, MaxImportDimension);
                 }
                 catch (Exception ex)
@@ -885,6 +885,8 @@ public class ImageImportService : IDisposable
                     Height = imgHeight,
                     Source = source,
                     DecodeMaxEdge = MaxImportDimension,
+                    SourceWidth = srcWidth,
+                    SourceHeight = srcHeight,
                     GpuRgba = rgbaDev,
                     FeatureWidth = featureWidth,
                     FeatureHeight = featureHeight,

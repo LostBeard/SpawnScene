@@ -129,6 +129,15 @@ public class ImportedImage
     /// <summary>Longest edge <see cref="Source"/> is decoded at (so every re-decode is the same size).</summary>
     public int DecodeMaxEdge { get; set; }
 
+    /// <summary>
+    /// The photo's own size before the import resize (<see cref="DecodeMaxEdge"/>), 0 when unknown. Training reloads its
+    /// targets from the source at its own resolution, so this - not <see cref="Width"/> - is the most detail it can use.
+    /// </summary>
+    public int SourceWidth { get; set; }
+
+    /// <summary>See <see cref="SourceWidth"/>.</summary>
+    public int SourceHeight { get; set; }
+
     /// <summary>Release the encoded source, any device copy and the learned descriptors. Idempotent.</summary>
     public void DisposeSource()
     {

@@ -127,4 +127,11 @@ public sealed class TrainingView
     /// question - and is a much larger number.
     /// </summary>
     public bool UsedForSupervision { get; init; } = true;
+
+    /// <summary>
+    /// Longest side of the photograph itself, 0 when unknown. The target is reloaded from the photo at the trainer's size
+    /// (LoadTargetAsync), so training may go ABOVE the camera's import size up to this
+    /// (<see cref="CameraParams.TrainingSize"/>).
+    /// </summary>
+    public int SourceLongestSide { get; init; }
 }

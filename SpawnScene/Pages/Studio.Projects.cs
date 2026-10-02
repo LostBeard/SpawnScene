@@ -361,6 +361,7 @@ public partial class Studio
                 UsedForInit = true,
                 QuarterTurns = turns,
                 UsedForSupervision = supervise,
+                SourceLongestSide = Math.Max(images[i].SourceWidth, images[i].SourceHeight),
             });
             scene.TrainingCameras.Add(cam);
         }
@@ -630,10 +631,10 @@ public partial class Studio
                 catch (Exception ex) { Console.WriteLine($"[Studio] {source.FileName}: no EXIF ({ex.Message})"); }
 
                 MemoryBuffer1D<int, Stride1D.Dense> rgba;
-                int w, h;
+                int w, h, srcW, srcH;
                 try
                 {
-                    (rgba, w, h, _, _) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
+                    (rgba, w, h, srcW, srcH) = await SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.DecodeToDeviceAsync(
                         file, accel, ImageImportService.MaxImportDimension);
                 }
                 catch (Exception ex) { Console.WriteLine($"[Studio] could not decode {source.FileName} - skipped ({ex.Message})"); file.Dispose(); continue; }
@@ -651,6 +652,8 @@ public partial class Studio
                     Height = h,
                     Source = file,
                     DecodeMaxEdge = ImageImportService.MaxImportDimension,
+                    SourceWidth = srcW,
+                    SourceHeight = srcH,
                     EstimatedCamera = camera,
                 });
             }

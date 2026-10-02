@@ -162,4 +162,21 @@ public class CameraScalingTests
         Assert.Throws<ArgumentOutOfRangeException>(() => cam.ScaledTo(0, 100));
         Assert.Throws<ArgumentOutOfRangeException>(() => cam.ScaledTo(100, -1));
     }
+
+    /// <summary>
+    /// Training above the IMPORT size (2026-10-02). Cameras are made at the import size (1024 on the longest edge) while
+    /// training reloads its targets from the photo, so the photo's own size is the ceiling. FitWithin never upscales: with
+    /// it, a 1600 px training setting silently trained TJ's 3120x4160 Bathroom photos at 768x1024.
+    /// </summary>
+    [Test]
+    public void TrainingSize_ScalesUpToThePhotoNotTheImportSize()
+    {
+        var imported = Phone().ScaledTo(768, 1024);
+        Assert.That(imported.TrainingSize(1600, 4160), Is.EqualTo((1200, 1600)), "1600 setting, 4160 px photo");
+        Assert.That(imported.TrainingSize(720, 4160), Is.EqualTo((540, 720)), "720 setting shrinks");
+        Assert.That(imported.TrainingSize(1024, 4160), Is.EqualTo((768, 1024)), "setting equal to the camera");
+        Assert.That(imported.TrainingSize(8000, 4160), Is.EqualTo((3120, 4160)), "never above the photo");
+        Assert.That(imported.TrainingSize(1600, 0), Is.EqualTo((768, 1024)), "unknown photo size: the camera is the ceiling");
+        Assert.That(imported.TrainingSize(1600, 1024), Is.EqualTo((768, 1024)), "photo no larger than the camera");
+    }
 }

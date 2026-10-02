@@ -87,6 +87,27 @@ public class CameraParams
     }
 
     /// <summary>
+    /// <see cref="FitWithin"/> for training: the largest size with this camera's aspect ratio whose longest side is at
+    /// most <paramref name="maxDimension"/> AND at most the photo's own <paramref name="sourceLongestSide"/> (0 = unknown:
+    /// this camera's size is the ceiling). Unlike FitWithin it scales UP when the photo is larger than the camera.
+    /// Rounded to even numbers like FitWithin.
+    /// </summary>
+    public (int Width, int Height) TrainingSize(int maxDimension, int sourceLongestSide)
+    {
+        // The photo's own size is the ceiling, not this camera's: cameras are made at the IMPORT size (1024 on the longest
+        // edge) while training reloads its targets from the photo. FitWithin alone never upscales, so a 1600 px training
+        // setting silently trained at 1024 or less (2026-10-02, TJ's 3120x4160 Bathroom photos).
+        int longest = Math.Max(Width, Height);
+        int ceiling = sourceLongestSide > 0 ? sourceLongestSide : longest;
+        int target = Math.Min(maxDimension, ceiling);
+        if (target == longest) return (Width, Height);
+        float s = (float)target / longest;
+        int w = Math.Max(2, (int)MathF.Round(Width * s / 2f) * 2);
+        int h = Math.Max(2, (int)MathF.Round(Height * s / 2f) * 2);
+        return (w, h);
+    }
+
+    /// <summary>
     /// The largest size with this camera's aspect ratio that fits inside
     /// <paramref name="maxDimension"/>, rounded to even numbers so a 16px tile grid divides it
     /// predictably. Never upscales.

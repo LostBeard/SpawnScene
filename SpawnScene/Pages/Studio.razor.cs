@@ -203,6 +203,12 @@ public partial class Studio : IAsyncDisposable
         }
         Console.WriteLine($"[Autotest] depth resize mode {DepthEstimationService.ResizeMode}");
 
+        if (mode == "textlab")
+        {
+            await RunTextLabAsync();
+            return;
+        }
+
         if (mode == "trainer-gate")
         {
             await RunTrainerGateAsync();

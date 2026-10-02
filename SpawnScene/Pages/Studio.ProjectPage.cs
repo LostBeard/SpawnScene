@@ -180,6 +180,19 @@ public partial class Studio
         }
         y = AddSectionHeading(parent, x, y, w, "Photos", sources.Count > 0 ? $"{sources.Count}" : null);
 
+        if (sources.Count >= 2)
+        {
+            // MEASURED 2026-10-02: on a small room (Bathroom, 24 training photos) neither resolution nor iterations moved
+            // the views between the photos; coverage does. Say so where the photos are added.
+            parent.AddChild(new UILabel
+            {
+                X = x, Y = y - 6,
+                Text = "Best results: many overlapping photos from many positions - coverage matters more than any setting.",
+                FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted,
+            });
+            y += 18;
+        }
+
         if (sources.Count == 0)
         {
             parent.AddChild(new UITextBlock
@@ -329,18 +342,29 @@ public partial class Studio
         float x = ProjectPageGutter, w = width - ProjectPageGutter * 2;
         var s = _activeProject!.Settings;
 
-        y = AddSectionHeading(parent, x, y, w, "Reconstruction", "2+ photos");
+        // -- Quality preset: one choice sets the reconstruction rows below; changing a row makes it "Custom" --
+        string preset = ReconstructionPresets.Match(s);
+        var presetNames = ReconstructionPresets.All.Select(p => p.Name).ToList();
+        y = AddSectionHeading(parent, x, y, w, "Quality", "2+ photos");
+        y = AddChoiceRow(parent, x, y, w, "Preset",
+            presetNames.Select((n, i) => (n, i)).ToArray(),
+            presetNames.IndexOf(preset),
+            i => ReconstructionPresets.Apply(s, presetNames[i]),
+            preset == "Custom" ? "Custom: the settings below were changed by hand. Pick a preset to reset them."
+                : ReconstructionPresets.All.First(p => p.Name == preset).Hint);
+
+        y = AddSectionHeading(parent, x, y + 8, w, "Reconstruction", preset);
         y = AddChoiceRow(parent, x, y, w, "Training resolution",
-            new (string, int)[] { ("720", 720), ("1024", 1024), ("1600", 1600) },
-            s.TrainMaxDimension, v => s.TrainMaxDimension = v,
-            "Longest side the photos are trained at, up to the photos' own size. Higher is sharper and needs more GPU memory and time.");
+            new (string, int)[] { ("720", 720), ("1024", 1024), ("1600", 1600), ("Photo", ReconstructionPresets.PhotoSize) },
+            s.TrainMaxDimension, v => { s.TrainMaxDimension = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
+            "Longest side the photos are trained at, never above the photos' own size (Photo = their size). Needs more GPU memory and time.");
         y = AddChoiceRow(parent, x, y, w, "Training iterations",
             new (string, int)[] { ("Off", 0), ("3K", 3000), ("7K", 7000), ("15K", 15000), ("30K", 30000) },
-            s.TrainIterations, v => s.TrainIterations = v,
-            "More iterations refine detail further. A 251-photo scene takes about 70 minutes at 30K.");
+            s.TrainIterations, v => { s.TrainIterations = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
+            "More iterations refine detail on well-covered scenes. A 251-photo scene takes about 70 minutes at 30K.");
         y = AddChoiceRow(parent, x, y, w, "Max splats",
             new (string, int)[] { ("500K", 500_000), ("1M", 1_000_000), ("3M", 3_000_000) },
-            s.TrainMaxSplats, v => s.TrainMaxSplats = v,
+            s.TrainMaxSplats, v => { s.TrainMaxSplats = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
             "Upper bound on scene size while training grows it. Lower it on a GPU with less memory.");
 
         y = AddSectionHeading(parent, x, y + 8, w, "Single photo", "depth");

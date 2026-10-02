@@ -60,6 +60,50 @@ public class ProjectScene
     public const int LegacyFloatsPerSplat = 10;
 }
 
+/// <summary>
+/// Multi-photo quality presets: one choice sets iterations, training resolution and the splat cap together
+/// (Research/project-settings-presets-2026-10-02.md). Iterations are the main time/quality dial (TruckFull 7K: 23.1 dB,
+/// sharpness 0.98); resolution is capped at the photos' own size, so <see cref="PhotoSize"/> means "as large as the
+/// photos are".
+/// </summary>
+public static class ReconstructionPresets
+{
+    /// <summary>A training resolution larger than any photo: TrainingSize caps it at the photos' own size.</summary>
+    public const int PhotoSize = 16384;
+
+    public static readonly (string Name, int Iterations, int MaxDimension, int MaxSplats, string Hint)[] All =
+    {
+        ("Draft", 3000, 720, 500_000, "A quick look: about a third of Standard's training."),
+        ("Standard", 7000, 1024, 3_000_000, "The reference's first checkpoint. Right for most captures."),
+        ("High", 15000, 1600, 3_000_000, "Longer training at up to 1600 px. Pays off when the photos cover the scene densely."),
+        ("Max", 30000, PhotoSize, 3_000_000, "The reference's full run at the photos' own size. Slowest."),
+    };
+
+    /// <summary>Apply preset <paramref name="name"/> to <paramref name="s"/>; false if there is no such preset.</summary>
+    public static bool Apply(ProjectSettings s, string name)
+    {
+        foreach (var p in All)
+        {
+            if (p.Name != name) continue;
+            s.TrainIterations = p.Iterations;
+            s.TrainMaxDimension = p.MaxDimension;
+            s.TrainMaxSplats = p.MaxSplats;
+            s.ReconstructionPreset = p.Name;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>The preset whose values the settings hold, or "Custom".</summary>
+    public static string Match(ProjectSettings s)
+    {
+        foreach (var p in All)
+            if (s.TrainIterations == p.Iterations && s.TrainMaxDimension == p.MaxDimension && s.TrainMaxSplats == p.MaxSplats)
+                return p.Name;
+        return "Custom";
+    }
+}
+
 /// <summary>Per-project generation and render settings.</summary>
 public class ProjectSettings
 {
@@ -82,6 +126,12 @@ public class ProjectSettings
     /// memory budget). Higher = sharper detail, more GPU memory and time per iteration.
     /// </summary>
     public int TrainMaxDimension { get; set; } = 1024;
+
+    /// <summary>
+    /// The multi-photo quality preset these training settings came from (<see cref="ReconstructionPresets"/>), or
+    /// "Custom" once any of them was changed by hand.
+    /// </summary>
+    public string ReconstructionPreset { get; set; } = "Standard";
     // Parked for a future NATIVE super-resolution pass (ORT SR retired 2026-07-01). See SuperResolutionService.cs.
     public bool UseSuperResolution { get; set; }
 

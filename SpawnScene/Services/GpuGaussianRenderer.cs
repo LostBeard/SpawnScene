@@ -19,15 +19,6 @@ public enum AdaptiveResMode
     ForceHalf,  // always render at half physical resolution
 }
 
-/// <summary>Controls the splat rendering technique.</summary>
-public enum SplatRenderMode
-{
-    /// <summary>Traditional sorted alpha blending (cull → radix sort → pack → render).</summary>
-    Sorted,
-    /// <summary>Sort-free stochastic rasterization with temporal accumulation (StochasticSplats, ICCV 2025).</summary>
-    Stochastic,
-}
-
 /// <summary>
 /// Native WebGPU Gaussian splat renderer with GPU-sorted splats.
 /// Architecture:

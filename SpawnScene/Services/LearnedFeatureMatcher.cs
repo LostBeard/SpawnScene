@@ -40,8 +40,11 @@ public sealed class LearnedFeatureMatcher : IDisposable
     /// </summary>
     public static bool ProfileSecondRun { get; set; }
 
-    /// <summary>Image pairs per matcher run (the graph takes [2P, 1, K, ...]). A short final batch is padded.</summary>
-    public static int PairsPerRun { get; set; } = 8;
+    /// <summary>
+    /// Image pairs per matcher run (the graph takes [2P, 1, K, ...]). A short final batch is padded. 1: 8 lost the WebGPU
+    /// device on DrJohnson (2026-10-01), and 1 is what every verified run used (~51 ms a pair at K=1024).
+    /// </summary>
+    public static int PairsPerRun { get; set; } = 1;
 
     /// <summary>
     /// How the matcher's 2P batch rows form pairs: true = interleaved (rows 2p, 2p+1 are pair p - fabio-sim's

@@ -369,10 +369,10 @@ public partial class Studio : IAsyncDisposable
             // &unloaddepth=1: unload the depth model before training (A/B for the densify-carry device loss).
             if (query.TryGetValue("unloaddepth", out var udq))
                 _unloadDepthBeforeTraining = udq is "1" or "true";
-            // &features=learned: RaCo-ALIKED + LightGlue+ (LearnedFeatureMatcher) instead of FAST/BRIEF for features and pair
+            // Features: RaCo-ALIKED + LightGlue+ (LearnedFeatureMatcher) by default; &features=brief for FAST/BRIEF features and pair
             // matches; &lgk=1024|3072 its keypoint budget, &lgpairs=N pairs per matcher run.
             if (query.TryGetValue("features", out var ftq))
-                _importService.UseLearnedFeatures = ftq is "learned" or "lightglue";
+                _importService.UseLearnedFeatures = ftq is not ("brief" or "fast");
             if (query.TryGetValue("lgk", out var lgk) && int.TryParse(lgk, out var lgki))
                 LearnedFeatureMatcher.KeypointBudget = lgki;
             if (query.TryGetValue("lgretrieval", out var lgr) && int.TryParse(lgr, out var lgri))

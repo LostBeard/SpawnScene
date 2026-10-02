@@ -38,10 +38,12 @@ public class ImageImportService : IDisposable
 
     /// <summary>
     /// Features and pair matches from the learned front end (<see cref="LearnedFeatureMatcher"/>: RaCo-ALIKED +
-    /// LightGlue+) instead of FAST/BRIEF + Hamming matching. &amp;features=learned. Pair verification and everything after
-    /// it are the same for both.
+    /// LightGlue+) instead of FAST/BRIEF + Hamming matching. Pair verification and everything after it are the same for both.
+    /// The DEFAULT since 2026-10-02 (&amp;features=brief for the A/B): Bathroom (35 phone photos) placed 32 of 34 cameras
+    /// vs 8 with FAST/BRIEF (held-out 14.22 vs 13.75 dB, SSIM 0.654 vs 0.527); DrJohnson a 27-camera core within 1.2% of
+    /// COLMAP; TruckFull 19.63 vs 19.78 dB (dense FAST/BRIEF init keeps the cloud dense).
     /// </summary>
-    public bool UseLearnedFeatures { get; set; }
+    public bool UseLearnedFeatures { get; set; } = true;
 
     /// <summary>All imported images.</summary>
     public IReadOnlyList<ImportedImage> Images => _images;

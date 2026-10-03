@@ -238,7 +238,7 @@ public class XRService : IDisposable
                 IsWebGLFallback = IsWebGLFallback,
                 Time = time,
             };
-            ReadThumbsticks(frameData);
+            ReadControllers(frame, frameData);
 
             if (IsWebGLFallback)
             {
@@ -291,10 +291,11 @@ public class XRService : IDisposable
     }
 
     /// <summary>
-    /// The controllers' thumbsticks. xr-standard puts the thumbstick on axes 2 and 3 (0 and 1 are a touchpad, absent on
-    /// Quest Touch); a gamepad with only two axes has the stick there.
+    /// The controllers' thumbsticks and grips. xr-standard puts the thumbstick on axes 2 and 3 (0 and 1 are a touchpad,
+    /// absent on Quest Touch; a gamepad with only two axes has the stick there) and the squeeze (grip) on button 1. A held
+    /// grip also reports where the hand is, from its grip space.
     /// </summary>
-    private void ReadThumbsticks(XRFrameData frameData)
+    private void ReadControllers(XRFrame frame, XRFrameData frameData)
     {
         using var sources = _session!.InputSources;
         int n = sources.Length;
@@ -307,11 +308,24 @@ public class XRService : IDisposable
             int a = axes.Length >= 4 ? 2 : 0;
             if (axes.Length < a + 2) continue;
             var stick = new Vector2((float)axes[a], (float)axes[a + 1]);
-            switch (source.Handedness)
-            {
-                case "left": frameData.LeftStick = stick; break;
-                case "right": frameData.RightStick = stick; break;
-            }
+            var hand = source.Handedness;
+            bool left = hand == "left";
+            if (!left && hand != "right") continue;
+            if (left) frameData.LeftStick = stick; else frameData.RightStick = stick;
+
+            var buttons = gamepad.Buttons;
+            bool squeeze = buttons.Length > 1 && buttons[1].Pressed;
+            foreach (var b in buttons) b.Dispose();
+            if (!squeeze) continue;
+            using var gripSpace = source.GripSpace;
+            if (gripSpace == null) continue;
+            using var gripPose = frame.GetPose(gripSpace, _refSpace!);
+            if (gripPose == null) continue;
+            using var gripTransform = gripPose.Transform;
+            var gp = gripTransform.Position;
+            var gripPosition = new Vector3((float)gp.X, (float)gp.Y, (float)gp.Z);
+            if (left) { frameData.LeftGrip = true; frameData.LeftGripPosition = gripPosition; }
+            else { frameData.RightGrip = true; frameData.RightGripPosition = gripPosition; }
         }
     }
 
@@ -353,6 +367,11 @@ public class XRFrameData
     /// <summary>Thumbsticks (x right, y down: pushed forward reads -1); zero without a controller.</summary>
     public Vector2 LeftStick { get; set; }
     public Vector2 RightStick { get; set; }
+    /// <summary>Grips (squeeze) held, and where each held grip is in the room.</summary>
+    public bool LeftGrip { get; set; }
+    public bool RightGrip { get; set; }
+    public Vector3 LeftGripPosition { get; set; }
+    public Vector3 RightGripPosition { get; set; }
 }
 
 /// <summary>Per-eye view data for XR rendering.</summary>

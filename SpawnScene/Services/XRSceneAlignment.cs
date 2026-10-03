@@ -46,10 +46,17 @@ public static class XRSceneAlignment
         m[8], m[9], m[10], m[11],
         m[12], m[13], m[14], m[15]);
 
-    /// <summary>A room view matrix (room -> eye) as a scene view matrix (scene -> eye).</summary>
+    /// <summary>
+    /// A room view matrix (room -> eye) as a RIGID scene view matrix (scene -> eye, in scene units). With the scene scaled
+    /// by the grips (<see cref="XRWorldGrab"/>), room -> eye after scene -> room carries that scale, and the splat shader
+    /// rebuilds a rigid camera (right/up/forward/position) from the view: the first scaled session drew a shrunken room of
+    /// huge blobs (emulator, 2026-10-03). Scaling eye space about the eye changes no pixel (x/z and y/z keep their
+    /// ratios), so the eye coordinates are put back in scene units; the scale still shows, through where each eye sits in
+    /// the scene (the eye separation in scene units).
+    /// </summary>
     public static Matrix4x4 SceneView(Matrix4x4 roomView, Matrix4x4 sceneFromRoom)
     {
         Matrix4x4.Invert(sceneFromRoom, out var roomFromScene);
-        return roomFromScene * roomView;
+        return roomFromScene * roomView * Matrix4x4.CreateScale(XRWorldGrab.Scale(sceneFromRoom));
     }
 }

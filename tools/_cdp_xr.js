@@ -5,7 +5,8 @@
 //
 //   SPAWNSCENE_CHROME_EXTENSION=_scratch/iwe/ext SPAWNSCENE_CDP_PORT=9228 SPAWNSCENE_APP_PORT=8102 \
 //     node tools/_cdp_xr.js [immersive-vr|immersive-ar] [out.png] [runMs]
-// Optional: SPAWNSCENE_XR_STICKS (thumbstick pushes, see below), SPAWNSCENE_XR_EXTRA (more query string).
+// Optional: SPAWNSCENE_XR_STICKS (thumbstick pushes), SPAWNSCENE_XR_EVENTS (scripted emulator events), see below;
+// SPAWNSCENE_XR_EXTRA (more query string).
 const http = require('http');
 const fs = require('fs');
 const WebSocket = require('ws');
@@ -82,6 +83,13 @@ const get = u => new Promise((res, rej) =>
     });
     const analog = (objectName, axisIndex, value) => send('Runtime.evaluate', { expression:
       `window.dispatchEvent(new CustomEvent('pa-analog-value-change', { detail: ${JSON.stringify({ objectName, axisIndex, value })} }))` });
+    // SPAWNSCENE_XR_EVENTS='[{"at":3000,"type":"pa-button-state-change","detail":{...}}, ...]': any emulator event at a
+    // time after entering - controller poses (pa-controller-pose-change: objectName, position [x,y,z], quaternion
+    // [x,y,z,w]) and buttons (pa-button-state-change: objectName, buttonIndex, pressed, touched, value; the emulator's
+    // button 2 is the grip, xr-standard button 1).
+    for (const e of JSON.parse(process.env.SPAWNSCENE_XR_EVENTS || '[]'))
+      setTimeout(() => { console.log(`event ${e.type} ${JSON.stringify(e.detail)}`); send('Runtime.evaluate', { expression:
+        `window.dispatchEvent(new CustomEvent(${JSON.stringify(e.type)}, { detail: ${JSON.stringify(e.detail)} }))` }); }, e.at);
     for (const k of sticks) {
       setTimeout(() => { console.log(`stick ${k.objectName} axis ${k.axisIndex} = ${k.value}`); analog(k.objectName, k.axisIndex, k.value); }, k.at);
       setTimeout(() => analog(k.objectName, k.axisIndex, 0), k.at + k.dur);

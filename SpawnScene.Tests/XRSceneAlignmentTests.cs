@@ -53,4 +53,33 @@ public class XRSceneAlignmentTests
         Matrix4x4.Invert(sceneView, out var eyeToScene);
         Assert.That(Vector3.Distance(Vector3.Transform(Vector3.Zero, eyeToScene), new Vector3(5, 2, 3)), Is.LessThan(1e-4f));
     }
+
+    [Test]
+    public void SceneView_ScaledScene_IsRigid_AndProjectsTheSame()
+    {
+        // A scene grown 2x by the grips (0.5 scene units per room metre), an eye 3 cm right of a turned head.
+        var head = new Vector3(0.1f, 1.6f, -0.2f);
+        var m = XRSceneAlignment.SceneFromRoom(head, Quaternion.Identity, new Vector3(5, 2, 3), Vector3.UnitX)
+            * Matrix4x4.CreateScale(0.5f, 0.5f, 0.5f, new Vector3(5, 2, 3));
+        var eyeRot = Quaternion.CreateFromAxisAngle(Vector3.UnitY, 0.3f);
+        var eyePos = head + new Vector3(0.03f, 0, 0);
+        var roomView = Matrix4x4.CreateTranslation(-eyePos) * Matrix4x4.CreateFromQuaternion(Quaternion.Conjugate(eyeRot));
+        var v = XRSceneAlignment.SceneView(roomView, m);
+
+        // Rigid: orthonormal rows (what the splat shader's camera basis assumes).
+        var r0 = new Vector3(v.M11, v.M12, v.M13); var r1 = new Vector3(v.M21, v.M22, v.M23); var r2 = new Vector3(v.M31, v.M32, v.M33);
+        Assert.That(r0.Length(), Is.EqualTo(1f).Within(1e-4f));
+        Assert.That(r1.Length(), Is.EqualTo(1f).Within(1e-4f));
+        Assert.That(r2.Length(), Is.EqualTo(1f).Within(1e-4f));
+        // The eye sits where the room eye maps into the scene.
+        Matrix4x4.Invert(v, out var eyeToScene);
+        Assert.That(Vector3.Distance(Vector3.Transform(Vector3.Zero, eyeToScene), Vector3.Transform(eyePos, m)), Is.LessThan(1e-4f));
+        // Same direction to a scene point as the scaled (unnormalised) view: the same pixel.
+        Matrix4x4.Invert(m, out var roomFromScene);
+        var scaled = roomFromScene * roomView;
+        var p = new Vector3(6, 2.3f, 3.4f);
+        var a = Vector3.Transform(p, v); var b = Vector3.Transform(p, scaled);
+        Assert.That(a.X / a.Z, Is.EqualTo(b.X / b.Z).Within(1e-4f));
+        Assert.That(a.Y / a.Z, Is.EqualTo(b.Y / b.Z).Within(1e-4f));
+    }
 }

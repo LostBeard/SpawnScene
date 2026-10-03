@@ -17,6 +17,7 @@ public partial class Studio
             _xrService.OnSessionEnded += OnXRSessionEnded;
             _xrSceneFromRoom = null; // placed on the session's first frame (XRSceneAlignment)
             _xrLocomotion.Reset();
+            _xrWorldGrab.Reset();
             _xrStickLog = true;
             _xrLastTime = -1;
 
@@ -78,6 +79,8 @@ public partial class Studio
     System.Numerics.Matrix4x4? _xrSceneFromRoom;
     // Thumbstick move / snap-turn / rise, applied to _xrSceneFromRoom each frame.
     readonly XRLocomotion _xrLocomotion = new();
+    // Grips: one drags the scene, both scale and turn it (XRWorldGrab).
+    readonly XRWorldGrab _xrWorldGrab = new();
     double _xrLastTime = -1;
     System.Numerics.Vector3 _xrHeadInScene;
     bool _xrStickLog; // log the first controller input of a session (shows the sticks are read)
@@ -93,8 +96,17 @@ public partial class Studio
         // dt clamped: a stalled frame must not throw the viewer across the scene.
         float dt = _xrLastTime < 0 ? 0f : (float)Math.Clamp((frameData.Time - _xrLastTime) / 1000.0, 0.0, 0.1);
         _xrLastTime = frameData.Time;
-        _xrSceneFromRoom = _xrLocomotion.Step(_xrSceneFromRoom.Value, frameData.HeadPosition, frameData.HeadOrientation,
-            frameData.LeftStick, frameData.RightStick, dt, _cameraController?.MoveSpeed ?? 1f);
+        bool wasGrabbing = _xrWorldGrab.Active;
+        _xrSceneFromRoom = _xrWorldGrab.Step(_xrSceneFromRoom.Value, frameData.LeftGrip, frameData.LeftGripPosition,
+            frameData.RightGrip, frameData.RightGripPosition);
+        if (wasGrabbing && !_xrWorldGrab.Active)
+            Console.WriteLine($"[XR] world grab released: scale {XRWorldGrab.Scale(_xrSceneFromRoom.Value):G3} scene units per metre");
+        // Sticks while no grip holds the scene (a grab restarts from its own start transform). Speed follows the
+        // scale, so a scene grown by the grips is not crossed faster in room terms.
+        if (!_xrWorldGrab.Active)
+            _xrSceneFromRoom = _xrLocomotion.Step(_xrSceneFromRoom.Value, frameData.HeadPosition, frameData.HeadOrientation,
+                frameData.LeftStick, frameData.RightStick, dt,
+                (_cameraController?.MoveSpeed ?? 1f) * XRWorldGrab.Scale(_xrSceneFromRoom.Value));
         if (_xrStickLog && (frameData.LeftStick != default || frameData.RightStick != default))
         {
             _xrStickLog = false;

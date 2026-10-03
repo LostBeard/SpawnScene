@@ -186,6 +186,9 @@ public class XRService : IDisposable
         _xrRafCallback?.Dispose();
         _xrRafCallback = null;
 
+        if (_hitTestSource != null) { try { _hitTestSource.Cancel(); } catch { } _hitTestSource.Dispose(); _hitTestSource = null; }
+        _hitTestRequested = false;
+
         // WebGPU XR resources
         _projectionLayer?.Dispose();
         _projectionLayer = null;
@@ -246,6 +249,7 @@ public class XRService : IDisposable
                 Time = time,
             };
             ReadControllers(frame, frameData);
+            ReadHitTest(frame, frameData);
 
             if (IsWebGLFallback)
             {
@@ -321,8 +325,35 @@ public class XRService : IDisposable
             if (left) frameData.LeftStick = stick; else frameData.RightStick = stick;
 
             var buttons = gamepad.Buttons;
+            bool trigger = buttons.Length > 0 && buttons[0].Pressed;
             bool squeeze = buttons.Length > 1 && buttons[1].Pressed;
             foreach (var b in buttons) b.Dispose();
+            if (left) frameData.LeftTrigger = trigger; else frameData.RightTrigger = trigger;
+
+            // AR: one hit-test source along the right controller's pointing ray, requested once per session, and the
+            // ray's pose each frame (the emulator only refreshes a ray space's matrix when its pose is read; without
+            // this its hit tests cast from the floor origin and found nothing).
+            if (!left && SessionMode == "immersive-ar")
+            {
+                using var raySpace = source.TargetRaySpace;
+                if (raySpace != null)
+                {
+                    using var rayPose = frame.GetPose(raySpace, _refSpace!);
+                    if (rayPose != null)
+                    {
+                        using var rt = rayPose.Transform;
+                        var rp = rt.Position;
+                        frameData.RightRayOrigin = new Vector3((float)rp.X, (float)rp.Y, (float)rp.Z);
+                    }
+                }
+            }
+            if (!left && !_hitTestRequested && SessionMode == "immersive-ar")
+            {
+                _hitTestRequested = true;
+                var ray = source.TargetRaySpace;
+                if (ray != null) _ = RequestHitTestSourceAsync(ray);
+            }
+
             if (!squeeze) continue;
             using var gripSpace = source.GripSpace;
             if (gripSpace == null) continue;
@@ -334,6 +365,39 @@ public class XRService : IDisposable
             if (left) { frameData.LeftGrip = true; frameData.LeftGripPosition = gripPosition; }
             else { frameData.RightGrip = true; frameData.RightGripPosition = gripPosition; }
         }
+    }
+
+    private XRHitTestSource? _hitTestSource;
+    private bool _hitTestRequested;
+
+    private async Task RequestHitTestSourceAsync(XRSpace ray)
+    {
+        try
+        {
+            var source = await _session!.RequestHitTestSource(new XRHitTestOptionsInit { Space = ray });
+            if (_session == null) { try { source.Cancel(); } catch { } source.Dispose(); return; }
+            _hitTestSource = source;
+            Console.WriteLine("[XRService] AR hit-test source ready (right controller ray)");
+        }
+        catch (Exception ex) { Console.WriteLine($"[XRService] AR hit-test unavailable: {ex.Message}"); }
+        finally { ray.Dispose(); }
+    }
+
+    /// <summary>Where the hit-test ray meets a real surface this frame (room space), if it does.</summary>
+    private void ReadHitTest(XRFrame frame, XRFrameData frameData)
+    {
+        if (_hitTestSource == null) return;
+        var results = frame.GetHitTestResults(_hitTestSource);
+        try
+        {
+            if (results.Length == 0) return;
+            using var pose = results[0].GetPose(_refSpace!);
+            if (pose == null) return;
+            using var t = pose.Transform;
+            var p = t.Position;
+            frameData.HitPosition = new Vector3((float)p.X, (float)p.Y, (float)p.Z);
+        }
+        finally { foreach (var r in results) r.Dispose(); }
     }
 
     private static Matrix4x4 JsFloatArrayToMatrix(float[] m) => XRSceneAlignment.FromWebXRMatrix(m);
@@ -379,6 +443,13 @@ public class XRFrameData
     public bool RightGrip { get; set; }
     public Vector3 LeftGripPosition { get; set; }
     public Vector3 RightGripPosition { get; set; }
+    /// <summary>Triggers (select) held.</summary>
+    public bool LeftTrigger { get; set; }
+    public bool RightTrigger { get; set; }
+    /// <summary>AR: where the right controller's ray meets a real surface (room space), if it does.</summary>
+    public Vector3? HitPosition { get; set; }
+    /// <summary>AR: where the right controller's pointing ray starts (room space).</summary>
+    public Vector3? RightRayOrigin { get; set; }
 }
 
 /// <summary>Per-eye view data for XR rendering.</summary>

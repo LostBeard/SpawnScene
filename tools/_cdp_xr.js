@@ -62,8 +62,14 @@ const get = u => new Promise((res, rej) =>
     const init = `setTimeout(() => {
       window.dispatchEvent(new CustomEvent('pa-device-init', { detail: { deviceDefinition: ${JSON.stringify(quest)}, stereoEffect: true } }));
       window.dispatchEvent(new CustomEvent('pa-room-dimension-change', { detail: { dimension: { x: 6, y: 3, z: 6 } } }));
+      // Controllers, not hands: otherwise the session's input sources are hands, which the controller pose events
+      // (SPAWNSCENE_XR_EVENTS) do not move - an AR hit-test along the right controller found nothing.
+      window.dispatchEvent(new CustomEvent('pa-input-mode-change', { detail: { inputMode: 'controllers' } }));
     }, 0);`;
-    await send('Page.addScriptToEvaluateOnNewDocument', { source: fs.readFileSync(`${iwe}/dist/webxr-polyfill.js`, 'utf8') + ';' + init });
+    // The polyfill instance is local to its bundle; expose it as window.__iwe for SPAWNSCENE_XR_PROBES.
+    const polyfillSrc = fs.readFileSync(`${iwe}/dist/webxr-polyfill.js`, 'utf8')
+      .replace('const polyfill = new CustomWebXRPolyfill();', 'const polyfill = new CustomWebXRPolyfill(); window.__iwe = polyfill;');
+    await send('Page.addScriptToEvaluateOnNewDocument', { source: polyfillSrc + ';' + init });
     await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
     await send('Page.navigate', { url: `${APP}/studio?autotest=generate-room&render=stochastic&xrhook=1${process.env.SPAWNSCENE_XR_EXTRA || ''}` });
     const deadline = Date.now() + 10 * 60 * 1000;
@@ -90,6 +96,15 @@ const get = u => new Promise((res, rej) =>
     for (const e of JSON.parse(process.env.SPAWNSCENE_XR_EVENTS || '[]'))
       setTimeout(() => { console.log(`event ${e.type} ${JSON.stringify(e.detail)}`); send('Runtime.evaluate', { expression:
         `window.dispatchEvent(new CustomEvent(${JSON.stringify(e.type)}, { detail: ${JSON.stringify(e.detail)} }))` }); }, e.at);
+    // SPAWNSCENE_XR_PROBES='[{"at":4000,"expr":"..."}]': evaluate page expressions (e.g. the emulator's state through
+    // window.__iwe) at times after entering and print the values.
+    for (const pr of JSON.parse(process.env.SPAWNSCENE_XR_PROBES || '[]'))
+      setTimeout(async () => {
+        const r = await send('Runtime.evaluate', { expression: pr.expr, returnByValue: true });
+        const v = r.result && (r.result.exceptionDetails ? 'THREW ' + JSON.stringify(r.result.exceptionDetails.exception && r.result.exceptionDetails.exception.description)
+          : JSON.stringify(r.result.result && r.result.result.value));
+        console.log(`probe @${pr.at}: ${v}`);
+      }, pr.at);
     for (const k of sticks) {
       setTimeout(() => { console.log(`stick ${k.objectName} axis ${k.axisIndex} = ${k.value}`); analog(k.objectName, k.axisIndex, k.value); }, k.at);
       setTimeout(() => analog(k.objectName, k.axisIndex, 0), k.at + k.dur);

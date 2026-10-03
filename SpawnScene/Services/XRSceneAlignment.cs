@@ -40,6 +40,17 @@ public static class XRSceneAlignment
             * RoomToSceneYaw(headOrientation, cameraForward) * Matrix4x4.CreateTranslation(anchorScene);
     }
 
+    /// <summary>
+    /// Slide the room-to-scene transform so the scene point <paramref name="anchorScene"/> (the miniature's bottom
+    /// centre) sits at <paramref name="roomPoint"/> (an AR hit on a real surface); scale and turn are kept.
+    /// </summary>
+    public static Matrix4x4 MoveAnchorTo(Matrix4x4 sceneFromRoom, Vector3 anchorScene, Vector3 roomPoint)
+    {
+        Matrix4x4.Invert(sceneFromRoom, out var roomFromScene);
+        var anchorRoom = Vector3.Transform(anchorScene, roomFromScene);
+        return Matrix4x4.CreateTranslation(anchorRoom - roomPoint) * sceneFromRoom;
+    }
+
     /// <summary>The turn about Y that carries the head's horizontal facing (room) onto the camera's (scene).</summary>
     static Matrix4x4 RoomToSceneYaw(Quaternion headOrientation, Vector3 cameraForward)
     {

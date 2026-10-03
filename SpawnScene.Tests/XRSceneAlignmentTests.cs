@@ -50,6 +50,19 @@ public class XRSceneAlignmentTests
     }
 
     [Test]
+    public void MoveAnchorTo_PutsTheAnchorOnTheHit_KeepingScaleAndTurn()
+    {
+        var box = new SplatBounds.Aabb(-2, -1, 3, 4, 1.5f, 6);
+        var m = XRSceneAlignment.SceneFromRoomMiniature(new Vector3(0, 1.6f, 0), Yaw(40f), Vector3.UnitX, box);
+        var anchor = new Vector3(box.CentreX, box.MinY, box.CentreZ);
+        var hit = new Vector3(0.7f, 0.74f, -1.3f);
+        var moved = XRSceneAlignment.MoveAnchorTo(m, anchor, hit);
+        Assert.That(Vector3.Distance(Vector3.Transform(hit, moved), anchor), Is.LessThan(1e-4f), "anchor on the hit");
+        Assert.That(XRWorldGrab.Scale(moved), Is.EqualTo(XRWorldGrab.Scale(m)).Within(1e-5f), "scale kept");
+        Assert.That(Vector3.Distance(Vector3.TransformNormal(Vector3.UnitX, moved), Vector3.TransformNormal(Vector3.UnitX, m)), Is.LessThan(1e-5f), "turn kept");
+    }
+
+    [Test]
     public void WebXRProjection_ProjectsLikeTheGLMatrix()
     {
         // A WebXR / GL perspective (column-major array, column vectors): fov 90 deg, near 0.1, far 100.

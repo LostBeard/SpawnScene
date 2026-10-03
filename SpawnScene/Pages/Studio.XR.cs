@@ -19,6 +19,10 @@ public partial class Studio
             _xrBoundsReady = false;  // set once the AR bounds are measured (immediately for VR, below)
             _xrLocomotion.Reset();
             _xrWorldGrab.Reset();
+            _xrPlacing = false;
+            _xrTriggerWasDown = false;
+            _xrHitLogged = false;
+            _xrLastHit = null;
             _xrStickLog = true;
             _xrLastTime = -1;
 
@@ -104,6 +108,11 @@ public partial class Studio
     System.Numerics.Matrix4x4? _xrSceneFromRoom;
     bool _xrPlaceMiniature, _xrBoundsReady = true;
     bool _xrForceAlpha; // &xralpha=1 (diagnostics)
+    // AR placement: while placing, the miniature's bottom centre (_xrAnchorScene) follows where the right controller
+    // points on a real surface (hit-test); a trigger press drops it there, another picks it up again.
+    bool _xrPlacing, _xrTriggerWasDown, _xrHitLogged;
+    System.Numerics.Vector3? _xrLastHit;
+    System.Numerics.Vector3 _xrAnchorScene;
     SplatBounds.Aabb? _xrMiniatureBox;
     // Thumbstick move / snap-turn / rise, applied to _xrSceneFromRoom each frame.
     readonly XRLocomotion _xrLocomotion = new();
@@ -122,6 +131,8 @@ public partial class Studio
             if (_xrPlaceMiniature && _xrMiniatureBox is { } box)
             {
                 _xrSceneFromRoom = XRSceneAlignment.SceneFromRoomMiniature(frameData.HeadPosition, frameData.HeadOrientation, cam.Forward, box);
+                _xrAnchorScene = new System.Numerics.Vector3(box.CentreX, box.MinY, box.CentreZ);
+                _xrPlacing = true;
                 Console.WriteLine($"[XR] scene placed as a miniature: {XRWorldGrab.Scale(_xrSceneFromRoom.Value):G3} scene units per metre");
             }
             else
@@ -138,6 +149,21 @@ public partial class Studio
             frameData.RightGrip, frameData.RightGripPosition);
         if (wasGrabbing && !_xrWorldGrab.Active)
             Console.WriteLine($"[XR] world grab released: scale {XRWorldGrab.Scale(_xrSceneFromRoom.Value):G3} scene units per metre");
+        bool trigger = frameData.LeftTrigger || frameData.RightTrigger;
+        if (trigger && !_xrTriggerWasDown && _xrPlaceMiniature)
+        {
+            _xrPlacing = !_xrPlacing;
+            Console.WriteLine(_xrPlacing ? "[XR] AR placement: picked up (follows the controller ray)"
+                : $"[XR] AR placement: dropped{(_xrLastHit is { } at ? $" at {at:F2}" : " (no surface hit yet)")}");
+        }
+        _xrTriggerWasDown = trigger;
+        if (frameData.HitPosition is { } hit)
+        {
+            _xrLastHit = hit;
+            if (!_xrHitLogged) { _xrHitLogged = true; Console.WriteLine($"[XR] AR hit-test: ray from {frameData.RightRayOrigin:F2} meets a surface at {hit:F2}"); }
+            if (_xrPlacing && !_xrWorldGrab.Active)
+                _xrSceneFromRoom = XRSceneAlignment.MoveAnchorTo(_xrSceneFromRoom.Value, _xrAnchorScene, hit);
+        }
         // Sticks while no grip holds the scene (a grab restarts from its own start transform). Speed follows the
         // scale, so a scene grown by the grips is not crossed faster in room terms.
         if (!_xrWorldGrab.Active)

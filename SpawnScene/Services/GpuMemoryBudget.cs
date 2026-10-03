@@ -12,7 +12,9 @@ namespace SpawnScene.Services;
 /// MEASURED 2026-10-02 (Bathroom b112, live storage at every densify): ~250 MB fixed, then ~1,350 bytes per splat
 /// (253 MB at 11,745 splats -> 817 MB at 449,523). Of that, 352 B was key buffers sized at a floor of 8 keys a splat;
 /// with the floor gone and the buffers growing on demand (b127, TruckFull 1.58M splats) keys took 133 MB instead of
-/// 532, and the whole is ~1,050 B: SH bank 720, other per-splat 120, Adam 112, keys ~90.
+/// 532, and the whole was ~1,050 B: SH bank 720, other per-splat 120, Adam 112, keys ~90. With the SH Adam moments in
+/// bfloat16 (b128) the SH bank is 543 and the whole ~870 (TruckFull 1.6M splats: keys 201, per-splat 183, Adam 171,
+/// SH 828 MB); 900 keeps headroom for key demand, which varies by scene and view.
 /// </remarks>
 public static class GpuMemoryBudget
 {
@@ -29,8 +31,8 @@ public static class GpuMemoryBudget
     /// </summary>
     public const long WidestSplatRowBytes = 45 * sizeof(float);
 
-    /// <summary>Training GPU memory per splat beyond the fixed part (measured: b112, then b127 with keys on demand).</summary>
-    public const long BytesPerSplat = 1050;
+    /// <summary>Training GPU memory per splat beyond the fixed part (measured: b112; b127 keys on demand; b128 bf16 SH moments).</summary>
+    public const long BytesPerSplat = 900;
 
     /// <summary>Training GPU memory that does not scale with splats or photos (frame buffers, sort scratch, pipelines).</summary>
     public const long FixedBytes = 256L * 1024 * 1024;

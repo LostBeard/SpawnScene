@@ -11,11 +11,12 @@ public class GpuMemoryBudgetTests
     [Test]
     public void Auto_IsFourGigabytes_QuarterForPhotos_RestForSplats()
     {
-        var (targets, splats) = GpuMemoryBudget.Derive(0, 2047 * MiB, 3_000_000);
+        var (targets, splats) = GpuMemoryBudget.Derive(0, 2047 * MiB, int.MaxValue);
         Assert.That(targets, Is.EqualTo(1024 * MiB), "a quarter of 4 GB, under the 2047 MiB binding limit");
         long expect = (4096 - 1024 - 256) * MiB / GpuMemoryBudget.BytesPerSplat;
         Assert.That(splats, Is.EqualTo((int)expect), "the rest at the measured bytes per splat");
-        Assert.That(splats, Is.LessThan(3_000_000), "4 GB cannot hold the preset's 3M");
+        // At ~1,350 B/splat Auto held 2.2M; keys on demand and bf16 SH moments (b127/b128) made it ~3.3M.
+        Assert.That(splats, Is.GreaterThan(3_000_000));
     }
 
     [Test]
@@ -29,10 +30,10 @@ public class GpuMemoryBudgetTests
     public void DeviceMax_IsTheBudgetUpToTheBindingLimit()
     {
         const int deviceMax = int.MaxValue;
-        // 12 GB (an RTX 4070): the budget fits ~10M splats, under the binding's 11.9M.
+        // 12 GB (an RTX 4070): the budget fits ~11.6M splats, just under the binding's 11.9M.
         long budget12 = (12L * 1024 - 2047 - 256) * MiB / GpuMemoryBudget.BytesPerSplat;
         Assert.That(GpuMemoryBudget.Derive(12, 2047 * MiB, deviceMax).MaxSplats, Is.EqualTo((int)budget12));
-        Assert.That(budget12, Is.GreaterThan(9_500_000).And.LessThan(11_924_639));
+        Assert.That(budget12, Is.GreaterThan(11_000_000).And.LessThan(11_924_639));
         // 48 GB: the budget would fit ~36M, but one 2047 MiB binding of 45-float SH rows holds 11.9M.
         long binding = 2047 * MiB / GpuMemoryBudget.WidestSplatRowBytes;
         Assert.That(GpuMemoryBudget.Derive(48, 2047 * MiB, deviceMax).MaxSplats, Is.EqualTo((int)binding));

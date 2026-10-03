@@ -57,7 +57,13 @@ would generate over 14,000,000 splats and render at 60fps. VERY large scenes are
   overflows and re-emit it (trainer gate "key growth" stage), so capacity follows measured demand (~2-3 keys a splat
   late in training). Keys 532 -> 133 MB, live 2,779 -> 2,378 MB, held-out 23.25 -> 23.23 dB (noise), one growth in
   the run. ~1,050 B/splat now; a 12 GB setting trains ~10M splats.
-- Of the ~1,050 B/splat, the degree-3 SH bank (value, gradient, two Adam moments, 45 floats each) is 720.
+- SH Adam moments in bfloat16 (b128): stochastic rounding on store (v moves ~0.1% a step, under bf16's resolution, so
+  round-to-nearest would freeze it); f32 exponent range so tiny second moments do not underflow as IEEE half would.
+  SH bank 720 -> 543 B/splat, live 2,378 -> 2,193 MB, held-out 23.23 -> 23.20 dB (run-to-run noise is ~0.05: b108
+  23.20, b126 23.25 on the same trainer). Training is now ~870 B/splat (BytesPerSplat 900); a 12 GB setting trains
+  ~11.6M splats, just under the 11.9M one-binding ceiling.
+- Remaining SH bank: value 180 + gradient 180 (f32, atomically summed) + moments 180. Past 11.9M splats the SH banks
+  must split across bindings; that is the next wall for scenes beyond a 12 GB card.
   That is the next lever for big scenes on a given GPU (fp16 moments / fp16 SH storage), and past 11.9M the SH banks
   must split across bindings. Rendering is far cheaper per splat (14M at 60 fps).
 

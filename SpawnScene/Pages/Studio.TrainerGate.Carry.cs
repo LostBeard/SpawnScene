@@ -63,8 +63,9 @@ public partial class Studio
 
         bool ok = true;
         ok &= Same("SH rest", gotSh, SplatDensityControl.RemapFloatRows(sh, features, Sh), Sh);
-        ok &= Same("SH Adam m", gotShAdam.M, SplatDensityControl.RemapFloatRows(shM, survivors, Sh), Sh);
-        ok &= Same("SH Adam v", gotShAdam.V, SplatDensityControl.RemapFloatRows(shV, survivors, Sh), Sh);
+        // SH moments are stored as bfloat16 (Bf16): the carry must move those bits exactly, so expect the rounded values.
+        ok &= Same("SH Adam m", gotShAdam.M, SplatDensityControl.RemapFloatRows(shM, survivors, Sh).Select(Bf16.Round).ToArray(), Sh);
+        ok &= Same("SH Adam v", gotShAdam.V, SplatDensityControl.RemapFloatRows(shV, survivors, Sh).Select(Bf16.Round).ToArray(), Sh);
         ok &= Same("Adam m", gotAdam.M, wantAdamM, Adam);
         ok &= Same("Adam v", gotAdam.V, wantAdamV, Adam);
         if (gotAdam.StepCount != 17)

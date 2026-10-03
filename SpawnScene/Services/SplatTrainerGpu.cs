@@ -103,8 +103,10 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
     MemoryBuffer1D<float, Stride1D.Dense>? _shRest;
     MemoryBuffer1D<int, Stride1D.Dense>? _gradShRest;
-    MemoryBuffer1D<float, Stride1D.Dense>? _adamShM;
-    MemoryBuffer1D<float, Stride1D.Dense>? _adamShV;
+    // SH Adam moments in bfloat16, two to a word (Bf16, SplatTrainerShaders.AdamShRest): 23 words a splat instead of 45
+    // floats each. They were 360 of the ~1,050 training bytes a splat.
+    MemoryBuffer1D<uint, Stride1D.Dense>? _adamShM;
+    MemoryBuffer1D<uint, Stride1D.Dense>? _adamShV;
     // Sum of per-step losses since the last read (float, LossReduce) and the per-workgroup partial sums of one step.
     MemoryBuffer1D<float, Stride1D.Dense>? _lossSum;
     MemoryBuffer1D<float, Stride1D.Dense>? _lossPartial;
@@ -118,6 +120,9 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUBuffer? _geomCfgBuf;
     GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
     int _adamStepCount;
+
+    /// <summary>32-bit words of one splat's SH Adam moment row (45 bfloat16 values, two a word).</summary>
+    public static readonly int ShMomentWords = Bf16.WordsPerRow(SphericalHarmonics.RestFloatsPerSplat);
 
     /// <summary>Grow the key buffers when a frame needs more keys than they hold (see RenderForwardAsync). On by default.</summary>
     public bool GrowKeysOnOverflow { get; set; } = true;
@@ -631,8 +636,8 @@ public sealed class SplatTrainerGpu : IDisposable
             _adamM = accel.Allocate1D<float>((long)splatCount * AdamSlots);
             _adamV = accel.Allocate1D<float>((long)splatCount * AdamSlots);
             _shRest = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
-            _adamShM = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
-            _adamShV = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+            _adamShM = accel.Allocate1D<uint>((long)splatCount * ShMomentWords);
+            _adamShV = accel.Allocate1D<uint>((long)splatCount * ShMomentWords);
             _shRest.MemSetToZero();
             _adamShM.MemSetToZero();
             _adamShV.MemSetToZero();
@@ -991,9 +996,9 @@ public sealed class SplatTrainerGpu : IDisposable
             await Stage("carried Adam v");
             _shRest = await CarryBankAsync(_shRest, featSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
             await Stage("carried SH rest");
-            _adamShM = await CarryBankAsync(_adamShM, adamSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
+            _adamShM = await CarryBankAsync(_adamShM, adamSrc, priorCount, newCount, ShMomentWords);
             await Stage("carried SH Adam m");
-            _adamShV = await CarryBankAsync(_adamShV, adamSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
+            _adamShV = await CarryBankAsync(_adamShV, adamSrc, priorCount, newCount, ShMomentWords);
             await Stage("carried SH Adam v");
         }
 
@@ -1014,15 +1019,15 @@ public sealed class SplatTrainerGpu : IDisposable
     /// One per-splat bank (Adam or SH shaped): allocate at the new count, gather the prior rows into it on the GPU,
     /// fence, dispose the prior. Peak is prior + next for THIS bank only.
     /// </summary>
-    async Task<MemoryBuffer1D<float, Stride1D.Dense>?> CarryBankAsync(
-        MemoryBuffer1D<float, Stride1D.Dense>? prior,
+    async Task<MemoryBuffer1D<T, Stride1D.Dense>?> CarryBankAsync<T>(
+        MemoryBuffer1D<T, Stride1D.Dense>? prior,
         MemoryBuffer1D<int, Stride1D.Dense> sources, int priorCount, int newCount,
-        int stride, int zeroSlot = -1)
+        int stride, int zeroSlot = -1) where T : unmanaged
     {
         // Step markers BEFORE each operation (no sync): three TruckFull no-COLMAP runs lost the device inside the
         // first bank's carry and the post-stage log could not say which operation. Printed only when enabled.
         if (TraceCarrySteps) Console.WriteLine($"[Trainer]   carry bank x{stride}: allocate {(long)newCount * stride * 4 / 1048576.0:F0} MB ({GpuService.MemoryReport(4)})");
-        var next = _gpu.WebGPUAccelerator.Allocate1D<float>((long)newCount * stride);
+        var next = _gpu.WebGPUAccelerator.Allocate1D<T>((long)newCount * stride);
         if (prior == null)
         {
             // No prior bank (Resize never ran) - zeros, as Resize itself would hand out.
@@ -1034,14 +1039,14 @@ public sealed class SplatTrainerGpu : IDisposable
         return next;
     }
 
-    async Task RemapGpuFencedAsync(
-        MemoryBuffer1D<float, Stride1D.Dense>? prior,
-        MemoryBuffer1D<float, Stride1D.Dense>? next,
+    async Task RemapGpuFencedAsync<T>(
+        MemoryBuffer1D<T, Stride1D.Dense>? prior,
+        MemoryBuffer1D<T, Stride1D.Dense>? next,
         MemoryBuffer1D<int, Stride1D.Dense> sources,
         int priorCount,
         int newCount,
         int stride,
-        int zeroSlot = -1)
+        int zeroSlot = -1) where T : unmanaged
     {
         if (prior == null || next == null || _remapFloatRows == null) return;
         if (TraceCarrySteps) Console.WriteLine("[Trainer]   carry bank: zero");
@@ -1061,7 +1066,7 @@ public sealed class SplatTrainerGpu : IDisposable
         });
         if (TraceCarrySteps) Console.WriteLine("[Trainer]   carry bank: fence");
         // CPU transfer: 4-byte fence — drains WebGPU queue after Dispatch Submit.
-        _ = await next.CopyToHostAsync<float>(0, 1);
+        _ = await next.CopyToHostAsync<T>(0, 1);
     }
 
     /// <summary>Adam moments and the global step count, as one movable blob.</summary>
@@ -1649,10 +1654,12 @@ public sealed class SplatTrainerGpu : IDisposable
         if (_adamShM == null || _adamShV == null)
             return new ShAdamState(System.Array.Empty<float>(), System.Array.Empty<float>());
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
-        long len = (long)splatCount * SphericalHarmonics.RestFloatsPerSplat;
+        // CPU transfer: gate / densify restore only. Stored as bfloat16 pairs; handed out as floats.
+        long len = (long)splatCount * ShMomentWords;
+        int floats = SphericalHarmonics.RestFloatsPerSplat;
         return new ShAdamState(
-            await _adamShM.CopyToHostAsync<float>(0, len),
-            await _adamShV.CopyToHostAsync<float>(0, len));
+            Bf16.Unpack(await _adamShM.CopyToHostAsync<uint>(0, len), floats),
+            Bf16.Unpack(await _adamShV.CopyToHostAsync<uint>(0, len), floats));
     }
 
     public void RestoreShRest(ReadOnlySpan<float> prior, int[] featureSources)
@@ -1665,8 +1672,8 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         if (_adamShM == null || _adamShV == null) return;
         int stride = SphericalHarmonics.RestFloatsPerSplat;
-        _adamShM.CopyFromCPU(SplatDensityControl.RemapFloatRows(prior.M, adamSurvivors, stride));
-        _adamShV.CopyFromCPU(SplatDensityControl.RemapFloatRows(prior.V, adamSurvivors, stride));
+        _adamShM.CopyFromCPU(Bf16.Pack(SplatDensityControl.RemapFloatRows(prior.M, adamSurvivors, stride), stride));
+        _adamShV.CopyFromCPU(Bf16.Pack(SplatDensityControl.RemapFloatRows(prior.V, adamSurvivors, stride), stride));
     }
 
     GPUBindGroupEntry ShRestBindEntry(int binding) =>

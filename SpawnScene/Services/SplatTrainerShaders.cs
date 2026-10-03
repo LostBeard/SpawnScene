@@ -2171,11 +2171,12 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
     public const string AdamShRest = @"
 @group(0) @binding(0) var<storage, read_write> sh_rest    : array<f32>;
 @group(0) @binding(1) var<storage, read>       grad_sh    : array<f32>;
-@group(0) @binding(2) var<storage, read_write> adam_m     : array<f32>;
-@group(0) @binding(3) var<storage, read_write> adam_v     : array<f32>;
+@group(0) @binding(2) var<storage, read_write> adam_m     : array<u32>; // bfloat16 pairs, low half first
+@group(0) @binding(3) var<storage, read_write> adam_v     : array<u32>;
 @group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=lr z=step w=count
 
 const SH_REST_FLOATS : u32 = 45u;
+const SH_MOMENT_WORDS : u32 = 23u;
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
 const EPS : f32 = 1e-15;
@@ -2188,6 +2189,28 @@ fn adam(value : f32, grad : f32, lr : f32, step : f32, m : ptr<function, f32>, v
     return value - lr * m_hat / (sqrt(v_hat) + EPS);
 }
 
+fn hash_u32(x : u32) -> u32 {
+    var h = x;
+    h = h ^ (h >> 16u);
+    h = h * 0x7feb352du;
+    h = h ^ (h >> 15u);
+    h = h * 0x846ca68bu;
+    h = h ^ (h >> 16u);
+    return h;
+}
+
+fn from_bf16(h : u32) -> f32 { return bitcast<f32>(h << 16u); }
+
+// Stochastic rounding to bfloat16: add uniform noise below the kept 16 bits, then truncate, so the magnitude rounds up
+// with probability equal to the dropped fraction and the stored value is right ON AVERAGE. Round-to-nearest would
+// freeze the second moment: v changes ~0.1% a step (BETA2 = 0.999), under bf16's ~0.4% resolution, so every update
+// would round back to the old value. A value that came from bf16 has zero low bits and is stored exactly.
+fn to_bf16_sr(x : f32, noise : u32) -> u32 {
+    let b = bitcast<u32>(x);
+    if ((b & 0x7f800000u) == 0x7f800000u) { return b >> 16u; } // inf / nan: no noise
+    return (b + (noise & 0xffffu)) >> 16u;
+}
+
 @compute @workgroup_size(64)
 fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
     let i = gid.x;
@@ -2195,14 +2218,27 @@ fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
     let step = cfg.z;
     let lr = cfg.x;
     let base = i * SH_REST_FLOATS;
-    for (var j = 0u; j < SH_REST_FLOATS; j = j + 1u) {
-        let g = grad_sh[base + j];
-        if (g == 0.0) { continue; }
-        var m = adam_m[base + j];
-        var v = adam_v[base + j];
-        sh_rest[base + j] = adam(sh_rest[base + j], g, lr, step, &m, &v);
-        adam_m[base + j] = m;
-        adam_v[base + j] = v;
+    let wbase = i * SH_MOMENT_WORDS;
+    let seed = hash_u32((i * 0x9e3779b9u) ^ (u32(step) * 0x85ebca6bu));
+    for (var w = 0u; w < SH_MOMENT_WORDS; w = w + 1u) {
+        let j0 = 2u * w;
+        let j1 = j0 + 1u;
+        let g0 = grad_sh[base + j0];
+        var g1 = 0.0;
+        if (j1 < SH_REST_FLOATS) { g1 = grad_sh[base + j1]; }
+        if (g0 == 0.0 && g1 == 0.0) { continue; }
+        let mw = adam_m[wbase + w];
+        let vw = adam_v[wbase + w];
+        var m0 = from_bf16(mw & 0xffffu);
+        var m1 = from_bf16(mw >> 16u);
+        var v0 = from_bf16(vw & 0xffffu);
+        var v1 = from_bf16(vw >> 16u);
+        if (g0 != 0.0) { sh_rest[base + j0] = adam(sh_rest[base + j0], g0, lr, step, &m0, &v0); }
+        if (g1 != 0.0) { sh_rest[base + j1] = adam(sh_rest[base + j1], g1, lr, step, &m1, &v1); }
+        let r = hash_u32(seed ^ (w * 0x27d4eb2du));
+        let r2 = hash_u32(r);
+        adam_m[wbase + w] = to_bf16_sr(m0, r) | (to_bf16_sr(m1, r >> 16u) << 16u);
+        adam_v[wbase + w] = to_bf16_sr(v0, r2) | (to_bf16_sr(v1, r2 >> 16u) << 16u);
     }
 }
 ";
@@ -2213,8 +2249,10 @@ fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
     /// whole moment bank (MEASURED OOM at 831k splats on WASM via ReadAdamStateAsync).
     /// </summary>
     public const string RemapFloatRows = @"
-@group(0) @binding(0) var<storage, read>       prior   : array<f32>;
-@group(0) @binding(1) var<storage, read_write> next    : array<f32>;
+// u32, not f32: a bit copy. Packed bfloat16 pairs (the SH moments) read as f32 can be subnormal, and a GPU may flush
+// those to zero on load or store; the f32 banks copy bit-exactly too.
+@group(0) @binding(0) var<storage, read>       prior   : array<u32>;
+@group(0) @binding(1) var<storage, read_write> next    : array<u32>;
 @group(0) @binding(2) var<storage, read>       sources : array<i32>;
 @group(0) @binding(3) var<uniform>             cfg     : vec4<u32>; // x=newCount y=stride z=oldCount w=zeroSlotOr!0
 
@@ -2233,7 +2271,7 @@ fn remap_float_rows(@builtin(global_invocation_id) gid : vec3<u32>) {
     }
     // Optional: zero one slot after copy (opacity-reset kills opacity momentum).
     if (cfg.w < stride) {
-        next[dst + cfg.w] = 0.0;
+        next[dst + cfg.w] = 0u; // the bits of 0.0
     }
 }
 ";

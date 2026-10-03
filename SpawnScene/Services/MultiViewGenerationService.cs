@@ -552,10 +552,18 @@ public class MultiViewGenerationService
             if (pairMatches != null && CheckSymmetricPairs && pending.Count > 0)
             {
                 var tt = System.Diagnostics.Stopwatch.StartNew();
+                long liveBefore = SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes;
                 foreach (int c in pending)
                     if (await _importService.ExtractTurned180Async(images[posed[c]]) is { } t) turnedOf[c] = t;
                 _importService.ReleaseLearnedExtractors();
-                Console.WriteLine($"[BA] symmetric-pair check: turned features for {turnedOf.Count} unplaced cameras in {tt.Elapsed.TotalSeconds:F1}s");
+                // After the release only the turned descriptors should remain (K x 128 floats each); anything more is the
+                // extractor session outliving its Dispose (SpawnDev.ILGPU.ML before 5.3.2-local.7: ~10 MB a cycle).
+                long held = turnedOf.Values.Sum(t => (long)(t.Holder.LearnedDescriptors?.Descriptors.LengthInBytes ?? 0)
+                    + (t.Holder.LearnedDescriptors?.Normalized.LengthInBytes ?? 0));
+                long liveAfter = SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes;
+                Console.WriteLine($"[BA] symmetric-pair check: turned features for {turnedOf.Count} unplaced cameras in {tt.Elapsed.TotalSeconds:F1}s; " +
+                    $"live storage {liveBefore >> 20} -> {liveAfter >> 20} MB after the extractor's release ({held >> 20} MB of it the turned descriptors, " +
+                    $"{(liveAfter - liveBefore - held) / 1048576.0:F1} MB unaccounted)");
             }
             var obsBuf = new List<(int Camera, float U, float V)>();
             for (; passes < 30 && pending.Count > 0; passes++)

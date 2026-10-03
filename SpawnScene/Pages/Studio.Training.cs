@@ -1107,12 +1107,16 @@ public partial class Studio
             // From THIS window's measured demand, up or down. It used to only ever grow: a sparse start (21k
             // large splats from the BA cloud, ~80 tiles each) set ~100 per splat, and that was then applied to the
             // densified set, whose splats are far smaller (MEASURED: 673k x 115 keys lost the device).
-            int needed = Math.Max(8, (int)Math.Ceiling(_trainer.PeakKeyDemand * 1.25 / Math.Max(1, n)));
-            if (needed != keys)
+            // No floor: a frame over capacity grows the buffers and re-emits (SplatTrainerGpu.TryGrowKeys), so measured
+            // demand plus headroom is enough. The floor of 8 it replaces held ~350 B/splat, 26% of training memory
+            // (b126: TruckFull 1.58M splats, 12.7M keys allocated).
+            int needed = Math.Max(1, (int)Math.Ceiling(_trainer.PeakKeyDemand * 1.25 / Math.Max(1, n)));
+            if (needed != keys || _trainer.KeyGrowths > 0)
             {
                 Console.WriteLine(
                     $"[{logTag}] keysPerSplat {keys} -> {needed}: peak demand was " +
-                    $"{_trainer.PeakKeyDemand:N0} keys for {n:N0} splats over this window");
+                    $"{_trainer.PeakKeyDemand:N0} keys for {n:N0} splats over this window" +
+                    (_trainer.KeyGrowths > 0 ? $" ({_trainer.KeyGrowths} frames grew the key buffers)" : ""));
                 keys = needed;
             }
         }
@@ -1131,7 +1135,8 @@ public partial class Studio
         await accel.SynchronizeAsync();
         // Live GPU memory with the splat count: what a device memory budget has to cover (bytes per splat, measured).
         Console.WriteLine($"[{logTag}] resized trainer to {m:N0} splats; " +
-            $"{SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes / 1048576.0:F0} MB live storage");
+            $"{SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes / 1048576.0:F0} MB live storage " +
+            $"(trainer: {_trainer.MemoryBreakdown()})");
         _trainer.ResetPeakKeyDemand();
         // Logits and log scales come from the packed splats; the moments were just carried and
         // must NOT be zeroed here (InitOptimizerState would).

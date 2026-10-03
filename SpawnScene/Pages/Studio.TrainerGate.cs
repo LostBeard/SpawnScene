@@ -303,12 +303,43 @@ public partial class Studio
             // -- Dense geometry Adam: a silent splat takes torch Adam's zero-gradient step, or none when off --
             if (!await DenseAdamGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
+            // -- Key growth: a frame over the key capacity grows the buffers and renders complete --
+            if (!await KeyGrowthGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
             Console.WriteLine("[TrainerGate] PASS");
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[TrainerGate] FAIL: {ex}");
         }
+    }
+
+    /// <summary>
+    /// A frame that needs more keys than the trainer holds must grow the key buffers and render the SAME image as one
+    /// that fit. Capacity follows measured demand per densify window with no floor, and a window does not see every
+    /// view, so this path runs in real training. Reference: the current capacity. Then a resize to 1 key a splat (this
+    /// scene needs several) and the same render. Last stage, because the resize resets the per-splat buffers.
+    /// </summary>
+    async Task<bool> KeyGrowthGateAsync(SplatTrainerGpu trainer, MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int n,
+        CameraParams cam, float depthNear, float depthFar)
+    {
+        var reference = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar);
+        int demand = trainer.LastKeyDemand;
+        if (trainer.LastOverflowed || demand <= n)
+        {
+            Console.WriteLine($"[TrainerGate] FAIL: key growth needs a reference that fits and needs more than 1 key a " +
+                $"splat (demand {demand:N0} for {n:N0} splats, overflowed {trainer.LastOverflowed})");
+            return false;
+        }
+        await trainer.ResizeAsync(GateWidth, GateHeight, n, keysPerSplat: 1);
+        trainer.ResetPeakKeyDemand();
+        var grown = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar);
+        float maxAbs = 0;
+        for (int i = 0; i < reference.Length; i++) maxAbs = MathF.Max(maxAbs, MathF.Abs(reference[i] - grown[i]));
+        bool ok = !trainer.LastOverflowed && trainer.KeyGrowths == 1 && maxAbs == 0;
+        Console.WriteLine($"[TrainerGate] key growth {(ok ? "PASS" : "FAIL")}: {demand:N0} keys for {n:N0} splats at 1 a " +
+            $"splat: {trainer.KeyGrowths} growth(s), overflowed {trainer.LastOverflowed}, max |diff| {maxAbs:G3} vs the fitted render");
+        return ok;
     }
 
     /// <summary>

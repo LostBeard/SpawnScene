@@ -119,6 +119,53 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
     int _adamStepCount;
 
+    /// <summary>Grow the key buffers when a frame needs more keys than they hold (see RenderForwardAsync). On by default.</summary>
+    public bool GrowKeysOnOverflow { get; set; } = true;
+
+    /// <summary>Key-buffer growths since the last <see cref="ResetPeakKeyDemand"/>.</summary>
+    public int KeyGrowths { get; private set; }
+
+    /// <summary>
+    /// Reallocate the key-indexed buffers (keys, values, the three per-key gradient bindings) for
+    /// <paramref name="needed"/> keys plus 25% headroom, within the per-binding and total key limits. Their contents
+    /// are per frame, so nothing is carried. False when even <paramref name="needed"/> does not fit the limits.
+    /// </summary>
+    bool TryGrowKeys(int needed)
+    {
+        long maxKeys = Math.Min(MaxStorageBindingBytes() / (3 * sizeof(float)), MaxTotalKeys);
+        if (needed > maxKeys) return false;
+        int capacity = (int)Math.Min(maxKeys, (long)needed + needed / 4);
+        var accel = _gpu.WebGPUAccelerator;
+        _keys?.Dispose(); _values?.Dispose(); _gradKeyA?.Dispose(); _gradKeyB?.Dispose(); _gradKeyC?.Dispose();
+        _keys = accel.Allocate1D<uint>(capacity);
+        _values = accel.Allocate1D<uint>(capacity);
+        _gradKeyA = accel.Allocate1D<float>((long)capacity * 3);
+        _gradKeyB = accel.Allocate1D<float>((long)capacity * 3);
+        _gradKeyC = accel.Allocate1D<float>((long)capacity * 3);
+        Console.WriteLine($"[Trainer] key buffers grown {_keyCapacity:N0} -> {capacity:N0} for a frame that needed {needed:N0}");
+        _keyCapacity = capacity;
+        KeyGrowths++;
+        return true;
+    }
+
+    /// <summary>
+    /// The trainer's GPU memory by group, in MB: what each splat (and key, and pixel) actually costs, so a memory cut aims
+    /// at the largest group (GpuMemoryBudget.BytesPerSplat is the total of the per-splat and per-key groups).
+    /// </summary>
+    public string MemoryBreakdown()
+    {
+        static long B(params MemoryBuffer?[] buffers) => buffers.Sum(b => b?.LengthInBytes ?? 0);
+        long keys = B(_keys, _values, _gradKeyA, _gradKeyB, _gradKeyC);
+        long pixels = B(_outColour, _outFinalT, _outEnd, _target, _dLdPix, _ssimRows, _ssimWinGrad, _ssimDRows, _lossPartial);
+        long splat = B(_gradFixed, _densifyAbs, _opacityLogit, _logScale, _geomOut, _densifyStats, _screenRadius, _maxRadius,
+            _viewSupport);
+        long adam = B(_adamM, _adamV);
+        long sh = B(_shRest, _gradShRest, _adamShM, _adamShV);
+        static string Mb(long b) => $"{b / 1048576.0:F0}";
+        return $"keys {Mb(keys)} ({_keyCapacity:N0}), per-splat {Mb(splat)}, Adam {Mb(adam)}, " +
+            $"SH {Mb(sh)}, per-pixel {Mb(pixels)} MB";
+    }
+
     /// <summary>Gradient slots per splat. Must match GRADS_PER_SPLAT in the shaders.</summary>
     public const int GradsPerSplat = SplatTileRasterizer.GradsPerKey;
 
@@ -672,6 +719,12 @@ public sealed class SplatTrainerGpu : IDisposable
         int keyCount = counted[0];
         LastKeyDemand = keyCount;
         PeakKeyDemand = Math.Max(PeakKeyDemand, keyCount);
+        // More keys than the buffers hold: grow them and emit again, so this frame's gradients are complete. The
+        // capacity is sized from measured demand per densify window, and that window does not see every view
+        // (TruckFull: ~100 of 219 per window), so a view busier than the window's peak lands here. Growing used to be
+        // impossible, which is why capacity kept a floor of 8 keys a splat (~350 B/splat, 26% of training memory).
+        if (keyCount > _keyCapacity && GrowKeysOnOverflow && TryGrowKeys(keyCount))
+            return await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback);
         LastOverflowed = keyCount > _keyCapacity;
         LastKeyCount = Math.Min(keyCount, _keyCapacity);
         if (LastOverflowed)
@@ -1078,7 +1131,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public int PeakKeyDemand { get; private set; }
 
     /// <summary>Clear the peak, at the start of a new densification window.</summary>
-    public void ResetPeakKeyDemand() => PeakKeyDemand = 0;
+    public void ResetPeakKeyDemand() { PeakKeyDemand = 0; KeyGrowths = 0; }
 
     /// <summary>
     /// Where a view's gradient dies: magnitudes at each stage of the chain, plus whether the

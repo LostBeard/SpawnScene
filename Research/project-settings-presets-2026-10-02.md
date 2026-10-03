@@ -52,7 +52,12 @@ would generate over 14,000,000 splats and render at 60fps. VERY large scenes are
   binding of the widest per-splat row holds (45-float SH rest, 180 B: 11.9M at 2047 MiB). Max splats offers 500K / 1M /
   3M / 6M / 10M / Device. GPU memory offers up to 48 GB. Projects saved under a preset with the old 3M cap upgrade on
   load.
-- Training costs ~1,350 B/splat, of which the degree-3 SH bank (value, gradient, two Adam moments, 45 floats each) is 720.
+- Training cost MEASURED by group (b126, TruckFull 7K, 1.58M splats): SH bank 720 B/splat, tile keys 352 (a floor of 8
+  keys a splat), other per-splat 120, Adam 112. The key floor is GONE (b127): the key buffers grow when a frame
+  overflows and re-emit it (trainer gate "key growth" stage), so capacity follows measured demand (~2-3 keys a splat
+  late in training). Keys 532 -> 133 MB, live 2,779 -> 2,378 MB, held-out 23.25 -> 23.23 dB (noise), one growth in
+  the run. ~1,050 B/splat now; a 12 GB setting trains ~10M splats.
+- Of the ~1,050 B/splat, the degree-3 SH bank (value, gradient, two Adam moments, 45 floats each) is 720.
   That is the next lever for big scenes on a given GPU (fp16 moments / fp16 SH storage), and past 11.9M the SH banks
   must split across bindings. Rendering is far cheaper per splat (14M at 60 fps).
 

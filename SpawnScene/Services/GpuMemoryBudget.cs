@@ -55,6 +55,29 @@ public static class GpuMemoryBudget
         return (targets, (int)Math.Min(requestedMaxSplats, cap));
     }
 
+    /// <summary>
+    /// GPU memory a training key costs across its buffers: key and value (8), three 12-byte gradient bindings (36), and
+    /// sort scratch (~8). SplatTrainerGpu sizes key buffers to measured demand and grows them on overflow; this bounds
+    /// how far they may grow.
+    /// </summary>
+    public const long BytesPerKey = 52;
+
+    /// <summary>The share of the budget key buffers may grow into (demand spikes: large early splats, close views).</summary>
+    public const double KeyShare = 0.25;
+
+    /// <summary>
+    /// The trainer's total key cap (SplatTrainerGpu.MaxTotalKeys) for <paramref name="budgetGB"/> (0 = Auto): a quarter
+    /// of the budget at <see cref="BytesPerKey"/>, never past one 12-byte gradient binding, never under 4M. It was a
+    /// fixed 40M (2 GB of keys), measured on a 12 GB card: more than a 2-4 GB budget holds, and a ceiling that 36M-splat
+    /// scenes (~3 keys each) would hit on a 48 GB one.
+    /// </summary>
+    public static long MaxTotalKeys(int budgetGB, long bindingLimitBytes)
+    {
+        long budget = (budgetGB > 0 ? budgetGB : AutoGB) * (1L << 30);
+        long byShare = (long)(budget * KeyShare) / BytesPerKey;
+        return Math.Clamp(byShare, 4_000_000L, Math.Max(4_000_000L, bindingLimitBytes / (3 * sizeof(float))));
+    }
+
     /// <summary>The most splats one trainer binding holds on a device with <paramref name="bindingLimitBytes"/>.</summary>
     public static long MaxSplatsPerBinding(long bindingLimitBytes) => bindingLimitBytes / WidestSplatRowBytes;
 

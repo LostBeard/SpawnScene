@@ -42,6 +42,19 @@ public class GpuMemoryBudgetTests
     }
 
     [Test]
+    public void KeyCap_FollowsTheBudget_WithinTheGradientBinding()
+    {
+        // Auto (4 GB): a quarter at 52 B a key, 20.6M - the fixed 40M (2 GB) it replaced was half the budget.
+        Assert.That(GpuMemoryBudget.MaxTotalKeys(0, 2047 * MiB), Is.EqualTo(4096 * MiB / 4 / GpuMemoryBudget.BytesPerKey));
+        // 12 GB: 61.9M, room for ~3 keys a splat at its ~11.6M splats.
+        Assert.That(GpuMemoryBudget.MaxTotalKeys(12, 2047 * MiB), Is.GreaterThan(3L * 11_600_000));
+        // 48 GB: capped by one 2047 MiB binding of 12-byte key gradients (178.9M).
+        Assert.That(GpuMemoryBudget.MaxTotalKeys(48, 2047 * MiB), Is.EqualTo(2047 * MiB / 12));
+        // A tiny device still gets the floor.
+        Assert.That(GpuMemoryBudget.MaxTotalKeys(2, 16 * MiB), Is.EqualTo(4_000_000));
+    }
+
+    [Test]
     public void SplatCap_NeverExceedsThePreset_NorDropsBelowTheFloor()
     {
         Assert.That(GpuMemoryBudget.Derive(16, 2047 * MiB, 500_000).MaxSplats, Is.EqualTo(500_000), "the preset wins when smaller");

@@ -784,6 +784,7 @@ public partial class Studio
     {
         var saved = (DensifyEveryIters, OpacityResetEveryIters, SplatDensityControl.GrowthSelectFraction,
             MaxDensifiedSplats, MaxTargetStackBytes, HeldOutEveryCycles, _unloadDepthBeforeTraining);
+        long savedMaxKeys = SplatTrainerGpu.MaxTotalKeys;
         DensifyEveryIters = 100;
         OpacityResetEveryIters = 3000;
         SplatDensityControl.GrowthSelectFraction = 1f;
@@ -792,9 +793,10 @@ public partial class Studio
         var (targetBytes, splatCap) = GpuMemoryBudget.Derive(GpuMemoryGB, DeviceBindingLimitBytes, maxSplats);
         MaxDensifiedSplats = splatCap;
         MaxTargetStackBytes = targetBytes;
+        SplatTrainerGpu.MaxTotalKeys = GpuMemoryBudget.MaxTotalKeys(GpuMemoryGB, DeviceBindingLimitBytes);
         Console.WriteLine(
             $"[Train] GPU memory budget {(GpuMemoryGB > 0 ? $"{GpuMemoryGB} GB" : $"Auto ({GpuMemoryBudget.AutoGB} GB)")}: " +
-            $"photos up to {targetBytes >> 20} MB, up to {splatCap:N0} splats (preset {maxSplats:N0}; device binding " +
+            $"photos up to {targetBytes >> 20} MB, up to {splatCap:N0} splats and {SplatTrainerGpu.MaxTotalKeys:N0} keys (preset {(maxSplats == ReconstructionPresets.DeviceMaxSplats ? "device max" : maxSplats.ToString("N0"))}; device binding " +
             $"limit {DeviceBindingLimitBytes >> 20} MB)");
         HeldOutEveryCycles = 0;           // no held-out views to score, so no mid-run evaluation passes
         _unloadDepthBeforeTraining = true; // give the trainer the depth model's GPU memory
@@ -825,6 +827,7 @@ public partial class Studio
         {
             (DensifyEveryIters, OpacityResetEveryIters, SplatDensityControl.GrowthSelectFraction,
                 MaxDensifiedSplats, MaxTargetStackBytes, HeldOutEveryCycles, _unloadDepthBeforeTraining) = saved;
+            SplatTrainerGpu.MaxTotalKeys = savedMaxKeys;
             _trainingActive = false;
             if (_state == StudioState.SceneViewer) BuildViewerHudUI();
         }

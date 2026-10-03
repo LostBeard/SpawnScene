@@ -51,6 +51,8 @@ public class ProjectScene
     public int ShDegree { get; set; }
     /// <summary>Training iterations this scene received (0 = not trained).</summary>
     public int TrainedIterations { get; set; }
+    /// <summary>The scene this one was edited from (viewer Edit tools, then Save), or null.</summary>
+    public string? EditedFrom { get; set; }
     /// <summary>
     /// How the SH bands are stored: SphericalHarmonics.Parts files (scenes/{id}.sh{p}.bin, PartFloatsPerSplat floats a
     /// splat each), or 0 for a scene saved before the split (one row-major scenes/{id}.sh.bin, 45 floats a splat).

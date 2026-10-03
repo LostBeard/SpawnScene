@@ -372,7 +372,8 @@ public partial class Studio
             card.AddChild(new UILabel
             {
                 X = lx, Y = 38,
-                Text = (scene.TrainedIterations > 0 ? $"Trained {scene.TrainedIterations:N0} iterations" : "Untrained") + $"  ·  {size}",
+                Text = (scene.EditedFrom != null ? "Edited  ·  " : "")
+                    + (scene.TrainedIterations > 0 ? $"Trained {scene.TrainedIterations:N0} iterations" : "Untrained") + $"  ·  {size}",
                 FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
             });
             card.AddChild(new UILabel { X = lx, Y = 58, Text = $"{scene.CreatedAt:g}", FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted });

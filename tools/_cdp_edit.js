@@ -36,7 +36,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     if (m.method === 'Runtime.consoleAPICalled') {
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       if (/\[Autotest\] PASS/.test(t)) passed = true;
-      if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
+      if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Studio\] (scene saved|Loaded)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
@@ -82,6 +82,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await drag(600, 520, 1000, 800);             // select again (still in Select mode)
     await click(90, 181); await sleep(1500);     // Keep only
     await shot('3_kept');
+    await click(90, 307); await sleep(4000);     // Save as new scene
+    await shot('4_saved');
+    await click(80, 28); await sleep(2500);      // back to the project page
+    await shot('5_project');
+    // SPAWNSCENE_EDIT_OPEN="x,y": then click there (a scene card) and capture the reopened scene.
+    if (process.env.SPAWNSCENE_EDIT_OPEN) {
+      const [ox, oy] = process.env.SPAWNSCENE_EDIT_OPEN.split(',').map(Number);
+      await click(ox, oy); await sleep(6000);
+      await shot('6_reopened');
+    }
   } finally {
     try { ws.send(JSON.stringify({ id: id++, method: 'Page.close', params: {} })); } catch { }
     await sleep(300);

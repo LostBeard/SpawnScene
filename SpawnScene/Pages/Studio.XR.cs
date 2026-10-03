@@ -374,10 +374,11 @@ public partial class Studio
         Button(x0, 290, "Delete", () => _ = XREditAsync(SplatEditor.Mode.DeleteInside));
         Button(x1, 290, "Keep only", () => _ = XREditAsync(SplatEditor.Mode.KeepInside));
         Button(x0, 350, "Undo", () => _ = UndoEditAsync().ContinueWith(_ => RefreshXRMenu()));
-        Button(x1, 350, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
+        Button(x1, 350, "Save as new scene", () => _ = SaveEditedSceneAsync().ContinueWith(_ => RefreshXRMenu()));
+        Button(x1, 410, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
         _xrEditLabel = p.AddChild(new UILabel
         {
-            X = 24, Y = 418, Text = "", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
+            X = 24, Y = 476, Text = "", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
         });
         RefreshXRMenu();
         return _xrMenu;
@@ -389,7 +390,7 @@ public partial class Studio
         if (_xrSpeedButton != null) _xrSpeedButton.Text = $"Move speed: x{_xrSpeedScale:0.#}";
         if (_xrSelectButton != null) _xrSelectButton.Text = _xrBox.Active ? "Select box: on" : "Select box";
         if (_xrEditLabel != null)
-            _xrEditLabel.Text = _editBusy ? "Working..." : _selection != null ? $"{_selectedCount:N0} splats in the box"
+            _xrEditLabel.Text = _editBusy ? "Working..." : _editNote != null ? _editNote : _selection != null ? $"{_selectedCount:N0} splats in the box"
                 : _xrBox.Active ? "Hold the trigger and drag to draw a box" : "Edit: choose Select box, draw it, then Delete or Keep only";
         if (_xrPlaceButton != null)
         {

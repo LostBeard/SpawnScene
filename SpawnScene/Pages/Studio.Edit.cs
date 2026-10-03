@@ -30,7 +30,7 @@ public partial class Studio
         float y = 68;
         var panel = _uiRoot.AddChild(new UIPanel
         {
-            X = x, Y = y, Width = w + 24, Height = 5 * (h + gap) + 54,
+            X = x, Y = y, Width = w + 24, Height = 6 * (h + gap) + 54,
             BackgroundColor = Color.FromArgb(200, 12, 16, 22),
         });
         float by = 12;
@@ -54,6 +54,7 @@ public partial class Studio
         Add("Keep only", () => _ = ApplyEditAsync(SplatEditor.Mode.KeepInside));
         Add("Undo", () => _ = UndoEditAsync());
         Add("Clear selection", () => { _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null; BuildViewerHudUI(); });
+        Add("Save as new scene", () => _ = SaveEditedSceneAsync());
         _editStatus = panel.AddChild(new UILabel
         {
             X = 12, Y = by + 2, Text = EditStatusText(), FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
@@ -61,7 +62,36 @@ public partial class Studio
         if (_dragStart is { } a && _dragEnd is { } b2) ShowSelectRect(a, b2);
     }
 
-    string EditStatusText() => _editBusy ? "Working..."
+    string? _editNote;   // a one-off result ("Saved", "No project") shown until the next edit
+
+    /// <summary>
+    /// Save the scene on screen, edits included, to the active project as a NEW scene (the original stays). Deleted
+    /// splats are saved at opacity 0 (they load invisible); trained colour (SH) bands come along.
+    /// </summary>
+    async Task SaveEditedSceneAsync()
+    {
+        if (_editBusy) return;
+        if (_activeProject == null) { _editNote = "Open a project to save into"; RefreshEditStatus(); return; }
+        _editBusy = true; _editNote = null; RefreshEditStatus();
+        try
+        {
+            await SaveViewedSceneToProjectAsync(_viewedProjectScene?.TrainedIterations ?? 0, editedFrom: _viewedProjectScene?.Id);
+            _editNote = "Saved as a new scene";
+            // Its card thumbnail, from this view once it has settled (as a generated scene's is).
+            if (_viewedProjectScene != null)
+            {
+                _pendingThumbnailProjectId = _activeProject.Id;
+                _pendingThumbnailSceneId = _viewedProjectScene.Id;
+                _thumbnailDelayFrames = 30;
+            }
+            Console.WriteLine($"[Edit] saved as a new scene in '{_activeProject.Name}'");
+        }
+        catch (Exception ex) { _editNote = "Save failed"; Console.WriteLine($"[Edit] save failed: {ex.Message}"); }
+        finally { _editBusy = false; }
+        RefreshEditStatus();
+    }
+
+    string EditStatusText() => _editBusy ? "Working..." : _editNote != null ? _editNote
         : _selection != null ? $"{_selectedCount:N0} selected"
         : _selectMode ? "Drag over the scene" : "Nothing selected";
 
@@ -93,6 +123,7 @@ public partial class Studio
             if (_uiRoot.HitTest(pos) != null) return false;   // a click on the toolbar, not a selection
             _dragStart = _dragEnd = pos;
             _dragging = true;
+            _editNote = null;
             _selection = null;
             ShowSelectRect(pos, pos);
             return true;
@@ -147,7 +178,7 @@ public partial class Studio
     {
         var packed = _gpuRenderer.PackedSplatBuffer;
         if (packed == null || _selection is not { } v || _editBusy) return;
-        _editBusy = true; RefreshEditStatus();
+        _editBusy = true; _editNote = null; RefreshEditStatus();
         try
         {
             await _splatEditor.ApplyAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v, mode);

@@ -244,6 +244,7 @@ public partial class Studio
                     QualityPreset = _activeProject.Settings.QualityPreset,
                 };
                 await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
+                _viewedProjectScene = projectScene;
                 Console.WriteLine($"[Studio] Scene saved to OPFS: {packedU8.Length / (1024 * 1024):F1} MB");
             }
             else
@@ -842,7 +843,10 @@ public partial class Studio
     /// Save the scene on screen to the active project: packed splats, plus (trained) the colour model and the SH
     /// bands. GPU -> JS -> OPFS, never the .NET heap.
     /// </summary>
-    private async Task SaveViewedSceneToProjectAsync(int trainedIters)
+    // The project scene on screen (loaded or just saved), so an edited copy keeps its training metadata.
+    ProjectScene? _viewedProjectScene;
+
+    private async Task SaveViewedSceneToProjectAsync(int trainedIters, string? editedFrom = null)
     {
         if (_activeProject == null) return;
         int count = _gpuRenderer.SplatCount;
@@ -852,6 +856,9 @@ public partial class Studio
         Uint8Array[]? shRest = null;
         if (trainedIters > 0 && _gpuRenderer.ShDegree > 0 && _trainer != null)
             shRest = await _trainer.ReadShRestUint8ArraysAsync(count);
+        // A scene loaded (not trained this session) and then edited: its SH bands live in the viewer.
+        if (shRest == null && _gpuRenderer.ShDegree > 0)
+            shRest = await _gpuRenderer.ReadShRestUint8ArraysAsync();
         try
         {
             var projectScene = new ProjectScene
@@ -862,8 +869,10 @@ public partial class Studio
                 ColoursAreShDc = _gpuRenderer.ColoursAreShDc,
                 ShDegree = shRest != null ? _gpuRenderer.ShDegree : 0,
                 TrainedIterations = trainedIters,
+                EditedFrom = editedFrom,
             };
             await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
+            _viewedProjectScene = projectScene;
             if (shRest != null)
                 await _projectService.SaveSceneShRestAsync(_activeProject.Id, projectScene, shRest);
             Console.WriteLine(
@@ -951,6 +960,7 @@ public partial class Studio
             BuildViewerHudUI();
 
             Console.WriteLine($"[Studio] Loaded scene from OPFS: {scene.SplatCount:N0} splats");
+            _viewedProjectScene = scene;
         }
         catch (Exception ex)
         {

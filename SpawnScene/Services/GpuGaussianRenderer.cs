@@ -239,6 +239,39 @@ public class GpuGaussianRenderer : IDisposable
         return parts;
     }
 
+    /// <summary>
+    /// The SH part buffers the viewer draws with, as JS Uint8Arrays (each a JS-side copy of the mapped range: the
+    /// bytes never enter the .NET heap - a 14M-splat scene's bands are ~2.5 GB). For saving a scene that was loaded,
+    /// not trained here (edited, then saved). Null when the viewer has no SH bands.
+    /// </summary>
+    public async Task<Uint8Array[]?> ReadShRestUint8ArraysAsync()
+    {
+        if (_shRest == null || _device == null || _queue == null) return null;
+        var parts = new Uint8Array[_shRest.Length];
+        for (int part = 0; part < parts.Length; part++)
+        {
+            ulong bytes = _shRest[part].Size;
+            using var staging = _device.CreateBuffer(new GPUBufferDescriptor
+            {
+                Size = bytes,
+                Usage = GPUBufferUsage.MapRead | GPUBufferUsage.CopyDst,
+            });
+            using (var encoder = _device.CreateCommandEncoder())
+            {
+                encoder.CopyBufferToBuffer(_shRest[part], 0, staging, 0, bytes);
+                using var cmd = encoder.Finish();
+                _queue.Submit(new[] { cmd });
+            }
+            await staging.MapAsync(GPUMapMode.Read, 0, (long)bytes);
+            using (var mapped = staging.GetMappedRange())
+            using (var view = new Uint8Array(mapped))
+                parts[part] = new Uint8Array(view);   // copy: unmapping detaches the mapped range
+            staging.Unmap();
+            staging.Destroy();
+        }
+        return parts;
+    }
+
     const string ShSplitWgsl = @"
 @group(0) @binding(0) var<storage, read>       rows  : array<f32>;   // 45 floats a splat
 @group(0) @binding(1) var<storage, read_write> part0 : array<f32>;   // 15 a splat each

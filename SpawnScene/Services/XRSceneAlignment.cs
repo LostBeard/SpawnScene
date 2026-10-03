@@ -16,8 +16,28 @@ public static class XRSceneAlignment
     /// Room-to-scene transform (row-vector convention: pScene = pRoom * result) that puts <paramref name="headPosition"/>
     /// at <paramref name="cameraPosition"/> and turns the head's horizontal facing onto the camera's.
     /// </summary>
-    public static Matrix4x4 SceneFromRoom(Vector3 headPosition, Quaternion headOrientation, Vector3 cameraPosition, Vector3 cameraForward)
-        => Matrix4x4.CreateTranslation(-headPosition) * RoomToSceneYaw(headOrientation, cameraForward) * Matrix4x4.CreateTranslation(cameraPosition);
+    public static Matrix4x4 SceneFromRoom(Vector3 headPosition, Quaternion headOrientation, Vector3 cameraPosition, Vector3 cameraForward,
+        float scale = 1f)
+        => Matrix4x4.CreateTranslation(-headPosition) * Matrix4x4.CreateScale(scale) * RoomToSceneYaw(headOrientation, cameraForward)
+            * Matrix4x4.CreateTranslation(cameraPosition);
+
+    /// <summary>The distance the VR start puts the scene's middle at: about across a living room.</summary>
+    public const float ComfortDistanceMetres = 3f;
+
+    /// <summary>
+    /// VR start scale (scene units per room metre) for a scene of unknown units: single-photo depth is relative and SfM
+    /// has no scale, so a scene came up far too big - TJ's first Quest session (2026-10-03): "the vr scene was far away
+    /// when it loaded". The middle of the scene's robust bounds, measured along the camera's view, is put
+    /// <see cref="ComfortDistanceMetres"/> away; the grips still rescale from there.
+    /// </summary>
+    public static float ComfortScale(SplatBounds.Aabb box, Vector3 cameraPosition, Vector3 cameraForward)
+    {
+        var centre = new Vector3(box.CentreX, box.CentreY, box.CentreZ);
+        float d = Vector3.Dot(centre - cameraPosition, Vector3.Normalize(cameraForward));
+        if (d <= 1e-4f) d = Vector3.Distance(centre, cameraPosition);   // behind or beside the camera: plain distance
+        if (d <= 1e-4f) return 1f;
+        return Math.Clamp(d / ComfortDistanceMetres, XRWorldGrab.MinScale, XRWorldGrab.MaxScale);
+    }
 
     /// <summary>
     /// AR start: the scene as a miniature in front of the viewer - its robust bounds (<see cref="SplatBounds.ComputeRobustAsync"/>)

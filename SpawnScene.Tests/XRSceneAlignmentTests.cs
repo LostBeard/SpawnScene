@@ -63,6 +63,22 @@ public class XRSceneAlignmentTests
     }
 
     [Test]
+    public void ComfortScale_PutsTheSceneMiddleThreeMetresAway()
+    {
+        // Camera at the origin looking +Z (a single-photo scene); bounds centred 0.88 units ahead.
+        var box = new SplatBounds.Aabb(-0.39f, -0.25f, 0.40f, 0.33f, 0.38f, 1.36f);
+        float s = XRSceneAlignment.ComfortScale(box, Vector3.Zero, Vector3.UnitZ);
+        Assert.That(s, Is.EqualTo(0.88f / 3f).Within(1e-4f));
+        // In the room: the head at the camera, the middle 3 m along the view.
+        var head = new Vector3(0, 1.6f, 0);
+        var m = XRSceneAlignment.SceneFromRoom(head, Quaternion.Identity, Vector3.Zero, Vector3.UnitZ, s);
+        Matrix4x4.Invert(m, out var roomFromScene);
+        var mid = Vector3.Transform(new Vector3(box.CentreX, box.CentreY, box.CentreZ), roomFromScene);
+        Assert.That(Vector3.Dot(mid - head, -Vector3.UnitZ), Is.EqualTo(3f).Within(1e-3f));
+        Assert.That(Vector3.Distance(Vector3.Transform(head, m), Vector3.Zero), Is.LessThan(1e-4f), "head still at the camera");
+    }
+
+    [Test]
     public void WebXRProjection_ProjectsLikeTheGLMatrix()
     {
         // A WebXR / GL perspective (column-major array, column vectors): fov 90 deg, near 0.1, far 100.

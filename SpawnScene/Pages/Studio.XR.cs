@@ -22,6 +22,7 @@ public partial class Studio
             _xrPlacing = false;
             _xrTriggerWasDown = false;
             _xrHitLogged = false;
+            _xrExitWasDown = true;   // a B/Y still held from before the session does not end it at once
             _xrLastHit = null;
             _xrStickLog = true;
             _xrLastTime = -1;
@@ -32,26 +33,23 @@ public partial class Studio
             await _xrService.EnterSessionAsync(mode);
             // Passthrough: draw only the splats; the real world shows wherever the scene has nothing.
             _gpuRenderer.XRTransparent = mode == "immersive-ar" && (_xrService.EnvironmentBlendMode != "opaque" || _xrForceAlpha);
-            // AR starts with the scene as a miniature in front of the viewer, sized from its robust bounds. Measured
-            // after requestSession (an await before it could spend the click's user activation); frames until then
-            // show passthrough only.
-            _xrMiniatureBox = null;
+            // The scene's robust bounds size the start: AR shows it as a miniature in front of the viewer, VR puts its
+            // middle a room's width away (XRSceneAlignment.ComfortScale). Measured after requestSession (an await
+            // before it could spend the click's user activation); frames until then draw nothing.
+            _xrSceneBox = null;
             _xrPlaceMiniature = _gpuRenderer.XRTransparent;
-            if (_xrPlaceMiniature)
+            var packed = _gpuRenderer.PackedSplatBuffer;
+            int n = _gpuRenderer.SplatCount;
+            try
             {
-                var packed = _gpuRenderer.PackedSplatBuffer;
-                int n = _gpuRenderer.SplatCount;
-                try
-                {
-                    _xrMiniatureBox = packed != null && n > 0
-                        ? await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, n) : null;
-                }
-                catch (Exception bex) { Console.WriteLine($"[XR] scene bounds failed ({bex.Message}); VR start"); }
-                if (_xrMiniatureBox is { } b)
-                    Console.WriteLine($"[XR] AR miniature: scene bounds (1-99%) {b.MinX:F2},{b.MinY:F2},{b.MinZ:F2} .. {b.MaxX:F2},{b.MaxY:F2},{b.MaxZ:F2}");
-                else
-                    _xrPlaceMiniature = false;   // no bounds: fall back to the VR start (head at the camera)
+                _xrSceneBox = packed != null && n > 0
+                    ? await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, n) : null;
             }
+            catch (Exception bex) { Console.WriteLine($"[XR] scene bounds failed ({bex.Message}); VR start at scale 1"); }
+            if (_xrSceneBox is { } b)
+                Console.WriteLine($"[XR] scene bounds (1-99%) {b.MinX:F2},{b.MinY:F2},{b.MinZ:F2} .. {b.MaxX:F2},{b.MaxY:F2},{b.MaxZ:F2}");
+            else
+                _xrPlaceMiniature = false;   // no bounds: the VR start at scale 1 (head at the camera)
             _xrBoundsReady = true;
 
             // Initialize WebGL blit helper for WebGL XR fallback
@@ -104,16 +102,16 @@ public partial class Studio
     }
 
     // Room (local-floor) -> scene: the head starts where the desktop camera was, facing its way (XRSceneAlignment);
-    // in AR, the scene starts as a miniature in front (_xrPlaceMiniature, sized from _xrMiniatureBox).
+    // in AR, the scene starts as a miniature in front (_xrPlaceMiniature, sized from _xrSceneBox).
     System.Numerics.Matrix4x4? _xrSceneFromRoom;
     bool _xrPlaceMiniature, _xrBoundsReady = true;
     bool _xrForceAlpha; // &xralpha=1 (diagnostics)
     // AR placement: while placing, the miniature's bottom centre (_xrAnchorScene) follows where the right controller
     // points on a real surface (hit-test); a trigger press drops it there, another picks it up again.
-    bool _xrPlacing, _xrTriggerWasDown, _xrHitLogged;
+    bool _xrPlacing, _xrTriggerWasDown, _xrHitLogged, _xrExitWasDown;
     System.Numerics.Vector3? _xrLastHit;
     System.Numerics.Vector3 _xrAnchorScene;
-    SplatBounds.Aabb? _xrMiniatureBox;
+    SplatBounds.Aabb? _xrSceneBox;
     // Thumbstick move / snap-turn / rise, applied to _xrSceneFromRoom each frame.
     readonly XRLocomotion _xrLocomotion = new();
     // Grips: one drags the scene, both scale and turn it (XRWorldGrab).
@@ -128,7 +126,7 @@ public partial class Studio
         {
             if (!_xrBoundsReady) return;   // AR bounds still being measured: passthrough only
             var cam = _sceneManager.Camera;
-            if (_xrPlaceMiniature && _xrMiniatureBox is { } box)
+            if (_xrPlaceMiniature && _xrSceneBox is { } box)
             {
                 _xrSceneFromRoom = XRSceneAlignment.SceneFromRoomMiniature(frameData.HeadPosition, frameData.HeadOrientation, cam.Forward, box);
                 _xrAnchorScene = new System.Numerics.Vector3(box.CentreX, box.MinY, box.CentreZ);
@@ -137,8 +135,9 @@ public partial class Studio
             }
             else
             {
-                _xrSceneFromRoom = XRSceneAlignment.SceneFromRoom(frameData.HeadPosition, frameData.HeadOrientation, cam.Position, cam.Forward);
-                Console.WriteLine($"[XR] room placed in the scene: head {frameData.HeadPosition} -> camera {cam.Position}, facing {cam.Forward}");
+                float scale = _xrSceneBox is { } b ? XRSceneAlignment.ComfortScale(b, cam.Position, cam.Forward) : 1f;
+                _xrSceneFromRoom = XRSceneAlignment.SceneFromRoom(frameData.HeadPosition, frameData.HeadOrientation, cam.Position, cam.Forward, scale);
+                Console.WriteLine($"[XR] room placed in the scene: head {frameData.HeadPosition} -> camera {cam.Position}, facing {cam.Forward}, {scale:G3} scene units per metre");
             }
         }
         // dt clamped: a stalled frame must not throw the viewer across the scene.
@@ -149,6 +148,12 @@ public partial class Studio
             frameData.RightGrip, frameData.RightGripPosition);
         if (wasGrabbing && !_xrWorldGrab.Active)
             Console.WriteLine($"[XR] world grab released: scale {XRWorldGrab.Scale(_xrSceneFromRoom.Value):G3} scene units per metre");
+        if (frameData.ExitButton && !_xrExitWasDown)
+        {
+            Console.WriteLine("[XR] B/Y pressed: leaving the session");
+            _xrService.RequestEnd();
+        }
+        _xrExitWasDown = frameData.ExitButton;
         bool trigger = frameData.LeftTrigger || frameData.RightTrigger;
         if (trigger && !_xrTriggerWasDown && _xrPlaceMiniature)
         {

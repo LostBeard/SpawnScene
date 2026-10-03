@@ -164,6 +164,22 @@ public class XRService : IDisposable
         Console.WriteLine("[XRService] XR render loop started");
     }
 
+    /// <summary>
+    /// Ask the session to end from inside a frame (a controller button). Cleanup and <see cref="OnSessionEnded"/> run
+    /// from the session's own end event, as when the system ends it.
+    /// </summary>
+    public void RequestEnd() => _ = EndAfterThisFrameAsync();
+
+    // Called from inside a frame callback, so the end waits for the frame to finish: the emulator fires 'end'
+    // synchronously inside end(), which tore the session down mid-frame (null reference, and the desktop view never
+    // resumed - 2026-10-03). Browsers queue the event; neither may run cleanup under a frame still drawing.
+    private async Task EndAfterThisFrameAsync()
+    {
+        await Task.Yield();
+        try { if (_session != null) await _session.End(); }
+        catch (Exception ex) { Console.WriteLine($"[XRService] end failed: {ex.Message}"); }
+    }
+
     /// <summary>Exit the current XR session.</summary>
     public async Task ExitSessionAsync()
     {
@@ -177,8 +193,12 @@ public class XRService : IDisposable
     private void OnSessionEnd(XRSessionEvent e)
     {
         Console.WriteLine("[XRService] XR session ended");
+        // Listeners first, while the session's GL context is still alive: Studio disposes its WebGLXRBlit on that
+        // context, and doing it after CleanupSession threw a null reference before the desktop view resumed
+        // (emulator, 2026-10-03). A listener's failure must not skip the cleanup either.
+        try { OnSessionEnded?.Invoke(); }
+        catch (Exception ex) { Console.WriteLine($"[XRService] session-ended listener failed: {ex.Message}"); }
         CleanupSession();
-        OnSessionEnded?.Invoke();
     }
 
     private void CleanupSession()
@@ -327,6 +347,8 @@ public class XRService : IDisposable
             var buttons = gamepad.Buttons;
             bool trigger = buttons.Length > 0 && buttons[0].Pressed;
             bool squeeze = buttons.Length > 1 && buttons[1].Pressed;
+            // B (right) / Y (left), xr-standard button 5: the menu and Meta buttons never reach a page.
+            if (buttons.Length > 5 && buttons[5].Pressed) frameData.ExitButton = true;
             foreach (var b in buttons) b.Dispose();
             if (left) frameData.LeftTrigger = trigger; else frameData.RightTrigger = trigger;
 
@@ -448,6 +470,8 @@ public class XRFrameData
     public bool RightTrigger { get; set; }
     /// <summary>AR: where the right controller's ray meets a real surface (room space), if it does.</summary>
     public Vector3? HitPosition { get; set; }
+    /// <summary>B or Y held (xr-standard button 5 on either controller): leave the session.</summary>
+    public bool ExitButton { get; set; }
     /// <summary>AR: where the right controller's pointing ray starts (room space).</summary>
     public Vector3? RightRayOrigin { get; set; }
 }

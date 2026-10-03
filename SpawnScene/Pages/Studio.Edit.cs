@@ -267,7 +267,11 @@ public partial class Studio
             var right = sceneRight ?? Vector3.Normalize(Vector3.Cross(_sceneManager.Camera.Forward, _sceneManager.Camera.Up));
             var b = clip.Bounds;
             float width = MathF.Abs(right.X) * (b.MaxX - b.MinX) + MathF.Abs(right.Y) * (b.MaxY - b.MinY) + MathF.Abs(right.Z) * (b.MaxZ - b.MinZ);
-            var offset = right * width * 1.1f;
+            // Beside it, but never out of sight: a screen rectangle selects near to far, so a deep selection is wide
+            // along the view's right too (a Truck paste landed 2.4 units off-screen); cap at the scene's move speed
+            // (about a second's walk) - Move places it from there.
+            float cap = _cameraController?.MoveSpeed ?? 1f;
+            var offset = right * MathF.Min(width * 1.1f, cap);
             var a = _gpuService.WebGPUAccelerator;
             int before = _gpuRenderer.SplatCount;
             int after = await clip.PasteAsync(a, _gpuRenderer, offset);

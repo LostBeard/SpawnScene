@@ -75,7 +75,8 @@ public sealed class SplatClipboard : IDisposable
             }
         }
         await a.SynchronizeAsync();
-        var bounds = await SplatBounds.ComputeAsync(a, clipPacked, k) ?? default;
+        // Robust (1-99%) bounds: a few far splats caught by a screen rectangle would otherwise set its size.
+        var bounds = await SplatBounds.ComputeRobustAsync(a, clipPacked, k) ?? default;
         return new SplatClipboard(clipPacked, clipSh, k, renderer.ShDegree, renderer.ColoursAreShDc, bounds);
     }
 

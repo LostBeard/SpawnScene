@@ -91,6 +91,13 @@ public sealed class SplatEditor : IDisposable
         packed[i * SplatFormat.Floats + SplatFormat.OffOpacity] = saved[i];
     }
 
+    static void ZeroFromKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> saved, int from, int n)
+    {
+        if (i >= n || i < from) return;
+        saved[i] = 0f;
+    }
+
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>? _zeroFrom;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int>? _count;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, int, int>? _apply;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>? _save, _restore;
@@ -111,6 +118,7 @@ public sealed class SplatEditor : IDisposable
         _apply ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, int, int>(ApplyKernel);
         _save ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(SaveOpacityKernel);
         _restore ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(RestoreOpacityKernel);
+        _zeroFrom ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>(ZeroFromKernel);
     }
 
     /// <summary>Visible splats inside the volume.</summary>
@@ -157,6 +165,23 @@ public sealed class SplatEditor : IDisposable
         await a.SynchronizeAsync();
         snap.Dispose();
         return true;
+    }
+
+    /// <summary>
+    /// After a paste grew the scene from <paramref name="pastedFrom"/> to <paramref name="n"/> splats: the old history
+    /// no longer fits it, so it starts again with one step whose Undo hides the pasted splats (rows pastedFrom..n).
+    /// </summary>
+    public async Task ResetUndoForPasteAsync(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, int pastedFrom)
+    {
+        ClearUndo();
+        if (n <= 0) return;
+        Load(a);
+        _undoSplats = n;
+        var snap = a.Allocate1D<float>(n);
+        _save!(n, packed.View, snap.View, n);
+        _zeroFrom!(n, snap.View, pastedFrom, n);
+        _undo.Add(snap);
+        await a.SynchronizeAsync();
     }
 
     public void ClearUndo()

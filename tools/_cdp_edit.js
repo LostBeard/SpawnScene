@@ -70,19 +70,33 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);
-    // Top bar: Edit sits left of AR (canvas 1600 wide, Send to Headset hidden on loopback). Toolbar: left edge.
+    // Top bar: Edit sits left of AR (canvas 1600 wide, Send to Headset hidden on loopback). Toolbar: left edge,
+    // buttons 42 px apart from y 97: Select, Delete, Keep only, Copy, Cut, Paste, Undo, Clear selection, Save.
+    const Y = { select: 97, del: 139, keep: 181, copy: 223, cut: 265, paste: 307, undo: 349, clear: 391, save: 433 };
     await click(1208, 28); await sleep(500);
-    await click(90, 97);                         // Select
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'copy') {
+      // SPAWNSCENE_EDIT_FLOW=copy: select the red pillow, Copy, Paste (lands to its right), Undo.
+      await click(90, Y.select);
+      await drag(720, 570, 910, 735);
+      await shot('c0_selected');
+      await click(90, Y.copy); await sleep(1500);
+      await click(90, Y.paste); await sleep(2500);
+      await shot('c1_pasted');
+      await click(90, Y.undo); await sleep(1500);
+      await shot('c2_undone');
+      return;
+    }
+    await click(90, Y.select);                   // Select
     await drag(600, 520, 1000, 800);             // over the sofa and table
     await shot('0_selected');
-    await click(90, 139); await sleep(1500);     // Delete
+    await click(90, Y.del); await sleep(1500);   // Delete
     await shot('1_deleted');
-    await click(90, 223); await sleep(1500);     // Undo
+    await click(90, Y.undo); await sleep(1500);  // Undo
     await shot('2_undone');
     await drag(600, 520, 1000, 800);             // select again (still in Select mode)
-    await click(90, 181); await sleep(1500);     // Keep only
+    await click(90, Y.keep); await sleep(1500);  // Keep only
     await shot('3_kept');
-    await click(90, 307); await sleep(4000);     // Save as new scene
+    await click(90, Y.save); await sleep(4000);  // Save as new scene
     await shot('4_saved');
     await click(80, 28); await sleep(2500);      // back to the project page
     await shot('5_project');

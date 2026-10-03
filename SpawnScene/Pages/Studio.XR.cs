@@ -202,6 +202,7 @@ public partial class Studio
             Console.WriteLine($"[XR] controller input: left {frameData.LeftStick}, right {frameData.RightStick}");
         }
         _xrHeadInScene = System.Numerics.Vector3.Transform(frameData.HeadPosition, _xrSceneFromRoom.Value);
+        _xrHeadRightRoom = System.Numerics.Vector3.Transform(System.Numerics.Vector3.UnitX, frameData.HeadOrientation);
         foreach (var v in frameData.Views)
         {
             v.RoomViewMatrix = v.ViewMatrix;
@@ -292,6 +293,16 @@ public partial class Studio
     UILabel? _xrEditLabel;
     readonly XRBoxTool _xrBox = new();
 
+    System.Numerics.Vector3 _xrHeadRightRoom = System.Numerics.Vector3.UnitX;
+
+    /// <summary>The headset's horizontal right, in the scene (where XR pastes go).</summary>
+    System.Numerics.Vector3? XRSceneRight()
+    {
+        if (_xrSceneFromRoom is not { } m) return null;
+        var r = System.Numerics.Vector3.TransformNormal(_xrHeadRightRoom, m);
+        return r.LengthSquared() > 1e-12f ? System.Numerics.Vector3.Normalize(r) : null;
+    }
+
     async Task XREditAsync(SplatEditor.Mode mode)
     {
         await ApplyEditAsync(mode);
@@ -375,10 +386,12 @@ public partial class Studio
         Button(x1, 290, "Keep only", () => _ = XREditAsync(SplatEditor.Mode.KeepInside));
         Button(x0, 350, "Undo", () => _ = UndoEditAsync().ContinueWith(_ => RefreshXRMenu()));
         Button(x1, 350, "Save as new scene", () => _ = SaveEditedSceneAsync().ContinueWith(_ => RefreshXRMenu()));
-        Button(x1, 410, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
+        Button(x0, 410, "Copy", () => _ = CopySelectionAsync(cut: false).ContinueWith(_ => RefreshXRMenu()));
+        Button(x1, 410, "Paste", () => _ = PasteClipboardAsync(XRSceneRight()).ContinueWith(_ => RefreshXRMenu()));
+        Button(x1, 470, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
         _xrEditLabel = p.AddChild(new UILabel
         {
-            X = 24, Y = 476, Text = "", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
+            X = 24, Y = 536, Text = "", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
         });
         RefreshXRMenu();
         return _xrMenu;

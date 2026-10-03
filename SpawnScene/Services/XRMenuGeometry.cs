@@ -5,8 +5,8 @@ namespace SpawnScene.Services;
 /// <summary>Geometry of the in-headset menu (<see cref="XRMenu"/>), kept free of GameUI so it can be tested.</summary>
 public static class XRMenuGeometry
 {
-    public const float PanelWidth = 560, PanelHeight = 520;
-    /// <summary>Metres per panel pixel: 0.56 x 0.52 m.</summary>
+    public const float PanelWidth = 560, PanelHeight = 580;
+    /// <summary>Metres per panel pixel: 0.56 x 0.58 m.</summary>
     public const float WorldScale = 0.001f;
 
     /// <summary>

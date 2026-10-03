@@ -110,6 +110,39 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>The SH degree the viewer is drawing with (0 = DC only).</summary>
     public int ShDegree => _shDegree;
 
+    /// <summary>The SH part buffers the viewer owns (PartFloatsPerSplat floats a splat each), or null.</summary>
+    public GPUBuffer[]? ShRestBuffers => _shRest;
+
+    /// <summary>SH part <paramref name="part"/>'s first <paramref name="splatCount"/> rows copied into a new ILGPU buffer
+    /// (scene editing gathers and grows them with kernels). The caller owns it.</summary>
+    public MemoryBuffer1D<float, Stride1D.Dense> CopyShPartToIlgpu(Accelerator a, int part, int splatCount)
+    {
+        long floats = (long)splatCount * SphericalHarmonics.PartFloatsPerSplat;
+        var dst = a.Allocate1D<float>(floats);
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        using var encoder = _device!.CreateCommandEncoder();
+        encoder.CopyBufferToBuffer(_shRest![part], 0, dst.GetGPUBuffer()!, 0, (ulong)floats * sizeof(float));
+        using var cmd = encoder.Finish();
+        _submitArray[0] = cmd;
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
+        return dst;
+    }
+
+    /// <summary>A new renderer-owned SH part buffer holding <paramref name="splatCount"/> rows copied from an ILGPU
+    /// buffer (for <see cref="SetShRest"/>).</summary>
+    public GPUBuffer NewShPartFrom(MemoryBuffer1D<float, Stride1D.Dense> src, int splatCount)
+    {
+        ulong bytes = (ulong)splatCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+        var part = NewShPart(bytes);
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        using var encoder = _device!.CreateCommandEncoder();
+        encoder.CopyBufferToBuffer(src.GetGPUBuffer()!, 0, part, 0, bytes);
+        using var cmd = encoder.Finish();
+        _submitArray[0] = cmd;
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
+        return part;
+    }
+
     /// <summary>
     /// The next scene's colours are plain RGB with no SH bands - every scene load that is NOT a trained scene
     /// must say so. Training sets <see cref="ColoursAreShDc"/> and nothing reset it, so any scene loaded after a

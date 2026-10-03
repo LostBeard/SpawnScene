@@ -30,7 +30,7 @@ public partial class Studio
         float y = 68;
         var panel = _uiRoot.AddChild(new UIPanel
         {
-            X = x, Y = y, Width = w + 24, Height = 6 * (h + gap) + 54,
+            X = x, Y = y, Width = w + 24, Height = 9 * (h + gap) + 54,
             BackgroundColor = Color.FromArgb(200, 12, 16, 22),
         });
         float by = 12;
@@ -52,6 +52,9 @@ public partial class Studio
         }, _selectMode);
         Add("Delete", () => _ = ApplyEditAsync(SplatEditor.Mode.DeleteInside));
         Add("Keep only", () => _ = ApplyEditAsync(SplatEditor.Mode.KeepInside));
+        Add("Copy", () => _ = CopySelectionAsync(cut: false));
+        Add("Cut", () => _ = CopySelectionAsync(cut: true));
+        Add("Paste", () => _ = PasteClipboardAsync());
         Add("Undo", () => _ = UndoEditAsync());
         Add("Clear selection", () => { _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null; BuildViewerHudUI(); });
         Add("Save as new scene", () => _ = SaveEditedSceneAsync());
@@ -63,6 +66,62 @@ public partial class Studio
     }
 
     string? _editNote;   // a one-off result ("Saved", "No project") shown until the next edit
+    SplatClipboard? _clipboard;
+
+    /// <summary>Copy the selection to the clipboard (with its SH colour rows); Cut also deletes it (undoable).</summary>
+    async Task CopySelectionAsync(bool cut)
+    {
+        if (_editBusy) return;
+        if (_selection is not { } v) { _editNote = "Select something first"; RefreshEditStatus(); return; }
+        _editBusy = true; _editNote = null; RefreshEditStatus();
+        try
+        {
+            var copy = await SplatClipboard.CopyAsync(_gpuService.WebGPUAccelerator, _gpuRenderer, _splatEditor, v);
+            if (copy == null) { _editNote = "Nothing visible in the selection"; return; }
+            _clipboard?.Dispose();
+            _clipboard = copy;
+            _editNote = $"{(cut ? "Cut" : "Copied")} {copy.Count:N0} splats";
+            Console.WriteLine($"[Edit] {(cut ? "cut" : "copied")} {copy.Count:N0} splats" + (copy.Sh != null ? $" with SH degree {copy.ShDegree}" : ""));
+        }
+        catch (Exception ex) { _editNote = "Copy failed"; Console.WriteLine($"[Edit] copy failed: {ex.Message}"); }
+        finally { _editBusy = false; RefreshEditStatus(); }
+        if (cut && _clipboard != null)
+        {
+            var note = _editNote;
+            await ApplyEditAsync(SplatEditor.Mode.DeleteInside);
+            _editNote = note; RefreshEditStatus();
+        }
+    }
+
+    /// <summary>
+    /// Paste the clipboard into the scene beside where it was copied from: moved to the right (as seen from the camera)
+    /// by its own width plus a little gap. Undo removes the pasted copy.
+    /// </summary>
+    async Task PasteClipboardAsync(Vector3? sceneRight = null)
+    {
+        if (_editBusy) return;
+        if (_clipboard is not { } clip) { _editNote = "Nothing copied yet"; RefreshEditStatus(); return; }
+        _editBusy = true; _editNote = null; RefreshEditStatus();
+        try
+        {
+            // To the viewer's right: the desktop camera's, or the headset's (sceneRight) in XR.
+            var right = sceneRight ?? Vector3.Normalize(Vector3.Cross(_sceneManager.Camera.Forward, _sceneManager.Camera.Up));
+            var b = clip.Bounds;
+            float width = MathF.Abs(right.X) * (b.MaxX - b.MinX) + MathF.Abs(right.Y) * (b.MaxY - b.MinY) + MathF.Abs(right.Z) * (b.MaxZ - b.MinZ);
+            var offset = right * width * 1.1f;
+            var a = _gpuService.WebGPUAccelerator;
+            int before = _gpuRenderer.SplatCount;
+            int after = await clip.PasteAsync(a, _gpuRenderer, offset);
+            if (_gpuRenderer.PackedSplatBuffer is { } packed)
+                await _splatEditor.ResetUndoForPasteAsync(a, packed, after, before);
+            if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = after;
+            _editNote = $"Pasted {clip.Count:N0} splats";
+            Console.WriteLine($"[Edit] pasted {clip.Count:N0} splats ({before:N0} -> {after:N0}), offset {offset}");
+        }
+        catch (Exception ex) { _editNote = "Paste failed"; Console.WriteLine($"[Edit] paste failed: {ex.Message}"); }
+        finally { _editBusy = false; }
+        BuildViewerHudUI();
+    }
 
     /// <summary>
     /// Save the scene on screen, edits included, to the active project as a NEW scene (the original stays). Deleted
@@ -194,7 +253,7 @@ public partial class Studio
     {
         var packed = _gpuRenderer.PackedSplatBuffer;
         if (packed == null || _editBusy) return;
-        _editBusy = true; RefreshEditStatus();
+        _editBusy = true; _editNote = null; RefreshEditStatus();
         bool undone;
         try
         {

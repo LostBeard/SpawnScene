@@ -203,6 +203,25 @@ public partial class Studio
             OnClick = () => _ = EnterXRAsync("immersive-ar"),
         });
 
+        // Send this page to a Meta Quest without typing the URL in the headset: Meta's open_url page pushes the link to
+        // the signed-in account's headset (https://developers.meta.com/vr/documentation/web/web-launch/). Hidden inside
+        // the Quest Browser (already there) and on a loopback origin, which the headset cannot reach.
+        if (CanSendToHeadset())
+        {
+            const string sendText = "Send to Headset";
+            float sendW = _gameUI.Renderer.MeasureText(sendText, FontSize.Caption);
+            sendW = sendW > 0 ? sendW + 28 : 132;
+            btnRight -= sendW + 8;
+            _uiRoot.AddChild(new UIButton
+            {
+                X = btnRight, Y = 12,
+                Width = sendW, Height = 32,
+                Text = sendText,
+                FontSize = FontSize.Caption,
+                OnClick = SendToHeadset,
+            });
+        }
+
         if (_showSettings)
             BuildSettingsPanel();
     }
@@ -569,5 +588,26 @@ public partial class Studio
         }
         catch { _touchPrimary = false; }
         return _touchPrimary.Value;
+    }
+
+    bool CanSendToHeadset()
+    {
+        var uri = new Uri(_nav.Uri);
+        if (uri.IsLoopback) return false;
+        try
+        {
+            using var navigator = _js.Get<Navigator>("navigator");
+            return !navigator.UserAgent.Contains("OculusBrowser", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return true; }
+    }
+
+    void SendToHeadset()
+    {
+        var url = $"https://www.oculus.com/open_url/?url={Uri.EscapeDataString(_nav.Uri)}";
+        Console.WriteLine($"[Studio] Send to headset: {_nav.Uri}");
+        using var window = _js.Get<Window>("window");
+        using var opened = window.Open(url, "_blank");
+        opened?.Focus();
     }
 }

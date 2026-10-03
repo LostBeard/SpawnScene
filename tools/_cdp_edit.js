@@ -35,8 +35,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     if (m.method === 'Runtime.exceptionThrown') console.log('EXC ' + JSON.stringify(m.params.exceptionDetails).slice(0, 300));
     if (m.method === 'Runtime.consoleAPICalled') {
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
-      if (/\[Autotest\] PASS/.test(t)) passed = true;
-      if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Studio\] (scene saved|Loaded)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
+      if ((process.env.SPAWNSCENE_EDIT_WAIT ? new RegExp(process.env.SPAWNSCENE_EDIT_WAIT) : /\[Autotest\] PASS/).test(t)) passed = true;
+      if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Dataset\] (FAIL|DONE)|\[Studio\] (scene saved|Loaded|scene .*SH)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
@@ -65,11 +65,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await send('Page.enable');
     await send('Runtime.enable');
     await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
-    await send('Page.navigate', { url: `${APP}/studio?autotest=generate-room&render=stochastic` });
-    const deadline = Date.now() + 10 * 60 * 1000;
+    // SPAWNSCENE_EDIT_QUERY: another start (e.g. the project autotest, which trains and saves a scene), with
+    // SPAWNSCENE_EDIT_WAIT the console line that says it is done.
+    await send('Page.navigate', { url: `${APP}/studio?${process.env.SPAWNSCENE_EDIT_QUERY || 'autotest=generate-room&render=stochastic'}` });
+    const deadline = Date.now() + 30 * 60 * 1000;
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'trained') {
+      // After the project autotest (trained scene saved, project page shown): open it, copy/paste with its SH bands,
+      // save as a new scene, open that. The viewer of a project scene has no Depth button: Edit sits left of AR.
+      await shot('t0_project');
+      await click(253, 264); await sleep(8000);          // Open (first scene card)
+      await shot('t1_trained');
+      await click(1288, 28); await sleep(600);            // Edit
+      await click(90, 97);                                // Select
+      await drag(300, 150, 700, 800);     // right of the toolbar (a drag that starts on it is a toolbar click)
+      await click(90, 223); await sleep(2500);            // Copy
+      await click(90, 307); await sleep(4000);            // Paste
+      await shot('t2_pasted');
+      await click(90, 475); await sleep(10000);           // Save as new scene
+      await click(80, 28); await sleep(3000);             // back to the project
+      await shot('t3_project');
+      await click(795, 264); await sleep(8000);           // Open the second card (the edited copy)
+      await shot('t4_reopened');
+      return;
+    }
     // Top bar: Edit sits left of AR (canvas 1600 wide, Send to Headset hidden on loopback). Toolbar: left edge,
     // buttons 42 px apart from y 97: Select, Delete, Keep only, Copy, Cut, Paste, Undo, Clear selection, Save.
     const Y = { select: 97, del: 139, keep: 181, copy: 223, cut: 265, paste: 307, insert: 349, undo: 391, clear: 433, save: 475 };

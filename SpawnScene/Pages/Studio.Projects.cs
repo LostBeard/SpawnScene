@@ -853,12 +853,10 @@ public partial class Studio
         using var packedU8 = await _gpuRenderer.ReadPackedUint8ArrayAsync(count);
         if (packedU8 == null) { Console.WriteLine("[Studio] save skipped: no packed splat data"); return; }
 
-        Uint8Array[]? shRest = null;
-        if (trainedIters > 0 && _gpuRenderer.ShDegree > 0 && _trainer != null)
-            shRest = await _trainer.ReadShRestUint8ArraysAsync(count);
-        // A scene loaded (not trained this session) and then edited: its SH bands live in the viewer.
-        if (shRest == null && _gpuRenderer.ShDegree > 0)
-            shRest = await _gpuRenderer.ReadShRestUint8ArraysAsync();
+        // The SH bands drawn on screen, from the viewer: it gets an exact copy of the trainer's after training, and only
+        // the viewer's follow edits. The trainer's were read here before - after a paste grew the scene (508,091 ->
+        // 512,736 splats) that copy overran the trainer's buffers and saved garbage bands (2026-10-03).
+        Uint8Array[]? shRest = _gpuRenderer.ShDegree > 0 ? await _gpuRenderer.ReadShRestUint8ArraysAsync() : null;
         try
         {
             var projectScene = new ProjectScene

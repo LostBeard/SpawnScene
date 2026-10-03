@@ -78,6 +78,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await shot('2_pinch_out');
     await sleep(3000);
     await shot('3_after');
+    // SPAWNSCENE_TOUCH_BACK=N: N pinch-ins (fingers 400 -> 50 px apart, ~1 move-speed unit back each), then capture:
+    // how a scene looks from far away.
+    const back = parseInt(process.env.SPAWNSCENE_TOUCH_BACK || '0', 10);
+    for (let n = 0; n < back; n++)
+      await gesture(Array.from({ length: 11 }, (_, k) => [[600 + 17.5 * k, 500], [1000 - 17.5 * k, 500]]));
+    if (back > 0) { await sleep(2500); await shot(`4_back${back}`); }
   } finally {
     try { ws.send(JSON.stringify({ id: id++, method: 'Page.close', params: {} })); } catch { }
     await sleep(300);

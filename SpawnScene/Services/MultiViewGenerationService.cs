@@ -581,6 +581,20 @@ public class MultiViewGenerationService
                             Console.WriteLine($"[BA-DUMP] {posed[c]} {w[c][i].X:R} {w[c][i].Y:R} {w[c][i].Z:R} {px[c][i].X:R} {px[c][i].Y:R}");
                     }
                     if (!ok || inl < 20 || inl < 0.5 * n) continue;
+                    // The camera's own verified pairs must agree with the resected rotation (match-weighted majority):
+                    // resection can take the mirror twin of a near-planar support set and still have most correspondences
+                    // agree (GlobalSfmInit.RotationVotes).
+                    if (pairMatches != null && CheckResectionRotations)
+                    {
+                        var (agreeM, disagreeM) = GlobalSfmInit.RotationVotes(c, placed, pairMatches, cams, good.Contains);
+                        if (disagreeM > agreeM)
+                        {
+                            Console.WriteLine($"[BA]   pass {passes}: view {posed[c]} resection REJECTED ({inl}/{n} agree, but its " +
+                                $"rotation disagrees with verified pairs: {disagreeM} matches against, {agreeM} for)");
+                            lastTry[c] = (n, 0);
+                            continue;
+                        }
+                    }
                     cams[c].Position = placed.Position; cams[c].Forward = placed.Forward; cams[c].Up = placed.Up;
                     good.Add(c); pending.Remove(c); registered++; thisPass++;
                     Console.WriteLine($"[BA]   pass {passes}: registered view {posed[c]} ({inl}/{n} agree)");
@@ -709,6 +723,14 @@ public class MultiViewGenerationService
                 }
             var core = GlobalSfmInit.LargestStrongComponent(cams.Count, shared, CoreSharedPoints, dropped);
             var coreSet = core.ToHashSet();
+            if (TraceCoreLinks)
+                for (int c = 0; c < cams.Count; c++)
+                {
+                    if (dropped.Contains(c)) continue;
+                    var top = Enumerable.Range(0, cams.Count).Where(q => q != c && shared[c, q] > 0)
+                        .OrderByDescending(q => shared[c, q]).Take(4).Select(q => $"{posed[q]}:{shared[c, q]}");
+                    Console.WriteLine($"[BA]   links: view {posed[c]}{(coreSet.Contains(c) ? " (core)" : "")} -> {string.Join(" ", top)}");
+                }
             var outside = Enumerable.Range(0, cams.Count).Where(c => !dropped.Contains(c) && !coreSet.Contains(c)).ToList();
             if (outside.Count > 0 && core.Count >= 2)
             {
@@ -810,6 +832,15 @@ public class MultiViewGenerationService
 
     /// <summary>Dense init: smallest widest-ray-pair angle a point needs (degrees). &amp;denseangle=N.</summary>
     public double DenseMinParallaxDeg { get; set; } = 0.5;
+
+    /// <summary>
+    /// Re-registration accepts a resected camera only if its verified pairs with placed cameras agree with the resected
+    /// rotation (match-weighted majority, GlobalSfmInit.RotationVotes). &amp;resectrot=0 for the A/B.
+    /// </summary>
+    public bool CheckResectionRotations { get; set; } = true;
+
+    /// <summary>Diagnostics: log every placed camera's strongest links (shared points) before the core is kept. &amp;coretrace=1.</summary>
+    public bool TraceCoreLinks { get; set; }
 
     /// <summary>Shared points (within 4 px of the final solution) that link a camera to the core. &amp;coremin=N.</summary>
     public int CoreSharedPoints { get; set; } = 50;

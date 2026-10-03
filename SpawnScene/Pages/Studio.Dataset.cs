@@ -564,13 +564,16 @@ public partial class Studio
             Console.WriteLine($"[BA-GT] {label}: could not align");
             return;
         }
-        int worst = -1;
+        // posFrac covers the paired cameras only (see ReportPoseAccuracyVsGroundTruth): report the IMAGE index.
+        var paired = Enumerable.Range(0, estimated.Length).Where(i => estimated[i] != null && gt[i] != null).ToArray();
+        int worstPaired = -1;
         for (int i = 0; i < posFrac.Length; i++)
-            if (estimated[i] != null && (worst < 0 || posFrac[i] > posFrac[worst])) worst = i;
+            if (worstPaired < 0 || posFrac[i] > posFrac[worstPaired]) worstPaired = i;
+        int worst = worstPaired >= 0 && worstPaired < paired.Length ? paired[worstPaired] : -1;
         Console.WriteLine(
             $"[BA-GT] {label}: {acc.Compared} cams, pos RMS {(acc.Spread > 0 ? acc.PositionRms / acc.Spread : float.NaN):P2} of spread, " +
             $"median {acc.MedianPosFrac:P2} p90 {acc.P90PosFrac:P2}, fwd median {acc.MedianForwardDeg:F2}deg p90 {acc.P90ForwardDeg:F2}deg, " +
-            $"scale {acc.Scale:F4}, aligned on {acc.AlignedOn}/{acc.Compared}" + (worst >= 0 ? $", worst view {worst} {posFrac[worst]:P1}" : ""));
+            $"scale {acc.Scale:F4}, aligned on {acc.AlignedOn}/{acc.Compared}" + (worst >= 0 ? $", worst image {worst} {posFrac[worstPaired]:P1}" : ""));
     }
 
     /// <summary>
@@ -605,14 +608,18 @@ public partial class Studio
             var prof = Enumerable.Range(0, bins)
                 .Select(b => posFrac.Skip(b * per).Take(per).DefaultIfEmpty(float.NaN).Average())
                 .Select(v => $"{v:P0}");
-            Console.WriteLine($"[Dataset]   pose-vs-GT along capture order ({per} views/bin): {string.Join(" ", prof)}");
+            Console.WriteLine($"[Dataset]   pose-vs-GT along capture order ({per} placed views/bin): {string.Join(" ", prof)}");
         }
 
-        // Name the worst few so a bad fold / bad view is findable in the log.
+        // Name the worst few so a bad fold / bad view is findable in the log. posFrac holds only the PAIRED cameras, in
+        // image order: map back to the image index. It used to print the paired position as "view N", which read as an
+        // image index and pointed at the wrong photos (2026-10-03, DrJohnson b134: "view 1" was not image 1).
+        var imageOf = Enumerable.Range(0, Math.Min(estimated.Length, groundTruth.Count))
+            .Where(i => estimated[i] != null).ToArray();
         var order = Enumerable.Range(0, posFrac.Length).OrderByDescending(i => posFrac[i]).Take(5);
         foreach (int i in order)
             Console.WriteLine(
-                $"[Dataset]   pose-vs-GT worst: view {i} pos {posFrac[i]:P1} of spread, " +
+                $"[Dataset]   pose-vs-GT worst: image {(i < imageOf.Length ? imageOf[i] : -1)} pos {posFrac[i]:P1} of spread, " +
                 $"forward {fwdDeg[i]:F1}deg");
     }
 }

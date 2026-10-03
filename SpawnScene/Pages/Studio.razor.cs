@@ -329,6 +329,12 @@ public partial class Studio : IAsyncDisposable
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");
+            // &resectrot=0: re-registration skips the verified-pair rotation check on resected cameras (A/B).
+            if (query.TryGetValue("resectrot", out var resectRotQ))
+                _multiViewService.CheckResectionRotations = resectRotQ is not ("0" or "false");
+            // &coretrace=1: log each placed camera's strongest shared-point links before the core is kept.
+            if (query.TryGetValue("coretrace", out var coreTraceQ))
+                _multiViewService.TraceCoreLinks = coreTraceQ is "1" or "true";
             if (query.TryGetValue("coremin", out var cmq) && int.TryParse(cmq, out var cmi))
                 _multiViewService.CoreSharedPoints = Math.Max(1, cmi);
             // &relpose=f: relative poses decomposed from the verification's F instead of a calibrated five-point E-RANSAC (A/B).

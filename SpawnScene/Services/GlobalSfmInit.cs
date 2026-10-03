@@ -1303,6 +1303,29 @@ public static class GlobalSfmInit
             && AngleDeg(RotationOf(cams[p.CamB]), Mul(p.R, RotationOf(cams[p.CamA]))) <= maxDeg).ToList();
 
     /// <summary>
+    /// What camera <paramref name="cam"/>'s verified pairs with PLACED cameras say about a candidate pose: the matches in
+    /// pairs whose relative rotation agrees with <paramref name="candidate"/> to within <paramref name="maxDeg"/>, and the
+    /// matches in pairs that disagree. Resection alone can land on the mirror twin of a near-planar support set (DrJohnson
+    /// b134-b136, K=3072: images 7 and 41 re-registered with 160-325 agreeing correspondences, ~126% of the spread off
+    /// COLMAP, forward error ~100 deg); the two-view rotations, from the essential matrices, do not share that ambiguity.
+    /// </summary>
+    public static (int AgreeMatches, int DisagreeMatches) RotationVotes(int cam, CameraParams candidate,
+        IReadOnlyList<PairMatch> pairs, IReadOnlyList<CameraParams> cams, Func<int, bool> placed, double maxDeg = 10)
+    {
+        var rc = RotationOf(candidate);
+        int agree = 0, disagree = 0;
+        foreach (var p in pairs)
+        {
+            double angle;
+            if (p.CamA == cam && placed(p.CamB)) angle = AngleDeg(RotationOf(cams[p.CamB]), Mul(p.R, rc));
+            else if (p.CamB == cam && placed(p.CamA)) angle = AngleDeg(rc, Mul(p.R, RotationOf(cams[p.CamA])));
+            else continue;
+            if (angle <= maxDeg) agree += p.FeatA.Length; else disagree += p.FeatA.Length;
+        }
+        return (agree, disagree);
+    }
+
+    /// <summary>
     /// 2D-3D correspondences for a camera not yet placed, through its verified pairs with PLACED cameras: a match whose
     /// placed-side feature lies on a triangulated track gives (that track's point, this camera's pixel), once per (track,
     /// feature): a wrong pair's candidate for a track does not shut out a true pair's, resection's RANSAC decides. The pairs

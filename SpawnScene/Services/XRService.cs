@@ -36,6 +36,10 @@ public class XRService : IDisposable
     public XRSession? Session => _session;
     public string? SessionMode { get; private set; }
 
+    /// <summary>How the device mixes the session with the real world: "opaque" (VR), "alpha-blend" (passthrough AR, the
+    /// layer's alpha shows the camera feed) or "additive" (see-through displays: black is clear).</summary>
+    public string? EnvironmentBlendMode { get; private set; }
+
     /// <summary>True when using WebGL XR fallback (WebGPU XR binding unavailable).</summary>
     public bool IsWebGLFallback { get; private set; }
 
@@ -103,6 +107,8 @@ public class XRService : IDisposable
         });
 
         SessionMode = mode;
+        try { EnvironmentBlendMode = _session.EnvironmentBlendMode; } catch { EnvironmentBlendMode = null; }
+        Console.WriteLine($"[XRService] {mode}: environment blend mode {EnvironmentBlendMode ?? "(not reported)"}");
         _session.OnEnd += OnSessionEnd;
 
         // Get reference space
@@ -203,6 +209,7 @@ public class XRService : IDisposable
             _session = null;
         }
         SessionMode = null;
+        EnvironmentBlendMode = null;
         IsWebGLFallback = false;
         _xrFrameCount = 0;
     }

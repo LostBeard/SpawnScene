@@ -28,6 +28,28 @@ public class XRSceneAlignmentTests
     }
 
     [Test]
+    public void Miniature_SitsInFront_AtTableHeight_SizedAndFacing()
+    {
+        var head = new Vector3(0.2f, 1.6f, -0.1f);
+        var headRot = Yaw(25f);
+        var camFwd = Vector3.Normalize(new Vector3(1, -0.2f, 0.5f));
+        var box = new SplatBounds.Aabb(-2, -1, 3, 4, 1.5f, 6);   // 6 x 2.5 x 3 scene units
+        var m = XRSceneAlignment.SceneFromRoomMiniature(head, headRot, camFwd, box);
+        Matrix4x4.Invert(m, out var roomFromScene);
+
+        var bottom = Vector3.Transform(new Vector3(box.CentreX, box.MinY, box.CentreZ), roomFromScene);
+        var headFwd = Vector3.Transform(-Vector3.UnitZ, headRot);
+        var flat = Vector3.Normalize(new Vector3(headFwd.X, 0, headFwd.Z));
+        Assert.That(Vector3.Distance(new Vector3(bottom.X, 0, bottom.Z), new Vector3(head.X, 0, head.Z) + flat * 0.9f), Is.LessThan(1e-4f), "0.9 m ahead");
+        Assert.That(bottom.Y, Is.EqualTo(1.0f).Within(1e-4f), "table height under a 1.6 m head");
+        float width = Vector3.Distance(Vector3.Transform(new Vector3(box.MinX, 0, 0), roomFromScene), Vector3.Transform(new Vector3(box.MaxX, 0, 0), roomFromScene));
+        Assert.That(width, Is.EqualTo(0.6f).Within(1e-4f), "largest side 0.6 m");
+        var camInRoom = Vector3.Normalize(Vector3.TransformNormal(new Vector3(camFwd.X, 0, camFwd.Z), roomFromScene));
+        Assert.That(Vector3.Dot(camInRoom, flat), Is.GreaterThan(0.9999f), "seen the way the desktop camera saw it");
+        Assert.That(Vector3.Dot(Vector3.Normalize(Vector3.TransformNormal(Vector3.UnitY, m)), Vector3.UnitY), Is.GreaterThan(0.9999f), "up stays up");
+    }
+
+    [Test]
     public void WebXRProjection_ProjectsLikeTheGLMatrix()
     {
         // A WebXR / GL perspective (column-major array, column vectors): fov 90 deg, near 0.1, far 100.

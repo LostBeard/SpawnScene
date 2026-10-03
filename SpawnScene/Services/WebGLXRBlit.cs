@@ -83,6 +83,9 @@ void main() {
 
         // Upload canvas content to texture (browser handles GPU→GPU copy internally)
         _gl.BindTexture(GL.TEXTURE_2D, _texture);
+        // The bridge canvas is premultiplied; without this the upload un-premultiplies it, and the XR compositor blends
+        // the layer as premultiplied (AR passthrough edges would come out too bright). Opaque pixels are unaffected.
+        _gl.PixelStorei(GL.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
         _gl.TexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, GL.RGBA, GL.UNSIGNED_BYTE, source);
 
         // Draw fullscreen triangle

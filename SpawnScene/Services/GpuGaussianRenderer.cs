@@ -434,7 +434,16 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
     /// <summary>Diagnostics (&amp;xrclear=1): clear XR eye views to magenta, so an empty view tells apart from a broken copy.</summary>
     public static bool XRDebugClear { get; set; }
-    private GPUColorDict XRClear() => XRDebugClear ? new() { R = 1, G = 0, B = 1, A = 1 } : NewClear();
+    private GPUColorDict XRClear() => XRDebugClear ? new() { R = 1, G = 0, B = 1, A = 1 }
+        : XRTransparent ? new() { R = 0, G = 0, B = 0, A = 0 } : NewClear();
+
+    /// <summary>
+    /// AR passthrough: XR eye views keep the splats' coverage as alpha (premultiplied) instead of drawing over the
+    /// background colour, so the real world shows wherever the scene has nothing. The sorted target clears to
+    /// transparent, back-to-front SrcAlpha/OneMinusSrcAlpha blending then leaves premultiplied colour + coverage, and the
+    /// CAS pass passes that alpha through (CASUniforms.keep_alpha) to a premultiplied bridge canvas.
+    /// </summary>
+    public bool XRTransparent { get; set; }
 
     /// <summary>Controls whether to use sorted alpha blending or stochastic rasterization.</summary>
     private SplatRenderMode _renderMode = SplatRenderMode.Stochastic;
@@ -1834,7 +1843,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         _casData[0] = applyCAS ? _sharpeningStrength : 0f;
         _casData[1] = 1f / width;
         _casData[2] = 1f / height;
-        _casData[3] = 0f;
+        _casData[3] = XRTransparent ? 1f : 0f;
         Buffer.BlockCopy(_casData, 0, _casByteData!, 0, _casByteData!.Length);
         _queue.WriteBuffer(_casUniformBuffer!, 0, _casByteData);
         using var canvasTexture = _xrBridgeContext!.GetCurrentTexture();
@@ -1846,7 +1855,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                 new GPURenderPassColorAttachment
                 {
                     View = canvasView, LoadOp = GPULoadOp.Clear, StoreOp = GPUStoreOp.Store,
-                    ClearValue = new GPUColorDict { R = 0, G = 0, B = 0, A = 1 },
+                    ClearValue = new GPUColorDict { R = 0, G = 0, B = 0, A = XRTransparent ? 0 : 1 },
                 },
             },
         }))
@@ -1881,6 +1890,8 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         {
             Device = _device!,
             Format = _canvasFormat,
+            // Alpha survives the copy into the XR layer (AR passthrough); VR views write alpha 1 anyway.
+            AlphaMode = "premultiplied",
         });
 
         _xrBridgeDepth = _device!.CreateTexture(new GPUTextureDescriptor
@@ -2445,7 +2456,7 @@ struct CASUniforms {
     strength   : f32,
     texel_x    : f32,
     texel_y    : f32,
-    _padding   : f32,
+    keep_alpha : f32,   // > 0.5: pass alpha through (premultiplied; AR passthrough), else opaque
 };
 
 @group(0) @binding(0) var t_color : texture_2d<f32>;
@@ -2507,6 +2518,11 @@ fn fs_cas(input : VSOutput) -> @location(0) vec4<f32> {
     let avg = (n + s + e + w) * 0.166666 + (ne + nw + se + sw) * 0.083333;
     let result = mix(c, c + (c - avg) * sharp, vec4<f32>(cas.strength));
 
+    if (cas.keep_alpha > 0.5) {
+        // Premultiplied: colour can never exceed coverage.
+        let a = clamp(result.a, 0.0, 1.0);
+        return vec4<f32>(clamp(result.rgb, vec3<f32>(0.0), vec3<f32>(a)), a);
+    }
     return vec4<f32>(clamp(result.rgb, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }
 ";

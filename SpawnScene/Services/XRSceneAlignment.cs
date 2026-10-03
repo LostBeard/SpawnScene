@@ -17,6 +17,31 @@ public static class XRSceneAlignment
     /// at <paramref name="cameraPosition"/> and turns the head's horizontal facing onto the camera's.
     /// </summary>
     public static Matrix4x4 SceneFromRoom(Vector3 headPosition, Quaternion headOrientation, Vector3 cameraPosition, Vector3 cameraForward)
+        => Matrix4x4.CreateTranslation(-headPosition) * RoomToSceneYaw(headOrientation, cameraForward) * Matrix4x4.CreateTranslation(cameraPosition);
+
+    /// <summary>
+    /// AR start: the scene as a miniature in front of the viewer - its robust bounds (<see cref="SplatBounds.ComputeRobustAsync"/>)
+    /// scaled so the largest side is <paramref name="size"/> metres, the bottom centre <paramref name="distance"/> metres
+    /// ahead at about table height, turned so the viewer looks into it the way the desktop camera did. Full size around
+    /// the viewer (the VR start) would cover most of the passthrough with a scene seen from inside.
+    /// </summary>
+    public static Matrix4x4 SceneFromRoomMiniature(Vector3 headPosition, Quaternion headOrientation, Vector3 cameraForward,
+        SplatBounds.Aabb box, float size = 0.6f, float distance = 0.9f)
+    {
+        float largest = MathF.Max(box.MaxX - box.MinX, MathF.Max(box.MaxY - box.MinY, box.MaxZ - box.MinZ));
+        float scale = MathF.Max(largest, 1e-6f) / size;   // scene units per room metre
+        var anchorScene = new Vector3(box.CentreX, box.MinY, box.CentreZ);
+        var f = Vector3.Transform(-Vector3.UnitZ, headOrientation);
+        var flat = new Vector3(f.X, 0, f.Z);
+        flat = flat.LengthSquared() < 1e-8f ? -Vector3.UnitZ : Vector3.Normalize(flat);
+        var anchorRoom = headPosition + flat * distance;
+        anchorRoom.Y = Math.Clamp(headPosition.Y - 0.6f, 0.3f, 1.0f);   // local-floor: about a table under a standing head
+        return Matrix4x4.CreateTranslation(-anchorRoom) * Matrix4x4.CreateScale(scale)
+            * RoomToSceneYaw(headOrientation, cameraForward) * Matrix4x4.CreateTranslation(anchorScene);
+    }
+
+    /// <summary>The turn about Y that carries the head's horizontal facing (room) onto the camera's (scene).</summary>
+    static Matrix4x4 RoomToSceneYaw(Quaternion headOrientation, Vector3 cameraForward)
     {
         // WebXR views look down -Z.
         var headForward = Vector3.Transform(-Vector3.UnitZ, headOrientation);
@@ -29,8 +54,7 @@ public static class XRSceneAlignment
         var b = Matrix4x4.CreateRotationY(-turn);
         var hf = Vector3.Normalize(new Vector3(headForward.X, 0, headForward.Z) + new Vector3(1e-9f, 0, 0));
         var cf = Vector3.Normalize(new Vector3(cameraForward.X, 0, cameraForward.Z) + new Vector3(1e-9f, 0, 0));
-        var rot = Vector3.Dot(Vector3.TransformNormal(hf, a), cf) >= Vector3.Dot(Vector3.TransformNormal(hf, b), cf) ? a : b;
-        return Matrix4x4.CreateTranslation(-headPosition) * rot * Matrix4x4.CreateTranslation(cameraPosition);
+        return Vector3.Dot(Vector3.TransformNormal(hf, a), cf) >= Vector3.Dot(Vector3.TransformNormal(hf, b), cf) ? a : b;
     }
 
     /// <summary>

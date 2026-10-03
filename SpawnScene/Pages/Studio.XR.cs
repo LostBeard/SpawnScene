@@ -16,6 +16,7 @@ public partial class Studio
             _xrService.OnXRFrame += OnXRFrame;
             _xrService.OnSessionEnded += OnXRSessionEnded;
             _xrSceneFromRoom = null; // placed on the session's first frame (XRSceneAlignment)
+            _xrBoundsReady = false;  // set once the AR bounds are measured (immediately for VR, below)
             _xrLocomotion.Reset();
             _xrWorldGrab.Reset();
             _xrStickLog = true;
@@ -25,6 +26,29 @@ public partial class Studio
             _xrActive = true;
 
             await _xrService.EnterSessionAsync(mode);
+            // Passthrough: draw only the splats; the real world shows wherever the scene has nothing.
+            _gpuRenderer.XRTransparent = mode == "immersive-ar" && _xrService.EnvironmentBlendMode != "opaque";
+            // AR starts with the scene as a miniature in front of the viewer, sized from its robust bounds. Measured
+            // after requestSession (an await before it could spend the click's user activation); frames until then
+            // show passthrough only.
+            _xrMiniatureBox = null;
+            _xrPlaceMiniature = _gpuRenderer.XRTransparent;
+            if (_xrPlaceMiniature)
+            {
+                var packed = _gpuRenderer.PackedSplatBuffer;
+                int n = _gpuRenderer.SplatCount;
+                try
+                {
+                    _xrMiniatureBox = packed != null && n > 0
+                        ? await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, n) : null;
+                }
+                catch (Exception bex) { Console.WriteLine($"[XR] scene bounds failed ({bex.Message}); VR start"); }
+                if (_xrMiniatureBox is { } b)
+                    Console.WriteLine($"[XR] AR miniature: scene bounds (1-99%) {b.MinX:F2},{b.MinY:F2},{b.MinZ:F2} .. {b.MaxX:F2},{b.MaxY:F2},{b.MaxZ:F2}");
+                else
+                    _xrPlaceMiniature = false;   // no bounds: fall back to the VR start (head at the camera)
+            }
+            _xrBoundsReady = true;
 
             // Initialize WebGL blit helper for WebGL XR fallback
             if (_xrService.IsWebGLFallback && _xrService.GLContext != null)
@@ -75,8 +99,11 @@ public partial class Studio
         }
     }
 
-    // Room (local-floor) -> scene: the head starts where the desktop camera was, facing its way (XRSceneAlignment).
+    // Room (local-floor) -> scene: the head starts where the desktop camera was, facing its way (XRSceneAlignment);
+    // in AR, the scene starts as a miniature in front (_xrPlaceMiniature, sized from _xrMiniatureBox).
     System.Numerics.Matrix4x4? _xrSceneFromRoom;
+    bool _xrPlaceMiniature, _xrBoundsReady = true;
+    SplatBounds.Aabb? _xrMiniatureBox;
     // Thumbstick move / snap-turn / rise, applied to _xrSceneFromRoom each frame.
     readonly XRLocomotion _xrLocomotion = new();
     // Grips: one drags the scene, both scale and turn it (XRWorldGrab).
@@ -89,9 +116,18 @@ public partial class Studio
     {
         if (_xrSceneFromRoom == null)
         {
+            if (!_xrBoundsReady) return;   // AR bounds still being measured: passthrough only
             var cam = _sceneManager.Camera;
-            _xrSceneFromRoom = XRSceneAlignment.SceneFromRoom(frameData.HeadPosition, frameData.HeadOrientation, cam.Position, cam.Forward);
-            Console.WriteLine($"[XR] room placed in the scene: head {frameData.HeadPosition} -> camera {cam.Position}, facing {cam.Forward}");
+            if (_xrPlaceMiniature && _xrMiniatureBox is { } box)
+            {
+                _xrSceneFromRoom = XRSceneAlignment.SceneFromRoomMiniature(frameData.HeadPosition, frameData.HeadOrientation, cam.Forward, box);
+                Console.WriteLine($"[XR] scene placed as a miniature: {XRWorldGrab.Scale(_xrSceneFromRoom.Value):G3} scene units per metre");
+            }
+            else
+            {
+                _xrSceneFromRoom = XRSceneAlignment.SceneFromRoom(frameData.HeadPosition, frameData.HeadOrientation, cam.Position, cam.Forward);
+                Console.WriteLine($"[XR] room placed in the scene: head {frameData.HeadPosition} -> camera {cam.Position}, facing {cam.Forward}");
+            }
         }
         // dt clamped: a stalled frame must not throw the viewer across the scene.
         float dt = _xrLastTime < 0 ? 0f : (float)Math.Clamp((frameData.Time - _xrLastTime) / 1000.0, 0.0, 0.1);
@@ -178,6 +214,7 @@ public partial class Studio
         _xrBlit?.Dispose();
         _xrBlit = null;
         _gpuRenderer.DisposeXRBridge();
+        _gpuRenderer.XRTransparent = false;
 
         // Resume canvas RAF loop
         _xrActive = false;

@@ -1,3 +1,5 @@
+using ILGPU;
+using ILGPU.Runtime;
 using SpawnDev.GameUI;
 using SpawnDev.GameUI.Elements;
 using SpawnScene.Models;
@@ -147,9 +149,13 @@ public partial class Studio
         // dt clamped: a stalled frame must not throw the viewer across the scene.
         float dt = _xrLastTime < 0 ? 0f : (float)Math.Clamp((frameData.Time - _xrLastTime) / 1000.0, 0.0, 0.1);
         _xrLastTime = frameData.Time;
+        // With the box tool on and something selected, the right grip moves the SELECTION (StepXRSelectionDrag), so
+        // the world grab only gets the left hand.
+        bool rightMovesSelection = _xrBox.Active && _selection != null && !(_xrMenu?.IsOpen == true);
+        StepXRSelectionDrag(rightMovesSelection && frameData.RightGrip, frameData.RightGripPosition);
         bool wasGrabbing = _xrWorldGrab.Active;
         _xrSceneFromRoom = _xrWorldGrab.Step(_xrSceneFromRoom.Value, frameData.LeftGrip, frameData.LeftGripPosition,
-            frameData.RightGrip, frameData.RightGripPosition);
+            frameData.RightGrip && !rightMovesSelection, frameData.RightGripPosition);
         if (wasGrabbing && !_xrWorldGrab.Active)
             Console.WriteLine($"[XR] world grab released: scale {XRWorldGrab.Scale(_xrSceneFromRoom.Value):G3} scene units per metre");
         if (frameData.ExitButton && !_xrExitWasDown)
@@ -301,6 +307,51 @@ public partial class Studio
         if (_xrSceneFromRoom is not { } m) return null;
         var r = System.Numerics.Vector3.TransformNormal(_xrHeadRightRoom, m);
         return r.LengthSquared() > 1e-12f ? System.Numerics.Vector3.Normalize(r) : null;
+    }
+
+    // ── Moving the selection with the right grip (box tool on, something selected) ───────────────────────────
+    bool _xrSelDragging, _xrSelMoveBusy;
+    System.Numerics.Vector3 _xrSelLastHand, _xrSelPending;
+
+    void StepXRSelectionDrag(bool held, System.Numerics.Vector3 hand)
+    {
+        if (!held)
+        {
+            if (_xrSelDragging) Console.WriteLine("[XR] selection dropped");
+            _xrSelDragging = false;
+            return;
+        }
+        if (_xrSceneFromRoom is not { } m || _selection is not { } v || _gpuRenderer.PackedSplatBuffer is not { } packed) return;
+        if (!_xrSelDragging)
+        {
+            _xrSelDragging = true;
+            _xrSelLastHand = hand;
+            _xrSelPending = System.Numerics.Vector3.Zero;
+            // One undo step for the whole drag.
+            _ = _splatEditor.MoveAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v, System.Numerics.Vector3.Zero);
+            Console.WriteLine("[XR] selection grabbed");
+            return;
+        }
+        _xrSelPending += System.Numerics.Vector3.TransformNormal(hand - _xrSelLastHand, m);
+        _xrSelLastHand = hand;
+        if (_xrSelMoveBusy || _xrSelPending.LengthSquared() < 1e-12f) return;
+        var offset = _xrSelPending;
+        _xrSelPending = System.Numerics.Vector3.Zero;
+        _xrSelMoveBusy = true;
+        _ = MoveSelectionNowAsync(packed, v, offset);
+    }
+
+    async Task MoveSelectionNowAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, SplatEditor.Volume v, System.Numerics.Vector3 offset)
+    {
+        try
+        {
+            await _splatEditor.MoveAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v, offset, pushUndo: false);
+            _gpuRenderer.SplatsEdited(_xrHeadInScene);
+            _selection = v.MovedBy(offset);
+            if (_xrBox.BoxToScene is { } box) _xrBox.MoveBy(offset);
+        }
+        catch (Exception ex) { Console.WriteLine($"[XR] selection move failed: {ex.Message}"); }
+        finally { _xrSelMoveBusy = false; }
     }
 
     async Task XREditAsync(SplatEditor.Mode mode)

@@ -100,6 +100,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await click(90, Y.copy); await sleep(1500);
       await click(90, Y.paste); await sleep(2500);
       await shot('c1_pasted');
+      // Move the pasted copy (selected after the paste): Up twice. Move buttons, 2 columns under the status line.
+      await click(56, 603); await sleep(1200);
+      await click(56, 603); await sleep(1500);
+      await shot('c1b_moved_up');
       await click(90, Y.undo); await sleep(1500);
       await shot('c2_undone');
       return;

@@ -20,7 +20,7 @@ public static class SplatRows
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        if (!SplatEditor.Inside(v, packed[o], packed[o + 1], packed[o + 2])) return;
+        if (!SplatEditor.Selected(v, i, packed[o], packed[o + 1], packed[o + 2])) return;
         int slot = Atomic.Add(ref count[0], 1);
         indices[slot] = i;
     }

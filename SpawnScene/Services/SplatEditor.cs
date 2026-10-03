@@ -24,6 +24,22 @@ public sealed class SplatEditor : IDisposable
     {
         public float M11, M12, M13, M14, M21, M22, M23, M24, M31, M32, M33, M34, M41, M42, M43, M44;
         public float X0, X1, Y0, Y1, Z0, Z1;
+        /// <summary>When RowTo &gt; RowFrom the selection is the rows RowFrom..RowTo instead of a region - what a
+        /// paste or an inserted scene just added, so it can be moved without catching the scene around it.</summary>
+        public int RowFrom, RowTo;
+
+        /// <summary>The same selection after its splats moved by <paramref name="offset"/>: a region moves with
+        /// them (so a second move takes the same splats); a row range is unchanged.</summary>
+        public Volume MovedBy(Vector3 offset)
+        {
+            if (RowTo > RowFrom) return this;
+            var m = new Matrix4x4(M11, M12, M13, M14, M21, M22, M23, M24, M31, M32, M33, M34, M41, M42, M43, M44);
+            var moved = From(Matrix4x4.CreateTranslation(-offset) * m, X0, X1, Y0, Y1, Z0, Z1);
+            return moved;
+        }
+
+        /// <summary>Rows <paramref name="from"/>..<paramref name="to"/> (exclusive).</summary>
+        public static Volume Rows(int from, int to) => new() { RowFrom = from, RowTo = to, M44 = 1 };
 
         public static Volume From(Matrix4x4 m, float x0, float x1, float y0, float y1, float z0, float z1) => new()
         {
@@ -50,6 +66,10 @@ public sealed class SplatEditor : IDisposable
 
     public enum Mode { DeleteInside = 0, KeepInside = 1 }
 
+    /// <summary>Whether splat <paramref name="i"/> at (x, y, z) is selected: by row range or by region.</summary>
+    public static bool Selected(Volume v, int i, float x, float y, float z)
+        => v.RowTo > v.RowFrom ? i >= v.RowFrom && i < v.RowTo : Inside(v, x, y, z);
+
     /// <summary>The selection test, shared by the kernels and the tests.</summary>
     public static bool Inside(Volume v, float x, float y, float z)
     {
@@ -67,7 +87,7 @@ public sealed class SplatEditor : IDisposable
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        if (Inside(v, packed[o], packed[o + 1], packed[o + 2])) Atomic.Add(ref count[0], 1);
+        if (Selected(v, i, packed[o], packed[o + 1], packed[o + 2])) Atomic.Add(ref count[0], 1);
     }
 
     static void ApplyKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, int keepInside, int n)
@@ -75,7 +95,7 @@ public sealed class SplatEditor : IDisposable
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        bool inside = Inside(v, packed[o], packed[o + 1], packed[o + 2]);
+        bool inside = Selected(v, i, packed[o], packed[o + 1], packed[o + 2]);
         if (inside != (keepInside != 0)) packed[o + SplatFormat.OffOpacity] = 0f;
     }
 
@@ -91,6 +111,29 @@ public sealed class SplatEditor : IDisposable
         packed[i * SplatFormat.Floats + SplatFormat.OffOpacity] = saved[i];
     }
 
+    static void MoveKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, float dx, float dy, float dz, int n)
+    {
+        if (i >= n) return;
+        int o = i * SplatFormat.Floats;
+        if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
+        if (!Selected(v, i, packed[o], packed[o + 1], packed[o + 2])) return;
+        packed[o] += dx; packed[o + 1] += dy; packed[o + 2] += dz;
+    }
+
+    static void SavePositionsKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, ArrayView1D<float, Stride1D.Dense> saved, int n)
+    {
+        if (i >= n) return;
+        int o = i * SplatFormat.Floats;
+        saved[i * 3] = packed[o]; saved[i * 3 + 1] = packed[o + 1]; saved[i * 3 + 2] = packed[o + 2];
+    }
+
+    static void RestorePositionsKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, ArrayView1D<float, Stride1D.Dense> saved, int n)
+    {
+        if (i >= n) return;
+        int o = i * SplatFormat.Floats;
+        packed[o] = saved[i * 3]; packed[o + 1] = saved[i * 3 + 1]; packed[o + 2] = saved[i * 3 + 2];
+    }
+
     static void ZeroFromKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> saved, int from, int n)
     {
         if (i >= n || i < from) return;
@@ -100,14 +143,21 @@ public sealed class SplatEditor : IDisposable
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>? _zeroFrom;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int>? _count;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, int, int>? _apply;
-    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>? _save, _restore;
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>? _save, _restore, _savePos, _restorePos;
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, float, float, float, int>? _move;
 
-    /// <summary>Undo snapshots (opacity columns, newest last). Held under <see cref="UndoBudgetBytes"/>; the oldest
-    /// goes first, but the newest edit can always be undone.</summary>
-    readonly List<MemoryBuffer1D<float, Stride1D.Dense>> _undo = new();
+    /// <summary>One undo step: what it restores (the opacity column, or positions) and the saved values.</summary>
+    readonly record struct Snapshot(bool Positions, MemoryBuffer1D<float, Stride1D.Dense> Values)
+    {
+        public void Dispose() => Values.Dispose();
+    }
+
+    /// <summary>Undo snapshots (newest last). Held under <see cref="UndoBudgetBytes"/>; the oldest goes first, but the
+    /// newest edit can always be undone.</summary>
+    readonly List<Snapshot> _undo = new();
     int _undoSplats = -1;
 
-    /// <summary>GPU memory the undo history may hold (a 14M-splat scene: 56 MB a step, so 4 steps).</summary>
+    /// <summary>GPU memory the undo history may hold (14M splats: an opacity step is 56 MB, a move step 168 MB).</summary>
     public long UndoBudgetBytes { get; set; } = 256L * 1024 * 1024;
 
     public int UndoDepth => _undo.Count;
@@ -119,6 +169,9 @@ public sealed class SplatEditor : IDisposable
         _save ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(SaveOpacityKernel);
         _restore ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(RestoreOpacityKernel);
         _zeroFrom ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>(ZeroFromKernel);
+        _savePos ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(SavePositionsKernel);
+        _restorePos ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(RestorePositionsKernel);
+        _move ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, float, float, float, int>(MoveKernel);
     }
 
     /// <summary>Visible splats inside the volume.</summary>
@@ -140,18 +193,36 @@ public sealed class SplatEditor : IDisposable
     {
         if (n <= 0) return;
         Load(a);
+        PushSnapshot(a, packed, n, positions: false);
+        _apply!(n, packed.View, v, mode == Mode.KeepInside ? 1 : 0, n);
+        await a.SynchronizeAsync();
+    }
+
+    /// <summary>Move the selected splats by <paramref name="offset"/> (scene units); undoable.</summary>
+    /// <remarks>A drag (the headset's grip) pushes one undo step when it starts and moves without one each frame
+    /// (<paramref name="pushUndo"/> false), so Undo takes the whole drag back.</remarks>
+    public async Task MoveAsync(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, Volume v, Vector3 offset,
+        bool pushUndo = true)
+    {
+        if (n <= 0) return;
+        Load(a);
+        if (pushUndo) PushSnapshot(a, packed, n, positions: true);
+        _move!(n, packed.View, v, offset.X, offset.Y, offset.Z, n);
+        await a.SynchronizeAsync();
+    }
+
+    void PushSnapshot(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, bool positions)
+    {
         if (n != _undoSplats) ClearUndo();   // a different scene: old snapshots do not fit it
         _undoSplats = n;
-        var snap = a.Allocate1D<float>(n);
-        _save!(n, packed.View, snap.View, n);
-        _undo.Add(snap);
-        while (_undo.Count > 1 && (long)_undo.Count * n * sizeof(float) > UndoBudgetBytes)
+        var values = a.Allocate1D<float>((long)n * (positions ? 3 : 1));
+        (positions ? _savePos! : _save!)(n, packed.View, values.View, n);
+        _undo.Add(new Snapshot(positions, values));
+        while (_undo.Count > 1 && _undo.Sum(s => s.Values.LengthInBytes) > UndoBudgetBytes)
         {
             _undo[0].Dispose();
             _undo.RemoveAt(0);
         }
-        _apply!(n, packed.View, v, mode == Mode.KeepInside ? 1 : 0, n);
-        await a.SynchronizeAsync();
     }
 
     /// <summary>Undo the last edit. False when there is nothing to undo.</summary>
@@ -161,7 +232,7 @@ public sealed class SplatEditor : IDisposable
         Load(a);
         var snap = _undo[^1];
         _undo.RemoveAt(_undo.Count - 1);
-        _restore!(n, packed.View, snap.View, n);
+        (snap.Positions ? _restorePos! : _restore!)(n, packed.View, snap.Values.View, n);
         await a.SynchronizeAsync();
         snap.Dispose();
         return true;
@@ -180,7 +251,7 @@ public sealed class SplatEditor : IDisposable
         var snap = a.Allocate1D<float>(n);
         _save!(n, packed.View, snap.View, n);
         _zeroFrom!(n, snap.View, pastedFrom, n);
-        _undo.Add(snap);
+        _undo.Add(new Snapshot(false, snap));
         await a.SynchronizeAsync();
     }
 

@@ -23,6 +23,13 @@ public sealed class XRBoxTool
 
     public void Clear() { BoxToScene = null; Dragging = false; }
 
+    /// <summary>Carry the finished box along with the splats it selected (they were moved by
+    /// <paramref name="sceneOffset"/>).</summary>
+    public void MoveBy(Vector3 sceneOffset)
+    {
+        if (BoxToScene is { } b) BoxToScene = b * Matrix4x4.CreateTranslation(sceneOffset);
+    }
+
     /// <summary>
     /// One frame. <paramref name="tip"/> is the controller tip in the room; returns true on the frame a box is
     /// finished (trigger released).

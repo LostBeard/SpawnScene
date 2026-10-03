@@ -65,8 +65,67 @@ public partial class Studio
         {
             X = 12, Y = by + 2, Text = EditStatusText(), FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
         });
+        // Move the selection, relative to the camera: a step is a tenth of the scene's move speed.
+        float my = by + 26, mw = (w - 4) / 2f;
+        panel.AddChild(new UILabel { X = 12, Y = my, Text = "Move selection", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary });
+        my += 22;
+        (string Label, Func<(Vector3 R, Vector3 U, Vector3 F), Vector3> Dir)[] moves =
+        {
+            ("Left", c => -c.R), ("Right", c => c.R),
+            ("Up", c => c.U), ("Down", c => -c.U),
+            ("Nearer", c => -c.F), ("Farther", c => c.F),
+        };
+        for (int m = 0; m < moves.Length; m++)
+        {
+            var dir = moves[m].Dir;
+            panel.AddChild(new UIButton
+            {
+                X = 12 + (m % 2) * (mw + 4), Y = my + (m / 2) * (h + 4), Width = mw, Height = h,
+                Text = moves[m].Label, FontSize = FontSize.Caption,
+                OnClick = () => _ = MoveSelectionAsync(dir(CameraAxes())),
+            });
+        }
+        panel.Height = my + 3 * (h + 4) + 8;
         if (_dragStart is { } a && _dragEnd is { } b2) ShowSelectRect(a, b2);
         if (_insertListOpen) BuildInsertList(x + w + 24 + 8, y);
+    }
+
+    void SelectRows(int from, int to)
+    {
+        _selection = SplatEditor.Volume.Rows(from, to);
+        _selectedCount = to - from;
+        _dragStart = _dragEnd = null;
+    }
+
+    /// <summary>The desktop camera's right, world up, and horizontal forward (for moving things).</summary>
+    (Vector3 R, Vector3 U, Vector3 F) CameraAxes()
+    {
+        var cam = _sceneManager.Camera;
+        var f = new Vector3(cam.Forward.X, 0, cam.Forward.Z);
+        f = f.LengthSquared() < 1e-8f ? cam.Forward : Vector3.Normalize(f);
+        var r = Vector3.Normalize(Vector3.Cross(cam.Forward, cam.Up));
+        return (r, Vector3.UnitY, f);
+    }
+
+    /// <summary>Move the selection one step along <paramref name="direction"/> (scene units, unit length); undoable.</summary>
+    async Task MoveSelectionAsync(Vector3 direction, float? step = null)
+    {
+        if (_editBusy) return;
+        var packed = _gpuRenderer.PackedSplatBuffer;
+        if (packed == null) return;
+        if (_selection is not { } v) { _editNote = "Select something first"; RefreshEditStatus(); return; }
+        var offset = direction * (step ?? (_cameraController?.MoveSpeed ?? 1f) * 0.05f);
+        _editBusy = true; _editNote = null; RefreshEditStatus();
+        try
+        {
+            await _splatEditor.MoveAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v, offset);
+            _gpuRenderer.SplatsEdited(_sceneManager.Camera.Position);
+            _selection = v.MovedBy(offset);
+            _dragStart = _dragEnd = null;   // a screen rectangle no longer outlines a region that moved
+            Console.WriteLine($"[Edit] moved {_selectedCount:N0} splats by {offset}");
+        }
+        finally { _editBusy = false; }
+        BuildViewerHudUI();
     }
 
     // ── Insert scene: combine another saved scene into this one ─────────────────────────────────────────────
@@ -155,7 +214,8 @@ public partial class Studio
             if (_gpuRenderer.PackedSplatBuffer is { } grown)
                 await _splatEditor.ResetUndoForPasteAsync(a, grown, after, before);
             if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = after;
-            _editNote = $"Inserted {scene.SplatCount:N0} splats";
+            SelectRows(before, after);
+            _editNote = $"Inserted {scene.SplatCount:N0} splats (selected - Move them)";
             Console.WriteLine($"[Edit] inserted '{project.Name}' scene {scene.Id}: {scene.SplatCount:N0} splats ({before:N0} -> {after:N0})" +
                 (sh != null ? $", SH degree {scene.ShDegree}" : "") + $", offset {offset}");
         }
@@ -214,7 +274,8 @@ public partial class Studio
             if (_gpuRenderer.PackedSplatBuffer is { } packed)
                 await _splatEditor.ResetUndoForPasteAsync(a, packed, after, before);
             if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = after;
-            _editNote = $"Pasted {clip.Count:N0} splats";
+            SelectRows(before, after);
+            _editNote = $"Pasted {clip.Count:N0} splats (selected - Move them)";
             Console.WriteLine($"[Edit] pasted {clip.Count:N0} splats ({before:N0} -> {after:N0}), offset {offset}");
         }
         catch (Exception ex) { _editNote = "Paste failed"; Console.WriteLine($"[Edit] paste failed: {ex.Message}"); }

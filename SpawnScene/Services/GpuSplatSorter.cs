@@ -347,6 +347,14 @@ public class GpuSplatSorter : IDisposable
         Console.WriteLine($"[GpuSorter] Uploaded {_splatCount:N0} splats");
     }
 
+    /// <summary>Sort again at the next chance even if the camera has not moved: the splats changed (an edit),
+    /// so the current order's packed vertices are stale. An in-flight sort is left to finish.</summary>
+    public void RequestResort()
+    {
+        _sortPending = true;
+        _lastSortedMvp.M11 = float.NaN;
+    }
+
     private void ResetSortState()
     {
         _prevFrameCameraPos = new Vector3(float.NaN);

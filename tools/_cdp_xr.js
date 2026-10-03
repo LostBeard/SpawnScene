@@ -41,7 +41,7 @@ const get = u => new Promise((res, rej) =>
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       if (/\[Autotest\] PASS/.test(t)) passed = true;
       if (/\[Autotest\] XR hook ready/.test(t)) hook = true;
-      if (/error|warn/.test(m.params.type) || /\[Autotest\]|\[XR|GPU ERROR|\[Studio\] (Entering|Failed|XR|immersive)/.test(t)) console.log('CON ' + t.slice(0, 300));
+      if (/error|warn/.test(m.params.type) || /\[Autotest\]|\[XR|\[Edit\]|GPU ERROR|\[Studio\] (Entering|Failed|XR|immersive)/.test(t)) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
@@ -109,6 +109,14 @@ const get = u => new Promise((res, rej) =>
       setTimeout(() => { console.log(`stick ${k.objectName} axis ${k.axisIndex} = ${k.value}`); analog(k.objectName, k.axisIndex, k.value); }, k.at);
       setTimeout(() => analog(k.objectName, k.axisIndex, 0), k.at + k.dur);
     }
+    // SPAWNSCENE_XR_SHOTS="5200,8000": extra captures at those times after entering (out.png -> out_<ms>.png).
+    for (const ms of (process.env.SPAWNSCENE_XR_SHOTS || '').split(',').filter(Boolean).map(Number))
+      setTimeout(async () => {
+        const p = await send('Page.captureScreenshot', { format: 'png' });
+        const f = out.replace(/\.png$/, `_${ms}.png`);
+        fs.writeFileSync(f, Buffer.from(p.result.data, 'base64'));
+        console.log('captured ' + f);
+      }, ms);
     await new Promise(r2 => setTimeout(r2, parseInt(runMs, 10)));
     const png = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(out, Buffer.from(png.result.data, 'base64'));

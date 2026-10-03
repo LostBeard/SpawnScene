@@ -167,7 +167,15 @@ public partial class Studio
         // While the menu is open the trigger belongs to it (clicks), not to the scene (AR placement).
         bool menuOpen = _xrMenu?.IsOpen == true;
         if (_xrMenu != null) _xrMenu.Step(frameData.RightRayOrigin, frameData.RightRayDirection, frameData.RightTrigger, dt);
-        bool trigger = !menuOpen && (frameData.LeftTrigger || frameData.RightTrigger);
+        // The box tool (menu: Select box) owns the right trigger while it is on and the menu is closed.
+        bool boxTool = _xrBox.Active && !menuOpen;
+        if (_xrBox.Step(boxTool ? frameData.RightRayOrigin : null, boxTool && frameData.RightTrigger, _xrSceneFromRoom.Value))
+        {
+            _selection = SplatEditor.Volume.Box(_xrBox.BoxToScene!.Value);
+            _ = CountSelectionAsync().ContinueWith(_ => RefreshXRMenu());
+            Console.WriteLine("[XR] selection box drawn");
+        }
+        bool trigger = !menuOpen && !_xrBox.Active && (frameData.LeftTrigger || frameData.RightTrigger);
         if (trigger && !_xrTriggerWasDown && _xrPlaceMiniature)
         {
             _xrPlacing = !_xrPlacing;
@@ -223,6 +231,9 @@ public partial class Studio
                 var roomViewProj = view.RoomViewMatrix * view.ProjectionMatrix;
                 _gpuRenderer.RenderXRViewSortedToCanvas(view.ViewMatrix, view.ProjectionMatrix, (int)vp.Width, (int)vp.Height, _xrCasEnabled,
                     _xrMenu?.IsOpen == true ? (enc, color, depth) => _xrMenu.Draw(_gameUI.Renderer, roomViewProj, enc, color, depth) : null);
+                if (_xrBox.BoxToRoom(_xrSceneFromRoom.Value) is { } boxRoom)
+                    _gpuRenderer.RenderXROverlayToCanvas((enc, color, depth) =>
+                        DrawXRBox(enc, color, depth, roomViewProj, boxRoom, frameData.HeadPosition, _xrBox.Dragging));
                 _xrBlit!.Blit(_gpuRenderer.XRBridgeCanvas!, layer.Framebuffer, vp);
             }
             return;
@@ -277,7 +288,35 @@ public partial class Studio
     XRMenu? _xrMenu;
     bool _xrMenuWasDown;
     float _xrSpeedScale = 1f;
-    UIButton? _xrTurnButton, _xrSpeedButton, _xrPlaceButton;
+    UIButton? _xrTurnButton, _xrSpeedButton, _xrPlaceButton, _xrSelectButton;
+    UILabel? _xrEditLabel;
+    readonly XRBoxTool _xrBox = new();
+
+    async Task XREditAsync(SplatEditor.Mode mode)
+    {
+        await ApplyEditAsync(mode);
+        _xrBox.Clear();
+        RefreshXRMenu();
+    }
+
+    /// <summary>The selection box's 12 edges as thin quads turned toward the head (room space, metres).</summary>
+    void DrawXRBox(SpawnDev.SpawnJS.JSObjects.GPUCommandEncoder enc, SpawnDev.SpawnJS.JSObjects.GPUTextureView color,
+        SpawnDev.SpawnJS.JSObjects.GPUTextureView depth, System.Numerics.Matrix4x4 roomViewProj,
+        System.Numerics.Matrix4x4 boxRoom, System.Numerics.Vector3 head, bool dragging)
+    {
+        var r = _gameUI.Renderer;
+        var c = XRBoxTool.Corners(boxRoom);
+        float cr = dragging ? 1f : 0.45f, cg = dragging ? 0.85f : 0.86f, cb = dragging ? 0.3f : 1f;
+        foreach (var (ia, ib) in XRBoxTool.Edges)
+        {
+            var a = c[ia]; var b = c[ib];
+            var side = System.Numerics.Vector3.Cross(b - a, (a + b) * 0.5f - head);
+            if (side.LengthSquared() < 1e-12f) continue;
+            side = System.Numerics.Vector3.Normalize(side) * 0.003f;
+            r.DrawWorldRayQuad(a - side, a + side, b - side, b + side, cr, cg, cb, 0.95f);
+        }
+        r.EndWorldSpace(enc, color, depth, roomViewProj);
+    }
 
     XRMenu EnsureXRMenu()
     {
@@ -294,36 +333,52 @@ public partial class Studio
             X = 24, Y = 58, Text = "Point with the right controller, trigger to choose. A/X closes, B/Y exits.",
             FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
         });
-        const float bw = 244, bh = 56, x0 = 24, x1 = 292;
+        const float bw = 244, bh = 50, x0 = 24, x1 = 292;
         UIButton Button(float x, float y, string text, Action click)
             => p.AddChild(new UIButton
             {
                 X = x, Y = y, Width = bw, Height = bh, Text = text, FontSize = FontSize.Body, OnClick = click,
             });
-        Button(x0, 100, "Reset view", () =>
+        Button(x0, 96, "Reset view", () =>
         {
             _xrSceneFromRoom = null;   // re-placed on the next frame (comfort scale / AR miniature)
+            _xrBox.Clear();
             _xrMenu!.Close();
             Console.WriteLine("[XR] menu: reset view");
         });
-        _xrTurnButton = Button(x1, 100, "", () =>
+        _xrTurnButton = Button(x1, 96, "", () =>
         {
             _xrLocomotion.SnapTurnDegrees = _xrLocomotion.SnapTurnDegrees >= 45f ? 30f : 45f;
             RefreshXRMenu();
         });
-        _xrSpeedButton = Button(x0, 172, "", () =>
+        _xrSpeedButton = Button(x0, 156, "", () =>
         {
             _xrSpeedScale = _xrSpeedScale >= 2f ? 0.5f : _xrSpeedScale * 2f;
             RefreshXRMenu();
         });
-        _xrPlaceButton = Button(x1, 172, "", () =>
+        _xrPlaceButton = Button(x1, 156, "", () =>
         {
             _xrPlacing = !_xrPlacing;
             _xrMenu!.Close();
             Console.WriteLine(_xrPlacing ? "[XR] menu: place on a surface" : "[XR] menu: placement off");
         });
-        Button(x0, 290, "Close menu", () => _xrMenu!.Close());
-        Button(x1, 290, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
+        // Editing: draw a box with the trigger, then delete it / keep only it / undo (SplatEditor, as on the desktop).
+        _xrSelectButton = Button(x0, 230, "", () =>
+        {
+            _xrBox.Active = !_xrBox.Active;
+            if (_xrBox.Active) _xrMenu!.Close();
+            RefreshXRMenu();
+            Console.WriteLine(_xrBox.Active ? "[XR] menu: select box on" : "[XR] menu: select box off");
+        });
+        Button(x1, 230, "Clear box", () => { _xrBox.Clear(); _selection = null; _selectedCount = 0; RefreshXRMenu(); });
+        Button(x0, 290, "Delete", () => _ = XREditAsync(SplatEditor.Mode.DeleteInside));
+        Button(x1, 290, "Keep only", () => _ = XREditAsync(SplatEditor.Mode.KeepInside));
+        Button(x0, 350, "Undo", () => _ = UndoEditAsync().ContinueWith(_ => RefreshXRMenu()));
+        Button(x1, 350, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
+        _xrEditLabel = p.AddChild(new UILabel
+        {
+            X = 24, Y = 418, Text = "", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
+        });
         RefreshXRMenu();
         return _xrMenu;
     }
@@ -332,6 +387,10 @@ public partial class Studio
     {
         if (_xrTurnButton != null) _xrTurnButton.Text = $"Snap turn: {_xrLocomotion.SnapTurnDegrees:0} deg";
         if (_xrSpeedButton != null) _xrSpeedButton.Text = $"Move speed: x{_xrSpeedScale:0.#}";
+        if (_xrSelectButton != null) _xrSelectButton.Text = _xrBox.Active ? "Select box: on" : "Select box";
+        if (_xrEditLabel != null)
+            _xrEditLabel.Text = _editBusy ? "Working..." : _selection != null ? $"{_selectedCount:N0} splats in the box"
+                : _xrBox.Active ? "Hold the trigger and drag to draw a box" : "Edit: choose Select box, draw it, then Delete or Keep only";
         if (_xrPlaceButton != null)
         {
             _xrPlaceButton.Visible = _xrPlaceMiniature;   // AR only

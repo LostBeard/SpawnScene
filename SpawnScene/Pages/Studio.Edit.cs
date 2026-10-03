@@ -137,6 +137,7 @@ public partial class Studio
         if (packed == null || _selection is not { } v) return;
         _editBusy = true; RefreshEditStatus();
         try { _selectedCount = await _splatEditor.CountAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v); }
+        catch (Exception ex) { Console.WriteLine($"[Edit] count failed: {ex.Message}"); }
         finally { _editBusy = false; }
         Console.WriteLine($"[Edit] selected {_selectedCount:N0} splats");
         RefreshEditStatus();
@@ -150,7 +151,7 @@ public partial class Studio
         try
         {
             await _splatEditor.ApplyAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v, mode);
-            _gpuRenderer.RepackForDisplay(_sceneManager.Camera.Position);
+            _gpuRenderer.SplatsEdited(_sceneManager.Camera.Position);
             Console.WriteLine($"[Edit] {(mode == SplatEditor.Mode.DeleteInside ? "deleted" : "kept only")} {_selectedCount:N0} splats (undo depth {_splatEditor.UndoDepth})");
         }
         finally { _editBusy = false; }
@@ -167,7 +168,7 @@ public partial class Studio
         try
         {
             undone = await _splatEditor.UndoAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount);
-            if (undone) _gpuRenderer.RepackForDisplay(_sceneManager.Camera.Position);
+            if (undone) _gpuRenderer.SplatsEdited(_sceneManager.Camera.Position);
         }
         finally { _editBusy = false; }
         Console.WriteLine(undone ? $"[Edit] undone (undo depth {_splatEditor.UndoDepth})" : "[Edit] nothing to undo");

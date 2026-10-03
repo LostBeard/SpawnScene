@@ -47,6 +47,7 @@
     <Compile Include="..\SpawnScene\Services\XRSceneAlignment.cs" Link="Linked\XRSceneAlignment.cs" />
     <Compile Include="..\SpawnScene\Services\XRLocomotion.cs" Link="Linked\XRLocomotion.cs" />
     <Compile Include="..\SpawnScene\Services\XRWorldGrab.cs" Link="Linked\XRWorldGrab.cs" />
+    <Compile Include="..\SpawnScene\Services\XRBoxTool.cs" Link="Linked\XRBoxTool.cs" />
     <Compile Include="..\SpawnScene\Services\SplatEditor.cs" Link="Linked\SplatEditor.cs" />
     <Compile Include="..\SpawnScene\Services\XRMenuGeometry.cs" Link="Linked\XRMenuGeometry.cs" />
     <Compile Include="..\SpawnScene\Services\TouchNavigator.cs" Link="Linked\TouchNavigator.cs" />

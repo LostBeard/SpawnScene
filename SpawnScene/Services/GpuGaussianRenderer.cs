@@ -520,6 +520,34 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     }
 
     /// <summary>
+    /// The splats were edited in the packed buffer (SplatEditor): rebuild the display vertices for the stochastic
+    /// path and make the sorted paths (desktop sorted, XR) sort again, even with a still camera.
+    /// </summary>
+    public void SplatsEdited(Vector3 cameraPosition)
+    {
+        RepackForDisplay(cameraPosition);
+        _sorter.RequestResort();
+    }
+
+    /// <summary>
+    /// Draw more on top of the current XR eye view in a submit of its own (after the eye's main one), with the bridge
+    /// canvas and its depth: for a second world-space UI batch, which cannot share a command buffer with the first
+    /// (GameUI's EndWorldSpace writes one set of buffers per batch).
+    /// </summary>
+    public void RenderXROverlayToCanvas(Action<GPUCommandEncoder, GPUTextureView, GPUTextureView> overlay)
+    {
+        if (_device == null || _xrBridgeContext == null || _xrBridgeDepth == null) return;
+        using var encoder = _device.CreateCommandEncoder();
+        using var canvasTexture = _xrBridgeContext.GetCurrentTexture();
+        using var canvasView = canvasTexture.CreateView();
+        using var depthView = _xrBridgeDepth.CreateView();
+        overlay(encoder, canvasView, depthView);
+        using var cmd = encoder.Finish();
+        _submitArray[0] = cmd;
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
+    }
+
+    /// <summary>
     /// Initialize the WebGPU render pipeline. Called once when canvas is attached.
     /// <paramref name="canvasRef"/> is stored for adaptive-resolution canvas pixel resizing.
     /// </summary>

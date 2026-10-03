@@ -22,7 +22,7 @@ public sealed class SplatClipboard : IDisposable
     public MemoryBuffer1D<float, Stride1D.Dense>[]? Sh { get; }
     public int Count { get; }
     public int ShDegree { get; }
-    public bool ColoursAreShDc { get; }
+    public bool ColoursAreShDc { get; private set; }
     /// <summary>The copy's bounds (exact) - where it came from, and how big it is.</summary>
     public SplatBounds.Aabb Bounds { get; }
 
@@ -30,6 +30,24 @@ public sealed class SplatClipboard : IDisposable
         int shDegree, bool shDc, SplatBounds.Aabb bounds)
     {
         Packed = packed; Sh = sh; Count = count; ShDegree = shDegree; ColoursAreShDc = shDc; Bounds = bounds;
+    }
+
+    /// <summary>A whole scene as a clipboard (for Insert scene): takes ownership of the buffers.</summary>
+    public static async Task<SplatClipboard> FromSceneAsync(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int count,
+        MemoryBuffer1D<float, Stride1D.Dense>[]? sh, int shDegree, bool shDc)
+    {
+        var bounds = await SplatBounds.ComputeRobustAsync(a, packed, count) ?? default;
+        return new SplatClipboard(packed, sh, count, sh != null ? shDegree : 0, shDc, bounds);
+    }
+
+    /// <summary>Store the copy's colours the way the target scene does (trained SH DC vs RGB). Going to RGB drops the
+    /// SH bands (base colour only).</summary>
+    public async Task MatchColoursAsync(Accelerator a, bool toShDc)
+    {
+        if (toShDc == ColoursAreShDc) return;
+        SplatRows.ConvertColours(a, Packed, Count, toShDc);
+        await a.SynchronizeAsync();
+        ColoursAreShDc = toShDc;
     }
 
     // ── Copy / Paste against the live renderer ──────────────────────────────────────────────────────────────

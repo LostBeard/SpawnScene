@@ -1202,6 +1202,24 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// wide and get widened on the GPU. Reading an old file at the new stride would not fail,
     /// it would just render noise, so the stride is always passed explicitly.
     /// </summary>
+    /// <summary>A saved scene's packed splats streamed into a new GPU buffer at the current stride (widened as on
+    /// load) WITHOUT uploading it - for inserting one scene into another. The caller owns the buffer.</summary>
+    public async Task<MemoryBuffer1D<float, Stride1D.Dense>> LoadPackedFromStreamAsync(Stream sceneStream, int splatCount, int floatsPerSplat)
+    {
+        var packedBuf = _gpu.WebGPUAccelerator.Allocate1D<float>((long)splatCount * floatsPerSplat);
+        await packedBuf.View.CopyFromStreamAsync(sceneStream);
+        return await _gaussianKernel.WidenPackedAsync(packedBuf, splatCount, floatsPerSplat);
+    }
+
+    /// <summary>A saved SH part (bytes from the project store) as a new ILGPU buffer; the caller owns it.</summary>
+    public MemoryBuffer1D<float, Stride1D.Dense> IlgpuFromArrayBuffer(Accelerator a, ArrayBuffer bytes)
+    {
+        var dst = a.Allocate1D<float>(bytes.ByteLength / sizeof(float));
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        _queue!.WriteBuffer(dst.GetGPUBuffer()!, 0L, bytes);
+        return dst;
+    }
+
     public async Task UploadSceneFromStream(Stream sceneStream, int splatCount, int floatsPerSplat)
     {
         var accelerator = _gpu.WebGPUAccelerator;

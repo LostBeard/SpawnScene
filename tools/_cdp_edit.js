@@ -72,8 +72,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await sleep(1500);
     // Top bar: Edit sits left of AR (canvas 1600 wide, Send to Headset hidden on loopback). Toolbar: left edge,
     // buttons 42 px apart from y 97: Select, Delete, Keep only, Copy, Cut, Paste, Undo, Clear selection, Save.
-    const Y = { select: 97, del: 139, keep: 181, copy: 223, cut: 265, paste: 307, undo: 349, clear: 391, save: 433 };
+    const Y = { select: 97, del: 139, keep: 181, copy: 223, cut: 265, paste: 307, insert: 349, undo: 391, clear: 433, save: 475 };
     await click(1208, 28); await sleep(500);
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'insert') {
+      // SPAWNSCENE_EDIT_FLOW=insert: Insert scene -> the newest other saved scene (this profile keeps earlier runs'
+      // projects), then back off with touch pinch-ins to see both side by side.
+      await click(90, Y.insert); await sleep(1500);   // Insert scene >
+      await shot('i0_list');
+      await click(338, 119); await sleep(5000);  // the first scene in the list
+      await shot('i1_inserted');
+      await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
+      const touch = (type, pts) => send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], i) => ({ x, y, id: i })) });
+      for (let n = 0; n < 3; n++) {
+        await touch('touchStart', [[600, 500], [1000, 500]]);
+        for (let k = 1; k <= 10; k++) { await sleep(33); await touch('touchMove', [[600 + 17.5 * k, 500], [1000 - 17.5 * k, 500]]); }
+        await sleep(33); await touch('touchEnd', []);
+      }
+      await sleep(2500);
+      await shot('i2_backed_off');
+      return;
+    }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'copy') {
       // SPAWNSCENE_EDIT_FLOW=copy: select the red pillow, Copy, Paste (lands to its right), Undo.
       await click(90, Y.select);

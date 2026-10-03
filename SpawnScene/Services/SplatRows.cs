@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using ILGPU.Algorithms;
 using System.Numerics;
 
 namespace SpawnScene.Services;
@@ -52,6 +53,31 @@ public static class SplatRows
         }
     }
 
+    // Display colour = C0 * dc + 0.5 (SphericalHarmonics.WgslViewRgb). A trained scene stores dc, others RGB 0..1.
+    const float ShC0 = 0.28209479177387814f;
+
+    static void ConvertColoursKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, int n, int toShDc)
+    {
+        if (i >= n) return;
+        int o = i * SplatFormat.Floats + SplatFormat.OffColor;
+        for (int c = 0; c < 3; c++)
+        {
+            float v = packed[o + c];
+            packed[o + c] = toShDc != 0 ? (v - 0.5f) / ShC0 : XMath.Clamp(ShC0 * v + 0.5f, 0f, 1f);
+        }
+    }
+
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>? _convert;
+
+    /// <summary>Rewrite <paramref name="n"/> packed splats' colours as SH DC coefficients (from RGB) or as RGB (from
+    /// SH DC - the view-dependent bands are dropped by the caller): so splats from a trained and an untrained scene
+    /// can live in one scene.</summary>
+    public static void ConvertColours(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, bool toShDc)
+    {
+        Load(a);
+        if (n > 0) _convert!(n, packed.View, n, toShDc ? 1 : 0);
+    }
+
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>? _select;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int>? _gather;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int, int, float, float, float, int>? _append;
@@ -59,7 +85,8 @@ public static class SplatRows
 
     static void Load(Accelerator a)
     {
-        if (!ReferenceEquals(_loadedFor, a)) { _select = null; _gather = null; _append = null; _loadedFor = a; }
+        if (!ReferenceEquals(_loadedFor, a)) { _select = null; _gather = null; _append = null; _convert = null; _loadedFor = a; }
+        _convert ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>(ConvertColoursKernel);
         _select ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SelectKernel);
         _gather ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int>(GatherKernel);
         _append ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int, int, float, float, float, int>(AppendKernel);

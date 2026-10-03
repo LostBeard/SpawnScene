@@ -1,5 +1,7 @@
 using System.Drawing;
 using System.Numerics;
+using ILGPU;
+using ILGPU.Runtime;
 using SpawnDev.GameUI;
 using SpawnDev.GameUI.Elements;
 using SpawnScene.Services;
@@ -30,7 +32,7 @@ public partial class Studio
         float y = 68;
         var panel = _uiRoot.AddChild(new UIPanel
         {
-            X = x, Y = y, Width = w + 24, Height = 9 * (h + gap) + 54,
+            X = x, Y = y, Width = w + 24, Height = 10 * (h + gap) + 54,
             BackgroundColor = Color.FromArgb(200, 12, 16, 22),
         });
         float by = 12;
@@ -55,6 +57,7 @@ public partial class Studio
         Add("Copy", () => _ = CopySelectionAsync(cut: false));
         Add("Cut", () => _ = CopySelectionAsync(cut: true));
         Add("Paste", () => _ = PasteClipboardAsync());
+        Add(_insertListOpen ? "Insert scene  <" : "Insert scene  >", () => _ = ToggleInsertListAsync());
         Add("Undo", () => _ = UndoEditAsync());
         Add("Clear selection", () => { _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null; BuildViewerHudUI(); });
         Add("Save as new scene", () => _ = SaveEditedSceneAsync());
@@ -63,6 +66,102 @@ public partial class Studio
             X = 12, Y = by + 2, Text = EditStatusText(), FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
         });
         if (_dragStart is { } a && _dragEnd is { } b2) ShowSelectRect(a, b2);
+        if (_insertListOpen) BuildInsertList(x + w + 24 + 8, y);
+    }
+
+    // ── Insert scene: combine another saved scene into this one ─────────────────────────────────────────────
+    bool _insertListOpen;
+    List<(Models.Project Project, Models.ProjectScene Scene)> _insertCandidates = new();
+
+    async Task ToggleInsertListAsync()
+    {
+        _insertListOpen = !_insertListOpen;
+        if (_insertListOpen)
+        {
+            _insertCandidates = new();
+            foreach (var p in await _projectService.ListProjectsAsync())
+                foreach (var s in p.Scenes)
+                    if (s.Id != _viewedProjectScene?.Id) _insertCandidates.Add((p, s));
+            _insertCandidates = _insertCandidates.OrderByDescending(c => c.Scene.CreatedAt).Take(10).ToList();
+        }
+        BuildViewerHudUI();
+    }
+
+    void BuildInsertList(float x, float y)
+    {
+        const float w = 300, h = 34, gap = 6;
+        var panel = _uiRoot.AddChild(new UIPanel
+        {
+            X = x, Y = y, Width = w + 24, Height = Math.Max(1, _insertCandidates.Count) * (h + gap) + 44,
+            BackgroundColor = Color.FromArgb(220, 12, 16, 22),
+        });
+        panel.AddChild(new UILabel { X = 12, Y = 10, Text = "Insert beside this scene:", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary });
+        float by = 34;
+        if (_insertCandidates.Count == 0)
+            panel.AddChild(new UILabel { X = 12, Y = by, Text = "No other saved scenes", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary });
+        foreach (var (p, s) in _insertCandidates)
+        {
+            var (proj, scene) = (p, s);
+            string label = $"{proj.Name}: {scene.SplatCount:N0} splats" + (scene.TrainedIterations > 0 ? ", trained" : "") + (scene.EditedFrom != null ? ", edited" : "");
+            panel.AddChild(new UIButton
+            {
+                X = 12, Y = by, Width = w, Height = h, Text = label, FontSize = FontSize.Caption,
+                OnClick = () => _ = InsertSceneAsync(proj, scene),
+            });
+            by += h + gap;
+        }
+    }
+
+    /// <summary>
+    /// Combine: stream another saved scene (and its SH bands) onto the GPU and paste it beside this one - right of it
+    /// as seen from the viewer, by both scenes' half widths. Colours are matched to this scene's representation. Undo
+    /// removes the inserted scene.
+    /// </summary>
+    async Task InsertSceneAsync(Models.Project project, Models.ProjectScene scene, System.Numerics.Vector3? sceneRight = null)
+    {
+        if (_editBusy) return;
+        var packedNow = _gpuRenderer.PackedSplatBuffer;
+        if (packedNow == null) return;
+        _editBusy = true; _editNote = null; _insertListOpen = false; RefreshEditStatus();
+        var a = _gpuService.WebGPUAccelerator;
+        try
+        {
+            using var stream = await _projectService.OpenSceneStreamAsync(project.Id, scene.Id);
+            if (stream == null) { _editNote = "Could not read that scene"; return; }
+            var packed = await _gpuRenderer.LoadPackedFromStreamAsync(stream, scene.SplatCount, scene.EffectiveFloatsPerSplat);
+            MemoryBuffer1D<float, Stride1D.Dense>[]? sh = null;
+            if (scene.ShDegree > 0 && scene.ShParts == SphericalHarmonics.Parts && _gpuRenderer.ShDegree > 0)
+            {
+                var bytes = await _projectService.ReadSceneShRestPartsAsync(project.Id, scene.Id, scene.ShParts);
+                if (bytes != null)
+                {
+                    sh = bytes.Select(b => _gpuRenderer.IlgpuFromArrayBuffer(a, b)).ToArray();
+                    foreach (var b in bytes) b.Dispose();
+                }
+            }
+            using var clip = await SplatClipboard.FromSceneAsync(a, packed, scene.SplatCount, sh, scene.ShDegree, scene.ColoursAreShDc);
+            await clip.MatchColoursAsync(a, _gpuRenderer.ColoursAreShDc);
+
+            // Beside this scene: centre to centre along the viewer's right, by both half widths + 5%.
+            var here = await SplatBounds.ComputeRobustAsync(a, packedNow, _gpuRenderer.SplatCount) ?? clip.Bounds;
+            var right = sceneRight ?? Vector3.Normalize(Vector3.Cross(_sceneManager.Camera.Forward, _sceneManager.Camera.Up));
+            float Half(SplatBounds.Aabb b) => 0.5f * (MathF.Abs(right.X) * (b.MaxX - b.MinX) + MathF.Abs(right.Y) * (b.MaxY - b.MinY) + MathF.Abs(right.Z) * (b.MaxZ - b.MinZ));
+            var hereC = new Vector3(here.CentreX, here.CentreY, here.CentreZ);
+            var thereC = new Vector3(clip.Bounds.CentreX, clip.Bounds.CentreY, clip.Bounds.CentreZ);
+            var offset = hereC - thereC + right * (Half(here) + Half(clip.Bounds)) * 1.05f;
+
+            int before = _gpuRenderer.SplatCount;
+            int after = await clip.PasteAsync(a, _gpuRenderer, offset);
+            if (_gpuRenderer.PackedSplatBuffer is { } grown)
+                await _splatEditor.ResetUndoForPasteAsync(a, grown, after, before);
+            if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = after;
+            _editNote = $"Inserted {scene.SplatCount:N0} splats";
+            Console.WriteLine($"[Edit] inserted '{project.Name}' scene {scene.Id}: {scene.SplatCount:N0} splats ({before:N0} -> {after:N0})" +
+                (sh != null ? $", SH degree {scene.ShDegree}" : "") + $", offset {offset}");
+        }
+        catch (Exception ex) { _editNote = "Insert failed"; Console.WriteLine($"[Edit] insert failed: {ex.Message}"); }
+        finally { _editBusy = false; }
+        BuildViewerHudUI();
     }
 
     string? _editNote;   // a one-off result ("Saved", "No project") shown until the next edit

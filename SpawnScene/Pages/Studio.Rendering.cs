@@ -60,7 +60,9 @@ public partial class Studio
                 _prevKeysDown.Add(key);
 
             var primary = input.PrimaryPointer;
-            if (primary != null && primary.WasPressed && !_isPointerLocked
+            // Select mode (Edit toolbar): a drag over the scene draws a selection instead of grabbing the mouse.
+            bool selecting = HandleSelectPointer(primary);
+            if (!selecting && !_selectMode && primary != null && primary.WasPressed && !_isPointerLocked
                 && primary.Type != SpawnDev.GameUI.Input.PointerType.Touch)   // touch navigates without a lock
             {
                 var pos = primary.ScreenPosition ?? Vector2.Zero;
@@ -84,7 +86,7 @@ public partial class Studio
                 _touchPositions.Add(tp);
                 if (p.WasPressed && _uiRoot.HitTest(tp) != null) touchStartsOnUi = true;
             }
-            var gesture = _touchNavigator.Step(_touchPositions, touchStartsOnUi);
+            var gesture = _touchNavigator.Step(_selectMode ? (IReadOnlyList<Vector2>)System.Array.Empty<Vector2>() : _touchPositions, touchStartsOnUi);
             if (gesture.LookPixels != Vector2.Zero)
             {
                 // The scene stays under the finger: one CSS pixel is 1 / (focal length in CSS pixels) radians.
@@ -242,6 +244,9 @@ public partial class Studio
 
     private void OnSceneChanged()
     {
+        // Edits and their undo snapshots belong to the scene they were made on.
+        _splatEditor.ClearUndo();
+        _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null;
         _state = StudioState.SceneViewer;
         _cameraController?.FitToScene();
         BuildViewerHudUI();

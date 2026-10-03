@@ -222,6 +222,25 @@ public partial class Studio
             });
         }
 
+        btnRight -= 80;
+        _uiRoot.AddChild(new UIButton
+        {
+            X = btnRight, Y = 12,
+            Width = 72, Height = 32,
+            Text = "Edit",
+            FontSize = FontSize.Caption,
+            NormalColor = _editOpen ? AccentSelected : UITheme.Current.ButtonNormal,
+            OnClick = () =>
+            {
+                _editOpen = !_editOpen;
+                if (!_editOpen) { _selectMode = false; _dragStart = _dragEnd = null; }
+                ReleasePointerLock();
+                BuildViewerHudUI();
+            },
+        });
+
+        BuildEditToolbar();
+
         if (_showSettings)
             BuildSettingsPanel();
     }

@@ -255,6 +255,7 @@ public class MultiViewGenerationService
                 ransac[c] = EpipolarRansac.Estimate(ransacPairs[c].A, ransacPairs[c].B, thresholdPx: 2.0, minInliers: 15,
                     seed: ransacPairs[c].Seed);
         }
+        var planarTrace = TraceCoreLinks ? new Dictionary<int, List<string>>() : null;
         for (int c = 0; c < candidates.Count; c++)
         {
             var r = ransac[c];
@@ -263,7 +264,23 @@ public class MultiViewGenerationService
             passed++;
             for (int k = 0; k < p.Matches.Count; k++)
                 if (r.Inliers[k]) verified.Add((p.ImageIndexA, p.Matches[k].IndexA, p.ImageIndexB, p.Matches[k].IndexB));
+            if (planarTrace != null)
+            {
+                // Diagnostics: how much of this pair's epipolar support one plane explains (Homography). DrJohnson's image
+                // 41 was matched to the symmetric rug at a rotated correspondence; is that visible here?
+                var ia = new List<System.Numerics.Vector2>(); var ib = new List<System.Numerics.Vector2>();
+                var xa = ransacPairs[c].A; var xb = ransacPairs[c].B;
+                for (int k = 0; k < p.Matches.Count; k++)
+                    if (r.Inliers[k]) { ia.Add(new(xa[k * 2], xa[k * 2 + 1])); ib.Add(new(xb[k * 2], xb[k * 2 + 1])); }
+                int h = Homography.InlierCount(ia, ib, 4f, 300, ransacPairs[c].Seed);
+                string note(int other) => $"{other}:{ia.Count}/{100 * h / Math.Max(1, ia.Count)}%";
+                (planarTrace.TryGetValue(p.ImageIndexA, out var la) ? la : planarTrace[p.ImageIndexA] = new()).Add(note(p.ImageIndexB));
+                (planarTrace.TryGetValue(p.ImageIndexB, out var lb) ? lb : planarTrace[p.ImageIndexB] = new()).Add(note(p.ImageIndexA));
+            }
         }
+        if (planarTrace != null)
+            foreach (var (img, notes) in planarTrace.OrderBy(kv => kv.Key))
+                Console.WriteLine($"[BA]   planar: image {img} pairs (partner:epipolar inliers/% on one homography) {string.Join(" ", notes)}");
         Console.WriteLine(
             $"[BA] verification: {considered} candidate pairs (within {MaxPairAngleDeg} deg, or >= {strong} raw matches; " +
             $"noise floor {noiseFloor}), {passed} verified, {verified.Count} inlier matches ({tv.Elapsed.TotalSeconds:F1}s {(GpuPairVerification ? "GPU" : "CPU")})");
@@ -584,9 +601,11 @@ public class MultiViewGenerationService
                     // The camera's own verified pairs must agree with the resected rotation (match-weighted majority):
                     // resection can take the mirror twin of a near-planar support set and still have most correspondences
                     // agree (GlobalSfmInit.RotationVotes).
+                    string voteNote = "";
                     if (pairMatches != null && CheckResectionRotations)
                     {
                         var (agreeM, disagreeM) = GlobalSfmInit.RotationVotes(c, placed, pairMatches, cams, good.Contains);
+                        voteNote = $"; pair rotations {agreeM} matches for, {disagreeM} against";
                         if (disagreeM > agreeM)
                         {
                             Console.WriteLine($"[BA]   pass {passes}: view {posed[c]} resection REJECTED ({inl}/{n} agree, but its " +
@@ -597,7 +616,7 @@ public class MultiViewGenerationService
                     }
                     cams[c].Position = placed.Position; cams[c].Forward = placed.Forward; cams[c].Up = placed.Up;
                     good.Add(c); pending.Remove(c); registered++; thisPass++;
-                    Console.WriteLine($"[BA]   pass {passes}: registered view {posed[c]} ({inl}/{n} agree)");
+                    Console.WriteLine($"[BA]   pass {passes}: registered view {posed[c]} ({inl}/{n} agree{voteNote})");
                 }
                 if (thisPass == 0) break;
 

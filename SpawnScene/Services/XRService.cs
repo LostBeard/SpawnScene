@@ -349,13 +349,15 @@ public class XRService : IDisposable
             bool squeeze = buttons.Length > 1 && buttons[1].Pressed;
             // B (right) / Y (left), xr-standard button 5: the menu and Meta buttons never reach a page.
             if (buttons.Length > 5 && buttons[5].Pressed) frameData.ExitButton = true;
+            // A (right) / X (left), xr-standard button 4: the in-headset menu.
+            if (buttons.Length > 4 && buttons[4].Pressed) frameData.MenuButton = true;
             foreach (var b in buttons) b.Dispose();
             if (left) frameData.LeftTrigger = trigger; else frameData.RightTrigger = trigger;
 
-            // AR: one hit-test source along the right controller's pointing ray, requested once per session, and the
-            // ray's pose each frame (the emulator only refreshes a ray space's matrix when its pose is read; without
-            // this its hit tests cast from the floor origin and found nothing).
-            if (!left && SessionMode == "immersive-ar")
+            // The right controller's pointing ray each frame: the menu's pointer, and in AR the hit-test ray (the
+            // emulator only refreshes a ray space's matrix when its pose is read; without this its AR hit tests cast
+            // from the floor origin and found nothing).
+            if (!left)
             {
                 using var raySpace = source.TargetRaySpace;
                 if (raySpace != null)
@@ -365,7 +367,10 @@ public class XRService : IDisposable
                     {
                         using var rt = rayPose.Transform;
                         var rp = rt.Position;
+                        var ro = rt.Orientation;
                         frameData.RightRayOrigin = new Vector3((float)rp.X, (float)rp.Y, (float)rp.Z);
+                        frameData.RightRayDirection = Vector3.Transform(-Vector3.UnitZ,
+                            new Quaternion((float)ro.X, (float)ro.Y, (float)ro.Z, (float)ro.W));
                     }
                 }
             }
@@ -472,8 +477,11 @@ public class XRFrameData
     public Vector3? HitPosition { get; set; }
     /// <summary>B or Y held (xr-standard button 5 on either controller): leave the session.</summary>
     public bool ExitButton { get; set; }
-    /// <summary>AR: where the right controller's pointing ray starts (room space).</summary>
+    /// <summary>The right controller's pointing ray (room space), if it is tracked.</summary>
     public Vector3? RightRayOrigin { get; set; }
+    public Vector3? RightRayDirection { get; set; }
+    /// <summary>A or X held (xr-standard button 4): the in-headset menu.</summary>
+    public bool MenuButton { get; set; }
 }
 
 /// <summary>Per-eye view data for XR rendering.</summary>
@@ -482,6 +490,8 @@ public class XRViewData
     public string Eye { get; set; } = "none";
     public Matrix4x4 ProjectionMatrix { get; set; }
     public Matrix4x4 ViewMatrix { get; set; }
+    /// <summary>The eye's view in the room (local-floor, metres) as WebXR gave it; ViewMatrix becomes the scene view.</summary>
+    public Matrix4x4 RoomViewMatrix { get; set; }
     /// <summary>GPU texture for the eye (WebGPU XR path only, null for WebGL fallback).</summary>
     public GPUTexture? ColorTexture { get; set; }
     public GPUTexture? DepthStencilTexture { get; set; }

@@ -1,3 +1,5 @@
+using SpawnDev.GameUI;
+using SpawnDev.GameUI.Elements;
 using SpawnScene.Models;
 using SpawnScene.Services;
 
@@ -23,6 +25,8 @@ public partial class Studio
             _xrTriggerWasDown = false;
             _xrHitLogged = false;
             _xrExitWasDown = true;   // a B/Y still held from before the session does not end it at once
+            _xrMenuWasDown = true;
+            _xrMenu?.Close();
             _xrLastHit = null;
             _xrStickLog = true;
             _xrLastTime = -1;
@@ -154,7 +158,16 @@ public partial class Studio
             _xrService.RequestEnd();
         }
         _xrExitWasDown = frameData.ExitButton;
-        bool trigger = frameData.LeftTrigger || frameData.RightTrigger;
+        if (frameData.MenuButton && !_xrMenuWasDown)
+        {
+            EnsureXRMenu().Toggle(frameData.HeadPosition, frameData.HeadOrientation);
+            Console.WriteLine(_xrMenu!.IsOpen ? "[XR] menu opened" : "[XR] menu closed");
+        }
+        _xrMenuWasDown = frameData.MenuButton;
+        // While the menu is open the trigger belongs to it (clicks), not to the scene (AR placement).
+        bool menuOpen = _xrMenu?.IsOpen == true;
+        if (_xrMenu != null) _xrMenu.Step(frameData.RightRayOrigin, frameData.RightRayDirection, frameData.RightTrigger, dt);
+        bool trigger = !menuOpen && (frameData.LeftTrigger || frameData.RightTrigger);
         if (trigger && !_xrTriggerWasDown && _xrPlaceMiniature)
         {
             _xrPlacing = !_xrPlacing;
@@ -174,14 +187,18 @@ public partial class Studio
         if (!_xrWorldGrab.Active)
             _xrSceneFromRoom = _xrLocomotion.Step(_xrSceneFromRoom.Value, frameData.HeadPosition, frameData.HeadOrientation,
                 frameData.LeftStick, frameData.RightStick, dt,
-                (_cameraController?.MoveSpeed ?? 1f) * XRWorldGrab.Scale(_xrSceneFromRoom.Value));
+                (_cameraController?.MoveSpeed ?? 1f) * _xrSpeedScale * XRWorldGrab.Scale(_xrSceneFromRoom.Value));
         if (_xrStickLog && (frameData.LeftStick != default || frameData.RightStick != default))
         {
             _xrStickLog = false;
             Console.WriteLine($"[XR] controller input: left {frameData.LeftStick}, right {frameData.RightStick}");
         }
         _xrHeadInScene = System.Numerics.Vector3.Transform(frameData.HeadPosition, _xrSceneFromRoom.Value);
-        foreach (var v in frameData.Views) v.ViewMatrix = XRSceneAlignment.SceneView(v.ViewMatrix, _xrSceneFromRoom.Value);
+        foreach (var v in frameData.Views)
+        {
+            v.RoomViewMatrix = v.ViewMatrix;
+            v.ViewMatrix = XRSceneAlignment.SceneView(v.ViewMatrix, _xrSceneFromRoom.Value);
+        }
         if (frameData.IsWebGLFallback && _gpuRenderer.XRSorted)
         {
             // One sort per frame from the head (scene space), a frustum wide enough for both eyes, then each eye.
@@ -203,7 +220,9 @@ public partial class Studio
             foreach (var view in frameData.Views)
             {
                 var vp = view.Viewport;
-                _gpuRenderer.RenderXRViewSortedToCanvas(view.ViewMatrix, view.ProjectionMatrix, (int)vp.Width, (int)vp.Height, _xrCasEnabled);
+                var roomViewProj = view.RoomViewMatrix * view.ProjectionMatrix;
+                _gpuRenderer.RenderXRViewSortedToCanvas(view.ViewMatrix, view.ProjectionMatrix, (int)vp.Width, (int)vp.Height, _xrCasEnabled,
+                    _xrMenu?.IsOpen == true ? (enc, color, depth) => _xrMenu.Draw(_gameUI.Renderer, roomViewProj, enc, color, depth) : null);
                 _xrBlit!.Blit(_gpuRenderer.XRBridgeCanvas!, layer.Framebuffer, vp);
             }
             return;
@@ -252,5 +271,71 @@ public partial class Studio
         _xrActive = false;
         Console.WriteLine("[Studio] XR session ended, resuming canvas rendering");
         RequestFrame();
+    }
+
+    // ── In-headset menu (X/A opens it; right ray + trigger click) ─────────────────────────────────────────────
+    XRMenu? _xrMenu;
+    bool _xrMenuWasDown;
+    float _xrSpeedScale = 1f;
+    UIButton? _xrTurnButton, _xrSpeedButton, _xrPlaceButton;
+
+    XRMenu EnsureXRMenu()
+    {
+        if (_xrMenu != null) { RefreshXRMenu(); return _xrMenu; }
+        _xrMenu = new XRMenu();
+        var p = _xrMenu.Panel;
+        p.AddChild(new UILabel
+        {
+            X = 24, Y = 18, Text = "SpawnScene", FontSize = FontSize.Heading,
+            Color = UITheme.Current.TextPrimary,
+        });
+        p.AddChild(new UILabel
+        {
+            X = 24, Y = 58, Text = "Point with the right controller, trigger to choose. A/X closes, B/Y exits.",
+            FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
+        });
+        const float bw = 244, bh = 56, x0 = 24, x1 = 292;
+        UIButton Button(float x, float y, string text, Action click)
+            => p.AddChild(new UIButton
+            {
+                X = x, Y = y, Width = bw, Height = bh, Text = text, FontSize = FontSize.Body, OnClick = click,
+            });
+        Button(x0, 100, "Reset view", () =>
+        {
+            _xrSceneFromRoom = null;   // re-placed on the next frame (comfort scale / AR miniature)
+            _xrMenu!.Close();
+            Console.WriteLine("[XR] menu: reset view");
+        });
+        _xrTurnButton = Button(x1, 100, "", () =>
+        {
+            _xrLocomotion.SnapTurnDegrees = _xrLocomotion.SnapTurnDegrees >= 45f ? 30f : 45f;
+            RefreshXRMenu();
+        });
+        _xrSpeedButton = Button(x0, 172, "", () =>
+        {
+            _xrSpeedScale = _xrSpeedScale >= 2f ? 0.5f : _xrSpeedScale * 2f;
+            RefreshXRMenu();
+        });
+        _xrPlaceButton = Button(x1, 172, "", () =>
+        {
+            _xrPlacing = !_xrPlacing;
+            _xrMenu!.Close();
+            Console.WriteLine(_xrPlacing ? "[XR] menu: place on a surface" : "[XR] menu: placement off");
+        });
+        Button(x0, 290, "Close menu", () => _xrMenu!.Close());
+        Button(x1, 290, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
+        RefreshXRMenu();
+        return _xrMenu;
+    }
+
+    void RefreshXRMenu()
+    {
+        if (_xrTurnButton != null) _xrTurnButton.Text = $"Snap turn: {_xrLocomotion.SnapTurnDegrees:0} deg";
+        if (_xrSpeedButton != null) _xrSpeedButton.Text = $"Move speed: x{_xrSpeedScale:0.#}";
+        if (_xrPlaceButton != null)
+        {
+            _xrPlaceButton.Visible = _xrPlaceMiniature;   // AR only
+            _xrPlaceButton.Text = _xrPlacing ? "Stop placing" : "Place on surface";
+        }
     }
 }

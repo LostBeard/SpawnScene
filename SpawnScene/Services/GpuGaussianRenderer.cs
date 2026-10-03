@@ -1786,7 +1786,10 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
     /// <summary>One eye on the sorted path: back-to-front alpha blend into an rgba16float target, then CAS (or a plain
     /// copy at strength 0) into the XR bridge canvas for <see cref="WebGLXRBlit"/>.</summary>
-    public void RenderXRViewSortedToCanvas(Matrix4x4 viewMatrix, Matrix4x4 projMatrix, int width, int height, bool applyCAS)
+    /// <param name="overlay">Optional: draws on top of the finished eye view (XR menus and pointers) with the bridge
+    /// canvas view and a depth24plus view cleared to 1 (sorted splats write no depth), in the same command buffer.</param>
+    public void RenderXRViewSortedToCanvas(Matrix4x4 viewMatrix, Matrix4x4 projMatrix, int width, int height, bool applyCAS,
+        Action<GPUCommandEncoder, GPUTextureView, GPUTextureView>? overlay = null)
     {
         if (_device == null || _splatBuffer == null || _splatCount == 0 || _splatPipeline == null || _casPipeline == null) return;
         EnsureXRBridge(width, height, needsCAS: false);
@@ -1873,6 +1876,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
             casPass.Draw(3, 1, 0, 0);
             casPass.End();
         }
+        overlay?.Invoke(encoder, canvasView, depthView);
         using var cmd = encoder.Finish();
         _submitArray[0] = cmd;
         RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);

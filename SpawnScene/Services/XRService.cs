@@ -226,10 +226,14 @@ public class XRService : IDisposable
             if (pose == null) return;
 
             var views = pose.Views;
+            using var headTransform = pose.Transform;
+            var hp = headTransform.Position; var ho = headTransform.Orientation;
             var frameData = new XRFrameData
             {
                 Frame = frame,
                 Pose = pose,
+                HeadPosition = new Vector3((float)hp.X, (float)hp.Y, (float)hp.Z),
+                HeadOrientation = new Quaternion((float)ho.X, (float)ho.Y, (float)ho.Z, (float)ho.W),
                 Views = new XRViewData[views.Length],
                 IsWebGLFallback = IsWebGLFallback,
             };
@@ -284,17 +288,7 @@ public class XRService : IDisposable
         }
     }
 
-    /// <summary>Convert a JS Float32Array (16 elements, column-major) to System.Numerics.Matrix4x4.</summary>
-    private static Matrix4x4 JsFloatArrayToMatrix(float[] m)
-    {
-        // WebXR matrices are column-major; System.Numerics is row-major
-        return new Matrix4x4(
-            m[0], m[4], m[8],  m[12],
-            m[1], m[5], m[9],  m[13],
-            m[2], m[6], m[10], m[14],
-            m[3], m[7], m[11], m[15]
-        );
-    }
+    private static Matrix4x4 JsFloatArrayToMatrix(float[] m) => XRSceneAlignment.FromWebXRMatrix(m);
 
     /// <summary>Convert XRRigidTransform to a view matrix.</summary>
     private static Matrix4x4 RigidTransformToViewMatrix(XRRigidTransform transform)
@@ -324,6 +318,9 @@ public class XRFrameData
     public XRViewerPose Pose { get; set; } = null!;
     public XRViewData[] Views { get; set; } = System.Array.Empty<XRViewData>();
     public bool IsWebGLFallback { get; set; }
+    /// <summary>The headset's pose in the room (local-floor space).</summary>
+    public Vector3 HeadPosition { get; set; }
+    public Quaternion HeadOrientation { get; set; } = Quaternion.Identity;
 }
 
 /// <summary>Per-eye view data for XR rendering.</summary>

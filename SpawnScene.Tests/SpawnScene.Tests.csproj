@@ -44,6 +44,7 @@
     <Compile Include="..\SpawnScene\Services\Bf16.cs" Link="Linked\Bf16.cs" />
     <Compile Include="..\SpawnScene\Services\Homography.cs" Link="Linked\Homography.cs" />
     <Compile Include="..\SpawnScene\Services\GpuImageOps.cs" Link="Linked\GpuImageOps.cs" />
+    <Compile Include="..\SpawnScene\Services\XRSceneAlignment.cs" Link="Linked\XRSceneAlignment.cs" />
     <Compile Include="..\SpawnScene\Models\Gaussian3D.cs" Link="Linked\Gaussian3D.cs" />
     <Compile Include="..\SpawnScene\Models\PointCloud.cs" Link="Linked\PointCloud.cs" />
     <Compile Include="..\SpawnScene\Services\ImageQuality.cs" Link="Linked\ImageQuality.cs" />

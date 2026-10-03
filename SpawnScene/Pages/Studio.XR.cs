@@ -1,3 +1,4 @@
+using SpawnScene.Models;
 using SpawnScene.Services;
 
 namespace SpawnScene.Pages;
@@ -14,6 +15,7 @@ public partial class Studio
 
             _xrService.OnXRFrame += OnXRFrame;
             _xrService.OnSessionEnded += OnXRSessionEnded;
+            _xrSceneFromRoom = null; // placed on the session's first frame (XRSceneAlignment)
 
             // Pause canvas RAF loop — XR has its own render loop
             _xrActive = true;
@@ -42,8 +44,71 @@ public partial class Studio
         }
     }
 
+    // XR frame cost, logged every XRStatsFrames frames: what the per-eye render + copy costs on this device.
+    const int XRStatsFrames = 90;
+    readonly System.Diagnostics.Stopwatch _xrFrameClock = new();
+    double _xrFrameMsSum;
+    int _xrFrameCount;
+    long _xrStatsStart;
+
     private void OnXRFrame(XRFrameData frameData)
     {
+        _xrFrameClock.Restart();
+        if (_xrFrameCount == 0) _xrStatsStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        try { RenderXRFrame(frameData); }
+        finally
+        {
+            _xrFrameMsSum += _xrFrameClock.Elapsed.TotalMilliseconds;
+            if (++_xrFrameCount == XRStatsFrames)
+            {
+                double wall = System.Diagnostics.Stopwatch.GetElapsedTime(_xrStatsStart).TotalMilliseconds;
+                var vp = frameData.Views.Length > 0 ? frameData.Views[0].Viewport : null;
+                Console.WriteLine($"[XR] {XRStatsFrames} frames: {_xrFrameMsSum / XRStatsFrames:F1} ms submit per frame " +
+                    $"({frameData.Views.Length} views of {vp?.Width}x{vp?.Height}), {1000.0 * XRStatsFrames / wall:F0} fps, " +
+                    $"{(frameData.IsWebGLFallback ? "WebGL copy path" : "WebGPU layer")}");
+                _xrFrameCount = 0; _xrFrameMsSum = 0;
+            }
+        }
+    }
+
+    // Room (local-floor) -> scene: the head starts where the desktop camera was, facing its way (XRSceneAlignment).
+    System.Numerics.Matrix4x4? _xrSceneFromRoom;
+
+    private void RenderXRFrame(XRFrameData frameData)
+    {
+        if (_xrSceneFromRoom == null)
+        {
+            var cam = _sceneManager.Camera;
+            _xrSceneFromRoom = XRSceneAlignment.SceneFromRoom(frameData.HeadPosition, frameData.HeadOrientation, cam.Position, cam.Forward);
+            Console.WriteLine($"[XR] room placed in the scene: head {frameData.HeadPosition} -> camera {cam.Position}, facing {cam.Forward}");
+        }
+        foreach (var v in frameData.Views) v.ViewMatrix = XRSceneAlignment.SceneView(v.ViewMatrix, _xrSceneFromRoom.Value);
+        if (frameData.IsWebGLFallback && _gpuRenderer.XRSorted)
+        {
+            // One sort per frame from the head (scene space), a frustum wide enough for both eyes, then each eye.
+            var m = _xrSceneFromRoom.Value;
+            var head = new CameraParams
+            {
+                Width = 1000, Height = 1000, FocalX = 182, FocalY = 182, CenterX = 500, CenterY = 500, // ~140 deg: both eyes
+                Near = _sceneManager.Camera.Near, Far = _sceneManager.Camera.Far,
+                Position = System.Numerics.Vector3.Transform(frameData.HeadPosition, m),
+                Forward = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.TransformNormal(
+                    System.Numerics.Vector3.Transform(-System.Numerics.Vector3.UnitZ, frameData.HeadOrientation), m)),
+                Up = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.TransformNormal(
+                    System.Numerics.Vector3.Transform(System.Numerics.Vector3.UnitY, frameData.HeadOrientation), m)),
+            };
+            var cullProj = CameraParams.CreateWebGpuProjection(head.FocalX, head.FocalY, head.CenterX, head.CenterY,
+                head.Width, head.Height, head.Near, head.Far);
+            _gpuRenderer.BeginXRFrameSorted(head, head.ViewMatrix * cullProj);
+            var layer = _xrService.WebGLLayer!;
+            foreach (var view in frameData.Views)
+            {
+                var vp = view.Viewport;
+                _gpuRenderer.RenderXRViewSortedToCanvas(view.ViewMatrix, view.ProjectionMatrix, (int)vp.Width, (int)vp.Height, _xrCasEnabled);
+                _xrBlit!.Blit(_gpuRenderer.XRBridgeCanvas!, layer.Framebuffer, vp);
+            }
+            return;
+        }
         if (frameData.IsWebGLFallback)
         {
             // WebGL fallback: render each eye to WebGPU bridge canvas, blit to XR framebuffer

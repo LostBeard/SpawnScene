@@ -72,6 +72,14 @@ async function ensureChrome({ headless = false } = {}) {
     'about:blank',
   ];
   if (headless) args.unshift('--headless=new');
+  // SPAWNSCENE_CHROME_EXTENSION=<unpacked dir>: load an extension, e.g. Meta's Immersive Web Emulator
+  // (_scratch/iwe/ext) for WebXR without a headset. Branded Chrome ignores --load-extension since 137 unless the
+  // DisableLoadExtensionCommandLineSwitch feature is turned off. Use its own CDP port: the profile is per port.
+  const extension = process.env.SPAWNSCENE_CHROME_EXTENSION;
+  if (extension) {
+    args.unshift(`--load-extension=${path.resolve(extension)}`, '--disable-features=DisableLoadExtensionCommandLineSwitch');
+    console.log(`[chrome] loading extension ${path.resolve(extension)}`);
+  }
   // SPAWNSCENE_CHROME_LOG=<file>: Chrome's own log (browser + GPU process). The page only ever sees
   // "A valid external Instance reference no longer exists" when the GPU process drops its Dawn
   // instance; WHY (D3D12 DEVICE_REMOVED hresult, GPU process exit code, Dawn OOM) is logged

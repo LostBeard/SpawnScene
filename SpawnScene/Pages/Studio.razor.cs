@@ -329,6 +329,9 @@ public partial class Studio : IAsyncDisposable
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");
+            // &xrclear=1: XR eye views clear to magenta (an empty view vs a broken copy).
+            if (query.TryGetValue("xrclear", out var xrClearQ))
+                GpuGaussianRenderer.XRDebugClear = xrClearQ is "1" or "true";
             // &symtrace=1: log live GPU storage through each turned-180 check.
             if (query.TryGetValue("symtrace", out var symTraceQ))
                 ImageImportService.TraceTurnedMemory = symTraceQ is "1" or "true";
@@ -591,12 +594,22 @@ public partial class Studio : IAsyncDisposable
                     $"velocity {_gpuRenderer.SmoothedCameraVelocity:E2}, frames {_gpuRenderer.FramesSubmitted}");
             }
             Console.WriteLine($"[Autotest] PASS — scene with {_sceneManager.ActiveScene?.Count ?? 0} splats");
+            // &xrhook=1: expose window.__spawnsceneEnterXR(mode) so a harness can enter WebXR (tools/_cdp_xr.js). It must be
+            // called from a user gesture (CDP Runtime.evaluate userGesture), which requestSession requires.
+            if (query.ContainsKey("xrhook"))
+            {
+                _xrHook ??= new ActionCallback<string>(m => _ = EnterXRAsync(m));
+                _js.Set("__spawnsceneEnterXR", _xrHook);
+                Console.WriteLine("[Autotest] XR hook ready");
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[Autotest] FAIL: {ex}");
         }
     }
+
+    ActionCallback<string>? _xrHook;
 
     public async ValueTask DisposeAsync()
     {

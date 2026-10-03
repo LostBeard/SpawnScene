@@ -432,6 +432,10 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// <summary>Fresh clear-colour POCO. Never share one instance across descriptors.</summary>
     private GPUColorDict NewClear() => new() { R = _bgR, G = _bgG, B = _bgB, A = 1.0 };
 
+    /// <summary>Diagnostics (&amp;xrclear=1): clear XR eye views to magenta, so an empty view tells apart from a broken copy.</summary>
+    public static bool XRDebugClear { get; set; }
+    private GPUColorDict XRClear() => XRDebugClear ? new() { R = 1, G = 0, B = 1, A = 1 } : NewClear();
+
     /// <summary>Controls whether to use sorted alpha blending or stochastic rasterization.</summary>
     private SplatRenderMode _renderMode = SplatRenderMode.Stochastic;
     public SplatRenderMode RenderMode
@@ -1652,7 +1656,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                 View = _xrBridgeStochasticView,
                 LoadOp = GPULoadOp.Clear,
                 StoreOp = GPUStoreOp.Store,
-                ClearValue = NewClear(),
+                ClearValue = XRClear(),
             };
             var passDesc = new GPURenderPassDescriptor
             {
@@ -1705,7 +1709,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                 View = canvasView,
                 LoadOp = GPULoadOp.Clear,
                 StoreOp = GPUStoreOp.Store,
-                ClearValue = NewClear(),
+                ClearValue = XRClear(),
             };
             var passDesc = new GPURenderPassDescriptor
             {
@@ -1728,6 +1732,132 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
         using var xrCmdBuf = encoder.Finish();
         _submitArray[0] = xrCmdBuf;
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
+    }
+
+    // ── XR, sorted: one depth sort per frame from the HEAD, shared by both eyes ────────────────────────────────
+    // The stochastic XR path draws one sample per eye per frame and the head never holds still, so nothing
+    // accumulates: the first emulator session (2026-10-03) showed sparse dots where the desktop shows the room. Sorted
+    // alpha blending needs no accumulation; one sort from between the eyes serves both (the usual WebXR splat-viewer
+    // approach), and the sorter runs asynchronously, so a frame never waits on it.
+    private int _xrSortedVisible;
+    private GPUTexture? _xrSortedTex;
+    private GPUTextureView? _xrSortedView;
+    private GPUBindGroup? _xrSortedCasBindGroup;
+    private int _xrSortedW, _xrSortedH;
+
+    /// <summary>Use sorted alpha blending in XR (default) rather than the stochastic path.</summary>
+    public bool XRSorted { get; set; } = true;
+
+    /// <summary>
+    /// Start an XR frame on the sorted path: hand the sorter the head pose (in scene space) and a frustum wide enough for
+    /// both eyes; when a sort has completed, repack the vertex buffer in its order (SH colour for the head position).
+    /// </summary>
+    public void BeginXRFrameSorted(CameraParams head, Matrix4x4 cullMvp)
+    {
+        if (_device == null || _splatBuffer == null || _splatCount == 0) return;
+        var (dataBuf, idxBuf, sortRan, visibleCount) = _sorter.Sort(head, cullMvp);
+        _xrSortedVisible = visibleCount;
+        if (!sortRan || dataBuf == null || idxBuf == null) return;
+        _packCameraPos = head.Position;
+        using var encoder = _device.CreateCommandEncoder();
+        AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount);
+        using var cmd = encoder.Finish();
+        _submitArray[0] = cmd;
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
+    }
+
+    /// <summary>One eye on the sorted path: back-to-front alpha blend into an rgba16float target, then CAS (or a plain
+    /// copy at strength 0) into the XR bridge canvas for <see cref="WebGLXRBlit"/>.</summary>
+    public void RenderXRViewSortedToCanvas(Matrix4x4 viewMatrix, Matrix4x4 projMatrix, int width, int height, bool applyCAS)
+    {
+        if (_device == null || _splatBuffer == null || _splatCount == 0 || _splatPipeline == null || _casPipeline == null) return;
+        EnsureXRBridge(width, height, needsCAS: false);
+        if (_xrSortedTex == null || _xrSortedW != width || _xrSortedH != height)
+        {
+            _xrSortedCasBindGroup?.Dispose();
+            _xrSortedView?.Dispose();
+            _xrSortedTex?.Destroy(); _xrSortedTex?.Dispose();
+            _xrSortedTex = _device.CreateTexture(new GPUTextureDescriptor
+            {
+                Size = new[] { width, height },
+                Format = SortedTargetFormat,
+                Usage = GPUTextureUsage.RenderAttachment | GPUTextureUsage.TextureBinding,
+            });
+            _xrSortedView = _xrSortedTex.CreateView();
+            _xrSortedCasBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
+            {
+                Layout = _casPipeline.GetBindGroupLayout(0),
+                Entries = new[]
+                {
+                    new GPUBindGroupEntry { Binding = 0, Resource = _xrSortedView },
+                    new GPUBindGroupEntry { Binding = 1, Resource = _casSampler! },
+                    new GPUBindGroupEntry { Binding = 2, Resource = new GPUBufferBinding { Buffer = _casUniformBuffer! } },
+                },
+            });
+            _xrSortedW = width; _xrSortedH = height;
+        }
+
+        var mvp = viewMatrix * projMatrix;
+        CameraParams.ExtractIntrinsics(projMatrix, width, height, out float eyeFx, out float eyeFy, out _, out _);
+        WriteCameraUniforms(mvp, viewMatrix, width, height, MathF.Abs(eyeFx), MathF.Abs(eyeFy));
+        _uniformData[UFrameIndex] = 0f;
+        _uniformData[UDilation] = 1f;
+        _uniformData[UMinAlpha] = 0f;
+        Buffer.BlockCopy(_uniformData, 0, _uniformByteData!, 0, _uniformByteData!.Length);
+        _queue!.WriteBuffer(_uniformBuffer!, 0, _uniformByteData);
+
+        using var encoder = _device.CreateCommandEncoder();
+        // The sorted pipeline declares a depth24plus attachment (compare "less", no writes): give it the bridge's.
+        using var depthView = _xrBridgeDepth!.CreateView();
+        using (var splatPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+        {
+            ColorAttachments = new[]
+            {
+                new GPURenderPassColorAttachment
+                {
+                    View = _xrSortedView!, LoadOp = GPULoadOp.Clear, StoreOp = GPUStoreOp.Store, ClearValue = XRClear(),
+                },
+            },
+            DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
+            {
+                View = depthView, DepthLoadOp = "clear", DepthStoreOp = "store", DepthClearValue = 1.0f,
+            },
+        }))
+        {
+            splatPass.SetPipeline(_splatPipeline);
+            splatPass.SetBindGroup(0, _uniformBindGroupSorted!);
+            splatPass.SetVertexBuffer(0, _splatBuffer);
+            splatPass.Draw(6, (uint)_xrSortedVisible, 0, 0);
+            splatPass.End();
+        }
+        _casData[0] = applyCAS ? _sharpeningStrength : 0f;
+        _casData[1] = 1f / width;
+        _casData[2] = 1f / height;
+        _casData[3] = 0f;
+        Buffer.BlockCopy(_casData, 0, _casByteData!, 0, _casByteData!.Length);
+        _queue.WriteBuffer(_casUniformBuffer!, 0, _casByteData);
+        using var canvasTexture = _xrBridgeContext!.GetCurrentTexture();
+        using var canvasView = canvasTexture.CreateView();
+        using (var casPass = encoder.BeginRenderPass(new GPURenderPassDescriptor
+        {
+            ColorAttachments = new[]
+            {
+                new GPURenderPassColorAttachment
+                {
+                    View = canvasView, LoadOp = GPULoadOp.Clear, StoreOp = GPUStoreOp.Store,
+                    ClearValue = new GPUColorDict { R = 0, G = 0, B = 0, A = 1 },
+                },
+            },
+        }))
+        {
+            casPass.SetPipeline(_casPipeline);
+            casPass.SetBindGroup(0, _xrSortedCasBindGroup!);
+            casPass.Draw(3, 1, 0, 0);
+            casPass.End();
+        }
+        using var cmd = encoder.Finish();
+        _submitArray[0] = cmd;
         RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
     }
 
@@ -1805,6 +1935,10 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// <summary>Release XR bridge resources. Called on session end and in Dispose.</summary>
     public void DisposeXRBridge()
     {
+        _xrSortedCasBindGroup?.Dispose(); _xrSortedCasBindGroup = null;
+        _xrSortedView?.Dispose(); _xrSortedView = null;
+        _xrSortedTex?.Destroy(); _xrSortedTex?.Dispose(); _xrSortedTex = null;
+        _xrSortedW = _xrSortedH = 0;
         _xrCasBindGroup?.Dispose();
         _xrCasBindGroup = null;
         _xrBridgeStochasticView?.Dispose();

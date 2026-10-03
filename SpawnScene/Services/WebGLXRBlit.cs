@@ -14,6 +14,7 @@ public class WebGLXRBlit : IDisposable
     private WebGLProgram? _program;
     private WebGLTexture? _texture;
     private WebGLUniformLocation? _texUniformLoc;
+    private WebGLUniformLocation? _viewportUniformLoc;
 
     private const string VertexShader = @"#version 300 es
 void main() {
@@ -26,10 +27,15 @@ void main() {
     private const string FragmentShader = @"#version 300 es
 precision mediump float;
 uniform sampler2D uTex;
+uniform vec4 uViewport; // x, y, width, height of this eye in the XR framebuffer
 out vec4 fragColor;
 void main() {
-    // gl_FragCoord → [0,1] UV via viewport dimensions
-    vec2 uv = gl_FragCoord.xy / vec2(textureSize(uTex, 0));
+    // gl_FragCoord is in WHOLE-framebuffer pixels: subtract the eye's viewport origin. Dividing by the texture size alone
+    // put the right eye (viewport x = width) at u in [1, 2], clamped to the edge column - horizontal streaks (2026-10-03).
+    vec2 uv = (gl_FragCoord.xy - uViewport.xy) / uViewport.zw;
+    // texImage2D from a canvas puts the canvas's TOP row at texture row 0, and GL's v = 0 is the BOTTOM of the
+    // viewport: without the flip every eye was upside down (emulator, 2026-10-03).
+    uv.y = 1.0 - uv.y;
     fragColor = texture(uTex, uv);
 }";
 
@@ -53,6 +59,7 @@ void main() {
         gl.LinkProgram(_program);
 
         _texUniformLoc = gl.GetUniformLocation(_program, "uTex");
+        _viewportUniformLoc = gl.GetUniformLocation(_program, "uViewport");
 
         // Create texture for canvas blit
         _texture = gl.CreateTexture();
@@ -81,6 +88,7 @@ void main() {
         // Draw fullscreen triangle
         _gl.UseProgram(_program);
         _gl.Uniform1i(_texUniformLoc, 0);
+        _gl.Uniform4f(_viewportUniformLoc!, (float)viewport.X, (float)viewport.Y, (float)viewport.Width, (float)viewport.Height);
         _gl.Disable(GL.DEPTH_TEST);
         _gl.DrawArrays(GL.TRIANGLES, 0, 3);
     }
@@ -92,6 +100,8 @@ void main() {
         if (_gl != null && _texture != null)
             _gl.DeleteTexture(_texture);
         _texUniformLoc?.Dispose();
+        _viewportUniformLoc?.Dispose();
+        _viewportUniformLoc = null;
         _texture?.Dispose();
         _program?.Dispose();
         _texUniformLoc = null;

@@ -21,7 +21,7 @@ All scored with `tools/score_views.py` at a fixed viewport against the original 
 | Training resolution (above the import size since f5559f1) | Bathroom 720/1024/1600: no measurable difference at 2K or 7K. Truck photos are 979 px, so nothing to gain there | Keep, cap at the photo's size, default 1024. Not a headline quality lever on the data we have. |
 | Max splats | GPU memory bound (TruckFull reached 1.7M under 3M) | Device-derived default, override in Advanced. |
 | Dense init FAST threshold (&densefast) | Bathroom: 10 doubles dense points (2,268 -> 4,243), held-out within noise | Advanced only, default 25 until a dataset shows a gain. |
-| Learned keypoints 1024 / 3072 | Models exist; not yet measured end to end | Measure before exposing. |
+| Learned keypoints 1024 / 3072 | MEASURED 10-03: DrJohnson 30 vs 27 cameras, held-out 18.74 vs 15.43 dB (b134/b92); TruckFull 23.31 vs 23.24 dB, sparse 19.5K vs 8.5K (b140/b138); ~6x matching time (251 photos: 20 vs 3.5 min; retrieval ~1 min either way since b141) | High and Max use 3072, Draft and Standard 1024; a Keypoints row in Reconstruction. |
 | More / better-placed photos | Bathroom held-out views between 24 supervised photos stay ~15 dB whatever the trainer does | Say so in the UI: the single biggest lever for a small room is coverage. |
 
 ## Iterations measured (TruckFull, 2026-10-02, b108 / b121 / b122)

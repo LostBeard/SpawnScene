@@ -438,6 +438,11 @@ public partial class Studio
             s.TrainMaxDimension, v => { s.TrainMaxDimension = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
             "Longest side the photos are trained at, never above the photos' own size (Photo = their size). Needs more GPU memory and time." +
             sizeNote);
+        y = AddChoiceRow(parent, x, y, w, "Keypoints",
+            new (string, int)[] { ("1024", ReconstructionPresets.StandardKeypoints), ("3072", ReconstructionPresets.HighKeypoints) },
+            s.LearnedKeypoints, v => { s.LearnedKeypoints = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
+            "Learned keypoints a photo for matching. 3072 places more cameras when photos are far apart (DrJohnson: 30 vs 27 " +
+            "cameras, +3.3 dB) for about 6x the matching time (251 photos: 20 vs 3.5 minutes).");
         y = AddChoiceRow(parent, x, y, w, "Training iterations",
             new (string, int)[] { ("Off", 0), ("3K", 3000), ("7K", 7000), ("15K", 15000), ("30K", 30000) },
             s.TrainIterations, v => { s.TrainIterations = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },

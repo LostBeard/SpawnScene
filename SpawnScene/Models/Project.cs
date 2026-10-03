@@ -88,28 +88,40 @@ public static class ReconstructionPresets
     /// <summary>The cap every preset but Draft had before <see cref="DeviceMaxSplats"/> (2026-10-02).</summary>
     const int LegacyPresetMaxSplats = 3_000_000;
 
-    public static readonly (string Name, int Iterations, int MaxDimension, int MaxSplats, string Hint)[] All =
+    /// <summary>
+    /// Learned keypoints per photo (LearnedFeatureMatcher.KeypointBudget; Kornia publishes 1024 and 3072). MEASURED
+    /// 2026-10-03: DrJohnson (wide baselines) 3072 vs 1024 placed 30 vs 27 cameras and held out 18.74 vs 15.43 dB (b134
+    /// vs b92); TruckFull (well covered) 23.31 vs 23.24 dB, sparse cloud 19.5K vs 8.5K points (b140 vs b138), for ~6x the
+    /// matching time (251 photos: LightGlue 20 min vs 3.5 min; retrieval stays ~1 min at either, b141).
+    /// </summary>
+    public const int StandardKeypoints = 1024, HighKeypoints = 3072;
+
+    public static readonly (string Name, int Iterations, int MaxDimension, int MaxSplats, int Keypoints, string Hint)[] All =
     {
-        ("Draft", 3000, 720, 500_000, "A quick look: about a third of Standard's training."),
-        ("Standard", 7000, 1024, DeviceMaxSplats, "The reference's first checkpoint. Right for most captures."),
-        ("High", 15000, 1600, DeviceMaxSplats, "About twice Standard's training. On a well-covered scene (TruckFull) it measured ~0.9 dB sharper."),
-        ("Max", 30000, PhotoSize, DeviceMaxSplats, "The full reference run at the photos' own size: about twice High's time, for a little more (+0.4 dB)."),
+        ("Draft", 3000, 720, 500_000, StandardKeypoints, "A quick look: about a third of Standard's training."),
+        ("Standard", 7000, 1024, DeviceMaxSplats, StandardKeypoints, "The reference's first checkpoint. Right for most captures."),
+        ("High", 15000, 1600, DeviceMaxSplats, HighKeypoints, "About twice Standard's training, and 3072 keypoints a photo: more cameras placed on wide-baseline captures (DrJohnson +3.3 dB), ~0.9 dB sharper on a well-covered one (TruckFull)."),
+        ("Max", 30000, PhotoSize, DeviceMaxSplats, HighKeypoints, "The full reference run at the photos' own size with 3072 keypoints: about twice High's training time, for a little more (+0.4 dB)."),
     };
 
     /// <summary>
-    /// A project saved under a preset with the old fixed 3M cap moves to that preset's current cap; anything set by hand
-    /// stays. Returns true when it changed <paramref name="s"/>.
+    /// A project saved under a preset before that preset's current values moves to them: the old fixed 3M splat cap, and
+    /// the 1024 keypoints every preset had before High and Max took 3072. Anything set by hand stays. Returns true when
+    /// it changed <paramref name="s"/>.
     /// </summary>
-    public static bool UpgradeLegacyCap(ProjectSettings s)
+    public static bool UpgradeLegacyPresetValues(ProjectSettings s)
     {
         foreach (var p in All)
         {
-            if (p.Name != s.ReconstructionPreset || p.MaxSplats == LegacyPresetMaxSplats) continue;
-            if (s.TrainIterations == p.Iterations && s.TrainMaxDimension == p.MaxDimension && s.TrainMaxSplats == LegacyPresetMaxSplats)
-            {
-                s.TrainMaxSplats = p.MaxSplats;
-                return true;
-            }
+            if (p.Name != s.ReconstructionPreset) continue;
+            if (s.TrainIterations != p.Iterations || s.TrainMaxDimension != p.MaxDimension) return false;
+            bool capOk = s.TrainMaxSplats == p.MaxSplats || s.TrainMaxSplats == LegacyPresetMaxSplats;
+            bool keypointsOk = s.LearnedKeypoints == p.Keypoints || s.LearnedKeypoints == StandardKeypoints;
+            if (!capOk || !keypointsOk) return false;
+            bool changed = s.TrainMaxSplats != p.MaxSplats || s.LearnedKeypoints != p.Keypoints;
+            s.TrainMaxSplats = p.MaxSplats;
+            s.LearnedKeypoints = p.Keypoints;
+            return changed;
         }
         return false;
     }
@@ -123,6 +135,7 @@ public static class ReconstructionPresets
             s.TrainIterations = p.Iterations;
             s.TrainMaxDimension = p.MaxDimension;
             s.TrainMaxSplats = p.MaxSplats;
+            s.LearnedKeypoints = p.Keypoints;
             s.ReconstructionPreset = p.Name;
             return true;
         }
@@ -133,7 +146,8 @@ public static class ReconstructionPresets
     public static string Match(ProjectSettings s)
     {
         foreach (var p in All)
-            if (s.TrainIterations == p.Iterations && s.TrainMaxDimension == p.MaxDimension && s.TrainMaxSplats == p.MaxSplats)
+            if (s.TrainIterations == p.Iterations && s.TrainMaxDimension == p.MaxDimension && s.TrainMaxSplats == p.MaxSplats
+                && s.LearnedKeypoints == p.Keypoints)
                 return p.Name;
         return "Custom";
     }
@@ -161,6 +175,9 @@ public class ProjectSettings
     /// memory budget). Higher = sharper detail, more GPU memory and time per iteration.
     /// </summary>
     public int TrainMaxDimension { get; set; } = 1024;
+
+    /// <summary>Learned keypoints per photo for matching (ReconstructionPresets.StandardKeypoints / HighKeypoints).</summary>
+    public int LearnedKeypoints { get; set; } = ReconstructionPresets.StandardKeypoints;
 
     /// <summary>
     /// The multi-photo quality preset these training settings came from (<see cref="ReconstructionPresets"/>), or

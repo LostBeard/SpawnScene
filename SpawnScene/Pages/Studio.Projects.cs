@@ -676,7 +676,12 @@ public partial class Studio
                 int subsample = _activeProject.Settings.Subsample;
                 float edgeSharpness = _activeProject.Settings.EdgeSharpness;
 
-                var result = await _multiViewService.GenerateAsync(images, subsample, edgeSharpness);
+                // The project's keypoint budget for this run (a static the dataset harness sets from &lgk), restored after.
+                int savedKeypoints = LearnedFeatureMatcher.KeypointBudget;
+                LearnedFeatureMatcher.KeypointBudget = _activeProject.Settings.LearnedKeypoints;
+                (MemoryBuffer1D<float, Stride1D.Dense> Buffer, int Count)? result;
+                try { result = await _multiViewService.GenerateAsync(images, subsample, edgeSharpness); }
+                finally { LearnedFeatureMatcher.KeypointBudget = savedKeypoints; }
                 if (result == null)
                 {
                     _statusMessage = _multiViewService.Status;

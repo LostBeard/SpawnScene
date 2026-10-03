@@ -15,6 +15,8 @@ namespace SpawnScene.Pages;
 /// </summary>
 public partial class Studio
 {
+    bool _gateSortReference;
+
     async Task<bool> RadixSortGateAsync()
     {
         var accel = _gpuService.WebGPUAccelerator;
@@ -63,7 +65,12 @@ public partial class Studio
                 Console.WriteLine($"[TrainerGate] radix sort n={n:N0} bits={bits} distinct={distinct}: exact, {ms:F1} ms");
         }
 
-        // The sort it replaces, same 2M keys, for the record.
+        // The sort it replaces, same 2M keys, for the record. Opt-in (&sortref=1): under AOT it kills the runtime
+        // (2026-10-02, both AOT publishes). The lambda CreateRadixSortPairs returns is not AOT-compiled for
+        // RadixSortPair<uint, uint>, so it runs interpreted. Its inlined TempViewManager.Allocate then calls shared-generic
+        // AOT code through a gsharedvt_out_sig wrapper that is not in the image ("interp.c:2737" assertion). Measured
+        // on the interpreted build when the WGSL sort landed; nothing in the app uses this sort.
+        if (_gateSortReference)
         {
             const int n = 2_000_003;
             var keys = Enumerable.Range(0, n).Select(_ => NextKey(rng, 30)).ToArray();

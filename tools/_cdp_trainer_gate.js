@@ -36,7 +36,7 @@ const get = u => new Promise((res, rej) =>
       if (m.method === 'Runtime.consoleAPICalled') {
         const s = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
         logs.push(s);
-        if (/TrainerGate|Trainer\]|Error|error/i.test(s)) console.log('  CON', s.slice(0, 300));
+        if (process.env.GATE_ALL_CONSOLE || /TrainerGate|Trainer\]|Error|error/i.test(s)) console.log('  CON', s.slice(0, 300));
       }
       if (m.method === 'Log.entryAdded') {
         const t = m.params.entry.text || '';

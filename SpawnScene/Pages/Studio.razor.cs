@@ -191,6 +191,13 @@ public partial class Studio : IAsyncDisposable
         if (!query.TryGetValue("autotest", out var mode))
             return;
 
+        // &xralpha=1: AR passthrough even when the session reports an opaque blend mode (the emulator has no
+        // camera feed and reports opaque), to exercise the transparent path.
+        if (query.TryGetValue("xralpha", out var xrAlphaQ))
+            _xrForceAlpha = xrAlphaQ is "1" or "true";
+        // &xrclear=1: XR eye views clear to magenta (an empty view vs a broken copy).
+        if (query.TryGetValue("xrclear", out var xrClearQ))
+            GpuGaussianRenderer.XRDebugClear = xrClearQ is "1" or "true";
         // &resize=native|letterbox - A/B the depth preprocessing on one build.
         if (query.TryGetValue("resize", out var resize))
         {
@@ -329,9 +336,6 @@ public partial class Studio : IAsyncDisposable
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");
-            // &xrclear=1: XR eye views clear to magenta (an empty view vs a broken copy).
-            if (query.TryGetValue("xrclear", out var xrClearQ))
-                GpuGaussianRenderer.XRDebugClear = xrClearQ is "1" or "true";
             // &symtrace=1: log live GPU storage through each turned-180 check.
             if (query.TryGetValue("symtrace", out var symTraceQ))
                 ImageImportService.TraceTurnedMemory = symTraceQ is "1" or "true";

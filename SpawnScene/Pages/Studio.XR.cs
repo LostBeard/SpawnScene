@@ -27,7 +27,7 @@ public partial class Studio
 
             await _xrService.EnterSessionAsync(mode);
             // Passthrough: draw only the splats; the real world shows wherever the scene has nothing.
-            _gpuRenderer.XRTransparent = mode == "immersive-ar" && _xrService.EnvironmentBlendMode != "opaque";
+            _gpuRenderer.XRTransparent = mode == "immersive-ar" && (_xrService.EnvironmentBlendMode != "opaque" || _xrForceAlpha);
             // AR starts with the scene as a miniature in front of the viewer, sized from its robust bounds. Measured
             // after requestSession (an await before it could spend the click's user activation); frames until then
             // show passthrough only.
@@ -103,6 +103,7 @@ public partial class Studio
     // in AR, the scene starts as a miniature in front (_xrPlaceMiniature, sized from _xrMiniatureBox).
     System.Numerics.Matrix4x4? _xrSceneFromRoom;
     bool _xrPlaceMiniature, _xrBoundsReady = true;
+    bool _xrForceAlpha; // &xralpha=1 (diagnostics)
     SplatBounds.Aabb? _xrMiniatureBox;
     // Thumbstick move / snap-turn / rise, applied to _xrSceneFromRoom each frame.
     readonly XRLocomotion _xrLocomotion = new();

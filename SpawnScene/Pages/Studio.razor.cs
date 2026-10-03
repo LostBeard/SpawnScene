@@ -211,6 +211,8 @@ public partial class Studio : IAsyncDisposable
 
         if (mode == "trainer-gate")
         {
+            // &sortref=1: also time the ILGPU.Algorithms RadixSortPairs the WGSL sort replaced (interpreted builds only).
+            _gateSortReference = query.TryGetValue("sortref", out var sortref) && sortref == "1";
             await RunTrainerGateAsync();
             return;
         }
@@ -263,7 +265,7 @@ public partial class Studio : IAsyncDisposable
             int piters = query.TryGetValue("train", out var pt2) && int.TryParse(pt2, out var pti2) ? pti2 : 1000;
             int pcount = query.TryGetValue("count", out var pc2) && int.TryParse(pc2, out var pci2) ? pci2 : 24;
             int pstride = query.TryGetValue("stride", out var ps2) && int.TryParse(ps2, out var psi2) ? psi2 : 1;
-            int pmax = query.TryGetValue("maxsplats", out var pm2) && int.TryParse(pm2, out var pmi2) ? pmi2 : 3_000_000;
+            int pmax = query.TryGetValue("maxsplats", out var pm2) && int.TryParse(pm2, out var pmi2) ? pmi2 : ReconstructionPresets.DeviceMaxSplats;
             int pres = query.TryGetValue("trainres", out var pr2) && int.TryParse(pr2, out var pri2) ? pri2 : 1024;
             bool ppage = query.TryGetValue("pageonly", out var pp2) && pp2 is "1" or "true";
             // &importmax=N: longest edge photos are decoded at (0 = full size - the red check for the managed-heap

@@ -36,10 +36,9 @@ public class ProjectService
         {
             var root = await GetRootDirAsync();
             var data = await ReadTextAsync(root, "projects.json");
-            if (data != null)
-                _projects = JsonSerializer.Deserialize<List<Project>>(data, _jsonOpts) ?? new();
-            else
-                _projects = new();
+            _projects = data != null ? JsonSerializer.Deserialize<List<Project>>(data, _jsonOpts) ?? new() : new();
+            // Projects saved under a preset with the old fixed 3M splat cap take the preset's device-max cap.
+            foreach (var project in _projects) ReconstructionPresets.UpgradeLegacyCap(project.Settings);
         }
         catch
         {

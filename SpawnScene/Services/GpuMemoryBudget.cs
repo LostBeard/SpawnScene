@@ -18,7 +18,14 @@ public static class GpuMemoryBudget
     public const int AutoGB = 4;
 
     /// <summary>The choices the settings panel offers; 0 = Auto.</summary>
-    public static readonly int[] ChoicesGB = { 0, 2, 4, 8, 16 };
+    public static readonly int[] ChoicesGB = { 0, 2, 4, 6, 8, 12, 16, 24, 32, 48 };
+
+    /// <summary>
+    /// The trainer's widest per-splat buffer row: the degree-3 SH rest coefficients, 45 floats (the SH value, gradient
+    /// and both Adam moment banks are each one binding of this width). One binding holds at most
+    /// bindingLimit / this many splats: 11.9M at the RTX 4070's 2047 MiB.
+    /// </summary>
+    public const long WidestSplatRowBytes = 45 * sizeof(float);
 
     /// <summary>Training GPU memory per splat beyond the fixed part (measured, b112).</summary>
     public const long BytesPerSplat = 1350;
@@ -40,8 +47,12 @@ public static class GpuMemoryBudget
         long targets = Math.Min(Math.Max(bindingLimitBytes, 128L << 20), (long)(budget * TargetShare));
         long forSplats = Math.Max(0, budget - targets - FixedBytes);
         long cap = Math.Clamp(forSplats / BytesPerSplat, 100_000L, int.MaxValue);
+        cap = Math.Min(cap, MaxSplatsPerBinding(bindingLimitBytes));
         return (targets, (int)Math.Min(requestedMaxSplats, cap));
     }
+
+    /// <summary>The most splats one trainer binding holds on a device with <paramref name="bindingLimitBytes"/>.</summary>
+    public static long MaxSplatsPerBinding(long bindingLimitBytes) => bindingLimitBytes / WidestSplatRowBytes;
 
     /// <summary>
     /// The device's <c>maxStorageBufferBindingSize</c>, or the 128 MiB WebGPU guarantee when it reports nothing.

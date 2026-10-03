@@ -72,13 +72,42 @@ public static class ReconstructionPresets
     /// <summary>A training resolution larger than any photo: TrainingSize caps it at the photos' own size.</summary>
     public const int PhotoSize = 16384;
 
+    /// <summary>
+    /// A splat cap larger than any device holds: GpuMemoryBudget.Derive caps it at what this device's GPU memory setting
+    /// and binding limit fit. Training stops growing a scene on its own once the photos are covered (TruckFull levelled
+    /// at 1.74M), so a high cap costs memory only on scenes that need it. Very large scenes are a goal (TJ, 2026-10-02:
+    /// a 5K single-photo scene renders 14M splats at 60 fps); the old fixed 3M cap was not.
+    /// </summary>
+    public const int DeviceMaxSplats = int.MaxValue;
+
+    /// <summary>The cap every preset but Draft had before <see cref="DeviceMaxSplats"/> (2026-10-02).</summary>
+    const int LegacyPresetMaxSplats = 3_000_000;
+
     public static readonly (string Name, int Iterations, int MaxDimension, int MaxSplats, string Hint)[] All =
     {
         ("Draft", 3000, 720, 500_000, "A quick look: about a third of Standard's training."),
-        ("Standard", 7000, 1024, 3_000_000, "The reference's first checkpoint. Right for most captures."),
-        ("High", 15000, 1600, 3_000_000, "About twice Standard's training. On a well-covered scene (TruckFull) it measured ~0.9 dB sharper."),
-        ("Max", 30000, PhotoSize, 3_000_000, "The full reference run at the photos' own size: about twice High's time, for a little more (+0.4 dB)."),
+        ("Standard", 7000, 1024, DeviceMaxSplats, "The reference's first checkpoint. Right for most captures."),
+        ("High", 15000, 1600, DeviceMaxSplats, "About twice Standard's training. On a well-covered scene (TruckFull) it measured ~0.9 dB sharper."),
+        ("Max", 30000, PhotoSize, DeviceMaxSplats, "The full reference run at the photos' own size: about twice High's time, for a little more (+0.4 dB)."),
     };
+
+    /// <summary>
+    /// A project saved under a preset with the old fixed 3M cap moves to that preset's current cap; anything set by hand
+    /// stays. Returns true when it changed <paramref name="s"/>.
+    /// </summary>
+    public static bool UpgradeLegacyCap(ProjectSettings s)
+    {
+        foreach (var p in All)
+        {
+            if (p.Name != s.ReconstructionPreset || p.MaxSplats == LegacyPresetMaxSplats) continue;
+            if (s.TrainIterations == p.Iterations && s.TrainMaxDimension == p.MaxDimension && s.TrainMaxSplats == LegacyPresetMaxSplats)
+            {
+                s.TrainMaxSplats = p.MaxSplats;
+                return true;
+            }
+        }
+        return false;
+    }
 
     /// <summary>Apply preset <paramref name="name"/> to <paramref name="s"/>; false if there is no such preset.</summary>
     public static bool Apply(ProjectSettings s, string name)
@@ -118,10 +147,10 @@ public class ProjectSettings
     /// </summary>
     public int TrainIterations { get; set; } = 7000;
     /// <summary>
-    /// Ceiling on the splat count while training grows the scene (densification). Bounds GPU memory: TruckFull
-    /// reached 1.7M under a 3M cap (b24). Lower it on a smaller GPU.
+    /// Ceiling on the splat count while training grows the scene (densification). The device's GPU memory setting caps
+    /// it further (GpuMemoryBudget); <see cref="ReconstructionPresets.DeviceMaxSplats"/> = as many as the device fits.
     /// </summary>
-    public int TrainMaxSplats { get; set; } = 3_000_000;
+    public int TrainMaxSplats { get; set; } = ReconstructionPresets.DeviceMaxSplats;
     /// <summary>
     /// Longest side, in pixels, the photos are trained at (the trainer also shrinks further to fit its target
     /// memory budget). Higher = sharper detail, more GPU memory and time per iteration.

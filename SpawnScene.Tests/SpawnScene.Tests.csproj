@@ -40,6 +40,7 @@
     <Compile Include="..\SpawnScene\Models\Project.cs" Link="Linked\Project.cs" />
     <Compile Include="..\SpawnScene\Services\SplatRenderMode.cs" Link="Linked\SplatRenderMode.cs" />
     <Compile Include="..\SpawnScene\Services\GpuMemoryBudget.cs" Link="Linked\GpuMemoryBudget.cs" />
+    <Compile Include="..\SpawnScene\Services\TrainingTimeEstimate.cs" Link="Linked\TrainingTimeEstimate.cs" />
     <Compile Include="..\SpawnScene\Models\Gaussian3D.cs" Link="Linked\Gaussian3D.cs" />
     <Compile Include="..\SpawnScene\Models\PointCloud.cs" Link="Linked\PointCloud.cs" />
     <Compile Include="..\SpawnScene\Services\ImageQuality.cs" Link="Linked\ImageQuality.cs" />

@@ -278,19 +278,13 @@ public partial class Studio
             // The photos' own size caps training, not the cameras' import size (TrainingSize may scale up). The stack shares
             // one size, so the smallest photo sets it.
             int sourceLongest = views.Min(v => v.SourceLongestSide);
-            var (tw, th) = views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest);
-            long TargetBytes(int pw, int ph) => (long)views.Count * pw * ph * sizeof(uint);
-            if (TargetBytes(tw, th) > MaxTargetStackBytes)
+            var (tw, th, shrunk) = TrainingTimeEstimate.TrainingSize(w, h, sourceLongest, maxTrainDimension, views.Count,
+                MaxTargetStackBytes);
+            if (shrunk)
             {
-                int shrunk = maxTrainDimension;
-                while (shrunk > 128 && TargetBytes(tw, th) > MaxTargetStackBytes)
-                {
-                    shrunk = shrunk * 3 / 4;
-                    (tw, th) = views[0].Camera.TrainingSize(shrunk, sourceLongest);
-                }
+                var (fw, fh) = views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest);
                 Console.WriteLine(
-                    $"[Train] {views.Count} views would need " +
-                    $"{TargetBytes(views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest).Width, views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest).Height) / (1024 * 1024)} MiB " +
+                    $"[Train] {views.Count} views would need {(long)views.Count * fw * fh * sizeof(uint) / (1024 * 1024)} MiB " +
                     $"of target stack at {maxTrainDimension}px; training at {tw}x{th} to fit " +
                     $"{MaxTargetStackBytes / (1024 * 1024)} MiB");
             }
@@ -455,6 +449,7 @@ public partial class Studio
 
             // -- Optimise --
             var start = DateTime.UtcNow;
+            var runMarks = new Dictionary<int, double>(); // TrainingTimeEstimate.Marks reached: elapsed s per training megapixel
             int overflowed = 0;
             // Loss is per VIEW, and views differ in how much of the frame the temple covers, so
             // comparing iteration 0 against iteration N compares two different pictures. Average
@@ -689,6 +684,9 @@ public partial class Studio
                     cycleSum = 0; cycleN = 0;
                 }
 
+                if (System.Array.IndexOf(TrainingTimeEstimate.Marks, it + 1) >= 0)
+                    runMarks[it + 1] = (DateTime.UtcNow - start).TotalSeconds / TrainingTimeEstimate.Megapixels(w, h);
+
                 // Progress about once a second, and (project runs) a fresh display pack every two seconds so the
                 // viewer shows the scene improving - training writes straight to the splat data and the viewer
                 // draws a packed copy that is otherwise only rebuilt when training ends.
@@ -721,6 +719,12 @@ public partial class Studio
                 : "no finite loss";
             Console.WriteLine(
                 $"[Train] {itersDone} iters in {total:F1}s ({itersDone / Math.Max(total, 1e-6):F1} it/s), {lossText}");
+            if (runMarks.Count > 0)
+            {
+                TrainMarks = TrainingTimeEstimate.Merge(TrainMarks, runMarks);
+                Console.WriteLine($"[Train] device time marks at {w}x{h} (s per training megapixel, the project page's estimate): " +
+                    string.Join(", ", runMarks.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}: {kv.Value:F1}")));
+            }
             if (overflowed > 0)
                 Console.WriteLine(
                     $"[Train] WARNING: {overflowed}/{iterations} iterations overflowed the key " +

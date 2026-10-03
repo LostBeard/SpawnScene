@@ -42,9 +42,19 @@ All scored with `tools/score_views.py` at a fixed viewport against the original 
 | Preset | Iterations | Resolution | Max splats | Front end | Use |
 |---|---|---|---|---|---|
 | Draft | 3K | 720 | 500K | learned | a quick look, weak GPU |
-| Standard (default) | 7K | 1024 | device default (<= 1M) | learned | most captures |
-| High | 15K | 1600 (capped at photo) | device default (<= 3M) | learned | well-covered scenes |
+| Standard (default) | 7K | 1024 | device max | learned | most captures |
+| High | 15K | 1600 (capped at photo) | device max | learned | well-covered scenes |
 | Max | 30K | photo size | device max | learned | best result, long run |
+
+Splat caps (2026-10-02, TJ: "3 million splats is very low... the 5k living room image with single image scene generation
+would generate over 14,000,000 splats and render at 60fps. VERY large scenes are a part of the goal"):
+- Every preset but Draft now takes **device max**: as many as the GPU memory setting fits, and never more than one
+  binding of the widest per-splat row holds (45-float SH rest, 180 B: 11.9M at 2047 MiB). Max splats offers 500K / 1M /
+  3M / 6M / 10M / Device. GPU memory offers up to 48 GB. Projects saved under a preset with the old 3M cap upgrade on
+  load.
+- Training costs ~1,350 B/splat, of which the degree-3 SH bank (value, gradient, two Adam moments, 45 floats each) is 720.
+  That is the next lever for big scenes on a given GPU (fp16 moments / fp16 SH storage), and past 11.9M the SH banks
+  must split across bindings. Rendering is far cheaper per splat (14M at 60 fps).
 
 Changing any row below the preset switches the preset label to "Custom" (the values stay where the user put them).
 
@@ -77,7 +87,12 @@ Sidebar sections, top to bottom:
 6. Generate, pinned at the foot.
 
 ## Open before implementing
-- An estimated-time line needs a per-device it/s measurement. Record it after each run, in project settings.
+- Estimated time: DONE (TrainingTimeEstimate). Each run of 1K+ iterations stores this device's seconds per
+  iteration-megapixel in localStorage. The Training iterations hint shows "Training takes about N min on this computer"
+  for the project's photos at the size the trainer would pick. Splat count is not in the model (TruckFull 1.7M splats
+  ran 16-24 it/s at 979x546), so it says "about". The old hint's "70 minutes at 30K" was stale (b122: 31 min).
+- The budget fit now picks the LARGEST size that fits (square root), not 3/4 steps from the setting
+  (TruckFull at 1600 px in 256 MB: 692 px, was 676).
 - Learned k3072 vs k1024 end-to-end measurement.
 - Settings are per project today (ProjectSettings). Device settings (GPU memory budget) belong to the device, so they
   go in app-level settings (localStorage is fine, a per-viewer convenience).

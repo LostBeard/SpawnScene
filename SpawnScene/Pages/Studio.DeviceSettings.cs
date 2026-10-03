@@ -38,6 +38,48 @@ public partial class Studio
         }
     }
 
+    const string TrainMarksKey = "spawnscene.trainSecondsPerMegapixelAtMark";
+    Dictionary<int, double>? _trainMarks;
+
+    /// <summary>
+    /// This device's measured training times (<see cref="TrainingTimeEstimate"/>): iteration mark -> elapsed seconds per
+    /// training megapixel, empty until a run reaches its first mark. Stored as "1000:18.9;3000:71.2" (no JSON
+    /// serializer to keep trim safe).
+    /// </summary>
+    Dictionary<int, double> TrainMarks
+    {
+        get
+        {
+            if (_trainMarks != null) return _trainMarks;
+            _trainMarks = new();
+            try
+            {
+                using var store = _js.Get<Storage>("localStorage");
+                foreach (var pair in (store?.GetItem(TrainMarksKey) ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var kv = pair.Split(':');
+                    if (kv.Length == 2 && int.TryParse(kv[0], out int mark) &&
+                        double.TryParse(kv[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture,
+                            out double s) && s > 0 && double.IsFinite(s))
+                        _trainMarks[mark] = s;
+                }
+            }
+            catch { }
+            return _trainMarks;
+        }
+        set
+        {
+            _trainMarks = value;
+            try
+            {
+                using var store = _js.Get<Storage>("localStorage");
+                store?.SetItem(TrainMarksKey, string.Join(";", value.OrderBy(kv => kv.Key)
+                    .Select(kv => $"{kv.Key}:{kv.Value.ToString("R", System.Globalization.CultureInfo.InvariantCulture)}")));
+            }
+            catch { }
+        }
+    }
+
     /// <summary>The device's storage-binding limit (the target stack's ceiling), read once.</summary>
     long DeviceBindingLimitBytes =>
         _deviceBindingLimit ??= GpuMemoryBudget.ReadMaxStorageBindingBytes(

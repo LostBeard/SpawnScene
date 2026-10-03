@@ -92,18 +92,22 @@ public class CameraParams
     /// this camera's size is the ceiling). Unlike FitWithin it scales UP when the photo is larger than the camera.
     /// Rounded to even numbers like FitWithin.
     /// </summary>
-    public (int Width, int Height) TrainingSize(int maxDimension, int sourceLongestSide)
+    public (int Width, int Height) TrainingSize(int maxDimension, int sourceLongestSide) =>
+        TrainingSize(Width, Height, maxDimension, sourceLongestSide);
+
+    /// <summary><see cref="TrainingSize(int, int)"/> for a <paramref name="width"/> x <paramref name="height"/> view.</summary>
+    public static (int Width, int Height) TrainingSize(int width, int height, int maxDimension, int sourceLongestSide)
     {
         // The photo's own size is the ceiling, not this camera's: cameras are made at the IMPORT size (1024 on the longest
         // edge) while training reloads its targets from the photo. FitWithin alone never upscales, so a 1600 px training
         // setting silently trained at 1024 or less (2026-10-02, TJ's 3120x4160 Bathroom photos).
-        int longest = Math.Max(Width, Height);
+        int longest = Math.Max(width, height);
         int ceiling = sourceLongestSide > 0 ? sourceLongestSide : longest;
         int target = Math.Min(maxDimension, ceiling);
-        if (target == longest) return (Width, Height);
+        if (target == longest) return (width, height);
         float s = (float)target / longest;
-        int w = Math.Max(2, (int)MathF.Round(Width * s / 2f) * 2);
-        int h = Math.Max(2, (int)MathF.Round(Height * s / 2f) * 2);
+        int w = Math.Max(2, (int)MathF.Round(width * s / 2f) * 2);
+        int h = Math.Max(2, (int)MathF.Round(height * s / 2f) * 2);
         return (w, h);
     }
 

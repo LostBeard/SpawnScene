@@ -410,29 +410,56 @@ public partial class Studio
             preset == "Custom" ? "Custom: the settings below were changed by hand. Pick a preset to reset them."
                 : ReconstructionPresets.All.First(p => p.Name == preset).Hint);
 
+        // What these photos would train at under this device's budget, and for how long (TrainingTimeEstimate: the trainer's
+        // own sizing rule, and the speed this device measured on its last run).
+        var (budgetTargets, _) = GpuMemoryBudget.Derive(GpuMemoryGB, DeviceBindingLimitBytes, s.TrainMaxSplats);
+        var photos = _activeProject.Sources.Where(p => p.Width > 0 && p.Height > 0).ToList();
+        string sizeNote = "", timeNote;
+        TrainingTimeEstimate.Duration? trainTime = null;
+        if (photos.Count >= 2)
+        {
+            var (tw, th, shrunk) = TrainingTimeEstimate.TrainingSize(photos[0].Width, photos[0].Height,
+                photos.Min(p => Math.Max(p.Width, p.Height)), s.TrainMaxDimension, photos.Count, budgetTargets);
+            sizeNote = $" These {photos.Count} photos train at {tw}x{th}" + (shrunk ? ", smaller to fit the GPU memory budget." : ".");
+            if (s.TrainIterations > 0)
+                trainTime = TrainingTimeEstimate.Estimate(TrainMarks, s.TrainIterations, TrainingTimeEstimate.Megapixels(tw, th));
+        }
+        if (s.TrainIterations == 0)
+            timeNote = "Off skips training: the scene stays the matched point cloud.";
+        else if (trainTime is TrainingTimeEstimate.Duration time)
+            timeNote = $"Training takes {TrainingTimeEstimate.Describe(time)} on this computer, from its earlier runs " +
+                "(scenes that grow more splats take longer). More iterations refine detail on well-covered scenes.";
+        else
+            timeNote = "More iterations refine detail on well-covered scenes. A time estimate appears here after this computer's first training run.";
+
         y = AddSectionHeading(parent, x, y + 8, w, "Reconstruction", preset);
         y = AddChoiceRow(parent, x, y, w, "Training resolution",
             new (string, int)[] { ("720", 720), ("1024", 1024), ("1600", 1600), ("Photo", ReconstructionPresets.PhotoSize) },
             s.TrainMaxDimension, v => { s.TrainMaxDimension = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
-            "Longest side the photos are trained at, never above the photos' own size (Photo = their size). Needs more GPU memory and time.");
+            "Longest side the photos are trained at, never above the photos' own size (Photo = their size). Needs more GPU memory and time." +
+            sizeNote);
         y = AddChoiceRow(parent, x, y, w, "Training iterations",
             new (string, int)[] { ("Off", 0), ("3K", 3000), ("7K", 7000), ("15K", 15000), ("30K", 30000) },
             s.TrainIterations, v => { s.TrainIterations = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
-            "More iterations refine detail on well-covered scenes. A 251-photo scene takes about 70 minutes at 30K.");
+            timeNote);
+        var (_, deviceSplats) = GpuMemoryBudget.Derive(GpuMemoryGB, DeviceBindingLimitBytes, ReconstructionPresets.DeviceMaxSplats);
         y = AddChoiceRow(parent, x, y, w, "Max splats",
-            new (string, int)[] { ("500K", 500_000), ("1M", 1_000_000), ("3M", 3_000_000) },
+            new (string, int)[] { ("500K", 500_000), ("1M", 1_000_000), ("3M", 3_000_000), ("6M", 6_000_000),
+                ("10M", 10_000_000), ("Device", ReconstructionPresets.DeviceMaxSplats) },
             s.TrainMaxSplats, v => { s.TrainMaxSplats = v; s.ReconstructionPreset = ReconstructionPresets.Match(s); },
-            "Upper bound on scene size while training grows it. Lower it on a GPU with less memory.");
+            $"Upper bound on scene size while training grows it; a scene stops growing once its photos are covered. " +
+            $"Device = as many as this computer's GPU memory setting fits: {deviceSplats:N0}" +
+            (s.TrainMaxSplats != ReconstructionPresets.DeviceMaxSplats && s.TrainMaxSplats > deviceSplats
+                ? $", so it caps this {s.TrainMaxSplats:N0}." : "."));
 
         // -- Device: this machine's GPU memory budget (localStorage, all projects) --
-        var (budgetTargets, budgetSplats) = GpuMemoryBudget.Derive(GpuMemoryGB, DeviceBindingLimitBytes, s.TrainMaxSplats);
         y = AddSectionHeading(parent, x, y + 8, w, "Device", "this computer");
         y = AddChoiceRow(parent, x, y, w, "GPU memory",
             GpuMemoryBudget.ChoicesGB.Select(gb => (gb == 0 ? $"Auto" : $"{gb} GB", gb)).ToArray(),
             GpuMemoryGB, v => GpuMemoryGB = v,
-            $"Training uses up to {budgetTargets >> 20} MB for photos and {budgetSplats:N0} splats" +
-            (budgetSplats < s.TrainMaxSplats ? $" (the preset allows {s.TrainMaxSplats:N0})" : "") +
-            $". Auto assumes {GpuMemoryBudget.AutoGB} GB; set yours if it differs.");
+            $"Training uses up to {budgetTargets >> 20} MB for photos and {deviceSplats:N0} splats " +
+            $"(about {GpuMemoryBudget.BytesPerSplat:N0} bytes each while training). Auto assumes {GpuMemoryBudget.AutoGB} GB; " +
+            "set your GPU's memory to train larger scenes. Setting more than the GPU has can lose the device mid-run.");
 
         y = AddSectionHeading(parent, x, y + 8, w, "Single photo", "depth");
         var presets = new[] { ("Fast", 4, 0f), ("Standard", 2, 0.3f), ("High", 1, 0.3f) };

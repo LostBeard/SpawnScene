@@ -300,23 +300,33 @@ public sealed class LearnedFeatureMatcher : IDisposable
     /// this fraction of the second-nearest's.</summary>
     public const float RetrievalRatio = 0.9f;
 
-    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int,
+    /// <summary>
+    /// Descriptors per image retrieval compares: every (K / this)-th of the image's K. Retrieval only RANKS partners for
+    /// LightGlue, and its cost grows with the square of the descriptors compared: at K=3072 all of them took 691 s on
+    /// TruckFull (b140, 251 images, 31,375 pairs) for the 209 s K=1024 matching it fed at the time. A strided 1,024 keeps it
+    /// at the K=1024 cost whatever K LightGlue matches at.
+    /// </summary>
+    public const int RetrievalDescriptors = 1024;
+
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int,
         ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>? _nearest;
     Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
         ArrayView1D<int, Stride1D.Dense>, int, float, ArrayView1D<int, Stride1D.Dense>>? _countMutual;
 
-    /// <summary>For descriptor i of image pa[p] (t = p * k + i): its nearest and second-nearest descriptor of image pb[p] by
-    /// dot product (descriptors are unit length, so the largest dot is the nearest), and the nearest's index.</summary>
+    /// <summary>For compared descriptor i of image pa[p] (t = p * kSub + i; descriptor i * stride of the image's k): its
+    /// nearest and second-nearest compared descriptor of image pb[p] by dot product (descriptors are unit length, so the
+    /// largest dot is the nearest), and the nearest's compared index.</summary>
     static void NearestKernel(Index1D t, ArrayView1D<float, Stride1D.Dense> desc, ArrayView1D<int, Stride1D.Dense> pa,
-        ArrayView1D<int, Stride1D.Dense> pb, int k, ArrayView1D<int, Stride1D.Dense> bestIdx, ArrayView1D<float, Stride1D.Dense> best,
+        ArrayView1D<int, Stride1D.Dense> pb, int k, int stride, ArrayView1D<int, Stride1D.Dense> bestIdx, ArrayView1D<float, Stride1D.Dense> best,
         ArrayView1D<float, Stride1D.Dense> second)
     {
-        int p = t / k, i = t - p * k;
-        int ai = (pa[p] * k + i) * 128, b0 = pb[p] * k * 128;
+        int kSub = k / stride;
+        int p = t / kSub, i = t - p * kSub;
+        int ai = (pa[p] * k + i * stride) * 128, b0 = pb[p] * k * 128;
         float s1 = -2f, s2 = -2f; int arg = -1;
-        for (int j = 0; j < k; j++)
+        for (int j = 0; j < kSub; j++)
         {
-            int bj = b0 + j * 128;
+            int bj = b0 + j * stride * 128;
             float dot = 0f;
             for (int d = 0; d < 128; d++) dot += desc[ai + d] * desc[bj + d];
             if (dot > s1) { s2 = s1; s1 = dot; arg = j; }
@@ -358,8 +368,9 @@ public sealed class LearnedFeatureMatcher : IDisposable
         var scores = new int[n, n];
         if (n < 2) return scores;
         int k = images[0].LearnedDescriptors?.K ?? throw new InvalidOperationException("no learned descriptors");
+        int stride = Math.Max(1, k / RetrievalDescriptors), kSub = k / stride;
         _nearest ??= Accel.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
-            ArrayView1D<int, Stride1D.Dense>, int, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<int, Stride1D.Dense>, int, int, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>>(NearestKernel);
         _countMutual ??= Accel.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, float, ArrayView1D<int, Stride1D.Dense>>(CountMutualKernel);
@@ -372,12 +383,16 @@ public sealed class LearnedFeatureMatcher : IDisposable
         }
         var pairs = new List<(int A, int B)>();
         for (int a = 0; a < n; a++) for (int b = a + 1; b < n; b++) pairs.Add((a, b));
-        int batch = Math.Max(1, batchPairs);
+        // The work per pair grows with k^2 (every descriptor against every descriptor of the partner). batchPairs is the
+        // size measured safe at K=1024; at K=3072 the same pair count is 9x the work in one submission, and TruckFull's
+        // first batch hung the device (b139, 2026-10-03: DXGI_ERROR_DEVICE_HUNG, the Windows GPU watchdog). Keep the work
+        // per batch at the K=1024 level: 256 pairs there, 28 at K=3072.
+        int batch = Math.Max(1, (int)((long)batchPairs * 1024 * 1024 / Math.Max(1L, (long)kSub * kSub)));
         using var pa = Accel.Allocate1D<int>(batch); using var pb = Accel.Allocate1D<int>(batch);
-        using var bestAB = Accel.Allocate1D<int>((long)batch * k); using var simAB = Accel.Allocate1D<float>((long)batch * k);
-        using var secAB = Accel.Allocate1D<float>((long)batch * k);
-        using var bestBA = Accel.Allocate1D<int>((long)batch * k); using var simBA = Accel.Allocate1D<float>((long)batch * k);
-        using var secBA = Accel.Allocate1D<float>((long)batch * k);
+        using var bestAB = Accel.Allocate1D<int>((long)batch * kSub); using var simAB = Accel.Allocate1D<float>((long)batch * kSub);
+        using var secAB = Accel.Allocate1D<float>((long)batch * kSub);
+        using var bestBA = Accel.Allocate1D<int>((long)batch * kSub); using var simBA = Accel.Allocate1D<float>((long)batch * kSub);
+        using var secBA = Accel.Allocate1D<float>((long)batch * kSub);
         using var count = Accel.Allocate1D<int>(batch);
         var ha = new int[batch]; var hb = new int[batch];
         for (int start = 0; start < pairs.Count; start += batch)
@@ -385,9 +400,9 @@ public sealed class LearnedFeatureMatcher : IDisposable
             int m = Math.Min(batch, pairs.Count - start);
             for (int q = 0; q < batch; q++) { var (a, b) = pairs[start + Math.Min(q, m - 1)]; ha[q] = a; hb[q] = b; }
             pa.View.CopyFromCPU(ha); pb.View.CopyFromCPU(hb);
-            _nearest(batch * k, desc.View, pa.View, pb.View, k, bestAB.View, simAB.View, secAB.View);
-            _nearest(batch * k, desc.View, pb.View, pa.View, k, bestBA.View, simBA.View, secBA.View);
-            _countMutual(batch, bestAB.View, simAB.View, secAB.View, bestBA.View, k, RetrievalRatio, count.View);
+            _nearest(batch * kSub, desc.View, pa.View, pb.View, k, stride, bestAB.View, simAB.View, secAB.View);
+            _nearest(batch * kSub, desc.View, pb.View, pa.View, k, stride, bestBA.View, simBA.View, secBA.View);
+            _countMutual(batch, bestAB.View, simAB.View, secAB.View, bestBA.View, kSub, RetrievalRatio, count.View);
             await Accel.SynchronizeAsync();
             // CPU transfer: one int per pair - the pair choice is made on the host.
             var c = await count.View.SubView(0, m).CopyToHostAsync();

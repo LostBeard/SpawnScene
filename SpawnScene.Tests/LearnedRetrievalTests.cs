@@ -61,6 +61,53 @@ public class LearnedRetrievalTests
     }
 
     [Test]
+    public async Task PairScores_LargeK_CompareAStridedSubset()
+    {
+        // K=2048: retrieval compares every 2nd descriptor (LearnedFeatureMatcher.RetrievalDescriptors = 1024), so its
+        // cost stays at the K=1024 level (b140: all 3072 took 691 s on TruckFull). The device must equal the host
+        // reference run on exactly that subset.
+        const int n = 3, k = 2048;
+        var rng = new Random(5);
+        var desc = new float[n][][];
+        for (int i = 0; i < n; i++) desc[i] = Enumerable.Range(0, k).Select(_ => Unit(rng)).ToArray();
+        for (int q = 0; q < 300; q++)
+        {
+            var v = desc[0][q * 2].Select(x => x + (float)(rng.NextDouble() - 0.5) * 0.02f).ToArray();
+            float inv = 1 / MathF.Sqrt(v.Sum(x => x * x));
+            desc[1][(q * 14) % k] = v.Select(x => x * inv).ToArray(); // even slots: inside the compared subset
+        }
+        int stride = k / LearnedFeatureMatcher.RetrievalDescriptors;
+        Assert.That(stride, Is.EqualTo(2));
+        float[][] Sub(float[][] d) => Enumerable.Range(0, k / stride).Select(i => d[i * stride]).ToArray();
+
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var accel = context.CreateCPUAccelerator(0);
+        using var matcher = new LearnedFeatureMatcher(() => accel, new NoModels());
+        var images = new List<ImportedImage>();
+        try
+        {
+            for (int i = 0; i < n; i++)
+                images.Add(new ImportedImage
+                {
+                    FileName = $"img{i}",
+                    LearnedDescriptors = new LearnedFeatureMatcher.ImageDescriptors
+                    {
+                        K = k,
+                        Normalized = accel.Allocate1D<float>(k * 2),
+                        Descriptors = accel.Allocate1D(desc[i].SelectMany(x => x).ToArray()),
+                    },
+                });
+            var scores = await matcher.PairScoresAsync(images);
+            for (int a = 0; a < n; a++)
+                for (int b = a + 1; b < n; b++)
+                    Assert.That(scores[a, b], Is.EqualTo(Reference(Sub(desc[a]), Sub(desc[b]), LearnedFeatureMatcher.RetrievalRatio)), $"pair {a}-{b}");
+            Assert.That(scores[0, 1], Is.GreaterThan(250), "the planted overlap ranks first");
+            Assert.That(scores[0, 2], Is.LessThan(20));
+        }
+        finally { foreach (var im in images) im.DisposeSource(); }
+    }
+
+    [Test]
     public async Task PairScores_MatchHostReference_AndRankTheOverlappingPairs()
     {
         const int n = 5, k = 256;

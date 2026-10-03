@@ -60,6 +60,18 @@ public sealed class XRMenu
 
     public void Close() { IsOpen = false; Cursor = null; _cursor.Visible = false; }
 
+    /// <summary>Where the panel is (its world transform in the room).</summary>
+    public Matrix4x4 Model => _model;
+
+    /// <summary>Open at a given place - another menu's (a sub-page replacing it where it stood).</summary>
+    public void OpenAt(Matrix4x4 model)
+    {
+        _model = model;
+        IsOpen = true;
+        Cursor = null;
+        _cursor.Visible = false;
+    }
+
     /// <summary>
     /// One frame of pointing. Returns true while the ray is on the open panel, so the caller does not also treat the
     /// trigger as a scene action (AR placement).

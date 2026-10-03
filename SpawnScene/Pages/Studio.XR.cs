@@ -151,7 +151,7 @@ public partial class Studio
         _xrLastTime = frameData.Time;
         // With the box tool on and something selected, the right grip moves the SELECTION (StepXRSelectionDrag), so
         // the world grab only gets the left hand.
-        bool rightMovesSelection = _xrBox.Active && _selection != null && !(_xrMenu?.IsOpen == true);
+        bool rightMovesSelection = _xrBox.Active && _selection != null && ActiveXRMenu == null;
         StepXRSelectionDrag(rightMovesSelection && frameData.RightGrip, frameData.RightGripPosition);
         bool wasGrabbing = _xrWorldGrab.Active;
         _xrSceneFromRoom = _xrWorldGrab.Step(_xrSceneFromRoom.Value, frameData.LeftGrip, frameData.LeftGripPosition,
@@ -166,13 +166,18 @@ public partial class Studio
         _xrExitWasDown = frameData.ExitButton;
         if (frameData.MenuButton && !_xrMenuWasDown)
         {
-            EnsureXRMenu().Toggle(frameData.HeadPosition, frameData.HeadOrientation);
-            Console.WriteLine(_xrMenu!.IsOpen ? "[XR] menu opened" : "[XR] menu closed");
+            if (_xrInsertMenu?.IsOpen == true) { _xrInsertMenu.Close(); Console.WriteLine("[XR] menu closed"); }
+            else
+            {
+                EnsureXRMenu().Toggle(frameData.HeadPosition, frameData.HeadOrientation);
+                Console.WriteLine(_xrMenu!.IsOpen ? "[XR] menu opened" : "[XR] menu closed");
+            }
         }
         _xrMenuWasDown = frameData.MenuButton;
-        // While the menu is open the trigger belongs to it (clicks), not to the scene (AR placement).
-        bool menuOpen = _xrMenu?.IsOpen == true;
-        if (_xrMenu != null) _xrMenu.Step(frameData.RightRayOrigin, frameData.RightRayDirection, frameData.RightTrigger, dt);
+        // While a menu is open the trigger belongs to it (clicks), not to the scene (AR placement).
+        var activeMenu = ActiveXRMenu;
+        bool menuOpen = activeMenu != null;
+        activeMenu?.Step(frameData.RightRayOrigin, frameData.RightRayDirection, frameData.RightTrigger, dt);
         // The box tool (menu: Select box) owns the right trigger while it is on and the menu is closed.
         bool boxTool = _xrBox.Active && !menuOpen;
         if (_xrBox.Step(boxTool ? frameData.RightRayOrigin : null, boxTool && frameData.RightTrigger, _xrSceneFromRoom.Value))
@@ -237,7 +242,7 @@ public partial class Studio
                 var vp = view.Viewport;
                 var roomViewProj = view.RoomViewMatrix * view.ProjectionMatrix;
                 _gpuRenderer.RenderXRViewSortedToCanvas(view.ViewMatrix, view.ProjectionMatrix, (int)vp.Width, (int)vp.Height, _xrCasEnabled,
-                    _xrMenu?.IsOpen == true ? (enc, color, depth) => _xrMenu.Draw(_gameUI.Renderer, roomViewProj, enc, color, depth) : null);
+                    ActiveXRMenu is { } drawMenu ? (enc, color, depth) => drawMenu.Draw(_gameUI.Renderer, roomViewProj, enc, color, depth) : null);
                 if (_xrBox.BoxToRoom(_xrSceneFromRoom.Value) is { } boxRoom)
                     _gpuRenderer.RenderXROverlayToCanvas((enc, color, depth) =>
                         DrawXRBox(enc, color, depth, roomViewProj, boxRoom, frameData.HeadPosition, _xrBox.Dragging));
@@ -294,6 +299,53 @@ public partial class Studio
     // ── In-headset menu (X/A opens it; right ray + trigger click) ─────────────────────────────────────────────
     XRMenu? _xrMenu;
     bool _xrMenuWasDown;
+    // The scene list (Insert scene...): a page that replaces the main menu where it stood. One panel at a time: GameUI
+    // world batches cannot share a command buffer.
+    XRMenu? _xrInsertMenu;
+
+    XRMenu? ActiveXRMenu => _xrInsertMenu?.IsOpen == true ? _xrInsertMenu : _xrMenu?.IsOpen == true ? _xrMenu : null;
+
+    async Task OpenXRInsertListAsync()
+    {
+        if (_xrMenu == null) return;
+        var at = _xrMenu.Model;
+        var candidates = new List<(Models.Project P, Models.ProjectScene S)>();
+        foreach (var proj in await _projectService.ListProjectsAsync())
+            foreach (var sc in proj.Scenes)
+                if (sc.Id != _viewedProjectScene?.Id) candidates.Add((proj, sc));
+        candidates = candidates.OrderByDescending(c => c.S.CreatedAt).Take(7).ToList();
+
+        _xrInsertMenu = new XRMenu();
+        var p = _xrInsertMenu.Panel;
+        p.AddChild(new UILabel { X = 24, Y = 18, Text = "Insert a scene", FontSize = FontSize.Heading, Color = UITheme.Current.TextPrimary });
+        p.AddChild(new UILabel { X = 24, Y = 58, Text = "It is placed beside this one, to your right.", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary });
+        float y = 90;
+        if (candidates.Count == 0)
+            p.AddChild(new UILabel { X = 24, Y = y, Text = "No other saved scenes", FontSize = FontSize.Body, Color = UITheme.Current.TextSecondary });
+        foreach (var (proj, sc) in candidates)
+        {
+            var (pp, ss) = (proj, sc);
+            string label = $"{pp.Name}: {ss.SplatCount:N0} splats" + (ss.TrainedIterations > 0 ? ", trained" : "") + (ss.EditedFrom != null ? ", edited" : "");
+            p.AddChild(new UIButton
+            {
+                X = 24, Y = y, Width = 512, Height = 50, Text = label, FontSize = FontSize.Body,
+                OnClick = () =>
+                {
+                    _xrInsertMenu!.Close();
+                    _ = InsertSceneAsync(pp, ss, XRSceneRight()).ContinueWith(_ => RefreshXRMenu());
+                },
+            });
+            y += 58;
+        }
+        p.AddChild(new UIButton
+        {
+            X = 24, Y = 506, Width = 512, Height = 50, Text = "Back", FontSize = FontSize.Body,
+            OnClick = () => { _xrInsertMenu!.Close(); _xrMenu!.OpenAt(at); },
+        });
+        _xrMenu.Close();
+        _xrInsertMenu.OpenAt(at);
+        Console.WriteLine($"[XR] insert list: {candidates.Count} scenes");
+    }
     float _xrSpeedScale = 1f;
     UIButton? _xrTurnButton, _xrSpeedButton, _xrPlaceButton, _xrSelectButton;
     UILabel? _xrEditLabel;
@@ -439,6 +491,7 @@ public partial class Studio
         Button(x1, 350, "Save as new scene", () => _ = SaveEditedSceneAsync().ContinueWith(_ => RefreshXRMenu()));
         Button(x0, 410, "Copy", () => _ = CopySelectionAsync(cut: false).ContinueWith(_ => RefreshXRMenu()));
         Button(x1, 410, "Paste", () => _ = PasteClipboardAsync(XRSceneRight()).ContinueWith(_ => RefreshXRMenu()));
+        Button(x0, 470, "Insert scene...", () => _ = OpenXRInsertListAsync());
         Button(x1, 470, "Exit", () => { _xrMenu!.Close(); _xrService.RequestEnd(); });
         _xrEditLabel = p.AddChild(new UILabel
         {

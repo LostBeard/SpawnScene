@@ -136,6 +136,34 @@ public partial class Studio
             await LoadProjectSceneAsync(saved);
             await CaptureProjectViewAsync("reloaded", seat);
 
+            // SH storage: new saves are SphericalHarmonics.Parts files, and a scene saved before the split (one
+            // row-major file) must load to the SAME part buffers, bit for bit, through the GPU split.
+            if (saved.ShDegree > 0)
+            {
+                if (saved.ShParts != SphericalHarmonics.Parts)
+                {
+                    Console.WriteLine($"[Dataset] FAIL: scene saved SH as {saved.ShParts} parts, expected {SphericalHarmonics.Parts}");
+                    return;
+                }
+                var fromParts = await _gpuRenderer.ReadShRestPartsAsync();
+                if (fromParts == null) { Console.WriteLine("[Dataset] FAIL: the reloaded scene has no SH on the GPU"); return; }
+                var rows = SphericalHarmonics.JoinParts(fromParts);
+                using (var legacy = new Uint8Array(System.Runtime.InteropServices.MemoryMarshal.AsBytes(rows.AsSpan()).ToArray()))
+                    await _projectService.RewriteSceneShAsLegacyRowsAsync(project.Id, saved.Id, legacy);
+                _projects = await _projectService.ListProjectsAsync();
+                _activeProject = _projects.First(p => p.Id == project.Id);
+                var legacyScene = _activeProject.Scenes.First(sc => sc.Id == saved.Id);
+                await LoadProjectSceneAsync(legacyScene);
+                var fromRows = await _gpuRenderer.ReadShRestPartsAsync();
+                int bad = fromRows == null ? -1 : Enumerable.Range(0, fromParts.Length)
+                    .Sum(part => fromParts[part].Length != fromRows[part].Length ? int.MaxValue / 4
+                        : fromParts[part].Where((v, i) => BitConverter.SingleToInt32Bits(v) != BitConverter.SingleToInt32Bits(fromRows[part][i])).Count());
+                Console.WriteLine(bad == 0
+                    ? $"[Dataset] legacy SH load PASS: {rows.Length:N0} row-major floats split on the GPU to the same {SphericalHarmonics.Parts} part buffers, bit for bit"
+                    : $"[Dataset] FAIL: legacy SH load differs from the part load ({bad} floats, -1 = no SH)");
+                if (bad != 0) return;
+            }
+
             // The viewer as a user sees it, its HUD (back, view buttons, stats) on.
             _state = StudioState.SceneViewer;
             _hideUiOverlay = false;

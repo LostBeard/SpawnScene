@@ -303,6 +303,9 @@ public partial class Studio
             // -- Dense geometry Adam: a silent splat takes torch Adam's zero-gradient step, or none when off --
             if (!await DenseAdamGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
+            // -- SH forward: degree-3 colour through the part buffers and emit_keys' colour buffer, vs the CPU --
+            if (!await ShForwardGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
             // -- Key growth: a frame over the key capacity grows the buffers and renders complete --
             if (!await KeyGrowthGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
@@ -311,6 +314,54 @@ public partial class Studio
         catch (Exception ex)
         {
             Console.WriteLine($"[TrainerGate] FAIL: {ex}");
+        }
+    }
+
+    /// <summary>
+    /// View-dependent colour at SH degree 3 must match the CPU oracle. The SH bands live in three part buffers
+    /// (SphericalHarmonics.Parts) and only emit_keys evaluates them, storing each splat's colour for the raster passes;
+    /// the rest of the gate runs at degree 0, so without this stage neither path was checked. A distinct pattern per
+    /// coefficient means a band read from the wrong part, or a stale colour, shows. Non-vacuous: the bands must change
+    /// the image against degree 0.
+    /// </summary>
+    async Task<bool> ShForwardGateAsync(SplatTrainerGpu trainer, MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int n,
+        CameraParams cam, float depthNear, float depthFar)
+    {
+        const int Sh = SphericalHarmonics.RestFloatsPerSplat;
+        var rest = new float[n * Sh];
+        for (int i = 0; i < n; i++)
+            for (int k = 0; k < Sh; k++)
+                rest[i * Sh + k] = 0.08f * MathF.Sin(i * 0.71f + k * 1.37f);
+        int savedDegree = trainer.ActiveShDegree;
+        try
+        {
+            trainer.ActiveShDegree = 0;
+            var flat = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar);
+            trainer.RestoreShRest(rest, Enumerable.Range(0, n).ToArray());
+            trainer.ActiveShDegree = 3;
+            var gpu = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar);
+            float[] packed = await splatBuf.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
+            var cpuSplats = ProjectForCpu(packed, n, cam, shDegree: 3, shRest: rest);
+            var bin = SplatTileRasterizer.Bin(cpuSplats, GateWidth, GateHeight);
+            var (cpu, _, _) = SplatTileRasterizer.Forward(cpuSplats, bin);
+            double sumAbs = 0, sumShift = 0;
+            float maxAbs = 0;
+            for (int i = 0; i < gpu.Length; i++)
+            {
+                float d = MathF.Abs(gpu[i] - cpu[i]);
+                sumAbs += d;
+                maxAbs = MathF.Max(maxAbs, d);
+                sumShift += MathF.Abs(gpu[i] - flat[i]);
+            }
+            float meanAbs = (float)(sumAbs / gpu.Length), shift = (float)(sumShift / gpu.Length);
+            bool ok = meanAbs < 2e-3f && maxAbs < 5e-2f && shift > 2e-3f;
+            Console.WriteLine($"[TrainerGate] SH forward {(ok ? "PASS" : "FAIL")}: degree 3 vs CPU meanAbs={meanAbs:F6} " +
+                $"maxAbs={maxAbs:F6}; the bands moved the image by {shift:F6} on average vs degree 0");
+            return ok;
+        }
+        finally
+        {
+            trainer.ActiveShDegree = savedDegree;
         }
     }
 

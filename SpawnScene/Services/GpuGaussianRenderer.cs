@@ -70,25 +70,42 @@ public class GpuGaussianRenderer : IDisposable
 
     // View-dependent colour. The trainer learns SH bands 1..3 per splat; the viewer used to draw DC only,
     // i.e. one colour per splat from every angle. Owned here (a GPU copy handed over after training).
-    private GPUBuffer? _shRest;
+    // SphericalHarmonics.Parts buffers of PartFloatsPerSplat floats a splat (one 45-float buffer capped a binding at
+    // 11.9M splats).
+    private GPUBuffer[]? _shRest;
     private GPUBuffer? _shRestCached;
     private GPUBuffer? _shDummy;
+    private GPUComputePipeline? _shSplitPipeline;
     private int _shDegree;
     private System.Numerics.Vector3 _packCameraPos;
     private long _lastShRepack;
 
     /// <summary>
-    /// Give the viewer the scene's SH rest coefficients (45 floats per splat, SphericalHarmonics layout) and the
-    /// active degree; the renderer takes ownership. Null / degree 0 = DC colour only.
+    /// Give the viewer the scene's SH rest coefficients (SphericalHarmonics.Parts buffers of PartFloatsPerSplat floats
+    /// a splat) and the active degree; the renderer takes ownership. Null / degree 0 = DC colour only.
     /// </summary>
-    public void SetShRest(GPUBuffer? buffer, int degree)
+    public void SetShRest(GPUBuffer[]? parts, int degree)
     {
-        if (!ReferenceEquals(_shRest, buffer)) { _shRest?.Destroy(); _shRest?.Dispose(); }
-        _shRest = buffer;
-        _shDegree = buffer == null ? 0 : Math.Clamp(degree, 0, SphericalHarmonics.MaxDegree);
+        if (!ReferenceEquals(_shRest, parts)) DestroyShRest();
+        _shRest = parts;
+        _shDegree = parts == null ? 0 : Math.Clamp(degree, 0, SphericalHarmonics.MaxDegree);
         _packBindGroup?.Dispose();
         _packBindGroup = null;
     }
+
+    void DestroyShRest()
+    {
+        if (_shRest == null) return;
+        foreach (var b in _shRest) { b.Destroy(); b.Dispose(); }
+        _shRest = null;
+    }
+
+    GPUBuffer NewShPart(ulong bytes) => _device!.CreateBuffer(new GPUBufferDescriptor
+    {
+        Size = Math.Max(16UL, bytes),
+        // CopySrc: ReadShRestPartsAsync (the autotest's legacy-load check) reads them back.
+        Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst | GPUBufferUsage.CopySrc,
+    });
 
     /// <summary>The SH degree the viewer is drawing with (0 = DC only).</summary>
     public int ShDegree => _shDegree;
@@ -105,22 +122,142 @@ public class GpuGaussianRenderer : IDisposable
     }
 
     /// <summary>
-    /// Load a trained scene's SH rest bands (45 floats per splat, as saved from the trainer) from JS memory straight
-    /// into a GPU buffer - the bytes never enter the .NET heap (1.7M splats is ~300 MB).
+    /// Load a trained scene's SH rest parts (one ArrayBuffer per SphericalHarmonics part, as saved from the trainer)
+    /// from JS memory straight into GPU buffers - the bytes never enter the .NET heap.
     /// </summary>
-    public void LoadShRest(ArrayBuffer data, int degree)
+    public void LoadShRest(ArrayBuffer[] parts, int degree)
     {
         if (_device == null || _queue == null) return;
-        long bytes = (long)data.ByteLength;
+        if (degree <= 0 || parts.Length != SphericalHarmonics.Parts || parts.Any(p => p.ByteLength <= 0))
+        {
+            SetShRest(null, 0);
+            return;
+        }
+        var buffers = new GPUBuffer[parts.Length];
+        for (int part = 0; part < parts.Length; part++)
+        {
+            buffers[part] = NewShPart((ulong)parts[part].ByteLength);
+            _queue.WriteBuffer(buffers[part], 0L, parts[part]);
+        }
+        SetShRest(buffers, degree);
+    }
+
+    /// <summary>
+    /// Load SH saved before the part split (one file of RestFloatsPerSplat floats a splat, row-major): upload it and
+    /// split it into the part buffers ON THE GPU. Such scenes are at most 11.9M splats - the old one-binding limit -
+    /// so the row buffer still fits one binding.
+    /// </summary>
+    public void LoadShRestRows(ArrayBuffer rows, int degree)
+    {
+        if (_device == null || _queue == null) return;
+        long bytes = (long)rows.ByteLength;
         if (bytes <= 0 || degree <= 0) { SetShRest(null, 0); return; }
-        var buffer = _device.CreateBuffer(new GPUBufferDescriptor
+        uint splats = (uint)(bytes / (SphericalHarmonics.RestFloatsPerSplat * sizeof(float)));
+        using var src = _device.CreateBuffer(new GPUBufferDescriptor
         {
             Size = (ulong)bytes,
             Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
         });
-        _queue.WriteBuffer(buffer, 0L, data);
-        SetShRest(buffer, degree);
+        _queue.WriteBuffer(src, 0L, rows);
+        var parts = new GPUBuffer[SphericalHarmonics.Parts];
+        for (int part = 0; part < parts.Length; part++)
+            parts[part] = NewShPart((ulong)splats * SphericalHarmonics.PartFloatsPerSplat * sizeof(float));
+        if (_shSplitPipeline == null)
+        {
+            using var module = _device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = ShSplitWgsl });
+            _shSplitPipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
+            {
+                Layout = "auto",
+                Compute = new GPUProgrammableStage { Module = module, EntryPoint = "split_sh_rows" },
+            });
+        }
+        using var cfg = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        _queue.WriteBuffer(cfg, 0, new byte[] { (byte)splats, (byte)(splats >> 8), (byte)(splats >> 16), (byte)(splats >> 24), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+        using var layout = _shSplitPipeline.GetBindGroupLayout(0);
+        using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor
+        {
+            Layout = layout,
+            Entries = new GPUBindGroupEntry[]
+            {
+                new() { Binding = 0, Resource = new GPUBufferBinding { Buffer = src } },
+                new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = parts[0] } },
+                new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = parts[1] } },
+                new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = parts[2] } },
+                new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = cfg } },
+            },
+        });
+        using var encoder = _device.CreateCommandEncoder();
+        using (var pass = encoder.BeginComputePass())
+        {
+            pass.SetPipeline(_shSplitPipeline);
+            pass.SetBindGroup(0, bg);
+            uint groups = (splats + 63) / 64;
+            const uint maxWG = 65535u;
+            pass.DispatchWorkgroups(Math.Min(groups, maxWG), (groups + maxWG - 1) / maxWG, 1);
+            pass.End();
+        }
+        using var cmd = encoder.Finish();
+        _queue.Submit(new[] { cmd });
+        src.Destroy();
+        cfg.Destroy();
+        SetShRest(parts, degree);
     }
+
+    /// <summary>
+    /// The SH part buffers the viewer is drawing with, read back (autotest / diagnostics only: CPU transfer of
+    /// ~60 bytes a splat a part). Null when it has none.
+    /// </summary>
+    public async Task<float[][]?> ReadShRestPartsAsync()
+    {
+        if (_shRest == null || _device == null || _queue == null) return null;
+        var parts = new float[_shRest.Length][];
+        for (int part = 0; part < parts.Length; part++)
+        {
+            ulong bytes = _shRest[part].Size;
+            using var staging = _device.CreateBuffer(new GPUBufferDescriptor
+            {
+                Size = bytes,
+                Usage = GPUBufferUsage.MapRead | GPUBufferUsage.CopyDst,
+            });
+            using (var encoder = _device.CreateCommandEncoder())
+            {
+                encoder.CopyBufferToBuffer(_shRest[part], 0, staging, 0, bytes);
+                using var cmd = encoder.Finish();
+                _queue.Submit(new[] { cmd });
+            }
+            await staging.MapAsync(GPUMapMode.Read, 0, (long)bytes);
+            using (var mapped = staging.GetMappedRange())
+            using (var floats = new Float32Array(mapped))
+                parts[part] = floats.ToArray();
+            staging.Unmap();
+            staging.Destroy();
+        }
+        return parts;
+    }
+
+    const string ShSplitWgsl = @"
+@group(0) @binding(0) var<storage, read>       rows  : array<f32>;   // 45 floats a splat
+@group(0) @binding(1) var<storage, read_write> part0 : array<f32>;   // 15 a splat each
+@group(0) @binding(2) var<storage, read_write> part1 : array<f32>;
+@group(0) @binding(3) var<storage, read_write> part2 : array<f32>;
+@group(0) @binding(4) var<uniform>             cfg   : vec4<u32>;    // x = splat count
+
+@compute @workgroup_size(64)
+fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>,
+                 @builtin(local_invocation_index) li : u32) {
+    let i = (wg.y * nwg.x + wg.x) * 64u + li;
+    if (i >= cfg.x) { return; }
+    for (var k = 0u; k < 15u; k = k + 1u) {
+        part0[i * 15u + k] = rows[i * 45u + k];
+        part1[i * 15u + k] = rows[i * 45u + 15u + k];
+        part2[i * 15u + k] = rows[i * 45u + 30u + k];
+    }
+}
+";
 
     /// <summary>Lower the SH degree in use (diagnostic A/B); takes effect at the next pack.</summary>
     public void CapShDegree(int degree)
@@ -1723,7 +1860,8 @@ public class GpuGaussianRenderer : IDisposable
             Size = 16,
             Usage = GPUBufferUsage.Storage,
         });
-        var shBinding = _shRest ?? _shDummy;
+        var sh0 = _shRest?[0] ?? _shDummy;
+        var shBinding = sh0;
 
         // Create or reuse pack bind group (invalidate only when GPU buffer refs change)
         if (_packBindGroup == null || _srcDataCached != srcDataBuffer || _srcIdxCached != srcIdxBuffer
@@ -1744,7 +1882,9 @@ public class GpuGaussianRenderer : IDisposable
                     new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = srcIdxBuffer } },
                     new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = _splatBuffer } },
                     new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = _packCountBuf } },
-                    new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = shBinding } },
+                    new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = sh0 } },
+                    new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _shRest?[1] ?? _shDummy } },
+                    new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _shRest?[2] ?? _shDummy } },
                 }
             });
         }
@@ -1771,7 +1911,8 @@ public class GpuGaussianRenderer : IDisposable
 
         _splatBuffer?.Destroy();
         _splatBuffer?.Dispose();
-        _shRest?.Destroy(); _shRest?.Dispose();
+        DestroyShRest();
+        _shSplitPipeline?.Dispose();
         _shDummy?.Destroy(); _shDummy?.Dispose();
         _uniformBuffer?.Destroy();
         _uniformBuffer?.Dispose();
@@ -2362,12 +2503,14 @@ struct PackUniforms {
 @group(0) @binding(1) var<storage, read>       idx     : array<i32>;  // sorted indices; -1 = culled sentinel
 @group(0) @binding(2) var<storage, read_write> dst     : array<u32>;  // packed vertex output (8 u32s/splat)
 @group(0) @binding(3) var<uniform>             u       : PackUniforms;
-@group(0) @binding(4) var<storage, read>       sh_rest : array<f32>;  // 45 floats per splat (or a dummy)
+// SH rest in SphericalHarmonics.Parts buffers of 15 floats a splat (or dummies).
+@group(0) @binding(4) var<storage, read>       sh_rest0 : array<f32>;
+@group(0) @binding(5) var<storage, read>       sh_rest1 : array<f32>;
+@group(0) @binding(6) var<storage, read>       sh_rest2 : array<f32>;
 
 const SH_C0 : f32 = 0.28209479177387814;
 const SH_C1 : f32 = 0.4886025119029199;
-const SH_REST_FLOATS : u32 = 45u;
-" + SphericalHarmonics.WgslViewRgb + @"
+" + SphericalHarmonics.WgslPartAccess + SphericalHarmonics.WgslViewRgb + @"
 
 @compute @workgroup_size(64)
 fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
@@ -2409,7 +2552,7 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     if (u.colours_are_sh_dc != 0u) {
         // Same function the trainer renders with, for the direction from this pack's camera.
         let pos = vec3<f32>(src[srcOff + 0u], src[srcOff + 1u], src[srcOff + 2u]);
-        rgb = sh_view_rgb(u32(origIdx) * SH_REST_FLOATS, normalize(pos - u.cam_pos.xyz), rgb, u.sh_degree);
+        rgb = sh_view_rgb(u32(origIdx), normalize(pos - u.cam_pos.xyz), rgb, u.sh_degree);
     }
     dst[dstOff + 3u] = pack2x16float(vec2<f32>(max(rgb.r, 0.0), max(rgb.g, 0.0)));
     dst[dstOff + 4u] = pack2x16float(vec2<f32>(max(rgb.b, 0.0), clamp(src[srcOff + 9u], 0.0, 1.0)));

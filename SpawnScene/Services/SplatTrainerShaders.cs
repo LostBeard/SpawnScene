@@ -110,9 +110,13 @@ const EWA_FILTER_PX2 : f32 = 0.3;
 // Packed splat source: SplatFormat.Floats (14) per splat.
 //   0..2 pos   3..5 SH DC (rgb = C0*dc+0.5 at degree 0)   6..8 scale   9 opacity   10..13 quat
 @group(0) @binding(1) var<storage, read> splats : array<f32>;
-// 15 higher SH bands x RGB (45 floats), zero until degree rises. Binding 12 avoids clashing
-// with emit_keys (2..5) and raster_forward (2..6).
-@group(0) @binding(12) var<storage, read> sh_rest : array<f32>;
+// 15 higher SH bands x RGB in three part buffers of 5 bands (SphericalHarmonics.Parts: one 45-float buffer capped a
+// binding at 11.9M splats), zero until degree rises. Only emit_keys reads them (splat_rgb below); the raster passes
+// read the colour it wrote. Bindings 12..14 avoid clashing with emit_keys (2..7) and the raster passes (2..11).
+@group(0) @binding(12) var<storage, read> sh_rest0 : array<f32>;
+@group(0) @binding(13) var<storage, read> sh_rest1 : array<f32>;
+@group(0) @binding(14) var<storage, read> sh_rest2 : array<f32>;
+" + SphericalHarmonics.WgslPartAccess + @"
 
 const SH_REST_FLOATS : u32 = 45u;
 const SH_C0 : f32 = 0.28209479177387814;
@@ -146,7 +150,7 @@ struct Projected {
 // View-dependent RGB from SH DC + rest (graphdeco / cvlab-epfl gaussian-splatting-web).
 " + SphericalHarmonics.WgslViewRgb + @"
 fn eval_sh_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
-    return sh_view_rgb(i * SH_REST_FLOATS, normalize(pos - u.cam_pos.xyz), dc, u.sh_degree);
+    return sh_view_rgb(i, normalize(pos - u.cam_pos.xyz), dc, u.sh_degree);
 }
 
 // Project one splat to screen space. Mirrors SplatCovariance.Cov3DFromScaleQuat ->
@@ -158,7 +162,9 @@ fn project(i : u32) -> Projected {
     let o = i * FLOATS_PER_SPLAT;
     let pos = vec3<f32>(splats[o + 0u], splats[o + 1u], splats[o + 2u]);
     let dc = vec3<f32>(splats[o + 3u], splats[o + 4u], splats[o + 5u]);
-    p.colour = eval_sh_rgb(i, pos, dc);
+    // Each module that includes this defines splat_rgb: emit_keys evaluates SH (and stores the result), the raster
+    // passes read what emit_keys stored, so SH is evaluated once a splat a view instead of once per tile it touches.
+    p.colour = splat_rgb(i, pos, dc);
     let scale = vec3<f32>(splats[o + 6u], splats[o + 7u], splats[o + 8u]);
     p.opacity = splats[o + 9u];
     let q = normalize(vec4<f32>(splats[o + 10u], splats[o + 11u], splats[o + 12u], splats[o + 13u]));
@@ -267,6 +273,10 @@ fn splat_weight(conic : vec3<f32>, centre : vec2<f32>, pixel : vec2<f32>) -> f32
 // reference's `radii > 0` visibility (in frustum and on screen, occluded or not). The densify accumulate
 // folds it into a running max, and in frustum mode counts the step as visible.
 @group(0) @binding(6) var<storage, read_write> screen_radius : array<f32>;
+// This view's display RGB per splat (3 floats), evaluated here once and read by both raster passes.
+@group(0) @binding(7) var<storage, read_write> splat_colour : array<f32>;
+
+fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> { return eval_sh_rgb(i, pos, dc); }
 
 // Depth occupies the low bits; the tile id sits above it. 18 bits of depth leaves 14 for the
 // tile, i.e. up to 16384 tiles - 2048x2048 pixels at 16px tiles.
@@ -288,6 +298,9 @@ fn emit_keys(
 
     let p = project(i);
     if (!p.valid) { return; }
+    splat_colour[i * 3u + 0u] = p.colour.x;
+    splat_colour[i * 3u + 1u] = p.colour.y;
+    splat_colour[i * 3u + 2u] = p.colour.z;
 
     let lo = vec2<i32>(floor((p.centre - p.extent) / f32(TILE)));
     let hi = vec2<i32>(floor((p.centre + p.extent) / f32(TILE)));
@@ -385,6 +398,11 @@ fn tile_ranges(
 @group(0) @binding(4) var<storage, read_write> out_colour : array<f32>;   // 3 per pixel
 @group(0) @binding(5) var<storage, read_write> out_final_t : array<f32>;  // 1 per pixel
 @group(0) @binding(6) var<storage, read_write> out_end : array<u32>;      // 1 per pixel
+// The display RGB emit_keys stored for this view (Common's project() calls this).
+@group(0) @binding(11) var<storage, read> splat_colour : array<f32>;
+fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(splat_colour[i * 3u], splat_colour[i * 3u + 1u], splat_colour[i * 3u + 2u]);
+}
 
 // Staging for one batch of splats, shared by the whole tile. 256 entries x 32 bytes = 8 KB,
 // inside the 16 KB workgroup budget with room to spare.
@@ -489,6 +507,11 @@ fn raster_forward(
 @group(0) @binding(4) var<storage, read> final_t : array<f32>;   // 1 per pixel, from forward
 @group(0) @binding(5) var<storage, read> end_idx : array<u32>;   // 1 per pixel, from forward
 @group(0) @binding(6) var<storage, read> dL_dpix : array<f32>;   // 3 per pixel
+// The display RGB emit_keys stored for this view (Common's project() calls this).
+@group(0) @binding(11) var<storage, read> splat_colour : array<f32>;
+fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(splat_colour[i * 3u], splat_colour[i * 3u + 1u], splat_colour[i * 3u + 2u]);
+}
 // Nine gradients per KEY, split across THREE bindings of three.
 //
 // Not cosmetic: maxStorageBufferBindingSize is guaranteed to be only 128 MiB, and it applies
@@ -2078,10 +2101,20 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(2) var<storage, read>       grad_fixed : array<u32>;   // f32 bits
 // Plain f32, no atomics: one thread owns one splat's 45 slots. The i32 fixed-point version
 // quantised at the colour scale for no reason - nothing else ever adds into this buffer.
-@group(0) @binding(3) var<storage, read_write> grad_sh    : array<f32>;
+// Three part buffers of 15 (SphericalHarmonics.Parts), the layout of sh_rest0..2.
+@group(0) @binding(3) var<storage, read_write> grad_sh0   : array<f32>;
 @group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // w=splat count
+@group(0) @binding(5) var<storage, read_write> grad_sh1   : array<f32>;
+@group(0) @binding(6) var<storage, read_write> grad_sh2   : array<f32>;
 
-const SH_REST_FLOATS : u32 = 45u;
+const SH_PART_FLOATS : u32 = 15u;
+
+fn put_grad_sh(i : u32, k : u32, v : f32) {
+    let o = i * SH_PART_FLOATS + k % SH_PART_FLOATS;
+    if (k < SH_PART_FLOATS) { grad_sh0[o] = v; }
+    else if (k < 2u * SH_PART_FLOATS) { grad_sh1[o] = v; }
+    else { grad_sh2[o] = v; }
+}
 
 @compute @workgroup_size(64)
 fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
@@ -2102,7 +2135,6 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
         bitcast<f32>(grad_fixed[i * GRADS_PER_SPLAT + 2u]));
     if (gr.x == 0.0 && gr.y == 0.0 && gr.z == 0.0) { return; }
 
-    let out = i * SH_REST_FLOATS;
 
     if (u.sh_degree >= 1u) {
         let b1 = -y * 0.4886025119029199;
@@ -2111,9 +2143,9 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
         for (var c = 0u; c < 3u; c = c + 1u) {
             let gc = gr[c];
             if (gc != 0.0) {
-                grad_sh[out + 0u + c] = gc * b1;
-                grad_sh[out + 3u + c] = gc * b2;
-                grad_sh[out + 6u + c] = gc * b3;
+                put_grad_sh(i, 0u + c, gc * b1);
+                put_grad_sh(i, 3u + c, gc * b2);
+                put_grad_sh(i, 6u + c, gc * b3);
             }
         }
     }
@@ -2135,7 +2167,7 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
             for (var c = 0u; c < 3u; c = c + 1u) {
                 let gc = gr[c];
                 if (gc != 0.0) {
-                    grad_sh[out + 9u + k * 3u + c] = gc * bk;
+                    put_grad_sh(i, 9u + k * 3u + c, gc * bk);
                 }
             }
         }
@@ -2160,7 +2192,7 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
             for (var c = 0u; c < 3u; c = c + 1u) {
                 let gc = gr[c];
                 if (gc != 0.0) {
-                    grad_sh[out + 24u + k * 3u + c] = gc * bk;
+                    put_grad_sh(i, 24u + k * 3u + c, gc * bk);
                 }
             }
         }
@@ -2173,10 +2205,11 @@ fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(1) var<storage, read>       grad_sh    : array<f32>;
 @group(0) @binding(2) var<storage, read_write> adam_m     : array<u32>; // bfloat16 pairs, low half first
 @group(0) @binding(3) var<storage, read_write> adam_v     : array<u32>;
-@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=lr z=step w=count
+@group(0) @binding(4) var<uniform>             cfg        : vec4<f32>; // x=lr y=part z=step w=count
 
-const SH_REST_FLOATS : u32 = 45u;
-const SH_MOMENT_WORDS : u32 = 23u;
+// One SH part per dispatch (SphericalHarmonics.Parts): 15 floats and 8 moment words a splat in each binding.
+const SH_REST_FLOATS : u32 = 15u;
+const SH_MOMENT_WORDS : u32 = 8u;
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
 const EPS : f32 = 1e-15;
@@ -2219,7 +2252,8 @@ fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
     let lr = cfg.x;
     let base = i * SH_REST_FLOATS;
     let wbase = i * SH_MOMENT_WORDS;
-    let seed = hash_u32((i * 0x9e3779b9u) ^ (u32(step) * 0x85ebca6bu));
+    // cfg.y = this dispatch's SH part, so the three parts draw independent rounding noise.
+    let seed = hash_u32((i * 0x9e3779b9u) ^ (u32(step) * 0x85ebca6bu) ^ (u32(cfg.y) * 0x632be5abu));
     for (var w = 0u; w < SH_MOMENT_WORDS; w = w + 1u) {
         let j0 = 2u * w;
         let j1 = j0 + 1u;

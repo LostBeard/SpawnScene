@@ -30,14 +30,15 @@ public class GpuMemoryBudgetTests
     public void DeviceMax_IsTheBudgetUpToTheBindingLimit()
     {
         const int deviceMax = int.MaxValue;
-        // 12 GB (an RTX 4070): the budget fits ~11.6M splats, just under the binding's 11.9M.
+        // 12 GB (an RTX 4070): the budget fits ~11.6M splats, well under one binding's 35.8M SH part rows.
         long budget12 = (12L * 1024 - 2047 - 256) * MiB / GpuMemoryBudget.BytesPerSplat;
         Assert.That(GpuMemoryBudget.Derive(12, 2047 * MiB, deviceMax).MaxSplats, Is.EqualTo((int)budget12));
-        Assert.That(budget12, Is.GreaterThan(11_000_000).And.LessThan(11_924_639));
-        // 48 GB: the budget would fit ~36M, but one 2047 MiB binding of 45-float SH rows holds 11.9M.
+        Assert.That(budget12, Is.GreaterThan(11_000_000).And.LessThan(35_773_917));
+        // 48 GB: the budget would fit ~53M, but one 2047 MiB binding of 15-float SH part rows holds 35.8M (it was
+        // 11.9M with all 45 floats in one buffer).
         long binding = 2047 * MiB / GpuMemoryBudget.WidestSplatRowBytes;
         Assert.That(GpuMemoryBudget.Derive(48, 2047 * MiB, deviceMax).MaxSplats, Is.EqualTo((int)binding));
-        Assert.That(binding, Is.EqualTo(11_924_639));
+        Assert.That(binding, Is.EqualTo(35_773_917));
     }
 
     [Test]

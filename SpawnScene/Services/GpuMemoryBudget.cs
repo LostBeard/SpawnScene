@@ -25,11 +25,11 @@ public static class GpuMemoryBudget
     public static readonly int[] ChoicesGB = { 0, 2, 4, 6, 8, 12, 16, 24, 32, 48 };
 
     /// <summary>
-    /// The trainer's widest per-splat buffer row: the degree-3 SH rest coefficients, 45 floats (the SH value, gradient
-    /// and both Adam moment banks are each one binding of this width). One binding holds at most
-    /// bindingLimit / this many splats: 11.9M at the RTX 4070's 2047 MiB.
+    /// The trainer's widest per-splat buffer row: one SH part, 15 floats (SphericalHarmonics.Parts; the packed splats
+    /// and the Adam moments are 14). One binding holds at most bindingLimit / this many splats: 35.8M at the RTX 4070's
+    /// 2047 MiB. Before the SH bands were split into parts the row was all 45 floats and the ceiling 11.9M.
     /// </summary>
-    public const long WidestSplatRowBytes = 45 * sizeof(float);
+    public const long WidestSplatRowBytes = SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
 
     /// <summary>Training GPU memory per splat beyond the fixed part (measured: b112; b127 keys on demand; b128 bf16 SH moments).</summary>
     public const long BytesPerSplat = 900;

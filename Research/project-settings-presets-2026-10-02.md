@@ -62,8 +62,16 @@ would generate over 14,000,000 splats and render at 60fps. VERY large scenes are
   SH bank 720 -> 543 B/splat, live 2,378 -> 2,193 MB, held-out 23.23 -> 23.20 dB (run-to-run noise is ~0.05: b108
   23.20, b126 23.25 on the same trainer). Training is now ~870 B/splat (BytesPerSplat 900); a 12 GB setting trains
   ~11.6M splats, just under the 11.9M one-binding ceiling.
-- Remaining SH bank: value 180 + gradient 180 (f32, atomically summed) + moments 180. Past 11.9M splats the SH banks
-  must split across bindings; that is the next wall for scenes beyond a 12 GB card.
+- SH banks SPLIT into three part buffers of 5 bands (b131): values, gradients and both moment banks, so the widest
+  per-splat row is 60 B and one 2047 MiB binding holds 35.8M splats (was 11.9M; the packed splats and Adam rows cap at
+  ~38M). Only emit_keys evaluates SH now: it writes each splat's view colour (12 B/splat) for both raster passes, so
+  they bind no SH at all (backward stays at 11 storage bindings) and SH is evaluated once a splat a view instead of
+  once per tile. Saved scenes store one file per part (scenes/{id}.sh{p}.bin, ProjectScene.ShParts = 3); older scenes
+  (one row-major file) are split on the GPU at load, checked bit for bit in the project autotest (b130). b131 vs b128:
+  held-out 23.20 = 23.20 dB, ~884 B/splat (BytesPerSplat 900 holds). Trainer gate: new "SH forward" stage (degree 3
+  vs the CPU oracle; red-checked with two parts swapped: meanAbs 0.008, FAIL).
+- Next walls past ~36M splats: the packed splat and Adam rows (14 floats, ~38M), and MaxTotalKeys (40M keys, a fixed
+  device budget from the 09-24 device loss) which large scenes will reach first.
   That is the next lever for big scenes on a given GPU (fp16 moments / fp16 SH storage), and past 11.9M the SH banks
   must split across bindings. Rendering is far cheaper per splat (14M at 60 fps).
 

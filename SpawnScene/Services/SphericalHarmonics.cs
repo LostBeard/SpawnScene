@@ -36,21 +36,21 @@ public static class SphericalHarmonics
 
     /// <summary>
     /// The ONE WGSL evaluation of view-dependent colour, shared by the trainer (SplatTrainerShaders) and the
-    /// viewer's pack pass (GpuGaussianRenderer) so the two renderers of one buffer cannot drift. Requires a
-    /// storage binding named <c>sh_rest</c> (45 floats per splat, <see cref="RestFloatsPerSplat"/> layout).
-    /// Returns display RGB: C0*dc + bands + 0.5, clamped at 0 - the same as <see cref="EvalRgb"/>.
+    /// viewer's pack pass (GpuGaussianRenderer) so the two renderers of one buffer cannot drift. Reads coefficient k
+    /// of splat i through <c>sh_coeff(i, k)</c>: include <see cref="WgslPartAccess"/> (the three part bindings) or
+    /// define it. Returns display RGB: C0*dc + bands + 0.5, clamped at 0 - the same as <see cref="EvalRgb"/>.
     /// </summary>
     public const string WgslViewRgb = @"
-fn sh_view_rgb(base : u32, dir : vec3<f32>, dc : vec3<f32>, deg : u32) -> vec3<f32> {
+fn sh_view_rgb(i : u32, dir : vec3<f32>, dc : vec3<f32>, deg : u32) -> vec3<f32> {
     let x = dir.x;
     let y = dir.y;
     let z = dir.z;
     var result = SH_C0 * dc;
 
     if (deg >= 1u) {
-        let sh1 = vec3<f32>(sh_rest[base + 0u], sh_rest[base + 1u], sh_rest[base + 2u]);
-        let sh2 = vec3<f32>(sh_rest[base + 3u], sh_rest[base + 4u], sh_rest[base + 5u]);
-        let sh3 = vec3<f32>(sh_rest[base + 6u], sh_rest[base + 7u], sh_rest[base + 8u]);
+        let sh1 = vec3<f32>(sh_coeff(i, 0u), sh_coeff(i, 1u), sh_coeff(i, 2u));
+        let sh2 = vec3<f32>(sh_coeff(i, 3u), sh_coeff(i, 4u), sh_coeff(i, 5u));
+        let sh3 = vec3<f32>(sh_coeff(i, 6u), sh_coeff(i, 7u), sh_coeff(i, 8u));
         result = result + SH_C1 * (-y * sh1 + z * sh2 - x * sh3);
     }
     if (deg >= 2u) {
@@ -60,11 +60,11 @@ fn sh_view_rgb(base : u32, dir : vec3<f32>, dc : vec3<f32>, deg : u32) -> vec3<f
         let xy = x * y;
         let xz = x * z;
         let yz = y * z;
-        let sh4 = vec3<f32>(sh_rest[base + 9u], sh_rest[base + 10u], sh_rest[base + 11u]);
-        let sh5 = vec3<f32>(sh_rest[base + 12u], sh_rest[base + 13u], sh_rest[base + 14u]);
-        let sh6 = vec3<f32>(sh_rest[base + 15u], sh_rest[base + 16u], sh_rest[base + 17u]);
-        let sh7 = vec3<f32>(sh_rest[base + 18u], sh_rest[base + 19u], sh_rest[base + 20u]);
-        let sh8 = vec3<f32>(sh_rest[base + 21u], sh_rest[base + 22u], sh_rest[base + 23u]);
+        let sh4 = vec3<f32>(sh_coeff(i, 9u), sh_coeff(i, 10u), sh_coeff(i, 11u));
+        let sh5 = vec3<f32>(sh_coeff(i, 12u), sh_coeff(i, 13u), sh_coeff(i, 14u));
+        let sh6 = vec3<f32>(sh_coeff(i, 15u), sh_coeff(i, 16u), sh_coeff(i, 17u));
+        let sh7 = vec3<f32>(sh_coeff(i, 18u), sh_coeff(i, 19u), sh_coeff(i, 20u));
+        let sh8 = vec3<f32>(sh_coeff(i, 21u), sh_coeff(i, 22u), sh_coeff(i, 23u));
         result = result
             + 1.0925484305920792 * xy * sh4
             + (-1.0925484305920792) * yz * sh5
@@ -79,13 +79,13 @@ fn sh_view_rgb(base : u32, dir : vec3<f32>, dc : vec3<f32>, deg : u32) -> vec3<f
         let xy = x * y;
         let xz = x * z;
         let yz = y * z;
-        let sh9 = vec3<f32>(sh_rest[base + 24u], sh_rest[base + 25u], sh_rest[base + 26u]);
-        let sh10 = vec3<f32>(sh_rest[base + 27u], sh_rest[base + 28u], sh_rest[base + 29u]);
-        let sh11 = vec3<f32>(sh_rest[base + 30u], sh_rest[base + 31u], sh_rest[base + 32u]);
-        let sh12 = vec3<f32>(sh_rest[base + 33u], sh_rest[base + 34u], sh_rest[base + 35u]);
-        let sh13 = vec3<f32>(sh_rest[base + 36u], sh_rest[base + 37u], sh_rest[base + 38u]);
-        let sh14 = vec3<f32>(sh_rest[base + 39u], sh_rest[base + 40u], sh_rest[base + 41u]);
-        let sh15 = vec3<f32>(sh_rest[base + 42u], sh_rest[base + 43u], sh_rest[base + 44u]);
+        let sh9 = vec3<f32>(sh_coeff(i, 24u), sh_coeff(i, 25u), sh_coeff(i, 26u));
+        let sh10 = vec3<f32>(sh_coeff(i, 27u), sh_coeff(i, 28u), sh_coeff(i, 29u));
+        let sh11 = vec3<f32>(sh_coeff(i, 30u), sh_coeff(i, 31u), sh_coeff(i, 32u));
+        let sh12 = vec3<f32>(sh_coeff(i, 33u), sh_coeff(i, 34u), sh_coeff(i, 35u));
+        let sh13 = vec3<f32>(sh_coeff(i, 36u), sh_coeff(i, 37u), sh_coeff(i, 38u));
+        let sh14 = vec3<f32>(sh_coeff(i, 39u), sh_coeff(i, 40u), sh_coeff(i, 41u));
+        let sh15 = vec3<f32>(sh_coeff(i, 42u), sh_coeff(i, 43u), sh_coeff(i, 44u));
         result = result
             + (-0.5900435899266435) * y * (3.0 * xx - yy) * sh9
             + 2.890611442640554 * xy * z * sh10
@@ -102,6 +102,54 @@ fn sh_view_rgb(base : u32, dir : vec3<f32>, dc : vec3<f32>, deg : u32) -> vec3<f
     public const int MaxDegree = 3;
     public const int RestBands = 15;
     public const int RestFloatsPerSplat = RestBands * 3;
+
+    /// <summary>
+    /// The rest bands live in <see cref="Parts"/> GPU buffers of <see cref="BandsPerPart"/> bands each (part p holds
+    /// bands 5p+1..5p+5, <see cref="PartFloatsPerSplat"/> floats a splat). One buffer of all 45 floats is 180 bytes a
+    /// splat, and one storage binding (2047 MiB on an RTX 4070) then held at most 11.9M splats; a part holds 35.8M,
+    /// past the other per-splat banks' ~38M. Very large scenes are a goal (TJ, 2026-10-02).
+    /// </summary>
+    public const int Parts = 3;
+    public const int BandsPerPart = RestBands / Parts;
+    public const int PartFloatsPerSplat = BandsPerPart * 3;
+
+    /// <summary>
+    /// WGSL <c>sh_coeff(i, k)</c> over three part bindings named <c>sh_rest0</c>..<c>sh_rest2</c> (the module declares
+    /// them; <see cref="PartFloatsPerSplat"/> floats a splat each). k is a constant at every call in
+    /// <see cref="WgslViewRgb"/>, so the part choice folds away.
+    /// </summary>
+    public const string WgslPartAccess = @"
+const SH_PART_FLOATS : u32 = 15u;
+fn sh_coeff(i : u32, k : u32) -> f32 {
+    let o = i * SH_PART_FLOATS + k % SH_PART_FLOATS;
+    if (k < SH_PART_FLOATS) { return sh_rest0[o]; }
+    if (k < 2u * SH_PART_FLOATS) { return sh_rest1[o]; }
+    return sh_rest2[o];
+}
+";
+
+    /// <summary>Split rows of <see cref="RestFloatsPerSplat"/> floats into the <see cref="Parts"/> part layouts.</summary>
+    public static float[][] SplitParts(ReadOnlySpan<float> rows)
+    {
+        int n = rows.Length / RestFloatsPerSplat;
+        var parts = new float[Parts][];
+        for (int p = 0; p < Parts; p++) parts[p] = new float[n * PartFloatsPerSplat];
+        for (int i = 0; i < n; i++)
+            for (int k = 0; k < RestFloatsPerSplat; k++)
+                parts[k / PartFloatsPerSplat][i * PartFloatsPerSplat + k % PartFloatsPerSplat] = rows[i * RestFloatsPerSplat + k];
+        return parts;
+    }
+
+    /// <summary>The inverse of <see cref="SplitParts"/>: rows of <see cref="RestFloatsPerSplat"/> floats.</summary>
+    public static float[] JoinParts(IReadOnlyList<float[]> parts)
+    {
+        int n = parts[0].Length / PartFloatsPerSplat;
+        var rows = new float[n * RestFloatsPerSplat];
+        for (int i = 0; i < n; i++)
+            for (int k = 0; k < RestFloatsPerSplat; k++)
+                rows[i * RestFloatsPerSplat + k] = parts[k / PartFloatsPerSplat][i * PartFloatsPerSplat + k % PartFloatsPerSplat];
+        return rows;
+    }
 
     public static Vector3 RgbToDc(Vector3 rgb) => (rgb - new Vector3(0.5f)) / C0;
 

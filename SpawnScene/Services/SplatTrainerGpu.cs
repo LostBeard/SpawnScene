@@ -101,12 +101,16 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _supportPartials;   // 6 per workgroup, 256 workgroups
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
     MemoryBuffer1D<float, Stride1D.Dense>? _adamV;
-    MemoryBuffer1D<float, Stride1D.Dense>? _shRest;
-    MemoryBuffer1D<int, Stride1D.Dense>? _gradShRest;
-    // SH Adam moments in bfloat16, two to a word (Bf16, SplatTrainerShaders.AdamShRest): 23 words a splat instead of 45
-    // floats each. They were 360 of the ~1,050 training bytes a splat.
-    MemoryBuffer1D<uint, Stride1D.Dense>? _adamShM;
-    MemoryBuffer1D<uint, Stride1D.Dense>? _adamShV;
+    // SH rest bands, their gradients and moments: one buffer per SphericalHarmonics part (5 bands each). A single
+    // 45-float buffer capped one storage binding at 11.9M splats; a part holds 35.8M.
+    MemoryBuffer1D<float, Stride1D.Dense>?[] _shRest = new MemoryBuffer1D<float, Stride1D.Dense>?[SphericalHarmonics.Parts];
+    MemoryBuffer1D<int, Stride1D.Dense>?[] _gradShRest = new MemoryBuffer1D<int, Stride1D.Dense>?[SphericalHarmonics.Parts];
+    // This view's display RGB per splat (3 floats), written by emit_keys and read by both raster passes.
+    MemoryBuffer1D<float, Stride1D.Dense>? _splatColour;
+    // SH Adam moments in bfloat16, two to a word (Bf16, SplatTrainerShaders.AdamShRest), per part: 8 words a splat for
+    // 15 floats. They were 360 of the ~1,050 training bytes a splat.
+    MemoryBuffer1D<uint, Stride1D.Dense>?[] _adamShM = new MemoryBuffer1D<uint, Stride1D.Dense>?[SphericalHarmonics.Parts];
+    MemoryBuffer1D<uint, Stride1D.Dense>?[] _adamShV = new MemoryBuffer1D<uint, Stride1D.Dense>?[SphericalHarmonics.Parts];
     // Sum of per-step losses since the last read (float, LossReduce) and the per-workgroup partial sums of one step.
     MemoryBuffer1D<float, Stride1D.Dense>? _lossSum;
     MemoryBuffer1D<float, Stride1D.Dense>? _lossPartial;
@@ -121,8 +125,8 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUBuffer? _targetBytes;   // one frame of packed RGBA, straight from the canvas
     int _adamStepCount;
 
-    /// <summary>32-bit words of one splat's SH Adam moment row (45 bfloat16 values, two a word).</summary>
-    public static readonly int ShMomentWords = Bf16.WordsPerRow(SphericalHarmonics.RestFloatsPerSplat);
+    /// <summary>32-bit words of one splat's SH Adam moment row in ONE part (15 bfloat16 values, two a word).</summary>
+    public static readonly int ShMomentWords = Bf16.WordsPerRow(SphericalHarmonics.PartFloatsPerSplat);
 
     /// <summary>Grow the key buffers when a frame needs more keys than they hold (see RenderForwardAsync). On by default.</summary>
     public bool GrowKeysOnOverflow { get; set; } = true;
@@ -163,9 +167,9 @@ public sealed class SplatTrainerGpu : IDisposable
         long keys = B(_keys, _values, _gradKeyA, _gradKeyB, _gradKeyC);
         long pixels = B(_outColour, _outFinalT, _outEnd, _target, _dLdPix, _ssimRows, _ssimWinGrad, _ssimDRows, _lossPartial);
         long splat = B(_gradFixed, _densifyAbs, _opacityLogit, _logScale, _geomOut, _densifyStats, _screenRadius, _maxRadius,
-            _viewSupport);
+            _viewSupport, _splatColour);
         long adam = B(_adamM, _adamV);
-        long sh = B(_shRest, _gradShRest, _adamShM, _adamShV);
+        long sh = B([.. _shRest, .. _gradShRest, .. _adamShM, .. _adamShV]);
         static string Mb(long b) => $"{b / 1048576.0:F0}";
         return $"keys {Mb(keys)} ({_keyCapacity:N0}), per-splat {Mb(splat)}, Adam {Mb(adam)}, " +
             $"SH {Mb(sh)}, per-pixel {Mb(pixels)} MB";
@@ -611,6 +615,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _fitSample = accel.Allocate1D<float>(FitSampleCount);
         _densifyStats = accel.Allocate1D<float>((long)splatCount * 2);
         _screenRadius = accel.Allocate1D<float>(splatCount);
+        _splatColour = accel.Allocate1D<float>((long)splatCount * 3);
         _maxRadius = accel.Allocate1D<float>(splatCount);
         _maxRadius.MemSetToZero();
         _viewSupport = accel.Allocate1D<uint>(splatCount);
@@ -629,18 +634,22 @@ public sealed class SplatTrainerGpu : IDisposable
             WriteSsimCfg();
         }
         await stage("ssim");
-        _gradShRest = accel.Allocate1D<int>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+        for (int part = 0; part < SphericalHarmonics.Parts; part++)
+            _gradShRest[part] = accel.Allocate1D<int>((long)splatCount * SphericalHarmonics.PartFloatsPerSplat);
         await stage("gradShRest");
         if (!carried)
         {
             _adamM = accel.Allocate1D<float>((long)splatCount * AdamSlots);
             _adamV = accel.Allocate1D<float>((long)splatCount * AdamSlots);
-            _shRest = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
-            _adamShM = accel.Allocate1D<uint>((long)splatCount * ShMomentWords);
-            _adamShV = accel.Allocate1D<uint>((long)splatCount * ShMomentWords);
-            _shRest.MemSetToZero();
-            _adamShM.MemSetToZero();
-            _adamShV.MemSetToZero();
+            for (int part = 0; part < SphericalHarmonics.Parts; part++)
+            {
+                _shRest[part] = accel.Allocate1D<float>((long)splatCount * SphericalHarmonics.PartFloatsPerSplat);
+                _adamShM[part] = accel.Allocate1D<uint>((long)splatCount * ShMomentWords);
+                _adamShV[part] = accel.Allocate1D<uint>((long)splatCount * ShMomentWords);
+                _shRest[part]!.MemSetToZero();
+                _adamShM[part]!.MemSetToZero();
+                _adamShV[part]!.MemSetToZero();
+            }
             _adamStepCount = 0;
             await stage("adam+sh");
         }
@@ -706,7 +715,8 @@ public sealed class SplatTrainerGpu : IDisposable
                     new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = _counter!.GetGPUBuffer()! } },
                     new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _capsBuf! } },
                     new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _screenRadius!.GetGPUBuffer()! } },
-                    ShRestBindEntry(12),
+                    new() { Binding = 7, Resource = new GPUBufferBinding { Buffer = _splatColour!.GetGPUBuffer()! } },
+                    ShRestBindEntry(12, 0), ShRestBindEntry(13, 1), ShRestBindEntry(14, 2),
                 },
             });
             pass.SetBindGroup(0, bg);
@@ -795,7 +805,7 @@ public sealed class SplatTrainerGpu : IDisposable
                     new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = _outColour!.GetGPUBuffer()! } },
                     new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _outFinalT!.GetGPUBuffer()! } },
                     new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _outEnd!.GetGPUBuffer()! } },
-                    ShRestBindEntry(12),
+                    new() { Binding = 11, Resource = new GPUBufferBinding { Buffer = _splatColour!.GetGPUBuffer()! } },
                 },
             });
             pass.SetBindGroup(0, bg);
@@ -994,12 +1004,15 @@ public sealed class SplatTrainerGpu : IDisposable
             await Stage("carried Adam m");
             _adamV = await CarryBankAsync(_adamV, adamSrc, priorCount, newCount, AdamSlots, zeroAdamSlot);
             await Stage("carried Adam v");
-            _shRest = await CarryBankAsync(_shRest, featSrc, priorCount, newCount, SphericalHarmonics.RestFloatsPerSplat);
-            await Stage("carried SH rest");
-            _adamShM = await CarryBankAsync(_adamShM, adamSrc, priorCount, newCount, ShMomentWords);
-            await Stage("carried SH Adam m");
-            _adamShV = await CarryBankAsync(_adamShV, adamSrc, priorCount, newCount, ShMomentWords);
-            await Stage("carried SH Adam v");
+            for (int part = 0; part < SphericalHarmonics.Parts; part++)
+            {
+                _shRest[part] = await CarryBankAsync(_shRest[part], featSrc, priorCount, newCount, SphericalHarmonics.PartFloatsPerSplat);
+                await Stage($"carried SH rest {part}");
+                _adamShM[part] = await CarryBankAsync(_adamShM[part], adamSrc, priorCount, newCount, ShMomentWords);
+                await Stage($"carried SH Adam m {part}");
+                _adamShV[part] = await CarryBankAsync(_adamShV[part], adamSrc, priorCount, newCount, ShMomentWords);
+                await Stage($"carried SH Adam v {part}");
+            }
         }
 
         _adamStepCount = step;
@@ -1566,8 +1579,8 @@ public sealed class SplatTrainerGpu : IDisposable
         SeedLogits(splatBuf, splatCount);
         _adamM!.MemSetToZero();
         _adamV!.MemSetToZero();
-        _adamShM?.MemSetToZero();
-        _adamShV?.MemSetToZero();
+        foreach (var m in _adamShM) m?.MemSetToZero();
+        foreach (var v in _adamShV) v?.MemSetToZero();
         _gpu.WebGPUAccelerator.FlushPendingCommands(); // ahead of the raw Adam dispatches
         _adamStepCount = 0;
     }
@@ -1601,86 +1614,111 @@ public sealed class SplatTrainerGpu : IDisposable
     }
 
     /// <summary>
-    /// A GPU copy of the SH rest coefficients for the display renderer (caller owns it), or null when there are
-    /// none. GPU to GPU - the coefficients never cross to the CPU. Pending trainer dispatches are submitted
-    /// first so the copy sees their writes.
+    /// GPU copies of the SH rest parts for the display renderer (caller owns them; SphericalHarmonics.Parts buffers of
+    /// PartFloatsPerSplat floats a splat), or null when there are none. GPU to GPU - the coefficients never cross to
+    /// the CPU. Pending trainer dispatches are submitted first so the copies see their writes.
     /// </summary>
-    public GPUBuffer? CopyShRestForDisplay(int splatCount)
+    public GPUBuffer[]? CopyShRestForDisplay(int splatCount)
     {
-        if (_shRest == null || _device == null || _queue == null || splatCount <= 0) return null;
-        var src = _shRest.GetGPUBuffer();
-        if (src == null) return null;
-        ulong bytes = (ulong)splatCount * SphericalHarmonics.RestFloatsPerSplat * sizeof(float);
-        var dst = _device.CreateBuffer(new GPUBufferDescriptor
-        {
-            Size = bytes,
-            Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
-        });
+        if (_shRest[0] == null || _device == null || _queue == null || splatCount <= 0) return null;
+        ulong bytes = (ulong)splatCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+        var parts = new GPUBuffer[SphericalHarmonics.Parts];
         _gpu.WebGPUAccelerator.FlushPendingCommands();
         using var encoder = _device.CreateCommandEncoder();
-        encoder.CopyBufferToBuffer(src, 0, dst, 0, bytes);
+        for (int part = 0; part < parts.Length; part++)
+        {
+            parts[part] = _device.CreateBuffer(new GPUBufferDescriptor
+            {
+                Size = bytes,
+                // The renderer owns these; CopySrc lets GpuGaussianRenderer.ReadShRestPartsAsync read them back.
+                Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst | GPUBufferUsage.CopySrc,
+            });
+            encoder.CopyBufferToBuffer(_shRest[part]!.GetGPUBuffer()!, 0, parts[part], 0, bytes);
+        }
         using var cmd = encoder.Finish();
         RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, new[] { cmd });
-        return dst;
+        return parts;
     }
 
     /// <summary>
-    /// The SH rest coefficients as a JS Uint8Array (caller disposes), for saving to OPFS without passing
-    /// through the .NET heap - 45 floats per splat is ~300 MB at 1.7M splats. Null when there are none.
+    /// The SH rest parts as JS Uint8Arrays (caller disposes), for saving to OPFS without passing through the .NET heap
+    /// - one array per part, so no single array grows past ~60 bytes a splat (14M splats: 840 MB each, where one
+    /// 45-float array would be 2.5 GB). Null when there are none.
     /// </summary>
-    public async Task<Uint8Array?> ReadShRestUint8ArrayAsync(int splatCount)
+    public async Task<Uint8Array[]?> ReadShRestUint8ArraysAsync(int splatCount)
     {
-        if (_shRest == null || splatCount <= 0) return null;
-        long bytes = (long)splatCount * SphericalHarmonics.RestFloatsPerSplat * sizeof(float);
+        if (_shRest[0] == null || splatCount <= 0) return null;
+        long bytes = (long)splatCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
-        return await _shRest.CopyToHostUint8ArrayAsync(0, bytes);
+        var parts = new Uint8Array[SphericalHarmonics.Parts];
+        for (int part = 0; part < parts.Length; part++)
+            parts[part] = await _shRest[part]!.CopyToHostUint8ArrayAsync(0, bytes);
+        return parts;
     }
 
+    /// <summary>The SH rest coefficients as rows of RestFloatsPerSplat (gate / CPU oracle only).</summary>
     public async Task<float[]> ReadShRestAsync(int splatCount)
     {
-        if (_shRest == null) return System.Array.Empty<float>();
-        return await _shRest.CopyToHostAsync<float>(0, (long)splatCount * SphericalHarmonics.RestFloatsPerSplat);
+        if (_shRest[0] == null) return System.Array.Empty<float>();
+        long len = (long)splatCount * SphericalHarmonics.PartFloatsPerSplat;
+        var parts = new float[SphericalHarmonics.Parts][];
+        for (int part = 0; part < parts.Length; part++)
+            parts[part] = await _shRest[part]!.CopyToHostAsync<float>(0, len);
+        return SphericalHarmonics.JoinParts(parts);
     }
 
     /// <summary>
     /// SH-rest Adam moments across a densify. Same survivor map as colour Adam: keep for
     /// survivors, zero for densified children. Resize zeros these; without a restore every
     /// densify (every 100 iters) throws away SH momentum while colour Adam is carefully kept.
+    /// Rows of RestFloatsPerSplat floats; stored as bfloat16 pairs per part.
     /// </summary>
     public readonly record struct ShAdamState(float[] M, float[] V);
 
     public async Task<ShAdamState> ReadShAdamStateAsync(int splatCount)
     {
-        if (_adamShM == null || _adamShV == null)
+        if (_adamShM[0] == null || _adamShV[0] == null)
             return new ShAdamState(System.Array.Empty<float>(), System.Array.Empty<float>());
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
-        // CPU transfer: gate / densify restore only. Stored as bfloat16 pairs; handed out as floats.
+        // CPU transfer: gate / densify restore only.
         long len = (long)splatCount * ShMomentWords;
-        int floats = SphericalHarmonics.RestFloatsPerSplat;
-        return new ShAdamState(
-            Bf16.Unpack(await _adamShM.CopyToHostAsync<uint>(0, len), floats),
-            Bf16.Unpack(await _adamShV.CopyToHostAsync<uint>(0, len), floats));
+        int floats = SphericalHarmonics.PartFloatsPerSplat;
+        var m = new float[SphericalHarmonics.Parts][];
+        var v = new float[SphericalHarmonics.Parts][];
+        for (int part = 0; part < m.Length; part++)
+        {
+            m[part] = Bf16.Unpack(await _adamShM[part]!.CopyToHostAsync<uint>(0, len), floats);
+            v[part] = Bf16.Unpack(await _adamShV[part]!.CopyToHostAsync<uint>(0, len), floats);
+        }
+        return new ShAdamState(SphericalHarmonics.JoinParts(m), SphericalHarmonics.JoinParts(v));
     }
 
     public void RestoreShRest(ReadOnlySpan<float> prior, int[] featureSources)
     {
-        if (_shRest == null) return;
-        _shRest.CopyFromCPU(SplatDensityControl.RemapFloatRows(prior, featureSources, SphericalHarmonics.RestFloatsPerSplat));
+        if (_shRest[0] == null) return;
+        var parts = SphericalHarmonics.SplitParts(
+            SplatDensityControl.RemapFloatRows(prior, featureSources, SphericalHarmonics.RestFloatsPerSplat));
+        for (int part = 0; part < parts.Length; part++) _shRest[part]!.CopyFromCPU(parts[part]);
     }
 
     public void RestoreShAdamState(ShAdamState prior, int[] adamSurvivors)
     {
-        if (_adamShM == null || _adamShV == null) return;
-        int stride = SphericalHarmonics.RestFloatsPerSplat;
-        _adamShM.CopyFromCPU(Bf16.Pack(SplatDensityControl.RemapFloatRows(prior.M, adamSurvivors, stride), stride));
-        _adamShV.CopyFromCPU(Bf16.Pack(SplatDensityControl.RemapFloatRows(prior.V, adamSurvivors, stride), stride));
+        if (_adamShM[0] == null || _adamShV[0] == null) return;
+        int stride = SphericalHarmonics.RestFloatsPerSplat, partFloats = SphericalHarmonics.PartFloatsPerSplat;
+        var m = SphericalHarmonics.SplitParts(SplatDensityControl.RemapFloatRows(prior.M, adamSurvivors, stride));
+        var v = SphericalHarmonics.SplitParts(SplatDensityControl.RemapFloatRows(prior.V, adamSurvivors, stride));
+        for (int part = 0; part < m.Length; part++)
+        {
+            _adamShM[part]!.CopyFromCPU(Bf16.Pack(m[part], partFloats));
+            _adamShV[part]!.CopyFromCPU(Bf16.Pack(v[part], partFloats));
+        }
     }
 
-    GPUBindGroupEntry ShRestBindEntry(int binding) =>
+    GPUBindGroupEntry ShRestBindEntry(int binding, int part) =>
         new()
         {
             Binding = (uint)binding,
-            Resource = new GPUBufferBinding { Buffer = _shRest!.GetGPUBuffer()! },
+            Resource = new GPUBufferBinding { Buffer = _shRest[part]!.GetGPUBuffer()! },
         };
 
     /// <summary>
@@ -1801,7 +1839,7 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(7, _gradKeyA!.GetGPUBuffer()!), Buf(8, _gradKeyB!.GetGPUBuffer()!),
             Buf(9, _gradKeyC!.GetGPUBuffer()!),
             Buf(10, _densifyAbs!.GetGPUBuffer()!),
-            ShRestBindEntry(12),
+            Buf(11, _splatColour!.GetGPUBuffer()!),
         });
 
         await PhaseAsync("backward");
@@ -1834,23 +1872,28 @@ public sealed class SplatTrainerGpu : IDisposable
         await PhaseAsync("adam");
         if (ActiveShDegree >= 1 && _scatterShGrad != null && _adamShRest != null)
         {
-            _gradShRest!.MemSetToZero();
+            foreach (var g in _gradShRest) g!.MemSetToZero();
             accel.FlushPendingCommands();
             // Scatter cfg: .w = splat count (matches shader).
             WriteVec4(_adamCfgBuf!, 0f, 0f, 0f, splatCount);
             Dispatch(_scatterShGrad, (splatCount + 63) / 64, 1, new[]
             {
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
-                Buf(3, _gradShRest!.GetGPUBuffer()!), Buf(4, _adamCfgBuf!),
+                Buf(3, _gradShRest[0]!.GetGPUBuffer()!), Buf(4, _adamCfgBuf!),
+                Buf(5, _gradShRest[1]!.GetGPUBuffer()!), Buf(6, _gradShRest[2]!.GetGPUBuffer()!),
             });
-            // Rest bands use feature_lr / 20 (Kerbl).
-            WriteVec4(_adamCfgBuf!, colourLr / 20f, 0f, _adamStepCount, splatCount);
-            Dispatch(_adamShRest, (splatCount + 63) / 64, 1, new[]
+            // Rest bands use feature_lr / 20 (Kerbl). One dispatch per part (cfg.y = part: its own rounding noise);
+            // Dispatch submits, so each write lands before its own dispatch.
+            for (int part = 0; part < SphericalHarmonics.Parts; part++)
             {
-                Buf(0, _shRest!.GetGPUBuffer()!), Buf(1, _gradShRest!.GetGPUBuffer()!),
-                Buf(2, _adamShM!.GetGPUBuffer()!), Buf(3, _adamShV!.GetGPUBuffer()!),
-                Buf(4, _adamCfgBuf!),
-            });
+                WriteVec4(_adamCfgBuf!, colourLr / 20f, part, _adamStepCount, splatCount);
+                Dispatch(_adamShRest, (splatCount + 63) / 64, 1, new[]
+                {
+                    Buf(0, _shRest[part]!.GetGPUBuffer()!), Buf(1, _gradShRest[part]!.GetGPUBuffer()!),
+                    Buf(2, _adamShM[part]!.GetGPUBuffer()!), Buf(3, _adamShV[part]!.GetGPUBuffer()!),
+                    Buf(4, _adamCfgBuf!),
+                });
+            }
         }
 
         // -- Geometry: the 2D gradients chained back to position, scale and rotation --
@@ -2127,14 +2170,18 @@ public sealed class SplatTrainerGpu : IDisposable
         _maxRadius?.Dispose(); _maxRadius = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
-        _gradShRest?.Dispose(); _gradShRest = null;
+        for (int part = 0; part < SphericalHarmonics.Parts; part++) { _gradShRest[part]?.Dispose(); _gradShRest[part] = null; }
+        _splatColour?.Dispose(); _splatColour = null;
         _lossSum?.Dispose(); _lossSum = null;
         if (keepOptimizerRows) return;
         _adamM?.Dispose(); _adamM = null;
         _adamV?.Dispose(); _adamV = null;
-        _shRest?.Dispose(); _shRest = null;
-        _adamShM?.Dispose(); _adamShM = null;
-        _adamShV?.Dispose(); _adamShV = null;
+        for (int part = 0; part < SphericalHarmonics.Parts; part++)
+        {
+            _shRest[part]?.Dispose(); _shRest[part] = null;
+            _adamShM[part]?.Dispose(); _adamShM[part] = null;
+            _adamShV[part]?.Dispose(); _adamShV[part] = null;
+        }
     }
 
     public void Dispose()

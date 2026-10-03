@@ -215,25 +215,75 @@ public class ProjectService
     }
 
     /// <summary>
-    /// Save a trained scene's SH rest bands next to its packed data (scenes/{id}.sh.bin), JS memory straight to
-    /// OPFS. Call after <see cref="SaveSceneAsync(string, ProjectScene, Uint8Array)"/>; adds to the scene's size.
+    /// Save a trained scene's SH rest parts next to its packed data (scenes/{id}.sh{p}.bin, one per
+    /// SphericalHarmonics part), JS memory straight to OPFS. Call after
+    /// <see cref="SaveSceneAsync(string, ProjectScene, Uint8Array)"/>; adds to the scene's size and records the layout.
     /// </summary>
-    public async Task SaveSceneShRestAsync(string projectId, ProjectScene scene, Uint8Array shRest)
+    public async Task SaveSceneShRestAsync(string projectId, ProjectScene scene, Uint8Array[] parts)
     {
         var project = (await ListProjectsAsync()).FirstOrDefault(p => p.Id == projectId);
         if (project == null) return;
         var root = await GetRootDirAsync();
         var projDir = await GetProjectDirAsync(root, projectId);
         using var scenesDir = await projDir.GetDirectoryHandle("scenes", create: true);
-        await WriteBinaryAsync(scenesDir, $"{scene.Id}.sh.bin", shRest);
+        for (int part = 0; part < parts.Length; part++)
+            await WriteBinaryAsync(scenesDir, $"{scene.Id}.sh{part}.bin", parts[part]);
+        scene.ShParts = parts.Length;
         var stored = project.Scenes.FirstOrDefault(s => s.Id == scene.Id);
-        if (stored != null) stored.SizeBytes += shRest.Length;
+        if (stored != null)
+        {
+            stored.SizeBytes += parts.Sum(p => (long)p.Length);
+            stored.ShParts = parts.Length;
+        }
         await SaveIndexAsync();
     }
 
     /// <summary>
-    /// A trained scene's SH rest bands as a JS ArrayBuffer (never the .NET heap), or null when the scene has
-    /// none. Caller disposes.
+    /// Autotest only: rewrite a scene's SH as the pre-split layout (one row-major scenes/{id}.sh.bin, ShParts 0) so the
+    /// legacy load path (GpuGaussianRenderer.LoadShRestRows) can be checked against the part path on the same data.
+    /// </summary>
+    public async Task RewriteSceneShAsLegacyRowsAsync(string projectId, string sceneId, Uint8Array rows)
+    {
+        var project = (await ListProjectsAsync()).FirstOrDefault(p => p.Id == projectId);
+        var stored = project?.Scenes.FirstOrDefault(s => s.Id == sceneId);
+        if (stored == null) return;
+        var root = await GetRootDirAsync();
+        var projDir = await GetProjectDirAsync(root, projectId);
+        using var scenesDir = await projDir.GetDirectoryHandle("scenes", create: true);
+        await WriteBinaryAsync(scenesDir, $"{sceneId}.sh.bin", rows);
+        for (int part = 0; part < SphericalHarmonics.Parts; part++)
+            try { await scenesDir.RemoveEntry($"{sceneId}.sh{part}.bin"); } catch { }
+        stored.ShParts = 0;
+        await SaveIndexAsync();
+    }
+
+    /// <summary>A trained scene's SH rest parts as JS ArrayBuffers (never the .NET heap), or null if any is missing.</summary>
+    public async Task<ArrayBuffer[]?> ReadSceneShRestPartsAsync(string projectId, string sceneId, int parts)
+    {
+        var buffers = new List<ArrayBuffer>();
+        try
+        {
+            var root = await GetRootDirAsync();
+            var projDir = await GetProjectDirAsync(root, projectId);
+            using var scenesDir = await projDir.GetDirectoryHandle("scenes");
+            for (int part = 0; part < parts; part++)
+            {
+                using var fileHandle = await scenesDir.GetFileHandle($"{sceneId}.sh{part}.bin");
+                using var file = await fileHandle.GetFile();
+                buffers.Add(await file.ArrayBuffer());
+            }
+            return buffers.ToArray();
+        }
+        catch
+        {
+            foreach (var b in buffers) b.Dispose();
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// A scene saved before the SH part split: its SH rest bands as one row-major JS ArrayBuffer (never the .NET
+    /// heap), or null when the scene has none. Caller disposes.
     /// </summary>
     public async Task<ArrayBuffer?> ReadSceneShRestAsync(string projectId, string sceneId)
     {
@@ -362,6 +412,8 @@ public class ProjectService
             using var scenesDir = await projDir.GetDirectoryHandle("scenes");
             await scenesDir.RemoveEntry($"{sceneId}.bin");
             try { await scenesDir.RemoveEntry($"{sceneId}.sh.bin"); } catch { /* untrained scenes have none */ }
+            for (int part = 0; part < SphericalHarmonics.Parts; part++)
+                try { await scenesDir.RemoveEntry($"{sceneId}.sh{part}.bin"); } catch { /* legacy or untrained */ }
         }
         catch { }
 

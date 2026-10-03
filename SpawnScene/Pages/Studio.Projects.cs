@@ -841,9 +841,9 @@ public partial class Studio
         using var packedU8 = await _gpuRenderer.ReadPackedUint8ArrayAsync(count);
         if (packedU8 == null) { Console.WriteLine("[Studio] save skipped: no packed splat data"); return; }
 
-        Uint8Array? shRest = null;
+        Uint8Array[]? shRest = null;
         if (trainedIters > 0 && _gpuRenderer.ShDegree > 0 && _trainer != null)
-            shRest = await _trainer.ReadShRestUint8ArrayAsync(count);
+            shRest = await _trainer.ReadShRestUint8ArraysAsync(count);
         try
         {
             var projectScene = new ProjectScene
@@ -860,12 +860,12 @@ public partial class Studio
                 await _projectService.SaveSceneShRestAsync(_activeProject.Id, projectScene, shRest);
             Console.WriteLine(
                 $"[Studio] scene saved: {count:N0} splats, {packedU8.Length / (1024 * 1024)} MB" +
-                (shRest != null ? $" + SH degree {projectScene.ShDegree} bands {shRest.Length / (1024 * 1024)} MB" : "") +
+                (shRest != null ? $" + SH degree {projectScene.ShDegree} bands {shRest.Sum(p => (long)p.Length) / (1024 * 1024)} MB" : "") +
                 (trainedIters > 0 ? $", trained {trainedIters:N0} iterations" : ", untrained"));
         }
         finally
         {
-            shRest?.Dispose();
+            if (shRest != null) foreach (var part in shRest) part.Dispose();
         }
     }
 
@@ -904,12 +904,28 @@ public partial class Studio
             await _gpuRenderer.UploadSceneFromStream(sceneStream, scene.SplatCount, scene.EffectiveFloatsPerSplat);
             if (scene.ShDegree > 0)
             {
-                using var shRest = await _projectService.ReadSceneShRestAsync(_activeProject.Id, scene.Id);
-                if (shRest != null)
+                bool loaded = false;
+                if (scene.ShParts == SphericalHarmonics.Parts)
                 {
-                    _gpuRenderer.LoadShRest(shRest, scene.ShDegree);
-                    _gpuRenderer.RepackForDisplay();
+                    var parts = await _projectService.ReadSceneShRestPartsAsync(_activeProject.Id, scene.Id, scene.ShParts);
+                    if (parts != null)
+                    {
+                        _gpuRenderer.LoadShRest(parts, scene.ShDegree);
+                        foreach (var part in parts) part.Dispose();
+                        loaded = true;
+                    }
                 }
+                else
+                {
+                    // Saved before the part split: one row-major file, split on the GPU.
+                    using var rows = await _projectService.ReadSceneShRestAsync(_activeProject.Id, scene.Id);
+                    if (rows != null)
+                    {
+                        _gpuRenderer.LoadShRestRows(rows, scene.ShDegree);
+                        loaded = true;
+                    }
+                }
+                if (loaded) _gpuRenderer.RepackForDisplay();
                 else Console.WriteLine($"[Studio] scene {scene.Id}: SH bands missing - drawing base colour only");
             }
 

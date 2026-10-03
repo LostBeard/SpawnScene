@@ -1765,7 +1765,15 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     public void BeginXRFrameSorted(CameraParams head, Matrix4x4 cullMvp)
     {
         if (_device == null || _splatBuffer == null || _splatCount == 0) return;
-        var (dataBuf, idxBuf, sortRan, visibleCount) = _sorter.Sort(head, cullMvp);
+        // No sub-pixel LOD cull in XR: a scene shrunk by the grips or placed as an AR miniature is made of splats far
+        // under 0.3 px (more so through this wide ~182 px-focal sort camera), and culling them removed the whole
+        // miniature once it was set on the floor 1.5 m away (emulator, 2026-10-03). Together they ARE the image.
+        float lod = _sorter.LodCullPixels;
+        _sorter.LodCullPixels = 0f;
+        (MemoryBuffer1D<float, Stride1D.Dense>? dataBuf, MemoryBuffer1D<int, Stride1D.Dense>? idxBuf, bool sortRan, int visibleCount) sorted;
+        try { sorted = _sorter.Sort(head, cullMvp); }
+        finally { _sorter.LodCullPixels = lod; }
+        var (dataBuf, idxBuf, sortRan, visibleCount) = sorted;
         _xrSortedVisible = visibleCount;
         if (!sortRan || dataBuf == null || idxBuf == null) return;
         _packCameraPos = head.Position;

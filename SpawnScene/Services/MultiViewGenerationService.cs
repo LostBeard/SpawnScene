@@ -542,7 +542,21 @@ public class MultiViewGenerationService
             var good = Enumerable.Range(0, cams.Count).Where(c => !bad.Contains(c)).ToHashSet();
             var pending = new HashSet<int>(bad);
             var lastTry = new Dictionary<int, (int Corr, int Inl)>();
+            var symmetryVerdict = new Dictionary<GlobalSfmInit.PairMatch, bool>(ReferenceEqualityComparer.Instance);
             int registered = 0, passes = 0;
+            bool symmetryCheckRan = false;
+            // The symmetric-pair check's turned features, for every camera re-registration may place: extracted up front in
+            // ONE extractor session (released before the matcher loads), not reloaded per check - each reload of the
+            // extractor left ~10 MB of GPU storage behind (b148: 46 checks, ~500 MB).
+            var turnedOf = new Dictionary<int, ImageImportService.TurnedFeatures>();
+            if (pairMatches != null && CheckSymmetricPairs && pending.Count > 0)
+            {
+                var tt = System.Diagnostics.Stopwatch.StartNew();
+                foreach (int c in pending)
+                    if (await _importService.ExtractTurned180Async(images[posed[c]]) is { } t) turnedOf[c] = t;
+                _importService.ReleaseLearnedExtractors();
+                Console.WriteLine($"[BA] symmetric-pair check: turned features for {turnedOf.Count} unplaced cameras in {tt.Elapsed.TotalSeconds:F1}s");
+            }
             var obsBuf = new List<(int Camera, float U, float V)>();
             for (; passes < 30 && pending.Count > 0; passes++)
             {
@@ -580,6 +594,7 @@ public class MultiViewGenerationService
                         (px.TryGetValue(c, out var pl) ? pl : px[c] = new()).AddRange(pp);
                     }
                 int thisPass = 0;
+                bool droppedSymmetricThisPass = false;
                 foreach (int c in w.Keys.OrderByDescending(c => w[c].Count).ToList())
                 {
                     int n = w[c].Count;
@@ -614,11 +629,43 @@ public class MultiViewGenerationService
                             continue;
                         }
                     }
+                    // Symmetric content: a supporting pair that matches about as well with this photo turned 180 deg, at a
+                    // very different rotation, is not evidence of a pose (DrJohnson image 41 / its rug: 13-41 kept 99% of its
+                    // inliers turned, 179 deg apart). Drop such pairs; the camera is retried without them next pass, and
+                    // left unplaced if what remains cannot place it - unplaced costs coverage, misplaced corrupts the scene.
+                    if (pairMatches != null && CheckSymmetricPairs)
+                    {
+                        var ambiguous = new List<GlobalSfmInit.PairMatch>();
+                        foreach (var pm in pairMatches.Where(p => (p.CamA == c && good.Contains(p.CamB)) || (p.CamB == c && good.Contains(p.CamA))).ToList())
+                        {
+                            if (!symmetryVerdict.TryGetValue(pm, out bool amb))
+                            {
+                                var v = await SymmetryVerdictAsync(pm, c, cams, images, posed, turnedOf.GetValueOrDefault(c));
+                                amb = v.Ambiguous;
+                                symmetryVerdict[pm] = amb;
+                                symmetryCheckRan = true;
+                                Console.WriteLine($"[BA]   pass {passes}: view {posed[c]} pair {posed[pm.CamA]}-{posed[pm.CamB]}: {v.Note} ({GpuService.MemoryReport(4)})");
+                            }
+                            if (amb) ambiguous.Add(pm);
+                        }
+                        if (ambiguous.Count > 0)
+                        {
+                            pairMatches.RemoveAll(ambiguous.Contains);
+                            Console.WriteLine($"[BA]   pass {passes}: view {posed[c]} NOT registered: {ambiguous.Count} of its supporting " +
+                                "pairs are symmetric content (they match turned 180 deg too) - dropped, retried without them");
+                            lastTry[c] = (n, 0);
+                            droppedSymmetricThisPass = true;
+                            continue;
+                        }
+                    }
                     cams[c].Position = placed.Position; cams[c].Forward = placed.Forward; cams[c].Up = placed.Up;
                     good.Add(c); pending.Remove(c); registered++; thisPass++;
                     Console.WriteLine($"[BA]   pass {passes}: registered view {posed[c]} ({inl}/{n} agree{voteNote})");
                 }
-                if (thisPass == 0) break;
+                // A pass that only dropped symmetric pairs placed nobody, but the cameras it touched deserve one try without
+                // them (their remaining pairs may still place them).
+                if (thisPass == 0 && !droppedSymmetricThisPass) break;
+                if (thisPass == 0) continue;
 
                 // The newly placed cameras' pairs that agree with their poses join the tracks, so BA refines them and the
                 // next ring triangulates from them (without this they would carry no observation at all).
@@ -638,6 +685,8 @@ public class MultiViewGenerationService
                 if (passBa != null)
                     for (int i = 0; i < cams.Count; i++) if (!pending.Contains(i)) passBa.Ba.WriteCamera(i, cams[i]);
             }
+            if (symmetryCheckRan || turnedOf.Count > 0) _importService.ReleaseLearnedModels(); // free the check's matcher
+            foreach (var t in turnedOf.Values) t.Dispose();
             foreach (int c in pending)
             {
                 var (corr, inl) = lastTry.TryGetValue(c, out var lt) ? lt : (0, 0);
@@ -851,6 +900,53 @@ public class MultiViewGenerationService
 
     /// <summary>Dense init: smallest widest-ray-pair angle a point needs (degrees). &amp;denseangle=N.</summary>
     public double DenseMinParallaxDeg { get; set; } = 0.5;
+
+    /// <summary>
+    /// Re-registration drops a camera's supporting pairs that are symmetric content - they match about as well with the
+    /// camera's photo turned 180 deg (at least <see cref="SymmetricInlierRatio"/> of the inliers) at a relative rotation more
+    /// than <see cref="SymmetricAngleDeg"/> away. MEASURED offline on DrJohnson (tools/sfm_offline/dj_sym_prevalence.py,
+    /// K=3072, 165 candidate pairs with COLMAP truth): at 0.5 / 30 deg it flags 17 of the 41 pairs whose rotation is wrong
+    /// (including image 41's 13-41 and 23-41) and 3 of the 95 that are right. Only cameras re-registration is about to
+    /// place are checked (one extra extraction and match per pair). &amp;symcheck=0 for the A/B.
+    /// </summary>
+    public bool CheckSymmetricPairs { get; set; } = true;
+
+    /// <summary>Turned-180 inliers as a fraction of the normal pair's for a pair to read as symmetric (&amp;symratio=F).</summary>
+    public double SymmetricInlierRatio { get; set; } = 0.5;
+
+    /// <summary>Relative rotation between the normal and turned estimates, degrees, for a pair to read as symmetric.</summary>
+    public double SymmetricAngleDeg { get; set; } = 30;
+
+    async Task<(bool Ambiguous, string Note)> SymmetryVerdictAsync(GlobalSfmInit.PairMatch pm, int candidate,
+        IReadOnlyList<CameraParams> cams, IReadOnlyList<ImportedImage> images, IReadOnlyList<int> posed,
+        ImageImportService.TurnedFeatures? turnedFeatures)
+    {
+        if (turnedFeatures == null) return (false, "symmetry check: no turned features - kept");
+        // Always turn the CANDIDATE's photo (the camera re-registration is about to place), and estimate both poses with it
+        // as image A. Turning the other photo is not equivalent for a matcher that is not rotation-invariant: DrJohnson
+        // pair 23-41 turned 23 gave 2 matches (b147) where turning 41 gives 149 inliers at the true rotation (offline).
+        int other = pm.CamA == candidate ? pm.CamB : pm.CamA;
+        var ia = images[posed[candidate]]; var ib = images[posed[other]];
+        var ca = cams[candidate]; var cb = cams[other];
+        double focal = 0.5 * (ca.FocalX + ca.FocalY);
+        float[] Coords(IReadOnlyList<ImageFeature> fa, IReadOnlyList<ImageFeature> fb, IEnumerable<(int A, int B)> m, bool b)
+            => m.SelectMany(x => { var f = b ? fb[x.B] : fa[x.A]; return new[] { f.X, f.Y }; }).ToArray();
+        // The normal pair, through the same estimator and orientation as the turned one, so the inlier counts compare.
+        var nm = (pm.CamA == candidate ? pm.FeatA.Zip(pm.FeatB, (a, b) => (a.Feature, b.Feature))
+                                       : pm.FeatB.Zip(pm.FeatA, (a, b) => (a.Feature, b.Feature))).ToList();
+        var normal = GlobalSfmInit.FromMatchesCalibrated(candidate, other, Coords(ia.Features, ib.Features, nm, false),
+            Coords(ia.Features, ib.Features, nm, true), focal, ca.CenterX, ca.CenterY, cb.CenterX, cb.CenterY, seed: 17);
+        if (normal == null) return (false, "symmetry check: no estimate - kept");
+        var tm = (await _importService.MatchLearnedAsync(turnedFeatures.Holder, ib)).Select(m => (m.IndexA, m.IndexB)).ToList();
+        var tp = tm.Count < 15 ? null : GlobalSfmInit.FromMatchesCalibrated(candidate, other,
+            Coords(turnedFeatures.Features, ib.Features, tm, false), Coords(turnedFeatures.Features, ib.Features, tm, true),
+            focal, ca.CenterX, ca.CenterY, cb.CenterX, cb.CenterY, seed: 17);
+        if (tp == null) return (false, $"{normal.Inliers} inliers; turned 180 deg: {tm.Count} matches, no pose - kept");
+        double apart = GlobalSfmInit.AngleDeg(tp.R, normal.R);
+        bool amb = tp.Inliers >= SymmetricInlierRatio * normal.Inliers && apart > SymmetricAngleDeg;
+        return (amb, $"{normal.Inliers} inliers; turned 180 deg: {tp.Inliers} inliers at {apart:F1} deg from it - " +
+            (amb ? "SYMMETRIC, dropped" : "kept"));
+    }
 
     /// <summary>
     /// Re-registration accepts a resected camera only if its verified pairs with placed cameras agree with the resected

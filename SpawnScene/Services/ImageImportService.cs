@@ -294,6 +294,89 @@ public class ImageImportService : IDisposable
         }
     }
 
+    /// <summary>A photo's learned features with the photo turned 180 degrees (caller disposes).</summary>
+    public sealed class TurnedFeatures : IDisposable
+    {
+        /// <summary>Holds the turned image's descriptors for matching (same size as the original).</summary>
+        public required ImportedImage Holder { get; init; }
+        /// <summary>The turned image's keypoints mapped back to the ORIGINAL image's coordinates.</summary>
+        public required List<ImageFeature> Features { get; init; }
+        public void Dispose() { Holder.LearnedDescriptors?.Dispose(); Holder.LearnedDescriptors = null; }
+    }
+
+    /// <summary>
+    /// The learned front end's features of <paramref name="a"/> TURNED 180 degrees, mapped back to its own image
+    /// coordinates, for <see cref="MatchLearnedAsync"/>. A pair that matches about as well turned as not, at a very
+    /// different rotation, is symmetric content (DrJohnson's rug: tools/sfm_offline/dj_rot_aug.py), not evidence of a pose.
+    /// The extractor stays loaded for the next call: extract every photo first, then <see cref="ReleaseLearnedModels"/>,
+    /// then match - the K=3072 extractor and matcher resident together lost the device mid-SfM (DrJohnson b146).
+    /// Null when the photo is not on the learned front end.
+    /// </summary>
+    public async Task<TurnedFeatures?> ExtractTurned180Async(ImportedImage a)
+    {
+        if (!UseLearnedFeatures) return null;
+        var accel = _gpu.WebGPUAccelerator;
+        long Live() => SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes >> 20;
+        long enter = Live();
+        bool decoded = await GpuImageOps.EnsureOnDeviceAsync(accel, a);
+        if (a.GpuRgba == null) return null;
+        var holder = new ImportedImage
+        {
+            FileName = a.FileName + " (turned 180)",
+            Width = a.Width, Height = a.Height, FeatureWidth = a.FeatureWidth, FeatureHeight = a.FeatureHeight,
+        };
+        try
+        {
+            List<ImageFeature> features;
+            using (var turned = GpuImageOps.Turn180(accel, a.GpuRgba))
+                features = await _learned.ExtractAsync(holder, turned, a.Width, a.Height, a.FeatureWidth, a.FeatureHeight);
+            // Back to the unturned image: (x, y) -> (W - 1 - x, H - 1 - y) in the feature frame, then to image pixels as the
+            // import scales every feature.
+            float sx = (float)a.Width / a.FeatureWidth, sy = (float)a.Height / a.FeatureHeight;
+            foreach (var f in features)
+            {
+                f.X = (a.FeatureWidth - 1 - f.X) * sx;
+                f.Y = (a.FeatureHeight - 1 - f.Y) * sy;
+            }
+            return new TurnedFeatures { Holder = holder, Features = features };
+        }
+        catch
+        {
+            holder.LearnedDescriptors?.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (decoded) a.DisposeGpu();
+            if (TraceTurnedMemory) Console.WriteLine($"[Import] turned-180 extract {a.FileName}: live storage {enter} -> {Live()} MB");
+        }
+    }
+
+    /// <summary>
+    /// LightGlue+ matches of one pair (IndexA into <paramref name="a"/>'s descriptors, IndexB into <paramref name="b"/>'s).
+    /// The matcher stays loaded for the next call; <see cref="ReleaseLearnedModels"/> frees it.
+    /// </summary>
+    public async Task<List<FeatureMatch>> MatchLearnedAsync(ImportedImage a, ImportedImage b)
+    {
+        List<FeatureMatch> matches = new();
+        if (a.LearnedDescriptors == null || b.LearnedDescriptors == null) return matches;
+        await _learned.MatchPairsAsync(new[] { a, b }, new[] { (0, 1) }, (_, m) => matches = m);
+        return matches;
+    }
+
+    /// <summary>Free the learned extractor sessions only (the matcher stays).</summary>
+    public void ReleaseLearnedExtractors() => _learned.ReleaseExtractors();
+
+    /// <summary>Diagnostics: log live GPU storage around each <see cref="ExtractTurned180Async"/> (&amp;symtrace=1).</summary>
+    public static bool TraceTurnedMemory { get; set; }
+
+    /// <summary>Free the learned front end's model sessions (reloaded when next used).</summary>
+    public void ReleaseLearnedModels()
+    {
+        _learned.ReleaseExtractors();
+        _learned.ReleaseMatcher();
+    }
+
     /// <summary>
     /// Learned features for a legacy MANAGED image (file picker / byte arrays: its pixels are on the host already).
     /// At feature resolution, like <see cref="FeatureDetector.Detect"/>.

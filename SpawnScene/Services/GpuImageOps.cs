@@ -30,8 +30,13 @@ public static class GpuImageOps
         ArrayView1D<int, Stride1D.Dense> colour)
         => colour[i] = rgba[index[i]];
 
+    // A packed RGBA image turned 180 degrees is the pixel array reversed.
+    static void ReverseKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> src, ArrayView1D<int, Stride1D.Dense> dst, int n)
+        => dst[i] = src[n - 1 - i];
+
     private sealed class Kernels
     {
+        public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int> Reverse = null!;
         public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int, float, float> Gray = null!;
         public Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>> Gather = null!;
     }
@@ -39,9 +44,18 @@ public static class GpuImageOps
 
     private static Kernels For(Accelerator accelerator) => s_kernels.GetValue(accelerator, a => new Kernels
     {
+        Reverse = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(ReverseKernel),
         Gray = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int, int, float, float>(GrayKernel),
         Gather = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>>(GatherKernel),
     });
+
+    /// <summary>A copy of a packed RGBA image turned 180 degrees, on the device. Caller disposes.</summary>
+    public static MemoryBuffer1D<int, Stride1D.Dense> Turn180(Accelerator accelerator, MemoryBuffer1D<int, Stride1D.Dense> rgba)
+    {
+        var turned = accelerator.Allocate1D<int>(rgba.Length);
+        For(accelerator).Reverse((int)rgba.Length, rgba.View, turned.View, (int)rgba.Length);
+        return turned;
+    }
 
     /// <summary>
     /// The feature detector's grayscale frame (one int 0..255 per pixel) at <paramref name="dstW"/> x

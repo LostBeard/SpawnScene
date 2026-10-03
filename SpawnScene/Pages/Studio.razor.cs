@@ -329,6 +329,15 @@ public partial class Studio : IAsyncDisposable
             // &core=0: keep every placed camera instead of the strongly connected core; &coremin=N its link strength (shared points).
             if (query.TryGetValue("core", out var coq))
                 _multiViewService.KeepStrongCore = coq is not ("0" or "false");
+            // &symtrace=1: log live GPU storage through each turned-180 check.
+            if (query.TryGetValue("symtrace", out var symTraceQ))
+                ImageImportService.TraceTurnedMemory = symTraceQ is "1" or "true";
+            // &symcheck=0: re-registration skips the turned-180 symmetric-pair check; &symratio=F its inlier ratio.
+            if (query.TryGetValue("symcheck", out var symQ))
+                _multiViewService.CheckSymmetricPairs = symQ is not ("0" or "false");
+            if (query.TryGetValue("symratio", out var symRatioQ) && double.TryParse(symRatioQ, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var symRatio))
+                _multiViewService.SymmetricInlierRatio = symRatio;
             // &resectrot=0: re-registration skips the verified-pair rotation check on resected cameras (A/B).
             if (query.TryGetValue("resectrot", out var resectRotQ))
                 _multiViewService.CheckResectionRotations = resectRotQ is not ("0" or "false");

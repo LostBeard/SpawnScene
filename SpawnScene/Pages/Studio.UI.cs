@@ -45,7 +45,10 @@ public partial class Studio
         });
 
         // The stats panel is as wide as its help line, measured with the real font (it clipped "ESC release").
-        const string hudHelp = "Click the scene to look  ·  WASD to move  ·  Esc to release";
+        // Phones and tablets (a coarse primary pointer) navigate by touch (TouchNavigator), not mouse-look + WASD.
+        string hudHelp = TouchIsPrimaryInput()
+            ? "Drag to look  ·  pinch to move  ·  two fingers to pan"
+            : "Click the scene to look  ·  WASD to move  ·  Esc to release";
         float hudW = _gameUI.Renderer.MeasureText(hudHelp, FontSize.Caption);
         hudW = hudW > 0 ? hudW + 28 : 360;
         var hud = _uiRoot.AddChild(new UIPanel
@@ -551,5 +554,20 @@ public partial class Studio
             BuildTestingUI();
         else if (_state == StudioState.ProjectDetail)
             BuildProjectDetailUI();
+    }
+
+    bool? _touchPrimary;
+    /// <summary>True when the device's primary pointer is coarse (a finger): phones and tablets, not touch laptops.</summary>
+    bool TouchIsPrimaryInput()
+    {
+        if (_touchPrimary is { } known) return known;
+        try
+        {
+            using var window = _js.Get<Window>("window");
+            using var query = window.MatchMedia("(pointer: coarse)");
+            _touchPrimary = query.Matches;
+        }
+        catch { _touchPrimary = false; }
+        return _touchPrimary.Value;
     }
 }

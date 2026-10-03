@@ -23,6 +23,10 @@ public partial class Studio
         _window.RequestAnimationFrame(_rafCallback);
     }
 
+    readonly TouchNavigator _touchNavigator = new();
+    readonly List<Vector2> _touchPositions = new();
+    int _canvasCssHeight = 640;
+
     private void OnAnimationFrame(double timestamp)
     {
         if (!_renderLoopRunning || _xrActive) return;
@@ -56,7 +60,8 @@ public partial class Studio
                 _prevKeysDown.Add(key);
 
             var primary = input.PrimaryPointer;
-            if (primary != null && primary.WasPressed && !_isPointerLocked)
+            if (primary != null && primary.WasPressed && !_isPointerLocked
+                && primary.Type != SpawnDev.GameUI.Input.PointerType.Touch)   // touch navigates without a lock
             {
                 var pos = primary.ScreenPosition ?? Vector2.Zero;
                 var hit = _uiRoot.HitTest(pos);
@@ -69,6 +74,31 @@ public partial class Studio
 
             if (_isPointerLocked && primary != null && MathF.Abs(primary.ScrollDelta) > 0.1f)
                 _cameraController.OnWheel(primary.ScrollDelta);
+
+            // Touch (no pointer lock on phones/tablets): one finger looks, two pan and pinch (TouchNavigator).
+            _touchPositions.Clear();
+            bool touchStartsOnUi = false;
+            foreach (var p in input.Pointers)
+            {
+                if (p.Type != SpawnDev.GameUI.Input.PointerType.Touch || !p.IsPressed || p.ScreenPosition is not { } tp) continue;
+                _touchPositions.Add(tp);
+                if (p.WasPressed && _uiRoot.HitTest(tp) != null) touchStartsOnUi = true;
+            }
+            var gesture = _touchNavigator.Step(_touchPositions, touchStartsOnUi);
+            if (gesture.LookPixels != Vector2.Zero)
+            {
+                // The scene stays under the finger: one CSS pixel is 1 / (focal length in CSS pixels) radians.
+                var cam = _sceneManager.Camera;
+                float focalCss = cam.FocalY * _canvasCssHeight / Math.Max(1, cam.Height);
+                _cameraController.TouchLook(gesture.LookPixels, 1f / Math.Max(focalCss, 1f));
+            }
+            if (gesture.PanPixels != Vector2.Zero || gesture.PinchLog != 0f)
+                _cameraController.TouchPanPinch(gesture.PanPixels, gesture.PinchLog);
+
+            // Gamepad: left stick moves, right stick looks, LB/RB sink/rise, RT fast.
+            var pad = input.Gamepad;
+            if (pad.Connected)
+                _cameraController.TickGamepad(pad.LeftStick, pad.RightStick, pad.IsButtonDown(4), pad.IsButtonDown(5), pad.IsButtonDown(7), dt);
         }
 
         // Update UI when not pointer-locked (clicks go to UI, not camera)
@@ -152,6 +182,7 @@ public partial class Studio
         if (dpr < 1f) dpr = 1f;
         _canvasWidth = Math.Max(1, (int)(cssWidth * dpr));
         _canvasHeight = Math.Max(1, (int)(cssHeight * dpr));
+        _canvasCssHeight = cssHeight;
 
         using var canvas = _canvasRef.As<HTMLCanvasElement>();
         canvas.Width = _canvasWidth;

@@ -213,6 +213,57 @@ public class CameraController : IDisposable
         UpdateCamera();
     }
 
+    // ── Touch and gamepad (phones, tablets, controllers: no pointer lock) ──────────────────────────────────────
+    const float TouchPanSensitivity = 0.002f;       // scene units per pixel, per unit of move speed
+    const float GamepadLookRadiansPerSecond = 2.2f;
+
+    /// <summary>One-finger drag: the scene follows the finger (drag right, the view turns left);
+    /// <paramref name="radiansPerPixel"/> = 1 / focal length in the same pixels keeps it under the finger.</summary>
+    public void TouchLook(Vector2 pixels, float radiansPerPixel)
+    {
+        _yaw -= pixels.X * radiansPerPixel;
+        _pitch += pixels.Y * radiansPerPixel;
+        _pitch = Math.Clamp(_pitch, MinPitch, MaxPitch);
+        UpdateCamera();
+    }
+
+    /// <summary>Two-finger gesture: pan with the fingers' centre (the scene follows it), dolly with the pinch
+    /// (log of the spread ratio; spreading moves in).</summary>
+    public void TouchPanPinch(Vector2 panPixels, float pinchLog)
+    {
+        float s = _moveSpeed * TouchPanSensitivity;
+        _position -= Right * panPixels.X * s;
+        _position += Up * panPixels.Y * s;
+        _position += Forward * pinchLog * _moveSpeed * 0.5f;   // doubling the spread moves ~0.35 x move speed
+        UpdateCamera();
+    }
+
+    /// <summary>
+    /// Gamepad (standard mapping): left stick moves, right stick looks, LB/RB (4/5) sink/rise, RT (7) held is fast.
+    /// Sticks read y down (pushed forward = -1). Returns true if the camera moved.
+    /// </summary>
+    public bool TickGamepad(Vector2 leftStick, Vector2 rightStick, bool sink, bool rise, bool fast, float dt)
+    {
+        var l = XRLocomotion.ApplyDeadzone(leftStick);
+        var r = XRLocomotion.ApplyDeadzone(rightStick);
+        bool moved = false;
+        if (r != Vector2.Zero)
+        {
+            _yaw += r.X * GamepadLookRadiansPerSecond * dt;
+            _pitch -= r.Y * GamepadLookRadiansPerSecond * dt;
+            _pitch = Math.Clamp(_pitch, MinPitch, MaxPitch);
+            moved = true;
+        }
+        var move = Forward * -l.Y + Right * l.X + Vector3.UnitY * ((rise ? 1 : 0) - (sink ? 1 : 0));
+        if (move != Vector3.Zero)
+        {
+            _position += move * _moveSpeed * (fast ? FastMultiplier : 1f) * dt;
+            moved = true;
+        }
+        if (moved) UpdateCamera();
+        return moved;
+    }
+
     public void OnWheel(double deltaY)
     {
         // Normalize: browser sends ±100+ per notch, we want ±1

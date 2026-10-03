@@ -236,7 +236,9 @@ public class XRService : IDisposable
                 HeadOrientation = new Quaternion((float)ho.X, (float)ho.Y, (float)ho.Z, (float)ho.W),
                 Views = new XRViewData[views.Length],
                 IsWebGLFallback = IsWebGLFallback,
+                Time = time,
             };
+            ReadThumbsticks(frameData);
 
             if (IsWebGLFallback)
             {
@@ -288,6 +290,31 @@ public class XRService : IDisposable
         }
     }
 
+    /// <summary>
+    /// The controllers' thumbsticks. xr-standard puts the thumbstick on axes 2 and 3 (0 and 1 are a touchpad, absent on
+    /// Quest Touch); a gamepad with only two axes has the stick there.
+    /// </summary>
+    private void ReadThumbsticks(XRFrameData frameData)
+    {
+        using var sources = _session!.InputSources;
+        int n = sources.Length;
+        for (int i = 0; i < n; i++)
+        {
+            using var source = sources[i];
+            using var gamepad = source.Gamepad;
+            if (gamepad == null) continue;
+            var axes = gamepad.Axes;
+            int a = axes.Length >= 4 ? 2 : 0;
+            if (axes.Length < a + 2) continue;
+            var stick = new Vector2((float)axes[a], (float)axes[a + 1]);
+            switch (source.Handedness)
+            {
+                case "left": frameData.LeftStick = stick; break;
+                case "right": frameData.RightStick = stick; break;
+            }
+        }
+    }
+
     private static Matrix4x4 JsFloatArrayToMatrix(float[] m) => XRSceneAlignment.FromWebXRMatrix(m);
 
     /// <summary>Convert XRRigidTransform to a view matrix.</summary>
@@ -321,6 +348,11 @@ public class XRFrameData
     /// <summary>The headset's pose in the room (local-floor space).</summary>
     public Vector3 HeadPosition { get; set; }
     public Quaternion HeadOrientation { get; set; } = Quaternion.Identity;
+    /// <summary>The frame's time (ms, from the XR animation frame).</summary>
+    public double Time { get; set; }
+    /// <summary>Thumbsticks (x right, y down: pushed forward reads -1); zero without a controller.</summary>
+    public Vector2 LeftStick { get; set; }
+    public Vector2 RightStick { get; set; }
 }
 
 /// <summary>Per-eye view data for XR rendering.</summary>

@@ -35,6 +35,9 @@ public class CameraController : IDisposable
     private const float MaxPitch = MathF.PI / 2f - 0.01f;
     private const float FastMultiplier = 4.0f;
 
+    /// <summary>Movement speed in scene units per second, sized to the scene (VR locomotion uses it too).</summary>
+    public float MoveSpeed => _moveSpeed;
+
     /// <summary>Whether any movement keys are currently held.</summary>
     public bool IsMoving => _heldKeys.Count > 0;
 

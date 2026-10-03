@@ -16,6 +16,9 @@ public partial class Studio
             _xrService.OnXRFrame += OnXRFrame;
             _xrService.OnSessionEnded += OnXRSessionEnded;
             _xrSceneFromRoom = null; // placed on the session's first frame (XRSceneAlignment)
+            _xrLocomotion.Reset();
+            _xrStickLog = true;
+            _xrLastTime = -1;
 
             // Pause canvas RAF loop — XR has its own render loop
             _xrActive = true;
@@ -65,7 +68,7 @@ public partial class Studio
                 var vp = frameData.Views.Length > 0 ? frameData.Views[0].Viewport : null;
                 Console.WriteLine($"[XR] {XRStatsFrames} frames: {_xrFrameMsSum / XRStatsFrames:F1} ms submit per frame " +
                     $"({frameData.Views.Length} views of {vp?.Width}x{vp?.Height}), {1000.0 * XRStatsFrames / wall:F0} fps, " +
-                    $"{(frameData.IsWebGLFallback ? "WebGL copy path" : "WebGPU layer")}");
+                    $"{(frameData.IsWebGLFallback ? "WebGL copy path" : "WebGPU layer")}, head at {_xrHeadInScene:F2} in the scene");
                 _xrFrameCount = 0; _xrFrameMsSum = 0;
             }
         }
@@ -73,6 +76,11 @@ public partial class Studio
 
     // Room (local-floor) -> scene: the head starts where the desktop camera was, facing its way (XRSceneAlignment).
     System.Numerics.Matrix4x4? _xrSceneFromRoom;
+    // Thumbstick move / snap-turn / rise, applied to _xrSceneFromRoom each frame.
+    readonly XRLocomotion _xrLocomotion = new();
+    double _xrLastTime = -1;
+    System.Numerics.Vector3 _xrHeadInScene;
+    bool _xrStickLog; // log the first controller input of a session (shows the sticks are read)
 
     private void RenderXRFrame(XRFrameData frameData)
     {
@@ -82,6 +90,17 @@ public partial class Studio
             _xrSceneFromRoom = XRSceneAlignment.SceneFromRoom(frameData.HeadPosition, frameData.HeadOrientation, cam.Position, cam.Forward);
             Console.WriteLine($"[XR] room placed in the scene: head {frameData.HeadPosition} -> camera {cam.Position}, facing {cam.Forward}");
         }
+        // dt clamped: a stalled frame must not throw the viewer across the scene.
+        float dt = _xrLastTime < 0 ? 0f : (float)Math.Clamp((frameData.Time - _xrLastTime) / 1000.0, 0.0, 0.1);
+        _xrLastTime = frameData.Time;
+        _xrSceneFromRoom = _xrLocomotion.Step(_xrSceneFromRoom.Value, frameData.HeadPosition, frameData.HeadOrientation,
+            frameData.LeftStick, frameData.RightStick, dt, _cameraController?.MoveSpeed ?? 1f);
+        if (_xrStickLog && (frameData.LeftStick != default || frameData.RightStick != default))
+        {
+            _xrStickLog = false;
+            Console.WriteLine($"[XR] controller input: left {frameData.LeftStick}, right {frameData.RightStick}");
+        }
+        _xrHeadInScene = System.Numerics.Vector3.Transform(frameData.HeadPosition, _xrSceneFromRoom.Value);
         foreach (var v in frameData.Views) v.ViewMatrix = XRSceneAlignment.SceneView(v.ViewMatrix, _xrSceneFromRoom.Value);
         if (frameData.IsWebGLFallback && _gpuRenderer.XRSorted)
         {

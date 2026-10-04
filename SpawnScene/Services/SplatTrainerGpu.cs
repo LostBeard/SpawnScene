@@ -97,6 +97,66 @@ public sealed class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<float, Stride1D.Dense>? _densifyStats;   // 2 per splat: pixel grad sum, visible count
     MemoryBuffer1D<float, Stride1D.Dense>? _screenRadius;   // 1 per splat: this view's 3-sigma radius, px
     MemoryBuffer1D<float, Stride1D.Dense>? _maxRadius;      // 1 per splat: max of that over the window
+    MemoryBuffer1D<float, Stride1D.Dense>? _scaleFloor;     // 1 per splat: Mip 3D-filter scale floor (0 = none)
+    int _scaleFloorFor = -1;                                // the splat count the floor was computed for
+    int _scaleFloorStep;                                    // the Adam step it was computed at
+    GPUBuffer? _mipCamsBuf, _mipCfgBuf;
+    int _mipCamCount;
+    GPUComputePipeline? _mipFloor;
+
+    /// <summary>
+    /// Mip-Splatting 3D filter size (0 = off): each splat's scale is floored at filter x depth / focal for the training
+    /// camera that sees it most finely, so no splat is thinner than the photos resolve - the needles and streaks a
+    /// viewer shows closer than the photos were taken (&amp;mipfilter=0.2, the paper's value).
+    /// </summary>
+    public static float MipFilter { get; set; }
+
+    /// <summary>The training cameras the Mip floor is measured against (at the training resolution).</summary>
+    public void SetMipCameras(IReadOnlyList<CameraParams> cams)
+    {
+        _mipCamCount = cams.Count;
+        if (cams.Count == 0) return;
+        var data = new float[cams.Count * 16];
+        for (int c = 0; c < cams.Count; c++)
+        {
+            var cam = cams[c];
+            WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var right, out var up, out var fwd, out var pos);
+            int o = c * 16;
+            data[o + 0] = pos.X; data[o + 1] = pos.Y; data[o + 2] = pos.Z; data[o + 3] = cam.FocalX;
+            data[o + 4] = right.X; data[o + 5] = right.Y; data[o + 6] = right.Z; data[o + 7] = cam.FocalY;
+            data[o + 8] = up.X; data[o + 9] = up.Y; data[o + 10] = up.Z; data[o + 11] = cam.Width * 0.5f;
+            data[o + 12] = fwd.X; data[o + 13] = fwd.Y; data[o + 14] = fwd.Z; data[o + 15] = cam.Height * 0.5f;
+        }
+        _mipCamsBuf?.Destroy();
+        _mipCamsBuf = _device!.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = (ulong)(data.Length * sizeof(float)),
+            Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
+        });
+        var bytes = new byte[data.Length * sizeof(float)];
+        Buffer.BlockCopy(data, 0, bytes, 0, bytes.Length);
+        _queue!.WriteBuffer(_mipCamsBuf, 0, bytes);
+        _scaleFloorFor = -1;
+    }
+
+    /// <summary>Recompute the Mip floor when the splats changed (count) or every 500 steps (they move).</summary>
+    void UpdateMipFloor(GPUBuffer splatGpu, int splatCount)
+    {
+        if (MipFilter <= 0f || _mipCamCount == 0 || _mipCamsBuf == null || _scaleFloor == null) return;
+        if (_scaleFloorFor == splatCount && _adamStepCount - _scaleFloorStep < 500) return;
+        _mipCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        WriteVec4(_mipCfgBuf, splatCount, _mipCamCount, MipFilter, 0f);
+        Dispatch(_mipFloor!, (splatCount + 63) / 64, 1, new[]
+        {
+            Buf(0, splatGpu), Buf(1, _mipCamsBuf), Buf(2, _scaleFloor.GetGPUBuffer()!), Buf(3, _mipCfgBuf),
+        });
+        _scaleFloorFor = splatCount;
+        _scaleFloorStep = _adamStepCount;
+    }
     MemoryBuffer1D<uint, Stride1D.Dense>? _viewSupport;        // views that ever moved each splat
     MemoryBuffer1D<float, Stride1D.Dense>? _supportPartials;   // 6 per workgroup, 256 workgroups
     MemoryBuffer1D<float, Stride1D.Dense>? _adamM;
@@ -166,7 +226,7 @@ public sealed class SplatTrainerGpu : IDisposable
         static long B(params MemoryBuffer?[] buffers) => buffers.Sum(b => b?.LengthInBytes ?? 0);
         long keys = B(_keys, _values, _gradKeyA, _gradKeyB, _gradKeyC);
         long pixels = B(_outColour, _outFinalT, _outEnd, _target, _dLdPix, _ssimRows, _ssimWinGrad, _ssimDRows, _lossPartial);
-        long splat = B(_gradFixed, _densifyAbs, _opacityLogit, _logScale, _geomOut, _densifyStats, _screenRadius, _maxRadius,
+        long splat = B(_gradFixed, _densifyAbs, _opacityLogit, _logScale, _geomOut, _densifyStats, _screenRadius, _maxRadius, _scaleFloor,
             _viewSupport, _splatColour);
         long adam = B(_adamM, _adamV);
         long sh = B([.. _shRest, .. _gradShRest, .. _adamShM, .. _adamShV]);
@@ -320,6 +380,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _adamStep = MakePipeline(SplatTrainerShaders.AdamStep, "adam_step");
         _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
         _adamGeometry = MakePipeline(SplatTrainerShaders.GeometryAdam, "adam_geometry");
+        _mipFloor = MakePipeline(SplatTrainerShaders.MipScaleFloor, "mip_floor");
         _evalSse = MakePipeline(SplatTrainerShaders.EvalSse, "eval_sse");
         _ssimRowsPipe = MakePipeline(SplatTrainerShaders.SsimRows, "ssim_rows");
         _ssimReducePipe = MakePipeline(SplatTrainerShaders.SsimReduce, "ssim_reduce");
@@ -618,6 +679,9 @@ public sealed class SplatTrainerGpu : IDisposable
         _splatColour = accel.Allocate1D<float>((long)splatCount * 3);
         _maxRadius = accel.Allocate1D<float>(splatCount);
         _maxRadius.MemSetToZero();
+        _scaleFloor = accel.Allocate1D<float>(splatCount);
+        _scaleFloor.MemSetToZero();
+        _scaleFloorFor = -1;
         _viewSupport = accel.Allocate1D<uint>(splatCount);
         _supportPartials = accel.Allocate1D<float>(SupportWorkgroups * SupportSlots);
         await stage("per-splat");
@@ -1902,6 +1966,7 @@ public sealed class SplatTrainerGpu : IDisposable
         await PhaseAsync("sh");
         if (geometry is { } geo)
         {
+            UpdateMipFloor(splatGpu, splatCount);
             WriteVec4x2(_geomCfgBuf!,
                 geo.PositionLr, geo.LogScaleLr, geo.RotationLr, _adamStepCount,
                 splatCount, geo.MaxScale, geo.MinScale, DenseGeometryAdam ? 1f : 0f);
@@ -1910,7 +1975,7 @@ public sealed class SplatTrainerGpu : IDisposable
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
                 Buf(3, _logScale!.GetGPUBuffer()!), Buf(4, _adamM!.GetGPUBuffer()!),
                 Buf(5, _adamV!.GetGPUBuffer()!), Buf(6, _geomCfgBuf!),
-                Buf(7, _geomOut!.GetGPUBuffer()!),
+                Buf(7, _geomOut!.GetGPUBuffer()!), Buf(8, _scaleFloor!.GetGPUBuffer()!),
             });
         }
 
@@ -2168,6 +2233,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _densifyStats?.Dispose(); _densifyStats = null;
         _screenRadius?.Dispose(); _screenRadius = null;
         _maxRadius?.Dispose(); _maxRadius = null;
+        _scaleFloor?.Dispose(); _scaleFloor = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
         for (int part = 0; part < SphericalHarmonics.Parts; part++) { _gradShRest[part]?.Dispose(); _gradShRest[part] = null; }

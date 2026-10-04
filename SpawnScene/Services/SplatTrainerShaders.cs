@@ -1808,6 +1808,41 @@ fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>) {
     /// Parameterisation matches the reference implementation or the published learning rates
     /// mean nothing: scale in log space, rotation as a quaternion normalised on use.
     /// </summary>
+    /// <summary>
+    /// Mip-Splatting's 3D smoothing filter as a per-splat scale floor: the highest sampling rate nu = focal / depth over
+    /// the training cameras that see the splat (centre in front, within 15% of the frame), and floor = filter / nu - the
+    /// smallest detail those photos resolve there (Yu et al. 2024 use variance (filter / nu)^2 with filter 0.2). Thin
+    /// splats below it are what turn into needles and streaks when the viewer gets closer than the photos did.
+    /// </summary>
+    public const string MipScaleFloor = @"
+@group(0) @binding(0) var<storage, read>       splats    : array<f32>;        // 14 per splat
+@group(0) @binding(1) var<storage, read>       cams      : array<vec4<f32>>;  // 4 per camera: pos|fx, right|fy, up|halfW, fwd|halfH
+@group(0) @binding(2) var<storage, read_write> floor_out : array<f32>;        // 1 per splat
+@group(0) @binding(3) var<uniform>             cfg       : vec4<f32>;         // x splat count, y camera count, z filter size
+
+@compute @workgroup_size(64)
+fn mip_floor(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= u32(cfg.x)) { return; }
+    let p = vec3<f32>(splats[i * 14u], splats[i * 14u + 1u], splats[i * 14u + 2u]);
+    var nu = 0.0;
+    for (var c = 0u; c < u32(cfg.y); c = c + 1u) {
+        let a = cams[c * 4u];
+        let r = cams[c * 4u + 1u];
+        let up = cams[c * 4u + 2u];
+        let f = cams[c * 4u + 3u];
+        let rel = p - a.xyz;
+        let z = dot(f.xyz, rel);
+        if (z <= 0.2) { continue; }
+        let x = dot(r.xyz, rel) / z * a.w;
+        let y = dot(up.xyz, rel) / z * r.w;
+        if (abs(x) > 1.15 * up.w || abs(y) > 1.15 * f.w) { continue; }
+        nu = max(nu, a.w / z);
+    }
+    floor_out[i] = select(0.0, cfg.z / nu, nu > 0.0);
+}
+";
+
     public const string GeometryAdam = UniformsBlock + @"
 @group(0) @binding(1) var<storage, read_write> splats     : array<f32>;   // 14 per splat
 @group(0) @binding(2) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
@@ -1824,6 +1859,9 @@ struct GeomCfg {
 // The GPU gate compares these against SplatGeometryGradients.Backward, and density control
 // will read the screen-space position gradient that feeds them.
 @group(0) @binding(7) var<storage, read_write> geom_out : array<f32>;
+// Per-splat minimum scale (world units) - the Mip-Splatting 3D filter as a floor: no axis thinner than the finest
+// detail any training camera resolves at this splat (MipScaleFloor). 0 = no floor.
+@group(0) @binding(8) var<storage, read>       scale_floor : array<f32>;
 
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
@@ -1860,7 +1898,8 @@ fn dense_zero_step(i : u32, o : u32) {
         let updated = adam(log_scale[i * 3u + c], 0.0, g.lr.y, step, &m, &v);
         adam_m[ab + ADAM_SCALE + c] = m;
         adam_v[ab + ADAM_SCALE + c] = v;
-        let bounded = clamp(updated, log(g.limit.z), log(g.limit.y));
+        let lo = min(log(max(g.limit.z, scale_floor[i])), log(g.limit.y));
+        let bounded = clamp(updated, lo, log(g.limit.y));
         log_scale[i * 3u + c] = bounded;
         splats[o + 6u + c] = exp(bounded);
     }
@@ -2075,7 +2114,8 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
         let updated = adam(log_scale[i * 3u + c], gs[c] * sc3[c] * live, g.lr.y, step, &m, &v);
         adam_m[ab + ADAM_SCALE + c] = m;
         adam_v[ab + ADAM_SCALE + c] = v;
-        let bounded = clamp(updated, log(g.limit.z), log(g.limit.y));
+        let lo = min(log(max(g.limit.z, scale_floor[i])), log(g.limit.y));
+        let bounded = clamp(updated, lo, log(g.limit.y));
         log_scale[i * 3u + c] = bounded;
         splats[o + 6u + c] = exp(bounded);
     }

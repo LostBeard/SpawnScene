@@ -404,6 +404,10 @@ public partial class Studio
             Console.WriteLine(
                 $"[Train] supervising on {supervised.Count} views, " +
                 $"{views.Count - supervised.Count} held out");
+            // The Mip 3D-filter floor is measured against the photos the scene is fitted to, at the training size.
+            _trainer.SetMipCameras(supervised.Select(i => views[i].Camera.ScaledTo(w, h)).ToList());
+            if (SplatTrainerGpu.MipFilter > 0)
+                Console.WriteLine($"[Train] Mip 3D filter {SplatTrainerGpu.MipFilter}: scale floor = filter x depth / focal over {supervised.Count} cameras");
 
             // -- Size the key budget from a measurement, not a guess --
             // How many tiles a splat covers is a property of the scene: TempleRing wants about

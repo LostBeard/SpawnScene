@@ -436,6 +436,10 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("maxradpx", out var mrq) && float.TryParse(mrq,
                     System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mrv) && mrv > 0)
                 SplatDensityControl.MaxScreenRadiusPx = mrv;
+            // &mipfilter=F: the Mip-Splatting 3D filter as a per-splat scale floor while training (0.2 = the paper's; 0 = off).
+            if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
+                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mfv))
+                SplatTrainerGpu.MipFilter = Math.Max(0f, mfv);
             // &render=sorted|stochastic: draw scenes with that renderer, in any autotest mode (A/B the viewer itself).
             if (query.TryGetValue("render", out var rmq))
             {

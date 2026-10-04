@@ -443,7 +443,11 @@ public partial class Studio : IAsyncDisposable
                 ImageImportService.MaxImportDimension = Math.Max(0, imv0);
             // &refineposes=1: photometric camera refinement while training (and test-time for held-out views);
             // &poselr=R,T: its rotation (rad) and translation (x spread) steps per update.
-            if (query.TryGetValue("refineposes", out var refPq)) RefinePoses = refPq is "1" or "true";
+            if (query.TryGetValue("refineposes", out var refPq))
+            {
+                RefinePoses = refPq is "1" or "true";
+                RefineTestPosesOnly = refPq == "2";   // control: held-out cameras only
+            }
             if (query.TryGetValue("poselr", out var plq))
             {
                 var poseLrParts = plq.Split(',');

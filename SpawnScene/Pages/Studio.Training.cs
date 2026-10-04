@@ -76,6 +76,9 @@ public partial class Studio
     /// that difference (c15 18.8 vs c17 24.0, 2026-10-04).
     /// </summary>
     public static bool RefinePoses { get; set; }
+    /// <summary>Diagnostic (&amp;refineposes=2): refine only the HELD-OUT cameras against the finished scene, not the
+    /// training ones - the control that separates a better scene from test views that were merely aligned.</summary>
+    public static bool RefineTestPosesOnly { get; set; }
     /// <summary>Pose rotation step, radians per update (Adam-normalised; decays to 10% over the run).</summary>
     public static float PoseLrRotation { get; set; } = 2e-4f;
     /// <summary>Pose translation step per update, as a fraction of the capture's camera spread.</summary>
@@ -462,7 +465,7 @@ public partial class Studio
             // Camera refinement: per-view Adam state, and the step sizes in this capture's units.
             PoseAdam? poseAdam = null;
             float poseSpread = 1f;
-            if (RefinePoses)
+            if (RefinePoses || RefineTestPosesOnly)
             {
                 _trainer.EnsurePoseSlots(views.Count);
                 poseAdam = new PoseAdam(views.Count);
@@ -585,7 +588,7 @@ public partial class Studio
                 bool readLoss = it < supervised.Count || it % supervised.Count == supervised.Count - 1
                     || it == iterations - 1;
                 float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo,
-                    readLoss: readLoss, poseSlot: poseAdam != null && geo != null ? vi : -1);
+                    readLoss: readLoss, poseSlot: poseAdam != null && geo != null && !RefineTestPosesOnly ? vi : -1);
 
                 // How much of the gradient survives the fixed-point atomic? Gradients cross it
                 // as scaled integers, and dL/d(pixel) is 1/(3*W*H) - about 1e-6 at this
@@ -720,7 +723,7 @@ public partial class Studio
                 }
                 if (it % supervised.Count == supervised.Count - 1)
                 {
-                    if (poseAdam != null)
+                    if (poseAdam != null && !RefineTestPosesOnly)
                     {
                         // Each supervised view was stepped once this cycle: one pose update each, from that gradient.
                         float decay = 1f - 0.9f * Math.Min(1f, (it + 1f) / iterations);

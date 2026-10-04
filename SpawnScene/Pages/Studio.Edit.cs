@@ -15,7 +15,13 @@ public partial class Studio
     readonly SplatEditor _splatEditor = new();
     bool _editOpen, _selectMode, _editBusy, _dragging;
     Vector2? _dragStart, _dragEnd;
-    SplatEditor.Volume? _selection;
+    SplatEditor.Volume? _selectionValue;
+    /// <summary>The edit selection; setting it also tints it on screen (GpuGaussianRenderer.SetSelectionHighlight).</summary>
+    SplatEditor.Volume? _selection
+    {
+        get => _selectionValue;
+        set { _selectionValue = value; _gpuRenderer.SetSelectionHighlight(value); }
+    }
     int _selectedCount;
     UIPanel? _selectRect;
     UILabel? _editStatus;

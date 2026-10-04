@@ -595,6 +595,56 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         _sorter.RequestResort();
     }
 
+    // ── Selection highlight (Edit tools) ─────────────────────────────────────────────────────────────────────
+    GPUBuffer? _selBuf;
+    readonly float[] _selData = new float[28];   // mat4 (16) + lo (4) + hi (4) + rows (4, as i32 bits)
+
+    GPUBuffer EnsureSelectionBuffer()
+    {
+        if (_selBuf == null)
+        {
+            _selBuf = _device!.CreateBuffer(new GPUBufferDescriptor
+            {
+                Size = (ulong)(_selData.Length * sizeof(float)),
+                Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+            });
+            WriteSelection();
+        }
+        return _selBuf;
+    }
+
+    void WriteSelection()
+    {
+        if (_selBuf == null || _queue == null) return;
+        var bytes = new byte[_selData.Length * sizeof(float)];
+        Buffer.BlockCopy(_selData, 0, bytes, 0, bytes.Length);
+        _queue.WriteBuffer(_selBuf, 0, bytes);
+    }
+
+    /// <summary>
+    /// Tint the splats a selection takes (null = none) - drawn by the pack pass, so the scene data is untouched. Takes
+    /// effect at once: the display vertices are repacked and the sorted paths sort again.
+    /// </summary>
+    public void SetSelectionHighlight(SplatEditor.Volume? selection)
+    {
+        System.Array.Clear(_selData);
+        if (selection is { } v)
+        {
+            // Row-major: WGSL reads column-major, so m * p in the shader is p * M here.
+            float[] m = { v.M11, v.M12, v.M13, v.M14, v.M21, v.M22, v.M23, v.M24, v.M31, v.M32, v.M33, v.M34, v.M41, v.M42, v.M43, v.M44 };
+            System.Array.Copy(m, _selData, 16);
+            _selData[16] = v.X0; _selData[17] = v.Y0; _selData[18] = v.Z0; _selData[19] = 1f;
+            _selData[20] = v.X1; _selData[21] = v.Y1; _selData[22] = v.Z1;
+            _selData[24] = BitConverter.Int32BitsToSingle(v.RowFrom);
+            _selData[25] = BitConverter.Int32BitsToSingle(v.RowTo);
+        }
+        if (_device == null) return;
+        EnsureSelectionBuffer();
+        WriteSelection();
+        RepackForDisplay();
+        _sorter.RequestResort();
+    }
+
     /// <summary>
     /// Draw more on top of the current XR eye view in a submit of its own (after the eye's main one), with the bridge
     /// canvas and its depth: for a second world-space UI batch, which cannot share a command buffer with the first
@@ -2154,6 +2204,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                     new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = sh0 } },
                     new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _shRest?[1] ?? _shDummy } },
                     new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _shRest?[2] ?? _shDummy } },
+                    new() { Binding = 7, Resource = new GPUBufferBinding { Buffer = EnsureSelectionBuffer() } },
                 }
             });
         }
@@ -2782,6 +2833,24 @@ struct PackUniforms {
 @group(0) @binding(5) var<storage, read>       sh_rest1 : array<f32>;
 @group(0) @binding(6) var<storage, read>       sh_rest2 : array<f32>;
 
+// The edit selection (SplatEditor.Volume), drawn tinted: the same test as the editor's kernels. lo.w = 1 when on.
+struct Selection {
+    m    : mat4x4<f32>,   // row-major copy of the System.Numerics matrix: m * p == p * M
+    lo   : vec4<f32>,     // x0, y0, z0, enabled
+    hi   : vec4<f32>,     // x1, y1, z1, -
+    rows : vec4<i32>,     // rowFrom, rowTo (a row range when rowTo > rowFrom), -, -
+}
+@group(0) @binding(7) var<uniform> sel : Selection;
+
+fn is_selected(i : u32, p : vec3<f32>) -> bool {
+    if (sel.lo.w == 0.0) { return false; }
+    if (sel.rows.y > sel.rows.x) { return i32(i) >= sel.rows.x && i32(i) < sel.rows.y; }
+    let c = sel.m * vec4<f32>(p, 1.0);
+    if (c.w <= 1e-7) { return false; }
+    let n = c.xyz / c.w;
+    return all(n >= sel.lo.xyz) && all(n <= sel.hi.xyz);
+}
+
 const SH_C0 : f32 = 0.28209479177387814;
 const SH_C1 : f32 = 0.4886025119029199;
 " + SphericalHarmonics.WgslPartAccess + SphericalHarmonics.WgslViewRgb + @"
@@ -2827,6 +2896,10 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
         // Same function the trainer renders with, for the direction from this pack's camera.
         let pos = vec3<f32>(src[srcOff + 0u], src[srcOff + 1u], src[srcOff + 2u]);
         rgb = sh_view_rgb(u32(origIdx), normalize(pos - u.cam_pos.xyz), rgb, u.sh_degree);
+    }
+    // Selected (Edit tools): amber-tinted, so what Delete / Move / Copy will take is visible first.
+    if (is_selected(u32(origIdx), vec3<f32>(src[srcOff + 0u], src[srcOff + 1u], src[srcOff + 2u]))) {
+        rgb = mix(rgb, vec3<f32>(1.0, 0.72, 0.15), 0.5);
     }
     dst[dstOff + 3u] = pack2x16float(vec2<f32>(max(rgb.r, 0.0), max(rgb.g, 0.0)));
     dst[dstOff + 4u] = pack2x16float(vec2<f32>(max(rgb.b, 0.0), clamp(src[srcOff + 9u], 0.0, 1.0)));

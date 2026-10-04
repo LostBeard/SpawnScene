@@ -370,6 +370,19 @@ public class ImageImportService : IDisposable
     /// <summary>Diagnostics: log live GPU storage around each <see cref="ExtractTurned180Async"/> (&amp;symtrace=1).</summary>
     public static bool TraceTurnedMemory { get; set; }
 
+    /// <summary>
+    /// Matching skipped (ground-truth poses): free the learned models here, since MatchAllPairsAsync - where they are
+    /// normally released - never runs. Left loaded, the extractor's model pools held ~4 GB through training: every
+    /// gtposes run started training with 4.1 GB live against ~0.1 GB for our own SfM, and DrJohnsonFull lost the device
+    /// at 6.6 GB live (2026-10-03, c2/c2b).
+    /// </summary>
+    void ReleaseModelsWithoutMatching()
+    {
+        if (!UseLearnedFeatures) return;
+        ReleaseLearnedModels();
+        Console.WriteLine($"[Import] learned models released (no matching); [GPU] {GpuService.MemoryReport(4)}");
+    }
+
     /// <summary>Free the learned front end's model sessions (reloaded when next used).</summary>
     public void ReleaseLearnedModels()
     {
@@ -482,9 +495,12 @@ public class ImageImportService : IDisposable
             if (_images.Count >= 2 && !SkipPairMatching)
                 await MatchAllPairsAsync();
             else if (SkipPairMatching)
+            {
                 Console.WriteLine(
                     $"[Import] skipped {_images.Count * (_images.Count - 1) / 2:N0} pair matches " +
                     "- this run uses ground-truth poses and never reads them");
+                ReleaseModelsWithoutMatching();
+            }
 
             Progress = 1.0f;
         }
@@ -1002,6 +1018,8 @@ public class ImageImportService : IDisposable
             Console.WriteLine($"[Import] {_images.Count} images decoded + features: {HeapReport()}");
             if (_images.Count >= 2 && !SkipPairMatching)
                 await MatchAllPairsAsync();
+            else if (SkipPairMatching)
+                ReleaseModelsWithoutMatching();
 
             Progress = 1.0f;
         }

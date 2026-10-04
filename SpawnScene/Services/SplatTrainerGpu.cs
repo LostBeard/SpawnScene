@@ -2289,8 +2289,6 @@ public sealed class SplatTrainerGpu : IDisposable
         _screenRadius?.Dispose(); _screenRadius = null;
         _maxRadius?.Dispose(); _maxRadius = null;
         _scaleFloor?.Dispose(); _scaleFloor = null;
-        _posePartials?.Dispose(); _posePartials = null;
-        _poseGrads?.Dispose(); _poseGrads = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
         for (int part = 0; part < SphericalHarmonics.Parts; part++) { _gradShRest[part]?.Dispose(); _gradShRest[part] = null; }
@@ -2310,6 +2308,10 @@ public sealed class SplatTrainerGpu : IDisposable
     public void Dispose()
     {
         DisposeBuffers();
+        // Per VIEW, not per splat: they live through every resize. In DisposeBuffers (which every densify resize runs)
+        // they were freed after the first densify, and camera refinement silently stepped no camera (c19, 2026-10-04).
+        _posePartials?.Dispose(); _posePartials = null;
+        _poseGrads?.Dispose(); _poseGrads = null;
         _radixSort?.Dispose(); _radixSort = null;
         _uniformBuf?.Destroy(); _uniformBuf?.Dispose();
         _capsBuf?.Destroy(); _capsBuf?.Dispose();

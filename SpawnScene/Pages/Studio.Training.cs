@@ -735,6 +735,9 @@ public partial class Studio
                         int pc = (it + 1) / supervised.Count;
                         if (pc % 5 == 1 && moved > 0)
                             Console.WriteLine($"[Train] cycle {pc,4} poses: {moved} views stepped, mean {rotSum / moved * 180f / MathF.PI:F4} deg / {transSum / moved / poseSpread:P3} of spread");
+                        // Never silently: c19 refined nothing for a whole run (the gradient buffer was freed on resize).
+                        if (moved == 0 && geo != null)
+                            Console.WriteLine($"[Train] WARNING cycle {pc,4}: camera refinement is on but no camera got a pose gradient");
                     }
                     double mean = cycleSum / cycleN;
                     if (double.IsNaN(firstCycle)) firstCycle = mean;

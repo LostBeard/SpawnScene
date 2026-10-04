@@ -39,7 +39,7 @@ const get = u => new Promise((res, rej) =>
     if (m.method === 'Runtime.exceptionThrown') console.log('EXC ' + JSON.stringify(m.params.exceptionDetails).slice(0, 400));
     if (m.method === 'Runtime.consoleAPICalled') {
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
-      if (/\[Autotest\] PASS/.test(t)) passed = true;
+      if ((process.env.SPAWNSCENE_XR_READY ? new RegExp(process.env.SPAWNSCENE_XR_READY) : /\[Autotest\] PASS/).test(t)) passed = true;
       if (/\[Autotest\] XR hook ready/.test(t)) hook = true;
       if (/error|warn/.test(m.params.type) || /\[Autotest\]|\[XR|\[Edit\]|GPU ERROR|\[Studio\] (Entering|Failed|XR|immersive)/.test(t)) console.log('CON ' + t.slice(0, 300));
     }
@@ -71,7 +71,9 @@ const get = u => new Promise((res, rej) =>
       .replace('const polyfill = new CustomWebXRPolyfill();', 'const polyfill = new CustomWebXRPolyfill(); window.__iwe = polyfill;');
     await send('Page.addScriptToEvaluateOnNewDocument', { source: polyfillSrc + ';' + init });
     await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
-    await send('Page.navigate', { url: `${APP}/studio?autotest=generate-room&render=stochastic&xrhook=1${process.env.SPAWNSCENE_XR_EXTRA || ''}` });
+    // SPAWNSCENE_XR_START: another start query (e.g. 'import=samples/truck.spawnscene'), with SPAWNSCENE_XR_READY the
+    // console line that says the scene is open (default: the Room sample's PASS).
+    await send('Page.navigate', { url: `${APP}/studio?${process.env.SPAWNSCENE_XR_START || 'autotest=generate-room&render=stochastic'}&xrhook=1${process.env.SPAWNSCENE_XR_EXTRA || ''}` });
     const deadline = Date.now() + 10 * 60 * 1000;
     while (!(passed && hook) && Date.now() < deadline) await new Promise(r => setTimeout(r, 500));
     if (!(passed && hook)) throw new Error('the Room sample never passed / the XR hook never appeared');

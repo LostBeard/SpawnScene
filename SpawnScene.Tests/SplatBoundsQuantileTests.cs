@@ -54,4 +54,21 @@ public class SplatBoundsQuantileTests
         Assert.That(lo, Is.EqualTo(2f));
         Assert.That(hi, Is.EqualTo(2f + B / 0.5f));
     }
+
+    [Test]
+    public void MedianOfHistogram_FindsTheMiddleDistance()
+    {
+        var h = new int[100];
+        h[10] = 1; h[20] = 5; h[80] = 2;            // 8 samples: the 4th is in bin 20
+        Assert.That(SplatBounds.MedianOfHistogram(h, 10f), Is.EqualTo(2.05f).Within(1e-5f));
+        Assert.That(SplatBounds.MedianOfHistogram(new int[10], 1f), Is.Null);
+    }
+
+    [Test]
+    public void ViewDistanceScale_PutsTheSubjectThreeMetresAway()
+    {
+        // The Truck start view: its subject 1.242 units away -> 0.414 units per metre (it was 1.72 from the bounds).
+        Assert.That(XRSceneAlignment.ComfortScale(1.242f), Is.EqualTo(1.242f / 3f).Within(1e-5f));
+        Assert.That(XRSceneAlignment.ComfortScale(0f), Is.EqualTo(1f), "nothing in view: scale 1");
+    }
 }

@@ -30,6 +30,15 @@ public static class XRSceneAlignment
     /// when it loaded". The middle of the scene's robust bounds, measured along the camera's view, is put
     /// <see cref="ComfortDistanceMetres"/> away; the grips still rescale from there.
     /// </summary>
+    /// <summary>
+    /// VR start scale from what the start view LOOKS AT: <paramref name="viewDistance"/> (the median distance of the
+    /// splats in a narrow cone around the view, <see cref="SplatBounds.MedianDistanceInConeAsync"/>) is put
+    /// <see cref="ComfortDistanceMetres"/> away. Preferred over the bounds: those of an inward-facing capture hold its
+    /// whole surroundings.
+    /// </summary>
+    public static float ComfortScale(float viewDistance)
+        => viewDistance > 1e-6f ? Math.Clamp(viewDistance / ComfortDistanceMetres, XRWorldGrab.MinScale, XRWorldGrab.MaxScale) : 1f;
+
     public static float ComfortScale(SplatBounds.Aabb box, Vector3 cameraPosition, Vector3 cameraForward)
     {
         var centre = new Vector3(box.CentreX, box.CentreY, box.CentreZ);

@@ -1,4 +1,5 @@
 using ILGPU;
+using ILGPU.Algorithms;
 using System.Numerics;
 using SpawnScene.Models;
 using ILGPU.Runtime;
@@ -209,6 +210,70 @@ public static class SplatBounds
             }
         }
         return new Aabb(lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+    }
+
+    // ── How far away is what a camera looks at? ──────────────────────────────────────────────────────────────
+    const int DepthBins = 2048;
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int,
+        float, float, float, float, float, float, float, float>? _coneKernel;
+
+    static void ConeDistanceKernel(Index1D index, ArrayView1D<float, Stride1D.Dense> packed, ArrayView1D<int, Stride1D.Dense> hist,
+        int splatCount, float ox, float oy, float oz, float dx, float dy, float dz, float cosHalf, float binsPerUnit)
+    {
+        int i = index;
+        if (i >= splatCount) return;
+        int o = i * SplatFormat.Floats;
+        if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
+        float vx = packed[o] - ox, vy = packed[o + 1] - oy, vz = packed[o + 2] - oz;
+        float dist = XMath.Sqrt(vx * vx + vy * vy + vz * vz);
+        if (dist <= 1e-6f) return;
+        if ((vx * dx + vy * dy + vz * dz) < cosHalf * dist) return;   // outside the cone
+        int bin = (int)(dist * binsPerUnit);
+        if (bin >= DepthBins) bin = DepthBins - 1;
+        Atomic.Add(ref hist[bin], 1);
+    }
+
+    /// <summary>
+    /// The median distance from <paramref name="origin"/> to the visible splats within <paramref name="halfAngleDeg"/>
+    /// of <paramref name="forward"/> - how far away the subject of a view is - on the GPU (a 2048-bin histogram over
+    /// the scene's robust size; the host reads 8 KB). Null when nothing is in the cone. The VR start scale uses it:
+    /// the robust bounds of an inward-facing capture take in its whole surroundings (Truck: 25 x 18 units, its middle
+    /// BEHIND the start camera), which shrank the truck to 0.7 m (TJ's Quest, 2026-10-03).
+    /// </summary>
+    public static async Task<float?> MedianDistanceInConeAsync(Accelerator accel, MemoryBuffer1D<float, Stride1D.Dense> packed,
+        int splatCount, Vector3 origin, Vector3 forward, float halfAngleDeg = 20f)
+    {
+        var box = await ComputeRobustAsync(accel, packed, splatCount);
+        if (box is not { } b) return null;
+        float range = MathF.Max(b.Diagonal * 2f, 1e-4f);
+        float binsPerUnit = DepthBins / range;
+        var f = Vector3.Normalize(forward);
+        _coneKernel ??= accel.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int,
+            float, float, float, float, float, float, float, float>(ConeDistanceKernel);
+        using var hist = accel.Allocate1D<int>(DepthBins);
+        hist.MemSetToZero();
+        _coneKernel(splatCount, packed.View, hist.View, splatCount, origin.X, origin.Y, origin.Z, f.X, f.Y, f.Z,
+            MathF.Cos(halfAngleDeg * MathF.PI / 180f), binsPerUnit);
+        await accel.SynchronizeAsync();
+        // CPU transfer: 2048 bin counts of scene metadata.
+        int[] h = await hist.CopyToHostAsync<int>(0, DepthBins);
+        return MedianOfHistogram(h, binsPerUnit);
+    }
+
+    /// <summary>The median of a distance histogram (bin k covers [k, k+1) / binsPerUnit), at the bin's middle; null if
+    /// empty. Public so it can be tested directly.</summary>
+    public static float? MedianOfHistogram(ReadOnlySpan<int> hist, float binsPerUnit)
+    {
+        long total = 0;
+        foreach (var c in hist) total += c;
+        if (total == 0) return null;
+        long half = (total + 1) / 2, run = 0;
+        for (int k = 0; k < hist.Length; k++)
+        {
+            run += hist[k];
+            if (run >= half) return (k + 0.5f) / binsPerUnit;
+        }
+        return (hist.Length - 0.5f) / binsPerUnit;
     }
 
     /// <summary>

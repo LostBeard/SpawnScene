@@ -54,6 +54,18 @@ public partial class Studio
             catch (Exception bex) { Console.WriteLine($"[XR] scene bounds failed ({bex.Message}); VR start at scale 1"); }
             if (_xrSceneBox is { } b)
                 Console.WriteLine($"[XR] scene bounds (1-99%) {b.MinX:F2},{b.MinY:F2},{b.MinZ:F2} .. {b.MaxX:F2},{b.MaxY:F2},{b.MaxZ:F2}");
+            // How far away the start view's subject is (VR start scale; the bounds are the fallback).
+            _xrViewDistance = null;
+            if (!_xrPlaceMiniature && packed != null && n > 0)
+            {
+                try
+                {
+                    var cam = _sceneManager.Camera;
+                    _xrViewDistance = await SplatBounds.MedianDistanceInConeAsync(_gpuService.WebGPUAccelerator, packed, n, cam.Position, cam.Forward);
+                    Console.WriteLine($"[XR] the start view's subject is {_xrViewDistance:F3} scene units away");
+                }
+                catch (Exception vex) { Console.WriteLine($"[XR] view distance failed ({vex.Message})"); }
+            }
             else
                 _xrPlaceMiniature = false;   // no bounds: the VR start at scale 1 (head at the camera)
             _xrBoundsReady = true;
@@ -118,6 +130,7 @@ public partial class Studio
     System.Numerics.Vector3? _xrLastHit;
     System.Numerics.Vector3 _xrAnchorScene;
     SplatBounds.Aabb? _xrSceneBox;
+    float? _xrViewDistance;   // median distance to what the start view looks at (scene units)
     // Thumbstick move / snap-turn / rise, applied to _xrSceneFromRoom each frame.
     readonly XRLocomotion _xrLocomotion = new();
     // Grips: one drags the scene, both scale and turn it (XRWorldGrab).
@@ -141,7 +154,8 @@ public partial class Studio
             }
             else
             {
-                float scale = _xrSceneBox is { } b ? XRSceneAlignment.ComfortScale(b, cam.Position, cam.Forward) : 1f;
+                float scale = _xrViewDistance is float vd ? XRSceneAlignment.ComfortScale(vd)
+                    : _xrSceneBox is { } b ? XRSceneAlignment.ComfortScale(b, cam.Position, cam.Forward) : 1f;
                 _xrSceneFromRoom = XRSceneAlignment.SceneFromRoom(frameData.HeadPosition, frameData.HeadOrientation, cam.Position, cam.Forward, scale);
                 Console.WriteLine($"[XR] room placed in the scene: head {frameData.HeadPosition} -> camera {cam.Position}, facing {cam.Forward}, {scale:G3} scene units per metre");
             }

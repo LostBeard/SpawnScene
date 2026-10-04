@@ -102,6 +102,13 @@ public partial class Studio
             var opened = _projects.First(p => p.Id == project.Id);
             OnOpenProject(opened);
             await LoadProjectSceneAsync(opened.Scenes.First(s => s.Id == scene.Id));
+            // &xrhook=1 (harness): the XR entry hook, as the Room autotest offers it (tools/_cdp_xr.js).
+            if (query.ContainsKey("xrhook"))
+            {
+                _xrHook ??= new SpawnDev.SpawnJS.ActionCallback<string>(m => _ = EnterXRAsync(m));
+                _js.Set("__spawnsceneEnterXR", _xrHook);
+                Console.WriteLine("[Autotest] XR hook ready");
+            }
             Console.WriteLine("[Import] DONE");
         }
         catch (Exception ex) { Console.WriteLine($"[Import] FAIL: {ex.Message}"); }

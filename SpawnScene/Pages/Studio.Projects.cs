@@ -1061,6 +1061,11 @@ public partial class Studio
                 GpuSplatCount = scene.SplatCount,
                 SourceName = "depth-splat",
             };
+            // As the generation paths show a scene: sorted alpha at full resolution. A reopened scene fell back to the
+            // stochastic renderer - 2 samples a pixel while moving, so every saved scene looked grainy and broken until
+            // the camera stopped, while the same scene had looked clean when it was generated (2026-10-04).
+            _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
+            _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
             _renderService.SetActiveSceneGpuLoaded(gaussianScene);
             _sceneManager.ActiveScene = gaussianScene;
 

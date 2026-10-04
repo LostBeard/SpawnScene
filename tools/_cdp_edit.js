@@ -36,7 +36,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     if (m.method === 'Runtime.consoleAPICalled') {
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       if ((process.env.SPAWNSCENE_EDIT_WAIT ? new RegExp(process.env.SPAWNSCENE_EDIT_WAIT) : /\[Autotest\] PASS/).test(t)) passed = true;
-      if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Dataset\] (FAIL|DONE)|\[Studio\] (scene saved|Loaded|scene .*SH)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
+      if (process.env.SPAWNSCENE_EDIT_PRINT && new RegExp(process.env.SPAWNSCENE_EDIT_PRINT).test(t)) console.log('CON ' + t.slice(0, 400));
+      else if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Dataset\] (FAIL|DONE)|\[Studio\] (scene saved|Loaded|scene .*SH)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
@@ -72,6 +73,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'none') return;   // just run SPAWNSCENE_EDIT_QUERY to its WAIT line
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'trained') {
       // After the project autotest (trained scene saved, project page shown): open it, copy/paste with its SH bands,
       // save as a new scene, open that. The viewer of a project scene has no Depth button: Edit sits left of AR.

@@ -174,11 +174,26 @@ public partial class Studio
 
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
 
+            // The photo on the GPU: the camera estimate and the unprojection both read it in place.
+            var rgbaGpuBuf = _gpuService.WebGPUAccelerator.Allocate1D<int>(w * h);
+            SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.UploadToDevice(dataArray, rgbaGpuBuf);
+
             // Build camera params from EXIF (or fall back to heuristic)
             var camera = CameraParams.CreateFromExif(w, h, exifFocal);
             var focalSource = exifFocal?.FocalLength35mm is > 0 ? "EXIF 35mm"
                 : exifFocal?.FocalLengthMm is > 0 and < 10f ? $"phone estimate ({exifFocal.FocalLengthMm:F1}mm * 7x)"
                 : "heuristic 1.2x";
+            // Without a real focal length (no EXIF 35mm equivalent: generated images, stripped metadata) ask DAv3 for
+            // the camera. The 1.2x-the-long-side guess is a ~45 degree view, far narrower than real photos: measured
+            // against COLMAP ground truth it was +102% on Truck (979 px, f=582) and +54% on DrJohnson (1332 px,
+            // f=1035) - a room built that narrow for its depth looked 1.5-2x too deep (TJ, 2026-10-03: "single photo
+            // generated splat scenes seem to have exaggerated depth"). DAv3 on one photo: +10..+29%, median ~+14%.
+            if (exifFocal?.FocalLength35mm is not > 0 && await EstimateSingleViewIntrinsicsAsync(rgbaGpuBuf, w, h, source.FileName) is { } k)
+            {
+                camera.FocalX = k[0]; camera.FocalY = k[4];
+                camera.CenterX = k[2]; camera.CenterY = k[5];
+                focalSource = "DAv3 camera estimate";
+            }
             Console.WriteLine($"[EXIF] {source.FileName}: fx={camera.FocalX:F1}px ({focalSource})");
 
             // Depth: JS TypedArray → EstimateGpuRawAsync(TypedArray) via the service (no managed Read<int>).
@@ -188,9 +203,7 @@ public partial class Studio
             var depthResult = await _depthService.EstimateDepthFromJsRgbaAsync(dataArray, w, h);
             if (depthResult == null) { _statusMessage = "Error: depth estimation failed"; BuildProjectDetailUI(); return; }
 
-            // Gaussian path: JS TypedArray → GPU directly (no .NET heap).
-            var rgbaGpuBuf = _gpuService.WebGPUAccelerator.Allocate1D<int>(w * h);
-            SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.UploadToDevice(dataArray, rgbaGpuBuf);
+            // Gaussian path: the RGBA uploaded above (JS TypedArray → GPU directly, no .NET heap).
             using var gpuImage = new GpuImage
             {
                 PackedRgba = rgbaGpuBuf,
@@ -873,6 +886,27 @@ public partial class Studio
         }
         Console.WriteLine($"[Studio] save drops {n - visible:N0} deleted splats: {visible:N0} of {n:N0} kept");
         return (visible, packedU8, sh);
+    }
+
+    /// <summary>
+    /// DAv3's camera for a single photo (a one-view joint pass): its 3x3 intrinsics in the photo's pixels, row-major, or
+    /// null. Reads the photo where it already is on the GPU.
+    /// </summary>
+    async Task<float[]?> EstimateSingleViewIntrinsicsAsync(
+        ILGPU.Runtime.MemoryBuffer1D<int, ILGPU.Stride1D.Dense> rgba, int w, int h, string name)
+    {
+        try
+        {
+            _statusMessage = "Estimating the camera...";
+            BuildProjectDetailUI();
+            var image = new ImportedImage { FileName = name, Width = w, Height = h, GpuRgba = rgba };
+            using var mv = await _depthService.EstimateDepthMultiViewAsync(new[] { image }, maxViews: 1);
+            if (mv?.Intrinsics is { Length: > 0 } ks && ks[0] is { Length: >= 9 } k && k[0] > 0 && k[4] > 0)
+                return k;
+            Console.WriteLine("[Studio] DAv3 gave no camera for this photo; keeping the fallback focal length");
+        }
+        catch (Exception ex) { Console.WriteLine($"[Studio] camera estimate failed: {ex.Message}"); }
+        return null;
     }
 
     // The project scene on screen (loaded or just saved), so an edited copy keeps its training metadata.

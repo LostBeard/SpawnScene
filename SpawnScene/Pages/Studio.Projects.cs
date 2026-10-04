@@ -363,7 +363,11 @@ public partial class Studio
             // (dataset_readers: test = image index % llffhold == 0, images sorted by name), for numbers
             // comparable with the published ones.
             // holdOut: false (a user's own project) trains on EVERY photo - the held-out split is for measuring.
-            bool supervise = !holdOut || (LlffHold > 0 ? posed % LlffHold != 0 : posed % 4 != 3);
+            // By IMAGE index (i), not by posed count: with our own SfM a camera can go unplaced, and counting posed views
+            // shifted every later held-out photo by one - bicycle's own-SfM run and its COLMAP-pose run then shared only
+            // 2 of 25 test photos, and the comparison read as a 5 dB pose gap (2026-10-04). An unplaced test photo is
+            // simply not scored.
+            bool supervise = !holdOut || (LlffHold > 0 ? i % LlffHold != 0 : posed % 4 != 3);
             if (!supervise) held++;
             posed++;
 

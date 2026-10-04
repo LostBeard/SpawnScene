@@ -53,6 +53,10 @@ public class ProjectScene
     public int TrainedIterations { get; set; }
     /// <summary>The scene this one was edited from (viewer Edit tools, then Save), or null.</summary>
     public string? EditedFrom { get; set; }
+    /// <summary>Where the viewer (and so the headset) starts: position, forward, up (9 floats), or null. A saved scene
+    /// keeps no training cameras, and the single-photo default (origin, looking +Z) means nothing for an SfM
+    /// reconstruction - a reopened Truck started inside the truck.</summary>
+    public float[]? HomeView { get; set; }
     /// <summary>
     /// How the SH bands are stored: SphericalHarmonics.Parts files (scenes/{id}.sh{p}.bin, PartFloatsPerSplat floats a
     /// splat each), or 0 for a scene saved before the split (one row-major scenes/{id}.sh.bin, 45 floats a splat).

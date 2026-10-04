@@ -25,8 +25,10 @@ public partial class Studio
             if (sh == null && _gpuRenderer.ShDegree > 0) sh = await _gpuRenderer.ReadShRestUint8ArraysAsync();
             if (packedU8 == null) { _editNote = "Nothing to export"; return; }
             string name = _activeProject?.Name ?? "SpawnScene scene";
+            var c = _sceneManager.Camera;   // the file opens at the view it was exported from
             var header = new SceneFile.Header(name, count, SplatFormat.Floats, _gpuRenderer.ColoursAreShDc,
-                sh != null ? _gpuRenderer.ShDegree : 0, sh?.Length ?? 0, _viewedProjectScene?.TrainedIterations ?? 0, DateTime.UtcNow);
+                sh != null ? _gpuRenderer.ShDegree : 0, sh?.Length ?? 0, _viewedProjectScene?.TrainedIterations ?? 0, DateTime.UtcNow,
+                new[] { c.Position.X, c.Position.Y, c.Position.Z, c.Forward.X, c.Forward.Y, c.Forward.Z, c.Up.X, c.Up.Y, c.Up.Z });
             parts.Add(new Uint8Array(SceneFile.Prefix(header)));
             parts.Add(packedU8);
             if (sh != null) parts.AddRange(sh);
@@ -89,6 +91,7 @@ public partial class Studio
             {
                 SplatCount = h.SplatCount, FloatsPerSplat = h.FloatsPerSplat, ColoursAreShDc = h.ColoursAreShDc,
                 ShDegree = h.ShParts > 0 ? h.ShDegree : 0, TrainedIterations = h.TrainedIterations,
+                HomeView = h.HomeView,
             };
             await _projectService.SaveSceneAsync(project.Id, scene, packedU8);
             if (sh.Count > 0) await _projectService.SaveSceneShRestAsync(project.Id, scene, sh.ToArray());

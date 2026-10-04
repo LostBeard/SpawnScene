@@ -889,6 +889,43 @@ public partial class Studio
     }
 
     /// <summary>
+    /// The view a scene saved now should open at: the first capture camera when the scene on screen still has its
+    /// cameras (just generated), else what the viewer is looking at.
+    /// </summary>
+    float[]? CurrentHomeView()
+    {
+        var cams = _sceneManager.ActiveScene?.TrainingCameras;
+        if (cams is { Count: > 0 }) return Pose(cams[0].Position, cams[0].Forward, cams[0].Up);
+        var c = _sceneManager.Camera;
+        return Pose(c.Position, c.Forward, c.Up);
+        static float[] Pose(System.Numerics.Vector3 p, System.Numerics.Vector3 f, System.Numerics.Vector3 u)
+            => new[] { p.X, p.Y, p.Z, f.X, f.Y, f.Z, u.X, u.Y, u.Z };
+    }
+
+    /// <summary>
+    /// Open a loaded scene at its home view; a trained scene saved before home views existed starts outside its robust
+    /// bounds looking at their middle (the single-photo default - origin, looking +Z - is arbitrary for SfM).
+    /// </summary>
+    async Task SeatAtHomeViewAsync(ProjectScene scene)
+    {
+        if (_cameraController == null) return;
+        if (scene.HomeView is { Length: 9 } h)
+        {
+            _cameraController.SetPose(new(h[0], h[1], h[2]), new(h[3], h[4], h[5]), new(h[6], h[7], h[8]));
+            return;
+        }
+        if (scene.TrainedIterations <= 0 || _gpuRenderer.PackedSplatBuffer is not { } packed) return;
+        var box = await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount);
+        if (box is not { } b) return;
+        var centre = new System.Numerics.Vector3(b.CentreX, b.CentreY, b.CentreZ);
+        float radius = 0.5f * b.Diagonal;
+        // A little above, from the -Z side (SfM scenes are levelled to world up).
+        var from = centre + new System.Numerics.Vector3(0, 0.35f * radius, -1.6f * radius);
+        _cameraController.SetPose(from, System.Numerics.Vector3.Normalize(centre - from), System.Numerics.Vector3.UnitY);
+        Console.WriteLine($"[Studio] no home view saved: seated outside the scene's bounds (radius {radius:F2})");
+    }
+
+    /// <summary>
     /// DAv3's camera for a single photo (a one-view joint pass): its 3x3 intrinsics in the photo's pixels, row-major, or
     /// null. Reads the photo where it already is on the GPU.
     /// </summary>
@@ -942,6 +979,7 @@ public partial class Studio
                 ShDegree = shRest != null ? _gpuRenderer.ShDegree : 0,
                 TrainedIterations = trainedIters,
                 EditedFrom = editedFrom,
+                HomeView = CurrentHomeView(),
             };
             await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
             _viewedProjectScene = projectScene;
@@ -1033,6 +1071,7 @@ public partial class Studio
 
             Console.WriteLine($"[Studio] Loaded scene from OPFS: {scene.SplatCount:N0} splats");
             _viewedProjectScene = scene;
+            await SeatAtHomeViewAsync(scene);
         }
         catch (Exception ex)
         {

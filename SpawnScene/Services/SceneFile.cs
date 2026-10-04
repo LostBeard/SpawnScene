@@ -15,9 +15,11 @@ public static class SceneFile
     public const string Magic = "SPSCENE1";
     public const string Extension = ".spawnscene";
 
+    /// <param name="HomeView">Where the viewer starts: position, forward, up (9 floats) - the view it was exported
+    /// from. Optional.</param>
     public sealed record Header(
         string Name, int SplatCount, int FloatsPerSplat, bool ColoursAreShDc, int ShDegree, int ShParts,
-        int TrainedIterations, DateTime SavedAt);
+        int TrainedIterations, DateTime SavedAt, float[]? HomeView = null);
 
     /// <summary>Magic + length + header JSON: the bytes that precede the splat data.</summary>
     public static byte[] Prefix(Header header)

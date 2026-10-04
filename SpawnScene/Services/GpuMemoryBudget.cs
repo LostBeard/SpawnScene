@@ -15,6 +15,10 @@ namespace SpawnScene.Services;
 /// 532, and the whole was ~1,050 B: SH bank 720, other per-splat 120, Adam 112, keys ~90. With the SH Adam moments in
 /// bfloat16 (b128) the SH bank is 543 and the whole ~870 (TruckFull 1.6M splats: keys 201, per-splat 183, Adam 171,
 /// SH 828 MB); 900 keeps headroom for key demand, which varies by scene and view.
+/// The BROWSER caps it too (MEASURED 2026-10-04): Chrome/Edge on Windows put the GPU process in a job whose memory limit
+/// scales with system RAM - 8 GB at <= 16 GB RAM, 16/32/64 GB above (sandbox_win.cc GetJobMemoryLimit) - and WebGPU
+/// allocations count against it (GPU-process private bytes tracked VRAM 1:1). Past it the GPU process is killed and the
+/// device lost: on a 12 GB RTX 4070 in a 15.7 GB-RAM PC every loss on record came at ~8.0 GB (c4 survived at 7.99).
 /// </remarks>
 public static class GpuMemoryBudget
 {

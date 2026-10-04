@@ -147,6 +147,10 @@ public partial class Studio : IAsyncDisposable
         _gameUI.Init(_device, _queue, _canvasFormat, _canvasRef, _canvasWidth, _canvasHeight);
         UITheme.Current = UITheme.Dark;
 
+        // A device loss kills every GPU path, the canvas UI included: say so in HTML (Studio.razor).
+        _gpuService.DeviceLostExplained += OnDeviceLost;
+        if (_gpuService.DeviceLostExplanation is { } lost) OnDeviceLost(lost);
+
         // Load projects from OPFS and build initial UI
         _projects = await _projectService.ListProjectsAsync();
         BuildProjectBrowserUI();
@@ -617,8 +621,19 @@ public partial class Studio : IAsyncDisposable
 
     ActionCallback<string>? _xrHook;
 
+    string? _deviceLostText;
+
+    void OnDeviceLost(string explanation)
+    {
+        _deviceLostText = explanation;
+        _ = InvokeAsync(StateHasChanged);
+    }
+
+    void ReloadPage() => _nav.NavigateTo(_nav.Uri, forceLoad: true);
+
     public async ValueTask DisposeAsync()
     {
+        _gpuService.DeviceLostExplained -= OnDeviceLost;
         _renderLoopRunning = false;
         _sceneManager.OnSceneChanged -= OnSceneChanged;
 

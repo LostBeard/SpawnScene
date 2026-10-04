@@ -465,7 +465,8 @@ public partial class Studio
             GpuMemoryGB, v => GpuMemoryGB = v,
             $"Training uses up to {budgetTargets >> 20} MB for photos and {deviceSplats:N0} splats " +
             $"(about {GpuMemoryBudget.BytesPerSplat:N0} bytes each while training). Auto assumes {GpuMemoryBudget.AutoGB} GB; " +
-            "set your GPU's memory to train larger scenes. Setting more than the GPU has can lose the device mid-run.");
+            "set your GPU's memory to train larger scenes. Setting more than the GPU has can lose the device mid-run. " +
+            "Chrome and Edge on Windows also cap all GPU use at 8 GB on PCs with 16 GB of RAM or less (16 GB with 32 GB RAM).");
 
         y = AddSectionHeading(parent, x, y + 8, w, "Single photo", "depth");
         var presets = new[] { ("Fast", 4, 0f), ("Standard", 2, 0.3f), ("High", 1, 0.3f) };

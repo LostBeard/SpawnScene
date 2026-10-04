@@ -81,6 +81,16 @@ async function ensureChrome({ headless = false } = {}) {
     args.unshift(`--load-extension=${path.resolve(extension)}`, '--disable-features=DisableLoadExtensionCommandLineSwitch');
     console.log(`[chrome] loading extension ${path.resolve(extension)}`);
   }
+  // SPAWNSCENE_CHROME_HIGH_GPU_MEM=1: lift Chrome's GPU-process job memory limit. On Windows it scales with system RAM -
+  // 8 GB at <= 16 GB RAM (this box: 15.7 GB), 16/32/64 GB above - and WebGPU allocations count against it (the GPU
+  // process's private bytes track VRAM 1:1). Past it the GPU process is killed: "GpuProcessHost: The GPU process died
+  // due to out of memory" in chrome://gpu, "A valid external Instance reference no longer exists" in the page. Every
+  // device loss on record (b17..c4) was this, at ~8.0 GB, on a 12 GB card. Off by default: users have the limit.
+  // (sandbox/policy/win/sandbox_win.cc GetJobMemoryLimit, Chrome 151: kWinSboxHighGPUJobMemoryLimits -> 1 TB.)
+  if (process.env.SPAWNSCENE_CHROME_HIGH_GPU_MEM === '1') {
+    args.unshift('--enable-features=WinSboxHighGPUJobMemoryLimits');
+    console.log('[chrome] GPU process job memory limit lifted (WinSboxHighGPUJobMemoryLimits)');
+  }
   // SPAWNSCENE_CHROME_LOG=<file>: Chrome's own log (browser + GPU process). The page only ever sees
   // "A valid external Instance reference no longer exists" when the GPU process drops its Dawn
   // instance; WHY (D3D12 DEVICE_REMOVED hresult, GPU process exit code, Dawn OOM) is logged

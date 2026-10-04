@@ -135,10 +135,38 @@ public class GpuService : IBackgroundService, IAsyncDisposable
         // MEASURED: DrJohnson 912k and Bathroom 757k both died on the first ApplySplatPlan with
         // exactly that message and no further information, twice, until this was added.
         WebGPUAccelerator.DeviceLost += (reason, message) =>
+        {
             Console.WriteLine($"[GpuService] DEVICE LOST: reason={reason} message={message}");
+            DeviceLostExplanation = DescribeDeviceLoss(message);
+            try { DeviceLostExplained?.Invoke(DeviceLostExplanation); }
+            catch (Exception ex) { Console.WriteLine($"[GpuService] device-lost listener failed: {ex.Message}"); }
+        };
         NativeDevice.OnUncapturedError += OnUncapturedGpuError;
 
         Console.WriteLine($"[GpuService] WebGPU initialized: {DeviceName}");
+    }
+
+    /// <summary>What to tell the user once the device is lost (null while it is not). Nothing on the GPU works after.</summary>
+    public string? DeviceLostExplanation { get; private set; }
+
+    /// <summary>Raised once when the device is lost, with <see cref="DeviceLostExplanation"/>.</summary>
+    public event Action<string>? DeviceLostExplained;
+
+    /// <summary>
+    /// A user-facing account of a device loss. Dawn's "A valid external Instance reference no longer exists" means the
+    /// browser's GPU PROCESS went away. Every such loss measured on SpawnScene (b17 .. c4, 2026-10-04) was chrome://gpu's
+    /// "GpuProcessHost: The GPU process died due to out of memory": Chrome on Windows caps its GPU process with a job
+    /// memory limit that scales with system RAM - 8 GB at 16 GB of RAM or less, 16/32/64 GB above
+    /// (sandbox_win.cc GetJobMemoryLimit) - and WebGPU allocations count against it, whatever the card's VRAM.
+    /// </summary>
+    public static string DescribeDeviceLoss(string? message)
+    {
+        if (message?.Contains("external Instance reference", StringComparison.OrdinalIgnoreCase) == true)
+            return "The browser's GPU process ran out of memory and restarted, so this page lost its GPU. " +
+                   "Chrome and Edge on Windows cap that process by system RAM - 8 GB on PCs with 16 GB of RAM or less - " +
+                   "however much memory the graphics card has. Reload the page, then lower Settings > GPU memory " +
+                   "(or use fewer or smaller photos).";
+        return $"The GPU stopped responding ({message ?? "no reason given"}). Reload the page to continue.";
     }
 
     /// <summary>

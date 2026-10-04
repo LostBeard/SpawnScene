@@ -425,6 +425,39 @@ public partial class Studio
             }
         }
 
+        // TURN IN PLACE at a capture pose, as a viewer does: the first thing TJ did in the Truck demo was stand at the
+        // home view and turn left 90 deg - into street and building the photos only saw past the truck - and it was a
+        // mess of needles that every held-out number missed (2026-10-04). Held-out views sit beside the photos;
+        // these do not. Intrinsics stay the photo's, and each pose is logged (TURN-POSE) so a reference trainer
+        // (gsplat) can render the identical view for a side by side.
+        var turnSeats = new List<int> { 0 };
+        int heldSeat = viewIdx.FirstOrDefault(i => !scene.TrainingViews[i].UsedForSupervision, -1);
+        if (heldSeat > 0) turnSeats.Add(heldSeat);
+        foreach (int i in turnSeats)
+        {
+            var tv = scene.TrainingViews[i];
+            var c0 = tv.Camera;
+            var camUp = Vector3.Normalize(c0.Up);
+            foreach (int deg in new[] { 45, 90, 180, -45, -90 })
+            {
+                // Positive = turn LEFT: rotating forward about up by +angle (right-handed, Y up) swings it left.
+                var q = Quaternion.CreateFromAxisAngle(camUp, deg * MathF.PI / 180f);
+                var turned = c0.ScaledTo(c0.Width, c0.Height);
+                turned.Position = c0.Position;
+                turned.Forward = Vector3.Normalize(Vector3.Transform(c0.Forward, q));
+                turned.Up = camUp;
+                string name = $"turn{(deg >= 0 ? "L" : "R")}{Math.Abs(deg)}-{i}";
+                await ParkOnGroundTruthPoseAsync(name, turned);
+                static string F(params float[] v) => string.Join(" ", v.Select(x => x.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
+                Console.WriteLine(
+                    $"[Dataset] TURN-POSE {name} {tv.ImageName} pos {F(turned.Position.X, turned.Position.Y, turned.Position.Z)} " +
+                    $"fwd {F(turned.Forward.X, turned.Forward.Y, turned.Forward.Z)} up {F(turned.Up.X, turned.Up.Y, turned.Up.Z)} " +
+                    $"K {F(turned.FocalX, turned.FocalY, turned.CenterX, turned.CenterY)} size {turned.Width} {turned.Height}");
+                Console.WriteLine($"[Dataset] READY-FOR-CAPTURE view-{name} {tv.ImageName} {turned.Width}x{turned.Height} turns={tv.QuarterTurns}");
+                await Task.Delay(1800);
+            }
+        }
+
         var moves = new (string Name, Vector3 Offset, float Yaw)[]
         {
             ("left",  -right * span, 0f),

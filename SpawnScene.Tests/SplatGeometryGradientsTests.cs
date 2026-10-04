@@ -356,6 +356,32 @@ public class SplatGeometryGradientsTests
     }
 
     [Test]
+    public void Project_TiltedNeedle_LiesAlongItsOwnDirectionInPixels()
+    {
+        // GROUND TRUTH, not a second copy of the arithmetic: a thin splat whose long axis points up-and-right on screen
+        // must weigh pixels up-and-right of its centre (pixel y DOWN: +x, -y) far above pixels down-and-right. The
+        // conic's xy term had the wrong sign - camera y is up, pixel y is down - so every tilted ellipse was drawn
+        // MIRRORED, in the trainer and the viewer alike; the copies agreed with each other and every gradient check
+        // passed, while gsplat's Truck rendered as fur (2026-10-04).
+        var v = new SplatGeometryGradients.View
+        {
+            Rx = 1f, Ry = 0f, Rz = 0f, Ux = 0f, Uy = 1f, Uz = 0f, Fx3 = 0f, Fy3 = 0f, Fz3 = -1f,   // looks down -Z, Y up
+            FocalX = 1000f, FocalY = 1000f, CenterX = 500f, CenterY = 400f,
+            LimX = SplatCovariance.JacobianClampLimit(1000f, 1000f), LimY = SplatCovariance.JacobianClampLimit(800f, 1000f),
+        };
+        // Long axis = local X turned 45 degrees about the view axis: world (1, 1, 0)/sqrt2, up-and-right on screen.
+        float h = MathF.Sin(MathF.PI / 8), c = MathF.Cos(MathF.PI / 8);
+        var g = Splat(0f, 0f, -5f, 0.5f, 0.01f, 0.01f, 0f, 0f, h, c);
+        var p = SplatGeometryGradients.Project(g, v);
+        Assert.That(p.Valid, Is.True);
+        float W(float dx, float dy) =>
+            MathF.Exp(-0.5f * (p.ConicA * dx * dx + p.ConicC * dy * dy) - p.ConicB * dx * dy);
+        float along = W(10f, -10f), across = W(10f, 10f);
+        Assert.That(along, Is.GreaterThan(0.9f), "up-and-right of centre is ON the needle");
+        Assert.That(across, Is.LessThan(1e-3f), "down-and-right of centre is off the needle (a mirrored footprint puts it on)");
+    }
+
+    [Test]
     public void Project_MatchesTheRasterizersOwnProjection()
     {
         // The rasteriser gate projects splats with its own copy of this arithmetic. If the two
@@ -382,7 +408,7 @@ public class SplatGeometryGradientsTests
         Assert.That(p.ScreenX, Is.EqualTo(v.FocalX * tx / tz + v.CenterX).Within(1e-3f));
         Assert.That(p.ScreenY, Is.EqualTo(v.CenterY - v.FocalY * ty / tz).Within(1e-3f));
         Assert.That(p.ConicA, Is.EqualTo(cov2.C * invDet).Within(1e-6f));
-        Assert.That(p.ConicB, Is.EqualTo(-cov2.B * invDet).Within(1e-6f));
+        Assert.That(p.ConicB, Is.EqualTo(cov2.B * invDet).Within(1e-6f));   // pixel axes, y down
         Assert.That(p.ConicC, Is.EqualTo(cov2.A * invDet).Within(1e-6f));
     }
 }

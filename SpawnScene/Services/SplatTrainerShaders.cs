@@ -224,7 +224,12 @@ fn project(i : u32) -> Projected {
     let inv_det = 1.0 / det;
 
     // Conic is the INVERSE covariance; the rasteriser consumes it directly.
-    p.conic = vec3<f32>(cov_c * inv_det, -cov_b * inv_det, cov_a * inv_det);
+    // In PIXEL axes (y down, as p.centre and every fragment offset): flipping y negates the off-diagonal, so the
+    // conic's xy term is +cov_b/det. It was -cov_b/det - every tilted splat mirrored about the horizontal, in the
+    // trainer AND the viewer (consistent with each other, so nothing looked wrong until a standard 3DGS scene came
+    // in: gsplat's Truck drew as fur where gsplat drew it crisp, 2026-10-04). A per-view mirror is no 3D shape, so
+    // the trainer could not fit thin splats across views either.
+    p.conic = vec3<f32>(cov_c * inv_det, cov_b * inv_det, cov_a * inv_det);
 
     // Screen position. y is measured UP in camera space but DOWN in pixels.
     p.centre = vec2<f32>(
@@ -1884,7 +1889,8 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
     let up_cx = bitcast<f32>(grad_fixed[gb + 4u]);
     let up_cy = bitcast<f32>(grad_fixed[gb + 5u]);
     let up_ca = bitcast<f32>(grad_fixed[gb + 6u]);
-    let up_cb = bitcast<f32>(grad_fixed[gb + 7u]);
+    // dL/d(conic.y); conic.y = +cov_b/det in pixel axes (project()), the formulas below are for -cov_b/det: negate.
+    let up_cb = -bitcast<f32>(grad_fixed[gb + 7u]);
     let up_cc = bitcast<f32>(grad_fixed[gb + 8u]);
 
     // A splat this view never touched has no gradient. By default it takes no step: stale momentum would

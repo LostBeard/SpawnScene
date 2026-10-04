@@ -60,7 +60,7 @@ public class GpuGaussianRenderer : IDisposable
     // Gaussian vertex buffer: packed format (position f32x3 + color_alpha u8x4 + scale f16x4 + quat f16x4)
     private GPUBuffer? _splatBuffer;
     private int _splatCount;
-    private const int PackedBytesPerSplat = SplatFormat.PackedBytes; // 12 pos + 8 color/alpha + 8 scale + 8 quat
+    private const int PackedBytesPerSplat = SplatFormat.PackedBytes; // 12 pos + 8 color/alpha f16 + 12 scale + 16 quat f32
 
     // Pack compute pipeline: converts Float32 sort output → packed vertex format
     private GPUComputePipeline? _packPipeline;
@@ -727,8 +727,8 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                         {
                             new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },  // position (12B)
                             new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.Float16x4 },  // color+alpha (8B)
-                            new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float16x4 },  // scale sx,sy,sz (8B)
-                            new() { ShaderLocation = 3, Offset = 28, Format = GPUVertexFormat.Float16x4 },  // rotation quat (8B)
+                            new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float32x3 },  // scale sx,sy,sz (12B f32)
+                            new() { ShaderLocation = 3, Offset = 32, Format = GPUVertexFormat.Float32x4 },  // rotation quat (16B f32)
                         }
                     }
                 }
@@ -780,8 +780,8 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                 {
                     new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },
                     new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.Float16x4 },
-                    new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float16x4 },
-                    new() { ShaderLocation = 3, Offset = 28, Format = GPUVertexFormat.Float16x4 },
+                    new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float32x3 },
+                    new() { ShaderLocation = 3, Offset = 32, Format = GPUVertexFormat.Float32x4 },
                 }
             }
         };
@@ -2307,8 +2307,8 @@ struct Uniforms {
 struct VertexInput {
     @location(0) position    : vec3<f32>,
     @location(1) color_alpha : vec4<f32>,  // Unorm8x4
-    @location(2) scale       : vec4<f32>,  // Float16x4: sx, sy, sz, pad (world units, 1 sigma)
-    @location(3) quat        : vec4<f32>,  // Float16x4: x, y, z, w
+    @location(2) scale       : vec4<f32>,  // Float32x3: sx, sy, sz (w reads 1) (world units, 1 sigma)
+    @location(3) quat        : vec4<f32>,  // Float32x4: x, y, z, w
 };
 
 struct VertexOutput {
@@ -2339,6 +2339,9 @@ const SIGMA_CUTOFF : f32 = 3.0;
 // half-pixel sigma instead of letting it alias into a flickering dot. Replaces the old
 // max(radius, 0.25px) clamp, which fattened every splat instead of only the sub-pixel ones.
 const EWA_FILTER_PX2 : f32 = 0.3;
+// Viewer near cull, scene units: the trainer's and the reference rasteriser's 0.2. (Lowering it to 0.01 changed
+// nothing measurable on gsplat's imported Truck, 2026-10-04.)
+const VIEWER_NEAR : f32 = 0.2;
 
 // A splat this large is either sitting on the near plane or numerically broken; either way it
 // can only cost fill rate. A rasterizer guard, not a workaround for a defect elsewhere.
@@ -2379,7 +2382,7 @@ fn vs_trainer(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOu
     let cz = dot(u.cam_fwd.xyz, rel);
     // Near plane 0.2 scene units, same as the trainer and the reference rasteriser. A splat at
     // depth 1e-5 projects to a frame-covering quad whose f32 conic is garbage: a full-screen flash.
-    if (cz <= 0.2) { return splat_reject(uv, rgb); }
+    if (cz <= VIEWER_NEAR) { return splat_reject(uv, rgb); }
 
     // -- Sigma_world = R S S^T R^T --
     let q = normalize(input.quat);
@@ -2436,7 +2439,11 @@ fn vs_trainer(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOu
     //    centre +- 3 sqrt(lambda_max). The eigen-decomposed whitened quad of vs_main disagreed with it for thin,
     //    near splats (MEASURED 2026-09-25 TruckFull 30K: the near post and near pavement smeared in the viewer
     //    and not in the trainer; held-out captures 1.6-2.3 dB under the trainer's own render). --
-    let conic = vec3<f32>(cov_c / det, -cov_b / det, cov_a / det);
+    // The covariance above is in camera axes with y UP (j11/j12 differentiate +fy*y/z), but centre_px and the fragment's
+    // pixel offsets have y DOWN: flipping y negates the off-diagonal, so in pixel space the conic's xy term is +cov_b/det.
+    // It was -cov_b/det: every tilted ellipse drawn MIRRORED about the horizontal - invisible on round splats, fur on
+    // needles (gsplat's Truck at the exact camera gsplat drew cleanly, 2026-10-04).
+    let conic = vec3<f32>(cov_c / det, cov_b / det, cov_a / det);
     let mid = 0.5 * (cov_a + cov_c);
     let l1 = mid + sqrt(max(mid * mid - det, 0.0));
     let op = input.color_alpha.a;
@@ -2491,7 +2498,7 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
     let cz = dot(u.cam_fwd.xyz, rel);
     // Near plane 0.2 scene units, same as the trainer and the reference rasteriser. A splat at
     // depth 1e-5 projects to a frame-covering quad whose f32 conic is garbage: a full-screen flash.
-    if (cz <= 0.2) { return splat_reject(uv, rgb); }
+    if (cz <= VIEWER_NEAR) { return splat_reject(uv, rgb); }
 
     // -- Sigma_world = R S S^T R^T --
     let q = normalize(input.quat);
@@ -2863,7 +2870,7 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     let i = gid.y * nwg.x * 64u + gid.x;
     if (i >= u.count) { return; }
 
-    let dstOff = i * 9u;
+    let dstOff = i * 12u;
 
     // Culled splats have idx=-1 sentinel (sorted last by DescendingInt32).
     // Write a fully-transparent vertex so the fragment shader discards it cheaply.
@@ -2878,6 +2885,9 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
         dst[dstOff + 6u] = 0u;
         dst[dstOff + 7u] = 0u;
         dst[dstOff + 8u] = 0u;
+        dst[dstOff + 9u] = 0u;
+        dst[dstOff + 10u] = 0u;
+        dst[dstOff + 11u] = 0u;
         return;
     }
 
@@ -2904,14 +2914,17 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     dst[dstOff + 3u] = pack2x16float(vec2<f32>(max(rgb.r, 0.0), max(rgb.g, 0.0)));
     dst[dstOff + 4u] = pack2x16float(vec2<f32>(max(rgb.b, 0.0), clamp(src[srcOff + 9u], 0.0, 1.0)));
 
-    // Scale: pack as Float16x4 (sx, sy, sz, 0)
-    dst[dstOff + 5u] = pack2x16float(vec2<f32>(src[srcOff + 6u], src[srcOff + 7u]));
-    dst[dstOff + 6u] = pack2x16float(vec2<f32>(src[srcOff + 8u], 0.0));
-
-    // Rotation: unit quaternion (x, y, z, w) as Float16x4. f16 carries ~3 decimal digits, which
-    // on a unit quaternion is well under a tenth of a degree — invisible at any splat size.
-    dst[dstOff + 7u] = pack2x16float(vec2<f32>(src[srcOff + 10u], src[srcOff + 11u]));
-    dst[dstOff + 8u] = pack2x16float(vec2<f32>(src[srcOff + 12u], src[srcOff + 13u]));
+    // Scale and rotation in FULL f32. They were f16 on the claim that ~3 digits of a unit quaternion is
+    // 'invisible at any splat size' - true for round splats, false for needles: a 3DGS-trained splat 1000x longer
+    // than wide, tilted by f16's 1e-3, moves its long axis by ten times its own width. gsplat's own Truck imported
+    // rendered as fur and streaks at the exact camera gsplat drew cleanly (2026-10-04).
+    dst[dstOff + 5u] = bitcast<u32>(src[srcOff + 6u]);
+    dst[dstOff + 6u] = bitcast<u32>(src[srcOff + 7u]);
+    dst[dstOff + 7u] = bitcast<u32>(src[srcOff + 8u]);
+    dst[dstOff + 8u] = bitcast<u32>(src[srcOff + 10u]);
+    dst[dstOff + 9u] = bitcast<u32>(src[srcOff + 11u]);
+    dst[dstOff + 10u] = bitcast<u32>(src[srcOff + 12u]);
+    dst[dstOff + 11u] = bitcast<u32>(src[srcOff + 13u]);
 }
 ";
 }

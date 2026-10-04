@@ -434,6 +434,12 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("maxradpx", out var mrq) && float.TryParse(mrq,
                     System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mrv) && mrv > 0)
                 SplatDensityControl.MaxScreenRadiusPx = mrv;
+            // &render=sorted|stochastic: draw scenes with that renderer, in any autotest mode (A/B the viewer itself).
+            if (query.TryGetValue("render", out var rmq))
+            {
+                _gpuRenderer.RenderMode = rmq == "sorted" ? SplatRenderMode.Sorted : SplatRenderMode.Stochastic;
+                Console.WriteLine($"[Autotest] render mode {_gpuRenderer.RenderMode}");
+            }
             // &shdeg=N: cap the viewer's SH degree after training (the trainer-render dump uses the same).
             if (query.TryGetValue("shdeg", out var shq) && int.TryParse(shq, out var shv))
                 ViewerShDegreeCap = Math.Max(0, shv);
@@ -590,12 +596,6 @@ public partial class Studio : IAsyncDisposable
                 _sceneManager.OnSceneChanged -= OnDone;
             }
 
-            // &render=sorted|stochastic: draw the generated scene with that renderer (A/B the single-photo look).
-            if (query.TryGetValue("render", out var rmq))
-            {
-                _gpuRenderer.RenderMode = rmq == "sorted" ? SplatRenderMode.Sorted : SplatRenderMode.Stochastic;
-                Console.WriteLine($"[Autotest] render mode {_gpuRenderer.RenderMode}");
-            }
             // Convergence diagnostics: a still camera should accumulate samples (stochastic mode).
             for (int k = 0; k < 3; k++)
             {

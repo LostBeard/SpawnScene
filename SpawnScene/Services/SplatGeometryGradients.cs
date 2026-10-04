@@ -117,7 +117,7 @@ public static class SplatGeometryGradients
             ScreenX = v.FocalX * tx / tz + v.CenterX,
             ScreenY = v.CenterY - v.FocalY * ty / tz,
             ConicA = cov2.C * invDet,
-            ConicB = -cov2.B * invDet,
+            ConicB = cov2.B * invDet,   // pixel axes (y down): +B/det - see SplatTrainerShaders project()
             ConicC = cov2.A * invDet,
             Depth = tz,
             Valid = true,
@@ -179,18 +179,20 @@ public static class SplatGeometryGradients
         float iD2 = iD * iD;
 
         // ── 1. conic = Sigma_2D^-1, in the three unique components ──
-        //   cA = c/D, cB = -b/D, cC = a/D,  D = ac - b^2
+        //   cA = c/D, cB = +b/D (pixel axes, y down), cC = a/D,  D = ac - b^2. The formulas below are written for
+        //   -b/D, so the incoming cB gradient is negated.
+        float upCB = -up.ConicB;
         float gA =
             up.ConicA * (-c * c * iD2) +
-            up.ConicB * (b * c * iD2) +
+            upCB * (b * c * iD2) +
             up.ConicC * (iD - a * c * iD2);
         float gB =
             up.ConicA * (2f * b * c * iD2) +
-            up.ConicB * (-iD - 2f * b * b * iD2) +
+            upCB * (-iD - 2f * b * b * iD2) +
             up.ConicC * (2f * a * b * iD2);
         float gC =
             up.ConicA * (iD - a * c * iD2) +
-            up.ConicB * (a * b * iD2) +
+            upCB * (a * b * iD2) +
             up.ConicC * (-a * a * iD2);
 
         // ── 2. Sigma_2D = J Sigma_cam J^T, expanded ──

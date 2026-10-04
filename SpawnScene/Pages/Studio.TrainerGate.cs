@@ -795,7 +795,7 @@ public partial class Studio
                 Px = cam.FocalX * cx / cz + cam.CenterX,
                 Py = cam.CenterY - cam.FocalY * cy / cz,
                 ConicA = cov2.C * invDet,
-                ConicB = -cov2.B * invDet,
+                ConicB = cov2.B * invDet,   // pixel axes (y down): +B/det
                 ConicC = cov2.A * invDet,
                 R = rgb.X, G = rgb.Y, B = rgb.Z,
                 Opacity = packed[o + 9],

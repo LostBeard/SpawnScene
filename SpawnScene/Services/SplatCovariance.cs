@@ -22,10 +22,12 @@ public static class SplatFormat
     /// Colour and opacity are f16, not unorm8: opacity at 1/255 steps rounded the faint splats a trained
     /// scene is full of (prune floor 0.005 is barely above one step) by up to ~40%, or to zero.
     /// </remarks>
-    public const int PackedBytes = 36; // 12 pos + 8 color/alpha f16x4 + 8 scale f16x4 + 8 quat f16x4
+    /// Scale and rotation are f32: f16's ~1e-3 on a quaternion moved a thin splat's long axis by many times its width
+    /// (gsplat's Truck rendered as fur, 2026-10-04).
+    public const int PackedBytes = 48; // 12 pos + 8 color/alpha f16x4 + 12 scale f32x3 + 16 quat f32x4
 
     /// <summary>u32 words per vertex (<see cref="PackedBytes"/> / 4).</summary>
-    public const int PackedWords = 9;
+    public const int PackedWords = 12;
 }
 
 /// <summary>

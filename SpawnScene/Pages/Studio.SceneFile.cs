@@ -102,6 +102,26 @@ public partial class Studio
             var opened = _projects.First(p => p.Id == project.Id);
             OnOpenProject(opened);
             await LoadProjectSceneAsync(opened.Scenes.First(s => s.Id == scene.Id));
+            // &park=w,h,fx,fy,cx,cy,px,py,pz,fwdx,fwdy,fwdz,upx,upy,upz (harness): seat the viewer at an EXACT camera,
+            // intrinsics and roll included, so a reference renderer can draw the identical view for a side by side. The
+            // home view goes through yaw/pitch (roll dropped), which is right for a person and wrong for an A/B.
+            if (query.TryGetValue("park", out var parkQ))
+            {
+                var v = parkQ.Split(',').Select(t => float.Parse(t, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                if (v.Length == 15)
+                {
+                    var cam = new CameraParams
+                    {
+                        Width = (int)v[0], Height = (int)v[1], FocalX = v[2], FocalY = v[3], CenterX = v[4], CenterY = v[5],
+                        Position = new(v[6], v[7], v[8]), Forward = new(v[9], v[10], v[11]), Up = new(v[12], v[13], v[14]),
+                    };
+                    // Deterministic: the stochastic renderer needs many still frames to converge, and a harness tab ran at
+                    // 0.2 fps - its captures were a few noisy samples (pastel speckle, broken needles), not the scene.
+                    if (!query.ContainsKey("render")) _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
+                    await ParkOnGroundTruthPoseAsync("park", cam);
+                    Console.WriteLine("[Import] PARKED");
+                }
+            }
             // &xrhook=1 (harness): the XR entry hook, as the Room autotest offers it (tools/_cdp_xr.js).
             if (query.ContainsKey("xrhook"))
             {
@@ -109,7 +129,9 @@ public partial class Studio
                 _js.Set("__spawnsceneEnterXR", _xrHook);
                 Console.WriteLine("[Autotest] XR hook ready");
             }
-            Console.WriteLine("[Import] DONE");
+            if (query.TryGetValue("render", out var rmode))
+                _gpuRenderer.RenderMode = rmode == "sorted" ? SplatRenderMode.Sorted : SplatRenderMode.Stochastic;
+            Console.WriteLine($"[Import] DONE (render mode {_gpuRenderer.RenderMode})");
         }
         catch (Exception ex) { Console.WriteLine($"[Import] FAIL: {ex.Message}"); }
     }

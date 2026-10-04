@@ -1415,6 +1415,12 @@ public partial class Studio
                 ctx.Rotate(-quarterTurns * Math.PI / 2.0);
                 ctx.Translate(-srcW / 2.0, -srcH / 2.0);
             }
+            // Downsample with a prefilter, as the reference does (gsplat/3DGS: PIL BICUBIC). The canvas default ("low")
+            // is bilinear with no prefilter: fine near 2x, but at a phone photo's ~4x (4000 -> 1024 px) it skips pixels
+            // and the targets alias. MEASURED 2026-10-04 at 2x (TruckFull 1957 -> 979, GT poses): 23.63 dB vs 23.70 with
+            // "low" - no change there; the larger factors are why it is set.
+            ctx.ImageSmoothingEnabled = true;
+            ctx.ImageSmoothingQuality = "high";
             ctx.DrawImage(bitmap, 0, 0, srcW, srcH);
             using var imageData = ctx.GetImageData(0, 0, w, h);
             using var dataArray = imageData.Data;

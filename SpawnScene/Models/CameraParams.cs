@@ -203,6 +203,18 @@ public class CameraParams
     /// Create default camera parameters for a given image size.
     /// Uses a reasonable default focal length (equivalent to ~50mm lens).
     /// </summary>
+    /// <summary>The viewer's vertical field of view, degrees: about 80 deg across a 16:9 window, like the phone and
+    /// action cameras scenes are captured with and in line with typical splat viewers.</summary>
+    public const float ViewerVerticalFovDeg = 50f;
+
+    /// <summary>
+    /// The VIEWER's focal length for a canvas this tall (<see cref="ViewerVerticalFovDeg"/>). It was 1.2 x the long side
+    /// - a 45 deg-wide telephoto that magnified every scene ~3x past the photos it was trained on (TruckFull: shot at
+    /// 80 deg), so splats showed as streaks and needles a photo-lens view did not have (2026-10-04, TJ). Photo
+    /// cameras keep <see cref="CreateDefault"/>.
+    /// </summary>
+    public static float ViewerFocal(int height) => height * 0.5f / MathF.Tan(ViewerVerticalFovDeg * MathF.PI / 360f);
+
     public static CameraParams CreateDefault(int width, int height)
     {
         float focalLength = MathF.Max(width, height) * 1.2f;

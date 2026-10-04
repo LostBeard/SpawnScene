@@ -50,6 +50,7 @@ public class SceneManager
     public SceneManager()
     {
         _camera = CameraParams.CreateDefault(800, 600);
+        _camera.FocalX = _camera.FocalY = CameraParams.ViewerFocal(_camera.Height);   // a viewer lens, not a photo's
     }
 
     /// <summary>
@@ -62,7 +63,7 @@ public class SceneManager
         // 2. Set focal length for current viewport
         if (_camera.Width > 0)
         {
-            _camera.FocalX = MathF.Max(_camera.Width, _camera.Height) * 1.2f;
+            _camera.FocalX = CameraParams.ViewerFocal(_camera.Height);
             _camera.FocalY = _camera.FocalX;
         }
 
@@ -117,6 +118,8 @@ public class SceneManager
         _camera.Height = height;
         _camera.CenterX = width / 2.0f;
         _camera.CenterY = height / 2.0f;
+        // The same lens at any window size (the focal length was left at whatever the last fit set).
+        _camera.FocalX = _camera.FocalY = CameraParams.ViewerFocal(height);
         OnCameraChanged?.Invoke();
     }
 }

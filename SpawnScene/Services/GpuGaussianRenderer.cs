@@ -1452,7 +1452,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
             camera.Height = _canvasHeight;
             camera.CenterX = _canvasWidth / 2f;
             camera.CenterY = _canvasHeight / 2f;
-            camera.FocalX = MathF.Max(_canvasWidth, _canvasHeight) * 1.2f;
+            camera.FocalX = CameraParams.ViewerFocal(_canvasHeight);
             camera.FocalY = camera.FocalX;
         }
 

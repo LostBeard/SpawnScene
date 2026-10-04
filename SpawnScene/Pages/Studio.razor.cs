@@ -436,6 +436,11 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("maxradpx", out var mrq) && float.TryParse(mrq,
                     System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mrv) && mrv > 0)
                 SplatDensityControl.MaxScreenRadiusPx = mrv;
+            // &importmax=N (any autotest): longest edge photos are decoded at for features and SfM (default 1024; 0 = full
+            // size). Pose precision follows keypoint precision: bicycle at 1024 px fit BA to 1.45 px RMS where COLMAP, at
+            // 4946 px, is sub-pixel - and the own-SfM run lost 5 dB held-out to the COLMAP-pose one (2026-10-04).
+            if (query.TryGetValue("importmax", out var imq0) && int.TryParse(imq0, out var imv0))
+                ImageImportService.MaxImportDimension = Math.Max(0, imv0);
             // &mipfilter=F: the Mip-Splatting 3D filter as a per-splat scale floor while training (0.2 = the paper's; 0 = off).
             if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
                     System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mfv))

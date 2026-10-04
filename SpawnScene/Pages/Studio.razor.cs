@@ -179,6 +179,8 @@ public partial class Studio : IAsyncDisposable
         await RunAutotestIfRequestedAsync();
         // ?import=<url>: open a .spawnscene file (Studio.SceneFile.cs).
         await RunImportIfRequestedAsync();
+        // ?export=latest: download the newest saved scene as a .spawnscene (harness; no UI clicks).
+        await RunExportIfRequestedAsync();
     }
 
     /// <summary>

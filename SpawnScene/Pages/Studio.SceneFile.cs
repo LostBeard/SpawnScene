@@ -54,6 +54,29 @@ public partial class Studio
     }
 
     /// <summary>
+    /// ?export=latest (harness): open the newest scene of the most recently modified project and download it as a
+    /// .spawnscene - the same export the Edit toolbar runs, without driving the UI by screen position.
+    /// </summary>
+    async Task RunExportIfRequestedAsync()
+    {
+        var uri = new Uri(_nav.Uri);
+        if (!uri.Query.Contains("export=latest", StringComparison.OrdinalIgnoreCase)) return;
+        try
+        {
+            _projects = await _projectService.ListProjectsAsync();
+            var project = _projects.Where(p => p.Scenes.Count > 0).OrderByDescending(p => p.ModifiedAt).FirstOrDefault();
+            if (project == null) { Console.WriteLine("[Export] FAIL: no saved scene"); return; }
+            var scene = project.Scenes.OrderByDescending(s => s.CreatedAt).First();
+            Console.WriteLine($"[Export] '{project.Name}' scene {scene.Id}: {scene.SplatCount:N0} splats");
+            OnOpenProject(project);
+            await LoadProjectSceneAsync(scene);
+            await ExportSceneFileAsync();
+            Console.WriteLine($"[Export] DONE: {_editNote}");
+        }
+        catch (Exception ex) { Console.WriteLine($"[Export] FAIL: {ex.Message}"); }
+    }
+
+    /// <summary>
     /// ?import=&lt;url&gt;: fetch a .spawnscene file, save it as a scene of a new project, and open it in the viewer.
     /// </summary>
     async Task RunImportIfRequestedAsync()

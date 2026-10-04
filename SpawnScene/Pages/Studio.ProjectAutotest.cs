@@ -138,7 +138,12 @@ public partial class Studio
 
             // SH storage: new saves are SphericalHarmonics.Parts files, and a scene saved before the split (one
             // row-major file) must load to the SAME part buffers, bit for bit, through the GPU split.
-            if (saved.ShDegree > 0)
+            // Skipped past 500K splats: it copies every SH float into .NET twice (1.9M splats = 2 x 342 MB), past the WASM
+            // heap - c14 (TruckFull 30K) died here with OutOfMemoryException after a good training. A format check
+            // needs no full-size scene.
+            if (saved.ShDegree > 0 && saved.SplatCount > 500_000)
+                Console.WriteLine($"[Dataset] legacy SH load check skipped ({saved.SplatCount:N0} splats > 500,000)");
+            else if (saved.ShDegree > 0)
             {
                 if (saved.ShParts != SphericalHarmonics.Parts)
                 {

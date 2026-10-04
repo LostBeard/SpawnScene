@@ -66,6 +66,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await send('Page.enable');
     await send('Runtime.enable');
     await send('Emulation.setDeviceMetricsOverride', { width: 1600, height: 1000, deviceScaleFactor: 1, mobile: false });
+    // SPAWNSCENE_EDIT_DOWNLOADS: where downloads land, for every flow (e.g. QUERY=export=latest with FLOW=none).
+    if (process.env.SPAWNSCENE_EDIT_DOWNLOADS) {
+      const dl = require('path').resolve(process.env.SPAWNSCENE_EDIT_DOWNLOADS);
+      fs.mkdirSync(dl, { recursive: true });
+      await send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dl });
+    }
     // SPAWNSCENE_EDIT_QUERY: another start (e.g. the project autotest, which trains and saves a scene), with
     // SPAWNSCENE_EDIT_WAIT the console line that says it is done.
     await send('Page.navigate', { url: `${APP}/studio?${process.env.SPAWNSCENE_EDIT_QUERY || 'autotest=generate-room&render=stochastic'}` });
@@ -74,7 +80,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);
-    if (process.env.SPAWNSCENE_EDIT_FLOW === 'none') return;   // just run SPAWNSCENE_EDIT_QUERY to its WAIT line
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'none') {   // just run SPAWNSCENE_EDIT_QUERY to its WAIT line
+      // ...and, with SPAWNSCENE_EDIT_DOWNLOADS, until no download is still in flight (.crdownload) - a 400 MB scene
+      // export outlives the WAIT line by many seconds, and closing the tab cancels it.
+      if (process.env.SPAWNSCENE_EDIT_DOWNLOADS) {
+        const dl = require('path').resolve(process.env.SPAWNSCENE_EDIT_DOWNLOADS);
+        const t0 = Date.now();
+        while (Date.now() - t0 < 10 * 60 * 1000) {
+          const f = fs.readdirSync(dl);
+          if (f.length > 0 && !f.some(n => n.endsWith('.crdownload'))) break;
+          await sleep(2000);
+        }
+        console.log('downloads: ' + fs.readdirSync(dl).join(', '));
+      }
+      return;
+    }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'export') {
       // After the project autotest: open its scene, Edit -> Export file, the download saved to SPAWNSCENE_EDIT_DOWNLOADS.
       const dir = require('path').resolve(process.env.SPAWNSCENE_EDIT_DOWNLOADS || '_shots/downloads');

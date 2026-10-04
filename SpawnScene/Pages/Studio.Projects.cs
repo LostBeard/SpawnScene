@@ -843,20 +843,60 @@ public partial class Studio
     /// Save the scene on screen to the active project: packed splats, plus (trained) the colour model and the SH
     /// bands. GPU -> JS -> OPFS, never the .NET heap.
     /// </summary>
+    /// <summary>
+    /// The visible splats (opacity &gt; 0) of the scene on screen, gathered on the GPU and read back as JS bytes - packed
+    /// rows and, with SH, each part's rows - with their count. Null bytes when nothing was deleted (the caller reads the
+    /// buffers whole).
+    /// </summary>
+    async Task<(int Count, Uint8Array? Packed, Uint8Array[]? Sh)> ReadVisibleRowsAsync(
+        ILGPU.Runtime.MemoryBuffer1D<float, ILGPU.Stride1D.Dense> packed, int n)
+    {
+        var a = _gpuService.WebGPUAccelerator;
+        var all = SplatEditor.Volume.Rows(0, n);
+        int visible = await _splatEditor.CountAsync(a, packed, n, all);
+        if (visible <= 0 || visible >= n) return (n, null, null);
+        using var indices = await SplatRows.SelectIndicesAsync(a, packed, n, all, visible);
+        using var kept = SplatRows.GatherRows(a, packed, indices, visible, SplatFormat.Floats);
+        await a.SynchronizeAsync();
+        var packedU8 = await kept.CopyToHostUint8ArrayAsync(0, (long)visible * SplatFormat.Floats * sizeof(float));
+        Uint8Array[]? sh = null;
+        if (_gpuRenderer.ShDegree > 0 && _gpuRenderer.ShRestBuffers is { } parts)
+        {
+            sh = new Uint8Array[parts.Length];
+            for (int p = 0; p < parts.Length; p++)
+            {
+                using var whole = _gpuRenderer.CopyShPartToIlgpu(a, p, n);
+                using var rows = SplatRows.GatherRows(a, whole, indices, visible, SphericalHarmonics.PartFloatsPerSplat);
+                await a.SynchronizeAsync();
+                sh[p] = await rows.CopyToHostUint8ArrayAsync(0, (long)visible * SphericalHarmonics.PartFloatsPerSplat * sizeof(float));
+            }
+        }
+        Console.WriteLine($"[Studio] save drops {n - visible:N0} deleted splats: {visible:N0} of {n:N0} kept");
+        return (visible, packedU8, sh);
+    }
+
     // The project scene on screen (loaded or just saved), so an edited copy keeps its training metadata.
     ProjectScene? _viewedProjectScene;
 
-    private async Task SaveViewedSceneToProjectAsync(int trainedIters, string? editedFrom = null)
+    private async Task SaveViewedSceneToProjectAsync(int trainedIters, string? editedFrom = null, bool dropDeleted = false)
     {
         if (_activeProject == null) return;
         int count = _gpuRenderer.SplatCount;
-        using var packedU8 = await _gpuRenderer.ReadPackedUint8ArrayAsync(count);
+        Uint8Array? packedU8 = null;
+        Uint8Array[]? shRest = null;
+        // An edited scene drops its deleted splats (opacity 0) on the way out: the saved file and every later load
+        // carry only what is visible. The viewer keeps its rows (and its undo history).
+        if (dropDeleted && _gpuRenderer.PackedSplatBuffer is { } packed)
+            (count, packedU8, shRest) = await ReadVisibleRowsAsync(packed, count);
+        packedU8 ??= await _gpuRenderer.ReadPackedUint8ArrayAsync(count);
+        using var packedHold = packedU8;
         if (packedU8 == null) { Console.WriteLine("[Studio] save skipped: no packed splat data"); return; }
 
         // The SH bands drawn on screen, from the viewer: it gets an exact copy of the trainer's after training, and only
         // the viewer's follow edits. The trainer's were read here before - after a paste grew the scene (508,091 ->
         // 512,736 splats) that copy overran the trainer's buffers and saved garbage bands (2026-10-03).
-        Uint8Array[]? shRest = _gpuRenderer.ShDegree > 0 ? await _gpuRenderer.ReadShRestUint8ArraysAsync() : null;
+        if (shRest == null && _gpuRenderer.ShDegree > 0)
+            shRest = await _gpuRenderer.ReadShRestUint8ArraysAsync();
         try
         {
             var projectScene = new ProjectScene

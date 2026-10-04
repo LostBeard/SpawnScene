@@ -298,7 +298,8 @@ public partial class Studio
         _editBusy = true; _editNote = null; RefreshEditStatus();
         try
         {
-            await SaveViewedSceneToProjectAsync(_viewedProjectScene?.TrainedIterations ?? 0, editedFrom: _viewedProjectScene?.Id);
+            await SaveViewedSceneToProjectAsync(_viewedProjectScene?.TrainedIterations ?? 0, editedFrom: _viewedProjectScene?.Id,
+                dropDeleted: true);
             _editNote = "Saved as a new scene";
             // Its card thumbnail, from this view once it has settled (as a generated scene's is).
             if (_viewedProjectScene != null)

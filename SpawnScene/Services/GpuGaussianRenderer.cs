@@ -1261,6 +1261,15 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         return await _gaussianKernel.WidenPackedAsync(packedBuf, splatCount, floatsPerSplat);
     }
 
+    /// <summary>Bytes as a new ILGPU word buffer (a .spawnscene v2 stream); the caller owns it.</summary>
+    public MemoryBuffer1D<uint, Stride1D.Dense> IlgpuWordsFromArrayBuffer(Accelerator a, ArrayBuffer bytes)
+    {
+        var dst = a.Allocate1D<uint>(Math.Max(1L, bytes.ByteLength / sizeof(uint)));
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        _queue!.WriteBuffer(dst.GetGPUBuffer()!, 0L, bytes);
+        return dst;
+    }
+
     /// <summary>A saved SH part (bytes from the project store) as a new ILGPU buffer; the caller owns it.</summary>
     public MemoryBuffer1D<float, Stride1D.Dense> IlgpuFromArrayBuffer(Accelerator a, ArrayBuffer bytes)
     {

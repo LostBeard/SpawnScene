@@ -1,3 +1,5 @@
+using SpawnDev.ILGPU;
+using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnScene.Models;
 using SpawnScene.Services;
@@ -9,48 +11,124 @@ namespace SpawnScene.Pages;
 // one into a new project and opens it (the Quest test link).
 public partial class Studio
 {
-    /// <summary>Download the scene on screen (visible splats only, SH bands included) as a .spawnscene file.</summary>
+    /// <summary>
+    /// Download the scene on screen (visible splats only, SH bands included) as a .spawnscene v2 file: quantized on the
+    /// GPU (SceneCodec, 76 bytes a splat instead of 236) and each stream gzipped by the browser. The raw v1 export of a
+    /// 3.28M-splat bicycle was 737 MB, and Chrome cancelled the download.
+    /// </summary>
     async Task ExportSceneFileAsync()
     {
         if (_editBusy) return;
         var packed = _gpuRenderer.PackedSplatBuffer;
         if (packed == null) return;
         _editBusy = true; _editNote = null; RefreshEditStatus();
-        var parts = new List<Uint8Array>();
+        var owned = new List<IDisposable>();
+        var js = new List<IDisposable>();
         try
         {
+            var a = _gpuService.WebGPUAccelerator;
             int n = _gpuRenderer.SplatCount;
-            var (count, packedU8, sh) = await ReadVisibleRowsAsync(packed, n);
-            packedU8 ??= await _gpuRenderer.ReadPackedUint8ArrayAsync(count);
-            if (sh == null && _gpuRenderer.ShDegree > 0) sh = await _gpuRenderer.ReadShRestUint8ArraysAsync();
-            if (packedU8 == null) { _editNote = "Nothing to export"; return; }
+            // The visible rows, on the GPU: Delete / Keep only leave opacity-0 rows behind.
+            var all = SplatEditor.Volume.Rows(0, n);
+            int visible = await _splatEditor.CountAsync(a, packed, n, all);
+            if (visible <= 0) { _editNote = "Nothing to export"; return; }
+            bool withSh = _gpuRenderer.ShDegree > 0 && _gpuRenderer.ShRestBuffers != null;
+            var keptPacked = packed;
+            ILGPU.Runtime.MemoryBuffer1D<float, ILGPU.Stride1D.Dense>[]? keptSh = null;
+            int count = n;
+            if (visible < n)
+            {
+                var indices = await SplatRows.SelectIndicesAsync(a, packed, n, all, visible); owned.Add(indices);
+                keptPacked = SplatRows.GatherRows(a, packed, indices, visible, SplatFormat.Floats); owned.Add(keptPacked);
+                if (withSh)
+                {
+                    keptSh = new ILGPU.Runtime.MemoryBuffer1D<float, ILGPU.Stride1D.Dense>[3];
+                    for (int part = 0; part < 3; part++)
+                    {
+                        var whole = _gpuRenderer.CopyShPartToIlgpu(a, part, n); owned.Add(whole);
+                        keptSh[part] = SplatRows.GatherRows(a, whole, indices, visible, SphericalHarmonics.PartFloatsPerSplat);
+                        owned.Add(keptSh[part]);
+                    }
+                }
+                count = visible;
+            }
+            else if (withSh)
+            {
+                keptSh = Enumerable.Range(0, 3).Select(part => _gpuRenderer.CopyShPartToIlgpu(a, part, n)).ToArray();
+                owned.AddRange(keptSh);
+            }
+
+            var box = await SplatBounds.ComputeAsync(a, keptPacked, count) ?? new SplatBounds.Aabb(0, 0, 0, 1, 1, 1);
+            var frame = SceneCodec.Frame.From(box, count);
+            var (geo, app, shq) = SceneCodec.Encode(a, keptPacked, keptSh, frame);
+            owned.Add(geo); owned.Add(app); owned.Add(shq);
+            await a.SynchronizeAsync();
+
+            // CPU transfer: file I/O - the encoded streams, a third of the raw scene, then gzipped by the browser.
+            var raw = new List<Uint8Array>
+            {
+                await geo.CopyToHostUint8ArrayAsync(0, (long)count * SceneCodec.GeoWords * sizeof(uint)),
+                await app.CopyToHostUint8ArrayAsync(0, (long)count * SceneCodec.AppWords * sizeof(uint)),
+            };
+            if (withSh) raw.Add(await shq.CopyToHostUint8ArrayAsync(0, (long)count * SceneCodec.ShWords * sizeof(uint)));
+            js.AddRange(raw);
+            var lens = new long[3];
+            var zipped = new List<Uint8Array>();
+            long rawBytes = 0;
+            for (int k = 0; k < raw.Count; k++)
+            {
+                rawBytes += raw[k].ByteLength;
+                using var blobIn = new Blob(new[] { raw[k] }, new BlobOptions { Type = "application/octet-stream" });
+                var z = await GzipAsync(blobIn, decompress: false);
+                js.Add(z);
+                var zu = new Uint8Array(z); js.Add(zu);
+                zipped.Add(zu);
+                lens[k] = z.ByteLength;
+            }
+
             string name = _activeProject?.Name ?? "SpawnScene scene";
             var c = _sceneManager.Camera;   // the file opens at the view it was exported from
-            var header = new SceneFile.Header(name, count, SplatFormat.Floats, _gpuRenderer.ColoursAreShDc,
-                sh != null ? _gpuRenderer.ShDegree : 0, sh?.Length ?? 0, _viewedProjectScene?.TrainedIterations ?? 0, DateTime.UtcNow,
-                new[] { c.Position.X, c.Position.Y, c.Position.Z, c.Forward.X, c.Forward.Y, c.Forward.Z, c.Up.X, c.Up.Y, c.Up.Z });
-            parts.Add(new Uint8Array(SceneFile.Prefix(header)));
-            parts.Add(packedU8);
-            if (sh != null) parts.AddRange(sh);
-            using var blob = new Blob(parts, new BlobOptions { Type = "application/octet-stream" });
+            var header = new SceneFile.Header2(name, count, _gpuRenderer.ColoursAreShDc, withSh ? _gpuRenderer.ShDegree : 0,
+                _viewedProjectScene?.TrainedIterations ?? 0, DateTime.UtcNow,
+                new[] { c.Position.X, c.Position.Y, c.Position.Z, c.Forward.X, c.Forward.Y, c.Forward.Z, c.Up.X, c.Up.Y, c.Up.Z },
+                new[] { box.MinX, box.MinY, box.MinZ, box.MaxX, box.MaxY, box.MaxZ }, lens);
+            var prefix = new Uint8Array(SceneFile.Prefix2(header)); js.Add(prefix);
+            var fileParts = new List<Uint8Array> { prefix };
+            fileParts.AddRange(zipped);
+            using var blob = new Blob(fileParts, new BlobOptions { Type = "application/octet-stream" });
             string url = blob.ToObjectURL();
             using var document = _js.Get<Document>("document");
-            using var a = document.CreateElement<HTMLAnchorElement>("a");
-            a.Href = url;
-            a.Download = string.Concat(name.Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '_')) + SceneFile.Extension;
-            a.Click();
-            _ = Task.Delay(60_000).ContinueWith(_ => URL.RevokeObjectURL(url));
-            _editNote = $"Exported {count:N0} splats";
-            Console.WriteLine($"[Edit] exported '{name}': {count:N0} splats" + (sh != null ? $", SH degree {header.ShDegree}" : "") +
-                $", {(blob.Size / (1024 * 1024))} MB");
+            using var anchor = document.CreateElement<HTMLAnchorElement>("a");
+            anchor.Href = url;
+            anchor.Download = string.Concat(name.Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '_')) + SceneFile.Extension;
+            anchor.Click();
+            _ = Task.Delay(120_000).ContinueWith(_ => URL.RevokeObjectURL(url));
+            long rawV1 = (long)count * (SplatFormat.Floats + (withSh ? 45 : 0)) * sizeof(float);
+            _editNote = $"Exported {count:N0} splats ({blob.Size / (1024 * 1024)} MB)";
+            Console.WriteLine($"[Edit] exported '{name}': {count:N0} splats" + (withSh ? $", SH degree {header.ShDegree}" : "") +
+                $", {blob.Size / (1024 * 1024)} MB (v2; raw v1 would be {rawV1 / (1024 * 1024)} MB, quantized {rawBytes / (1024 * 1024)} MB before gzip)");
         }
         catch (Exception ex) { _editNote = "Export failed"; Console.WriteLine($"[Edit] export failed: {ex.Message}"); }
         finally
         {
-            foreach (var p in parts) p.Dispose();
+            foreach (var d in js) d.Dispose();
+            foreach (var d in owned) d.Dispose();
             _editBusy = false;
             RefreshEditStatus();
         }
+    }
+
+    /// <summary>gzip (or gunzip) a blob through the browser's CompressionStream - streamed, no second full copy in .NET.</summary>
+    static async Task<ArrayBuffer> GzipAsync(Blob input, bool decompress)
+    {
+        using var src = input.Stream();
+        // SpawnJS types PipeThrough as TransformStream, which (De)CompressionStream is not - in JS either: pipeThrough takes
+        // any {readable, writable} pair. Viewed through the same JS object. (Lib follow-up: a PipeThrough overload for them.)
+        using SpawnJSObject codec = decompress ? new DecompressionStream("gzip") : new CompressionStream("gzip");
+        using var t = codec.JSRef!.As<TransformStream>();
+        using var piped = src.PipeThrough(t);
+        using var resp = new Response(piped, (ResponseOptions?)null);
+        return await resp.ArrayBuffer();
     }
 
     /// <summary>
@@ -94,32 +172,86 @@ public partial class Studio
             if (!response.Ok) { Console.WriteLine($"[Import] FAIL: HTTP {response.Status}"); return; }
             using var bytes = await response.ArrayBuffer();
             using var first = new Uint8Array(bytes, 0, 12);
-            int headerLen = SceneFile.HeaderLength(first.ReadBytes());
+            var firstBytes = first.ReadBytes();
+            int version = SceneFile.Version(firstBytes);
+            int headerLen = SceneFile.HeaderLength(firstBytes);
             using var headerView = new Uint8Array(bytes, 12, headerLen);
-            var h = SceneFile.ParseHeader(headerView.ReadBytes());
             long offset = SceneFile.DataOffset(headerLen);
-            long packedBytes = (long)h.SplatCount * h.FloatsPerSplat * sizeof(float);
-            using var packedU8 = new Uint8Array(bytes, offset, packedBytes);
-            offset += packedBytes;
+            Uint8Array packedU8;
             var sh = new List<Uint8Array>();
-            for (int p = 0; p < h.ShParts; p++)
+            ProjectScene scene;
+            string sceneName;
+            if (version == 2)
             {
-                long partBytes = (long)h.SplatCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
-                sh.Add(new Uint8Array(bytes, offset, partBytes));
-                offset += partBytes;
+                // v2: gunzip each stream, decode on the GPU (SceneCodec), then read the raw rows back for the project store.
+                var h2 = SceneFile.ParseHeader2(headerView.ReadBytes());
+                var a = _gpuService.WebGPUAccelerator;
+                var words = new ILGPU.Runtime.MemoryBuffer1D<uint, ILGPU.Stride1D.Dense>?[3];
+                try
+                {
+                    for (int k = 0; k < 3; k++)
+                    {
+                        long len = h2.StreamBytes.Length > k ? h2.StreamBytes[k] : 0;
+                        if (len <= 0) continue;
+                        using var zipped = new Uint8Array(bytes, offset, len);
+                        using var blobIn = new Blob(new[] { zipped }, new BlobOptions { Type = "application/octet-stream" });
+                        using var rawStream = await GzipAsync(blobIn, decompress: true);
+                        words[k] = _gpuRenderer.IlgpuWordsFromArrayBuffer(a, rawStream);
+                        offset += len;
+                    }
+                    var b = h2.Bounds;
+                    var frame = SceneCodec.Frame.From(new SplatBounds.Aabb(b[0], b[1], b[2], b[3], b[4], b[5]), h2.SplatCount);
+                    var (dp, dsh) = SceneCodec.Decode(a, words[0]!, words[1]!, words[2], frame);
+                    try
+                    {
+                        await a.SynchronizeAsync();
+                        // CPU transfer: file I/O - the decoded rows go to the project store as any saved scene does.
+                        packedU8 = await dp.CopyToHostUint8ArrayAsync(0, (long)h2.SplatCount * SplatFormat.Floats * sizeof(float));
+                        if (dsh != null)
+                            foreach (var part in dsh)
+                                sh.Add(await part.CopyToHostUint8ArrayAsync(0, (long)h2.SplatCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float)));
+                    }
+                    finally
+                    {
+                        dp.Dispose();
+                        if (dsh != null) foreach (var part in dsh) part.Dispose();
+                    }
+                }
+                finally { foreach (var w in words) w?.Dispose(); }
+                scene = new ProjectScene
+                {
+                    SplatCount = h2.SplatCount, FloatsPerSplat = SplatFormat.Floats, ColoursAreShDc = h2.ColoursAreShDc,
+                    ShDegree = sh.Count > 0 ? h2.ShDegree : 0, TrainedIterations = h2.TrainedIterations, HomeView = h2.HomeView,
+                };
+                sceneName = h2.Name;
+            }
+            else
+            {
+                var h = SceneFile.ParseHeader(headerView.ReadBytes());
+                long packedBytes = (long)h.SplatCount * h.FloatsPerSplat * sizeof(float);
+                packedU8 = new Uint8Array(bytes, offset, packedBytes);
+                offset += packedBytes;
+                for (int p = 0; p < h.ShParts; p++)
+                {
+                    long partBytes = (long)h.SplatCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+                    sh.Add(new Uint8Array(bytes, offset, partBytes));
+                    offset += partBytes;
+                }
+                scene = new ProjectScene
+                {
+                    SplatCount = h.SplatCount, FloatsPerSplat = h.FloatsPerSplat, ColoursAreShDc = h.ColoursAreShDc,
+                    ShDegree = h.ShParts > 0 ? h.ShDegree : 0, TrainedIterations = h.TrainedIterations,
+                    HomeView = h.HomeView,
+                };
+                sceneName = h.Name;
             }
 
-            var project = await _projectService.CreateProjectAsync(h.Name);
-            var scene = new ProjectScene
-            {
-                SplatCount = h.SplatCount, FloatsPerSplat = h.FloatsPerSplat, ColoursAreShDc = h.ColoursAreShDc,
-                ShDegree = h.ShParts > 0 ? h.ShDegree : 0, TrainedIterations = h.TrainedIterations,
-                HomeView = h.HomeView,
-            };
+            var project = await _projectService.CreateProjectAsync(sceneName);
             await _projectService.SaveSceneAsync(project.Id, scene, packedU8);
             if (sh.Count > 0) await _projectService.SaveSceneShRestAsync(project.Id, scene, sh.ToArray());
+            packedU8.Dispose();
             foreach (var s in sh) s.Dispose();
-            Console.WriteLine($"[Import] '{h.Name}': {h.SplatCount:N0} splats" + (h.ShParts > 0 ? $", SH degree {h.ShDegree}" : "") + " - opening");
+            Console.WriteLine($"[Import] '{sceneName}' (v{version}): {scene.SplatCount:N0} splats" + (scene.ShDegree > 0 ? $", SH degree {scene.ShDegree}" : "") + " - opening");
 
             _projects = await _projectService.ListProjectsAsync();
             var opened = _projects.First(p => p.Id == project.Id);

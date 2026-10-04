@@ -37,7 +37,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       if ((process.env.SPAWNSCENE_EDIT_WAIT ? new RegExp(process.env.SPAWNSCENE_EDIT_WAIT) : /\[Autotest\] PASS/).test(t)) passed = true;
       if (process.env.SPAWNSCENE_EDIT_PRINT && new RegExp(process.env.SPAWNSCENE_EDIT_PRINT).test(t)) console.log('CON ' + t.slice(0, 400));
-      else if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Dataset\] (FAIL|DONE)|\[Studio\] (scene saved|Loaded|scene .*SH)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
+      else if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Import\]|\[Dataset\] (FAIL|DONE)|\[Studio\] (scene saved|Loaded|scene .*SH)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
@@ -69,11 +69,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // SPAWNSCENE_EDIT_QUERY: another start (e.g. the project autotest, which trains and saves a scene), with
     // SPAWNSCENE_EDIT_WAIT the console line that says it is done.
     await send('Page.navigate', { url: `${APP}/studio?${process.env.SPAWNSCENE_EDIT_QUERY || 'autotest=generate-room&render=stochastic'}` });
-    const deadline = Date.now() + 30 * 60 * 1000;
+    const deadline = Date.now() + 60 * 60 * 1000;
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'none') return;   // just run SPAWNSCENE_EDIT_QUERY to its WAIT line
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'export') {
+      // After the project autotest: open its scene, Edit -> Export file, the download saved to SPAWNSCENE_EDIT_DOWNLOADS.
+      const dir = require('path').resolve(process.env.SPAWNSCENE_EDIT_DOWNLOADS || '_shots/downloads');
+      fs.mkdirSync(dir, { recursive: true });
+      await send('Page.setDownloadBehavior', { behavior: 'allow', downloadPath: dir });
+      await click(253, 264); await sleep(10000);          // Open (first scene card)
+      await shot('e0_scene');
+      await click(1288, 28); await sleep(600);            // Edit (a project scene's viewer: no Depth button)
+      await click(90, 517); await sleep(60000);           // Export file (the 11th toolbar button)
+      console.log('downloads: ' + fs.readdirSync(dir).join(', '));
+      return;
+    }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'trained') {
       // After the project autotest (trained scene saved, project page shown): open it, copy/paste with its SH bands,
       // save as a new scene, open that. The viewer of a project scene has no Depth button: Edit sits left of AR.

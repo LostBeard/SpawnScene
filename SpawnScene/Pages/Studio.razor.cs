@@ -173,6 +173,8 @@ public partial class Studio : IAsyncDisposable
 
         // Optional automated gate: /studio?autotest=generate-room
         await RunAutotestIfRequestedAsync();
+        // ?import=<url>: open a .spawnscene file (Studio.SceneFile.cs).
+        await RunImportIfRequestedAsync();
     }
 
     /// <summary>

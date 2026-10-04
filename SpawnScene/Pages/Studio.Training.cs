@@ -80,9 +80,9 @@ public partial class Studio
     /// training ones - the control that separates a better scene from test views that were merely aligned.</summary>
     public static bool RefineTestPosesOnly { get; set; }
     /// <summary>Pose rotation step, radians per update (Adam-normalised; decays to 10% over the run).</summary>
-    public static float PoseLrRotation { get; set; } = 2e-4f;
+    public static float PoseLrRotation { get; set; } = 1e-3f;   // measured: 2e-4 had decayed to 0.001 deg/update (c19); 1e-3 c21
     /// <summary>Pose translation step per update, as a fraction of the capture's camera spread.</summary>
-    public static float PoseLrTranslation { get; set; } = 2e-4f;
+    public static float PoseLrTranslation { get; set; } = 1e-3f;
     /// <summary>Test-time refinement steps per held-out view before scoring.</summary>
     public static int PoseTestIterations { get; set; } = 40;
 

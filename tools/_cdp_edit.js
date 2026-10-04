@@ -32,6 +32,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ws.on('message', raw => {
     const m = JSON.parse(raw.toString());
     if (m.id && pend.has(m.id)) pend.get(m.id)(m);
+    // Downloads: say what Chrome does with them (a 737 MB export reported DONE and never landed).
+    if (m.method === 'Page.downloadWillBegin') console.log('DL begin ' + m.params.suggestedFilename);
+    if (m.method === 'Page.downloadProgress' && m.params.state !== 'inProgress') console.log('DL ' + m.params.state + ' ' + (m.params.receivedBytes || 0) + ' bytes');
     if (m.method === 'Runtime.exceptionThrown') console.log('EXC ' + JSON.stringify(m.params.exceptionDetails).slice(0, 300));
     if (m.method === 'Runtime.consoleAPICalled') {
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');

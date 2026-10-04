@@ -104,6 +104,56 @@ public sealed class SplatTrainerGpu : IDisposable
     int _mipCamCount;
     GPUComputePipeline? _mipFloor;
 
+    // ── Photometric camera refinement (SplatTrainerShaders.PoseGradPartial / PoseGradFinal) ──
+    GPUComputePipeline? _posePartial, _poseFinal;
+    MemoryBuffer1D<float, Stride1D.Dense>? _posePartials;   // 6 per workgroup of the last reduction
+    MemoryBuffer1D<float, Stride1D.Dense>? _poseGrads;      // 6 per view: dL/d(translation), dL/d(rotation)
+    GPUBuffer? _poseCfgBuf, _poseFinalCfgBuf;
+
+    /// <summary>Room for <paramref name="views"/> per-view pose gradients, zeroed.</summary>
+    public void EnsurePoseSlots(int views)
+    {
+        if (_poseGrads == null || _poseGrads.Length < views * 6L)
+        {
+            _poseGrads?.Dispose();
+            _poseGrads = _gpu.WebGPUAccelerator.Allocate1D<float>(Math.Max(1, views) * 6L);
+        }
+        _poseGrads.MemSetToZero();
+    }
+
+    /// <summary>The pose gradients written since the last read (6 per view, zero for a view not stepped), then zero.</summary>
+    public async Task<float[]> ReadPoseGradsAsync(int views)
+    {
+        if (_poseGrads == null) return new float[views * 6];
+        // CPU transfer: 24 bytes a view, once a cycle - the host owns the camera poses.
+        var g = await _poseGrads.CopyToHostAsync<float>(0, views * 6L);
+        _poseGrads.MemSetToZero();
+        return g;
+    }
+
+    void DispatchPoseGrad(GPUBuffer splatGpu, int splatCount, System.Numerics.Vector3 camCentre, int slot)
+    {
+        if (_poseGrads == null || _geomOut == null) return;
+        int groups = (splatCount + 255) / 256;
+        if (_posePartials == null || _posePartials.Length < groups * 6L)
+        {
+            _posePartials?.Dispose();
+            _posePartials = _gpu.WebGPUAccelerator.Allocate1D<float>(groups * 6L);
+        }
+        _poseCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor { Size = 16, Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst });
+        _poseFinalCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor { Size = 16, Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst });
+        WriteVec4(_poseCfgBuf, splatCount, camCentre.X, camCentre.Y, camCentre.Z);
+        Dispatch(_posePartial!, groups, 1, new[]
+        {
+            Buf(0, splatGpu), Buf(1, _geomOut.GetGPUBuffer()!), Buf(2, _posePartials.GetGPUBuffer()!), Buf(3, _poseCfgBuf),
+        });
+        WriteVec4(_poseFinalCfgBuf, groups, slot, 0f, 0f);
+        Dispatch(_poseFinal!, 1, 1, new[]
+        {
+            Buf(0, _posePartials.GetGPUBuffer()!), Buf(1, _poseGrads.GetGPUBuffer()!), Buf(2, _poseFinalCfgBuf),
+        });
+    }
+
     /// <summary>
     /// Mip-Splatting 3D filter size (0 = off): each splat's scale is floored at filter x depth / focal for the training
     /// camera that sees it most finely, so no splat is thinner than the photos resolve - the needles and streaks a
@@ -381,6 +431,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
         _adamGeometry = MakePipeline(SplatTrainerShaders.GeometryAdam, "adam_geometry");
         _mipFloor = MakePipeline(SplatTrainerShaders.MipScaleFloor, "mip_floor");
+        _posePartial = MakePipeline(SplatTrainerShaders.PoseGradPartial, "pose_partial");
+        _poseFinal = MakePipeline(SplatTrainerShaders.PoseGradFinal, "pose_final");
         _evalSse = MakePipeline(SplatTrainerShaders.EvalSse, "eval_sse");
         _ssimRowsPipe = MakePipeline(SplatTrainerShaders.SsimRows, "ssim_rows");
         _ssimReducePipe = MakePipeline(SplatTrainerShaders.SsimReduce, "ssim_reduce");
@@ -1799,7 +1851,8 @@ public sealed class SplatTrainerGpu : IDisposable
         float colourLr = SplatOptimizer.DefaultColourLr,
         float opacityLr = SplatOptimizer.DefaultOpacityLr,
         GeometryStep? geometry = null,
-        bool readLoss = true)
+        bool readLoss = true,
+        int poseSlot = -1)
     {
         var accel = _gpu.WebGPUAccelerator;
         var splatGpu = splatBuf.GetGPUBuffer()!;
@@ -1977,6 +2030,8 @@ public sealed class SplatTrainerGpu : IDisposable
                 Buf(5, _adamV!.GetGPUBuffer()!), Buf(6, _geomCfgBuf!),
                 Buf(7, _geomOut!.GetGPUBuffer()!), Buf(8, _scaleFloor!.GetGPUBuffer()!),
             });
+            // This view's camera-pose gradient, from the splat position gradients just written (poseSlot >= 0).
+            if (poseSlot >= 0) DispatchPoseGrad(splatGpu, splatCount, cam.Position, poseSlot);
         }
 
         await PhaseAsync("geometry");
@@ -2234,6 +2289,8 @@ public sealed class SplatTrainerGpu : IDisposable
         _screenRadius?.Dispose(); _screenRadius = null;
         _maxRadius?.Dispose(); _maxRadius = null;
         _scaleFloor?.Dispose(); _scaleFloor = null;
+        _posePartials?.Dispose(); _posePartials = null;
+        _poseGrads?.Dispose(); _poseGrads = null;
         _viewSupport?.Dispose(); _viewSupport = null;
         _supportPartials?.Dispose(); _supportPartials = null;
         for (int part = 0; part < SphericalHarmonics.Parts; part++) { _gradShRest[part]?.Dispose(); _gradShRest[part] = null; }

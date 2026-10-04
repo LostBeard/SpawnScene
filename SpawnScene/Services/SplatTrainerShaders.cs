@@ -1814,6 +1814,87 @@ fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>) {
     /// smallest detail those photos resolve there (Yu et al. 2024 use variance (filter / nu)^2 with filter 0.2). Thin
     /// splats below it are what turn into needles and streaks when the viewer gets closer than the photos did.
     /// </summary>
+    /// <summary>
+    /// Photometric camera refinement: the loss gradient w.r.t. one view's camera pose, from the per-splat position
+    /// gradients adam_geometry already wrote (geom_out, dL/dp). Moving the camera by delta is moving every splat by
+    /// -delta, so dL/d(delta) = -sum g; turning it by omega about its centre turns every splat by -omega, so
+    /// dL/d(omega) = sum g x (p - c). Workgroup partial sums here, the total in <see cref="PoseGradFinal"/>.
+    /// Own SfM poses at 1024 px fit BA to ~1.5 px where COLMAP is sub-pixel, and bicycle lost 5 dB held-out to it.
+    /// </summary>
+    public const string PoseGradPartial = @"
+@group(0) @binding(0) var<storage, read>       splats   : array<f32>;   // 14 per splat
+@group(0) @binding(1) var<storage, read>       geom_out : array<f32>;   // 10 per splat: dL/dp xyz first
+@group(0) @binding(2) var<storage, read_write> partials : array<f32>;   // 6 per workgroup
+@group(0) @binding(3) var<uniform>             cfg      : vec4<f32>;    // x splat count, yzw camera centre
+
+var<workgroup> red : array<f32, 1536>;
+
+@compute @workgroup_size(256)
+fn pose_partial(@builtin(global_invocation_id) gid : vec3<u32>,
+                @builtin(local_invocation_index) li : u32,
+                @builtin(workgroup_id) wg : vec3<u32>) {
+    let i = gid.x;
+    var t = vec3<f32>(0.0);
+    var w = vec3<f32>(0.0);
+    if (i < u32(cfg.x)) {
+        let g = vec3<f32>(geom_out[i * 10u], geom_out[i * 10u + 1u], geom_out[i * 10u + 2u]);
+        let r = vec3<f32>(splats[i * 14u], splats[i * 14u + 1u], splats[i * 14u + 2u]) - cfg.yzw;
+        if (all(g == g) && all(abs(g) < vec3<f32>(1e30))) {   // NaN / inf guard: one bad splat must not move a camera
+            t = -g;
+            w = cross(g, r);
+        }
+    }
+    red[li * 6u] = t.x; red[li * 6u + 1u] = t.y; red[li * 6u + 2u] = t.z;
+    red[li * 6u + 3u] = w.x; red[li * 6u + 4u] = w.y; red[li * 6u + 5u] = w.z;
+    workgroupBarrier();
+    var stride = 128u;
+    loop {
+        if (stride == 0u) { break; }
+        if (li < stride) {
+            for (var k = 0u; k < 6u; k = k + 1u) { red[li * 6u + k] = red[li * 6u + k] + red[(li + stride) * 6u + k]; }
+        }
+        workgroupBarrier();
+        stride = stride / 2u;
+    }
+    if (li == 0u) {
+        for (var k = 0u; k < 6u; k = k + 1u) { partials[wg.x * 6u + k] = red[k]; }
+    }
+}
+";
+
+    /// <summary>Sums <see cref="PoseGradPartial"/>'s workgroup totals into one view's 6-float slot.</summary>
+    public const string PoseGradFinal = @"
+@group(0) @binding(0) var<storage, read>       partials : array<f32>;   // 6 per workgroup
+@group(0) @binding(1) var<storage, read_write> pose     : array<f32>;   // 6 per view
+@group(0) @binding(2) var<uniform>             cfg      : vec4<f32>;    // x partial count, y view slot
+
+var<workgroup> red : array<f32, 1536>;
+
+@compute @workgroup_size(256)
+fn pose_final(@builtin(local_invocation_index) li : u32) {
+    let n = u32(cfg.x);
+    var acc = array<f32, 6>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (var j = li; j < n; j = j + 256u) {
+        for (var k = 0u; k < 6u; k = k + 1u) { acc[k] = acc[k] + partials[j * 6u + k]; }
+    }
+    for (var k = 0u; k < 6u; k = k + 1u) { red[li * 6u + k] = acc[k]; }
+    workgroupBarrier();
+    var stride = 128u;
+    loop {
+        if (stride == 0u) { break; }
+        if (li < stride) {
+            for (var k = 0u; k < 6u; k = k + 1u) { red[li * 6u + k] = red[li * 6u + k] + red[(li + stride) * 6u + k]; }
+        }
+        workgroupBarrier();
+        stride = stride / 2u;
+    }
+    if (li == 0u) {
+        let slot = u32(cfg.y);
+        for (var k = 0u; k < 6u; k = k + 1u) { pose[slot * 6u + k] = red[k]; }
+    }
+}
+";
+
     public const string MipScaleFloor = @"
 @group(0) @binding(0) var<storage, read>       splats    : array<f32>;        // 14 per splat
 @group(0) @binding(1) var<storage, read>       cams      : array<vec4<f32>>;  // 4 per camera: pos|fx, right|fy, up|halfW, fwd|halfH

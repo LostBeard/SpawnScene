@@ -68,6 +68,59 @@ public partial class Studio
     /// <summary><c>&amp;shdeg=N</c>: cap the viewer's SH degree after training (diagnostic A/B; the trainer dump follows).</summary>
     public static int? ViewerShDegreeCap { get; set; }
 
+    /// <summary>
+    /// Photometric camera refinement (&amp;refineposes=1): each supervised view's pose takes an Adam step on the
+    /// photometric loss once a cycle, from the splat position gradients (SplatTrainerShaders.PoseGradPartial), and the
+    /// held-out views are refined against the finished scene before they are scored (their poses came from the same
+    /// SfM). Own SfM fit BA to ~1.5 px at 1024 px; COLMAP is sub-pixel at full size, and bicycle lost 5 dB held-out to
+    /// that difference (c15 18.8 vs c17 24.0, 2026-10-04).
+    /// </summary>
+    public static bool RefinePoses { get; set; }
+    /// <summary>Pose rotation step, radians per update (Adam-normalised; decays to 10% over the run).</summary>
+    public static float PoseLrRotation { get; set; } = 2e-4f;
+    /// <summary>Pose translation step per update, as a fraction of the capture's camera spread.</summary>
+    public static float PoseLrTranslation { get; set; } = 2e-4f;
+    /// <summary>Test-time refinement steps per held-out view before scoring.</summary>
+    public static int PoseTestIterations { get; set; } = 40;
+
+    /// <summary>Per-view Adam state for <see cref="RefinePoses"/>.</summary>
+    sealed class PoseAdam
+    {
+        readonly float[] _m, _v; readonly int[] _t;
+        public PoseAdam(int views) { _m = new float[views * 6]; _v = new float[views * 6]; _t = new int[views]; }
+
+        /// <summary>One Adam step of view <paramref name="vi"/>'s pose from its 6 gradients; false when it had none.
+        /// Returns the rotation angle (rad) and translation length applied.</summary>
+        public (bool Moved, float Rot, float Trans) Step(CameraParams cam, ReadOnlySpan<float> g, int vi, float lrRot, float lrTrans)
+        {
+            bool any = false;
+            for (int k = 0; k < 6; k++) if (g[k] != 0f && float.IsFinite(g[k])) any = true;
+            if (!any) return (false, 0f, 0f);
+            int t = ++_t[vi];
+            Span<float> d = stackalloc float[6];
+            for (int k = 0; k < 6; k++)
+            {
+                int j = vi * 6 + k;
+                float gk = float.IsFinite(g[k]) ? g[k] : 0f;
+                _m[j] = 0.9f * _m[j] + 0.1f * gk;
+                _v[j] = 0.999f * _v[j] + 0.001f * gk * gk;
+                float mh = _m[j] / (1f - MathF.Pow(0.9f, t)), vh = _v[j] / (1f - MathF.Pow(0.999f, t));
+                d[k] = -mh / (MathF.Sqrt(vh) + 1e-12f) * (k < 3 ? lrTrans : lrRot);
+            }
+            var dt = new System.Numerics.Vector3(d[0], d[1], d[2]);
+            var dw = new System.Numerics.Vector3(d[3], d[4], d[5]);
+            cam.Position += dt;
+            float ang = dw.Length();
+            if (ang > 1e-12f)
+            {
+                var q = System.Numerics.Quaternion.CreateFromAxisAngle(dw / ang, ang);
+                cam.Forward = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Transform(cam.Forward, q));
+                cam.Up = System.Numerics.Vector3.Normalize(System.Numerics.Vector3.Transform(cam.Up, q));
+            }
+            return (true, ang, dt.Length());
+        }
+    }
+
     /// <summary><c>&amp;trainprofile=1</c>: per-phase GPU time of a training step, logged with each cycle line.</summary>
     public static bool ProfileTrainPhases { get; set; }
 
@@ -406,6 +459,19 @@ public partial class Studio
                 $"{views.Count - supervised.Count} held out");
             // The Mip 3D-filter floor is measured against the photos the scene is fitted to, at the training size.
             _trainer.SetMipCameras(supervised.Select(i => views[i].Camera.ScaledTo(w, h)).ToList());
+            // Camera refinement: per-view Adam state, and the step sizes in this capture's units.
+            PoseAdam? poseAdam = null;
+            float poseSpread = 1f;
+            if (RefinePoses)
+            {
+                _trainer.EnsurePoseSlots(views.Count);
+                poseAdam = new PoseAdam(views.Count);
+                var centroid = System.Numerics.Vector3.Zero;
+                foreach (var v in views) centroid += v.Camera.Position;
+                centroid /= views.Count;
+                poseSpread = Math.Max(1e-6f, views.Max(v => System.Numerics.Vector3.Distance(v.Camera.Position, centroid)));
+                Console.WriteLine($"[Train] refining camera poses: rotation {PoseLrRotation:G3} rad, translation {PoseLrTranslation:G3} x spread {poseSpread:F3} per update, decaying to 10%");
+            }
             if (SplatTrainerGpu.MipFilter > 0)
                 Console.WriteLine($"[Train] Mip 3D filter {SplatTrainerGpu.MipFilter}: scale floor = filter x depth / focal over {supervised.Count} cameras");
 
@@ -519,7 +585,7 @@ public partial class Studio
                 bool readLoss = it < supervised.Count || it % supervised.Count == supervised.Count - 1
                     || it == iterations - 1;
                 float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo,
-                    readLoss: readLoss);
+                    readLoss: readLoss, poseSlot: poseAdam != null && geo != null ? vi : -1);
 
                 // How much of the gradient survives the fixed-point atomic? Gradients cross it
                 // as scaled integers, and dL/d(pixel) is 1/(3*W*H) - about 1e-6 at this
@@ -654,6 +720,22 @@ public partial class Studio
                 }
                 if (it % supervised.Count == supervised.Count - 1)
                 {
+                    if (poseAdam != null)
+                    {
+                        // Each supervised view was stepped once this cycle: one pose update each, from that gradient.
+                        float decay = 1f - 0.9f * Math.Min(1f, (it + 1f) / iterations);
+                        var pg = await _trainer.ReadPoseGradsAsync(views.Count);
+                        int moved = 0; float rotSum = 0f, transSum = 0f;
+                        foreach (int svi in supervised)
+                        {
+                            var (m, r, t) = poseAdam.Step(views[svi].Camera, pg.AsSpan(svi * 6, 6), svi,
+                                PoseLrRotation * decay, PoseLrTranslation * poseSpread * decay);
+                            if (m) { moved++; rotSum += r; transSum += t; }
+                        }
+                        int pc = (it + 1) / supervised.Count;
+                        if (pc % 5 == 1 && moved > 0)
+                            Console.WriteLine($"[Train] cycle {pc,4} poses: {moved} views stepped, mean {rotSum / moved * 180f / MathF.PI:F4} deg / {transSum / moved / poseSpread:P3} of spread");
+                    }
                     double mean = cycleSum / cycleN;
                     if (double.IsNaN(firstCycle)) firstCycle = mean;
                     lastCycle = mean;
@@ -733,6 +815,32 @@ public partial class Studio
                 Console.WriteLine(
                     $"[Train] WARNING: {overflowed}/{iterations} iterations overflowed the key " +
                     $"buffer (keysPerSplat={_trainer.KeysPerSplat}) - those gradients are incomplete");
+
+            // Held-out views carry SfM poses too: refine them against the finished scene (photometric, splats frozen -
+            // zero learning rates) before scoring, as camera-refining pipelines evaluate, or the score measures how far
+            // the refined training cameras moved from the unrefined test ones rather than the scene.
+            if (poseAdam != null && geo is { } g1)
+            {
+                var frozen = g1 with { PositionLr = 0f, LogScaleLr = 0f, RotationLr = 0f };
+                int refined = 0;
+                for (int hv = 0; hv < views.Count; hv++)
+                {
+                    if (views[hv].UsedForSupervision) continue;
+                    for (int k = 0; k < PoseTestIterations; k++)
+                    {
+                        var hc = views[hv].Camera.ScaledTo(w, h);
+                        var (hn, hf) = SplatBounds.DepthRangeFor(box, hc);
+                        _trainer.SetTargetFrom(targets, hv);
+                        await _trainer.TrainStepAsync(packed, n, hc, hn, hf, colourLr: 0f, opacityLr: 0f, geometry: frozen,
+                            readLoss: false, poseSlot: hv);
+                        var hg = await _trainer.ReadPoseGradsAsync(views.Count);
+                        float d2 = 1f - 0.9f * k / Math.Max(1f, PoseTestIterations - 1f);
+                        poseAdam.Step(views[hv].Camera, hg.AsSpan(hv * 6, 6), hv, PoseLrRotation * d2, PoseLrTranslation * poseSpread * d2);
+                    }
+                    refined++;
+                }
+                Console.WriteLine($"[Train] held-out poses refined against the frozen scene: {refined} views x {PoseTestIterations} steps");
+            }
 
             var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box, logPerView: true);
             WarnOnEvalOverflow(fitted, views.Count);

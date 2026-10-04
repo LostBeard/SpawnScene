@@ -441,6 +441,16 @@ public partial class Studio : IAsyncDisposable
             // 4946 px, is sub-pixel - and the own-SfM run lost 5 dB held-out to the COLMAP-pose one (2026-10-04).
             if (query.TryGetValue("importmax", out var imq0) && int.TryParse(imq0, out var imv0))
                 ImageImportService.MaxImportDimension = Math.Max(0, imv0);
+            // &refineposes=1: photometric camera refinement while training (and test-time for held-out views);
+            // &poselr=R,T: its rotation (rad) and translation (x spread) steps per update.
+            if (query.TryGetValue("refineposes", out var refPq)) RefinePoses = refPq is "1" or "true";
+            if (query.TryGetValue("poselr", out var plq))
+            {
+                var poseLrParts = plq.Split(',');
+                if (poseLrParts.Length == 2 && float.TryParse(poseLrParts[0], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var plr)
+                    && float.TryParse(poseLrParts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var plt))
+                { PoseLrRotation = plr; PoseLrTranslation = plt; }
+            }
             // &mipfilter=F: the Mip-Splatting 3D filter as a per-splat scale floor while training (0.2 = the paper's; 0 = off).
             if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
                     System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mfv))

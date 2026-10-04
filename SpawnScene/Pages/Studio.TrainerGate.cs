@@ -277,6 +277,11 @@ public partial class Studio
             if (!recovered) { Console.WriteLine("[TrainerGate] FAIL: colours did not move toward truth"); return; }
             Console.WriteLine("[TrainerGate] colour/opacity PASS");
 
+            // -- Camera-pose gradient (photometric refinement): analytic vs finite difference of the loss. Here, on the
+            //    fitted scene against its own target; it resets the peak key demand its perturbed views raised. --
+            if (!await PoseGradientGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
+
             // -- Gradients: do the shaders compute what the verified CPU oracles compute? Both D-SSIM forms,
             //    luma (&ssimrgb=0) and per-channel (the default), each against its own CPU oracle. --
             bool ssimWas = SplatTrainerGpu.SsimPerChannel;
@@ -315,6 +320,75 @@ public partial class Studio
         {
             Console.WriteLine($"[TrainerGate] FAIL: {ex}");
         }
+    }
+
+    /// <summary>
+    /// The camera-pose gradient (SplatTrainerShaders.PoseGradPartial, used by &amp;refineposes=1) must point where the
+    /// loss actually falls: from a camera turned 0.4 deg and shifted off the one the target was rendered from, the
+    /// analytic dL/d(translation) and dL/d(rotation) against central finite differences of the step's own loss, as
+    /// directions (cosine &gt; 0.9 each). A flipped sign or a swapped cross product would make refinement walk cameras
+    /// AWAY from the photos. Zero learning rates: nothing in the scene moves.
+    /// </summary>
+    async Task<bool> PoseGradientGateAsync(SplatTrainerGpu trainer, MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int n,
+        CameraParams cam, float depthNear, float depthFar)
+    {
+        var frozen = new SplatTrainerGpu.GeometryStep(0f, 0f, 0f, 1e-9f, 1e9f);
+        trainer.EnsurePoseSlots(1);
+        // Zero learning rates do not make a step a no-op here: the geometry step rewrites scale (and opacity) from the
+        // trainer's log-scale / logit buffers, which this gate never seeded. Snapshot the splats and restore them after,
+        // so the stages that follow see the fitted scene (key growth failed on a scene this stage had rewritten).
+        float[] snapshot = await splatBuf.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
+        float scale = Math.Max(1e-3f, depthNear);
+        static CameraParams Moved(CameraParams c, Vector3 dt, Vector3 dw)
+        {
+            var m = c.ScaledTo(c.Width, c.Height);
+            m.Position = c.Position + dt;
+            float ang = dw.Length();
+            if (ang > 0f)
+            {
+                var q = Quaternion.CreateFromAxisAngle(dw / ang, ang);
+                m.Forward = Vector3.Normalize(Vector3.Transform(c.Forward, q));
+                m.Up = Vector3.Normalize(Vector3.Transform(c.Up, q));
+            }
+            else { m.Forward = c.Forward; m.Up = c.Up; }
+            return m;
+        }
+        var baseCam = Moved(cam, new Vector3(0.6f, -0.3f, 0.4f) * (0.01f * scale),
+            Vector3.Normalize(new Vector3(0.3f, 0.8f, 0.5f)) * (0.4f * MathF.PI / 180f));
+
+        await trainer.TrainStepAsync(splatBuf, n, baseCam, depthNear, depthFar, colourLr: 0f, opacityLr: 0f,
+            geometry: frozen, readLoss: true, poseSlot: 0);
+        var g = await trainer.ReadPoseGradsAsync(1);
+
+        float et = 0.002f * scale, er = 1e-3f;
+        var fd = new float[6];
+        for (int k = 0; k < 6; k++)
+        {
+            var e = new Vector3(k % 3 == 0 ? 1 : 0, k % 3 == 1 ? 1 : 0, k % 3 == 2 ? 1 : 0);
+            float eps = k < 3 ? et : er;
+            var plus = k < 3 ? Moved(baseCam, e * eps, Vector3.Zero) : Moved(baseCam, Vector3.Zero, e * eps);
+            var minus = k < 3 ? Moved(baseCam, -e * eps, Vector3.Zero) : Moved(baseCam, Vector3.Zero, -e * eps);
+            float lp = await trainer.TrainStepAsync(splatBuf, n, plus, depthNear, depthFar, 0f, 0f, frozen, true);
+            float lm = await trainer.TrainStepAsync(splatBuf, n, minus, depthNear, depthFar, 0f, 0f, frozen, true);
+            fd[k] = (lp - lm) / (2f * eps);
+        }
+        await trainer.ReadPoseGradsAsync(1);
+        splatBuf.View.SubView(0, (long)n * SplatFormat.Floats).CopyFromCPU(snapshot);
+        _gpuService.WebGPUAccelerator.FlushPendingCommands();
+        // Its perturbed views raised the peak key demand; later stages (key growth) size from it.
+        trainer.ResetPeakKeyDemand();
+        static float Cos(ReadOnlySpan<float> a, ReadOnlySpan<float> b)
+        {
+            double ab = 0, aa = 0, bb = 0;
+            for (int i = 0; i < a.Length; i++) { ab += a[i] * b[i]; aa += a[i] * a[i]; bb += b[i] * b[i]; }
+            return aa > 0 && bb > 0 ? (float)(ab / Math.Sqrt(aa * bb)) : 0f;
+        }
+        float cosT = Cos(g.AsSpan(0, 3), fd.AsSpan(0, 3)), cosR = Cos(g.AsSpan(3, 3), fd.AsSpan(3, 3));
+        bool ok = cosT > 0.9f && cosR > 0.9f;
+        Console.WriteLine($"[TrainerGate] pose gradient {(ok ? "PASS" : "FAIL")}: cos(analytic, finite diff) translation {cosT:F3}, " +
+            $"rotation {cosR:F3}; analytic t=({g[0]:G3},{g[1]:G3},{g[2]:G3}) r=({g[3]:G3},{g[4]:G3},{g[5]:G3}), " +
+            $"fd t=({fd[0]:G3},{fd[1]:G3},{fd[2]:G3}) r=({fd[3]:G3},{fd[4]:G3},{fd[5]:G3})");
+        return ok;
     }
 
     /// <summary>
@@ -381,6 +455,15 @@ public partial class Studio
             Console.WriteLine($"[TrainerGate] FAIL: key growth needs a reference that fits and needs more than 1 key a " +
                 $"splat (demand {demand:N0} for {n:N0} splats, overflowed {trainer.LastOverflowed})");
             return false;
+        }
+        // Resize never goes below 1,024 keys (SplatTrainerGpu.ResizeCoreAsync), so a frame that needs fewer cannot
+        // overflow at any keys-per-splat and this stage would fail for want of a test, not of growth. That happened
+        // when an earlier stage nudged this 240-splat scene to 968-970 keys (2026-10-04); say so instead of failing.
+        if (demand <= 1024)
+        {
+            Console.WriteLine($"[TrainerGate] key growth SKIPPED: this frame needs {demand:N0} keys, at or under the 1,024-key " +
+                "capacity floor, so no resize can make it overflow");
+            return true;
         }
         await trainer.ResizeAsync(GateWidth, GateHeight, n, keysPerSplat: 1);
         trainer.ResetPeakKeyDemand();

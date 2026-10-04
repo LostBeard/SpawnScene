@@ -69,7 +69,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // SPAWNSCENE_EDIT_QUERY: another start (e.g. the project autotest, which trains and saves a scene), with
     // SPAWNSCENE_EDIT_WAIT the console line that says it is done.
     await send('Page.navigate', { url: `${APP}/studio?${process.env.SPAWNSCENE_EDIT_QUERY || 'autotest=generate-room&render=stochastic'}` });
-    const deadline = Date.now() + 60 * 60 * 1000;
+    // SPAWNSCENE_EDIT_MINUTES: how long SPAWNSCENE_EDIT_QUERY may run (a 30K project training is well past an hour).
+    const deadline = Date.now() + Number(process.env.SPAWNSCENE_EDIT_MINUTES || 60) * 60 * 1000;
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);

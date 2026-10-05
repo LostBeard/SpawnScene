@@ -43,6 +43,41 @@ public class GpuSplatSorter : IDisposable
         ArrayView1D<int, Stride1D.Dense>,    // outIndices
         CullParams>? _cullDistanceKernel;
 
+    private Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+        ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+        ArrayView1D<float, Stride1D.Dense>, CullParams>? _cullDistanceLodKernel;
+
+    // ── LOD tree cut (Plans/lod-streaming.md): when set, the scene's rows are the tree's nodes ──
+    MemoryBuffer1D<int, Stride1D.Dense>? _lodParent;
+    MemoryBuffer1D<float, Stride1D.Dense>? _lodBounds, _lodSize;
+    int _lodLeafCount;
+
+    /// <summary>The LOD cut threshold in pixels: a node is drawn once its view size is at most this.</summary>
+    public float LodTau { get; set; } = 1.5f;
+
+    /// <summary>True while the scene is an LOD tree drawn through its cut.</summary>
+    public bool LodActive => _lodParent != null;
+
+    /// <summary>
+    /// Draw the current scene (whose rows must be an LOD tree's nodes, leaves first) through its cut. Takes ownership of
+    /// the three arrays; any new upload drops them (they belong to that scene).
+    /// </summary>
+    public void SetLod(MemoryBuffer1D<int, Stride1D.Dense> parent, MemoryBuffer1D<float, Stride1D.Dense> bounds,
+        MemoryBuffer1D<float, Stride1D.Dense> size, int leafCount)
+    {
+        ClearLod();
+        _lodParent = parent; _lodBounds = bounds; _lodSize = size; _lodLeafCount = leafCount;
+        ResetSortState();
+    }
+
+    void ClearLod()
+    {
+        _lodParent?.Dispose(); _lodParent = null;
+        _lodBounds?.Dispose(); _lodBounds = null;
+        _lodSize?.Dispose(); _lodSize = null;
+        _lodLeafCount = 0;
+    }
+
     // WGSL radix sort (8 bits a pass, one submission): 16-bit keys = 2 passes, 32-bit = 4. The
     // ILGPU.Algorithms sort it replaces ran 2 bits a pass, ~100 dispatches (MEASURED 10x slower in the trainer).
     private GpuRadixSort? _radixSort;
@@ -140,6 +175,9 @@ public class GpuSplatSorter : IDisposable
         // Screen-space LOD culling: reject splats whose projected pixel size < MinScreenSize
         public float FocalLength;   // max(focalX, focalY) in pixels
         public float MinScreenSize; // minimum projected pixel radius (e.g. 0.3)
+        // LOD tree cut (CullAndDistanceLodKernel): leaves are rows 0..LodLeafCount-1, the cut threshold in pixels.
+        public int LodLeafCount;
+        public float LodTau;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -212,6 +250,66 @@ public class GpuSplatSorter : IDisposable
         // visible 16-bit key (<= 65534). Pack shader skips idx < 0 -> no wasted vertex/fragment work.
         outDistances[i] = -1;
         outIndices[i] = -1;
+    }
+
+    /// <summary>
+    /// <see cref="CullAndDistanceKernel"/> over an LOD tree's nodes (Plans/lod-streaming.md, LodTree): node i is drawn
+    /// only when it is in the cut - small enough on screen (or a leaf) while its parent is not (or it is a root) - with
+    /// the view metric LOD size x focal / distance to the subtree's bounding sphere, which never grows from parent to
+    /// child, so exactly one node on every root-to-leaf path is drawn. The sub-pixel cull is off: the cut replaces it.
+    /// </summary>
+    private static void CullAndDistanceLodKernel(
+        Index1D index,
+        ArrayView1D<float, Stride1D.Dense> packedData,
+        ArrayView1D<int, Stride1D.Dense> outDistances,
+        ArrayView1D<int, Stride1D.Dense> outIndices,
+        ArrayView1D<int, Stride1D.Dense> lodParent,
+        ArrayView1D<float, Stride1D.Dense> lodBounds,
+        ArrayView1D<float, Stride1D.Dense> lodSize,
+        CullParams p)
+    {
+        int i = index;
+        if (i >= p.SplatCount) return;
+        bool smallEnough = i < p.LodLeafCount || LodPixelSize(i, lodBounds, lodSize, p) <= p.LodTau;
+        int parent = lodParent[i];
+        bool parentTooBig = parent < 0 || LodPixelSize(parent, lodBounds, lodSize, p) > p.LodTau;
+        if (!(smallEnough && parentTooBig))
+        {
+            outDistances[i] = -1;
+            outIndices[i] = -1;
+            return;
+        }
+        int o = i * FloatsPerSplat;
+        float x = packedData[o], y = packedData[o + 1], z = packedData[o + 2];
+        float s0 = packedData[o + 6], s1 = packedData[o + 7], s2 = packedData[o + 8];
+        float sMax = s0 > s1 ? s0 : s1;
+        if (s2 > sMax) sMax = s2;
+        float margin = sMax * 3f;
+        bool visible = packedData[o + 9] > 0f
+            && x * p.P0x + y * p.P0y + z * p.P0z + p.P0d >= -margin
+            && x * p.P1x + y * p.P1y + z * p.P1z + p.P1d >= -margin
+            && x * p.P2x + y * p.P2y + z * p.P2z + p.P2d >= -margin
+            && x * p.P3x + y * p.P3y + z * p.P3z + p.P3d >= -margin
+            && x * p.P4x + y * p.P4y + z * p.P4z + p.P4d >= -margin
+            && x * p.P5x + y * p.P5y + z * p.P5z + p.P5d >= -margin;
+        float dist = (x - p.CamPosX) * p.CamFwdX + (y - p.CamPosY) * p.CamFwdY + (z - p.CamPosZ) * p.CamFwdZ;
+        if (visible && dist > 0f)
+        {
+            int qDist = (int)(dist * p.DistScale);
+            outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
+            outIndices[i] = i;
+            return;
+        }
+        outDistances[i] = -1;
+        outIndices[i] = -1;
+    }
+
+    /// <summary>LodTree.PixelSize on the GPU: LOD size x focal / max(distance to the bounding sphere, 0.1).</summary>
+    static float LodPixelSize(int i, ArrayView1D<float, Stride1D.Dense> bounds, ArrayView1D<float, Stride1D.Dense> size, CullParams p)
+    {
+        float dx = bounds[i * 4] - p.CamPosX, dy = bounds[i * 4 + 1] - p.CamPosY, dz = bounds[i * 4 + 2] - p.CamPosZ;
+        float d = XMath.Sqrt(dx * dx + dy * dy + dz * dz) - bounds[i * 4 + 3];
+        return size[i] * p.FocalLength / XMath.Max(d, 0.1f);
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -487,6 +585,17 @@ public class GpuSplatSorter : IDisposable
         float focalLength = MathF.Max(camera.FocalX, camera.FocalY);
         var cullParams = BuildCullParams(mvp, camPos, camFwd, _splatCount, distScale, distMax, focalLength,
             LodCullPixels);
+        if (_lodParent != null)
+        {
+            cullParams.LodLeafCount = _lodLeafCount;
+            cullParams.LodTau = LodTau;
+            _cullDistanceLodKernel ??= accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>,
+                ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, CullParams>(CullAndDistanceLodKernel);
+            _cullDistanceLodKernel(_splatCount, _packedDataBuf.View, _distanceBuf!.View, _indicesBuf.View,
+                _lodParent.View, _lodBounds!.View, _lodSize!.View, cullParams);
+        }
+        else
         _cullDistanceKernel(
             _splatCount,
             _packedDataBuf.View,
@@ -588,6 +697,7 @@ public class GpuSplatSorter : IDisposable
         _indicesBuf?.Dispose(); _indicesBuf = null;
         _radixSort?.Dispose(); _radixSort = null;
         _lastSortVisibleCount = 0;
+        ClearLod();
     }
 
     public void Dispose() => DisposeBuffers();

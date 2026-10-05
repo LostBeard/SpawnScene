@@ -1073,6 +1073,8 @@ public partial class Studio
                 if (loaded) _gpuRenderer.RepackForDisplay();
                 else Console.WriteLine($"[Studio] scene {scene.Id}: SH bands missing - drawing base colour only");
             }
+            // &lodtau=N: draw the scene through its LOD tree's cut (Studio.Lod).
+            if (LodTauOption > 0f) await InstallLodTreeAsync();
 
             var gaussianScene = new GaussianScene
             {

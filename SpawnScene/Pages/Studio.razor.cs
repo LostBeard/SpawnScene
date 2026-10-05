@@ -209,6 +209,9 @@ public partial class Studio : IAsyncDisposable
             if (bp.Length == 2 && int.TryParse(bp[0], out var bc) && int.TryParse(bp[1], out var br) && bc >= 1 && br >= 1)
                 TrainingBlocks = (Math.Min(bc, 8), Math.Min(br, 8));
         }
+        if (query.TryGetValue("lodtau", out var ltq) && float.TryParse(ltq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var ltv))
+            LodTauOption = Math.Max(0f, ltv);
         if (query.TryGetValue("frozendiag", out var fdq)) DiagnoseFrozenDensify = fdq is "1" or "true";
         if (query.TryGetValue("coarse", out var crq) && float.TryParse(crq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var crv))

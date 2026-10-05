@@ -268,6 +268,14 @@ public partial class Studio
             _projects = await _projectService.ListProjectsAsync();
             var opened = _projects.First(p => p.Id == project.Id);
             OnOpenProject(opened);
+            // Viewer options an import is opened with (the autotest branch that parses them never runs for an import):
+            // &lodtau=N draws the scene through its LOD tree (Studio.Lod); &lodpx=N is the sub-pixel cull (0 = none).
+            if (query.TryGetValue("lodtau", out var ltq) && float.TryParse(ltq, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var ltv))
+                LodTauOption = Math.Max(0f, ltv);
+            if (query.TryGetValue("lodpx", out var lpq) && float.TryParse(lpq, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var lpv))
+                _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);
             await LoadProjectSceneAsync(opened.Scenes.First(s => s.Id == scene.Id));
             // &park=w,h,fx,fy,cx,cy,px,py,pz,fwdx,fwdy,fwdz,upx,upy,upz (harness): seat the viewer at an EXACT camera,
             // intrinsics and roll included, so a reference renderer can draw the identical view for a side by side. The

@@ -203,6 +203,58 @@ public class GpuGaussianRenderer : IDisposable
         SetShRest(buffers, degree);
     }
 
+    /// <summary>
+    /// Show the scene through its LOD tree (Plans/lod-streaming.md): the tree's nodes become the drawn rows (the sorter
+    /// takes ownership of them and of the cut arrays), each frame draws only the cut at <paramref name="tau"/> pixels,
+    /// and the SH bands grow to the node count - the leaves keep theirs, internal nodes get none (view-independent
+    /// colour for merged distant detail; WebGPU buffers start zeroed). The cut runs in the sorted path's cull, so LOD
+    /// draws sorted: stochastic mode would draw every node at once.
+    /// </summary>
+    public async Task InstallLodAsync(GpuLodTree tree, float tau)
+    {
+        var oldSh = _shRest;
+        int degree = _shDegree;
+        _shRest = null;   // kept alive across the upload, re-sized below
+        var nodes = tree.Nodes;
+        tree.Nodes = null!;
+        RenderMode = SplatRenderMode.Sorted;
+        await UploadSceneFromGpuBuffer(nodes, tree.NodeCount);
+        _sorter.SetLod(tree.Parent, tree.Bounds, tree.LodSize, tree.LeafCount);
+        tree.Parent = null!; tree.Bounds = null!; tree.LodSize = null!;
+        _sorter.LodTau = tau;
+        if (oldSh != null && degree > 0 && _device != null && _queue != null)
+        {
+            ulong leafBytes = (ulong)tree.LeafCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+            ulong nodeBytes = (ulong)tree.NodeCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+            var parts = new GPUBuffer[oldSh.Length];
+            _gpu.WebGPUAccelerator.FlushPendingCommands();
+            using (var encoder = _device.CreateCommandEncoder())
+            {
+                for (int p = 0; p < parts.Length; p++)
+                {
+                    parts[p] = NewShPart(nodeBytes);
+                    encoder.CopyBufferToBuffer(oldSh[p], 0, parts[p], 0, leafBytes);
+                }
+                using var cmd = encoder.Finish();
+                _submitArray[0] = cmd;
+                RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
+            }
+            foreach (var b in oldSh) { b.Destroy(); b.Dispose(); }
+            SetShRest(parts, degree);
+        }
+        else
+        {
+            if (oldSh != null) foreach (var b in oldSh) { b.Destroy(); b.Dispose(); }
+            SetShRest(null, 0);
+        }
+        RepackForDisplay();
+        Console.WriteLine($"[LOD] drawing {tree.LeafCount:N0} splats through a {tree.NodeCount:N0}-node tree " +
+            $"({tree.Levels} levels), cut at {tau} px, sorted mode");
+    }
+
+    /// <summary>The LOD cut threshold in pixels (when a tree is installed).</summary>
+    public float LodTau { get => _sorter.LodTau; set => _sorter.LodTau = value; }
+
     /// <summary>JS bytes into an ILGPU buffer at a byte offset (a parked block's rows into a merged scene).</summary>
     public void WriteIlgpuBytes(MemoryBuffer1D<float, Stride1D.Dense> dst, long byteOffset, ArrayBuffer bytes)
     {

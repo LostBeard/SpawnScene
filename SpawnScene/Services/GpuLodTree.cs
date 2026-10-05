@@ -126,23 +126,24 @@ public sealed class GpuLodTree : IDisposable
         bounds[i * 4] = nodes[o]; bounds[i * 4 + 1] = nodes[o + 1]; bounds[i * 4 + 2] = nodes[o + 2]; bounds[i * 4 + 3] = 1.5f * s;
     }
 
-    static uint Axis(float v, float step)
+    static uint Axis(float v, float step, float origin)
     {
-        long c = (long)XMath.Floor(v / step) + AxisBias;
+        long c = (long)XMath.Floor((v - origin) / step) + AxisBias;
         c = c < 0 ? 0 : c > (1 << AxisBits) - 1 ? (1 << AxisBits) - 1 : c;
         return (uint)c;
     }
 
     static void KeyKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> frontier, ArrayView1D<float, Stride1D.Dense> nodes,
         ArrayView1D<float, Stride1D.Dense> lodSize, ArrayView1D<uint, Stride1D.Dense> keyLo, ArrayView1D<uint, Stride1D.Dense> keyHi,
-        ArrayView1D<uint, Stride1D.Dense> sortLo, ArrayView1D<uint, Stride1D.Dense> perm, int m, float step, int lastLevel)
+        ArrayView1D<uint, Stride1D.Dense> sortLo, ArrayView1D<uint, Stride1D.Dense> perm, int m, float step, float origin, int lastLevel)
     {
         if (i >= m) return;
         int node = frontier[i];
         perm[i] = (uint)i.X;
         if (lastLevel == 0 && lodSize[node] > step) { keyLo[i] = WaitKey; keyHi[i] = WaitKey; sortLo[i] = WaitKey; return; }
         long o = (long)node * F;
-        ulong k = Axis(nodes[o], step) | ((ulong)Axis(nodes[o + 1], step) << AxisBits) | ((ulong)Axis(nodes[o + 2], step) << (2 * AxisBits));
+        ulong k = Axis(nodes[o], step, origin) | ((ulong)Axis(nodes[o + 1], step, origin) << AxisBits)
+            | ((ulong)Axis(nodes[o + 2], step, origin) << (2 * AxisBits));
         uint lo = (uint)(k & 0xFFFFFFFFul), hi = (uint)(k >> 32);
         keyLo[i] = lo; keyHi[i] = hi; sortLo[i] = lo;
     }
@@ -283,7 +284,7 @@ public sealed class GpuLodTree : IDisposable
             ArrayView1D<int, Stride1D.Dense>, int>(InitKernel);
         var key = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>,
-            ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>, int, float, int>(KeyKernel);
+            ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>, int, float, float, int>(KeyKernel);
         var gather = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>,
             ArrayView1D<uint, Stride1D.Dense>, int>(GatherKernel);
         var merge = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>,
@@ -303,7 +304,8 @@ public sealed class GpuLodTree : IDisposable
         for (; level < maxLevels && m > 1; level++, step *= LodTree.LevelGrowth)
         {
             int last = level == maxLevels - 1 ? 1 : 0;
-            key(m, cur.View, t.Nodes.View, t.LodSize.View, keyLo.View, keyHi.View, sortKey.View, perm.View, m, step, last);
+            key(m, cur.View, t.Nodes.View, t.LodSize.View, keyLo.View, keyHi.View, sortKey.View, perm.View, m, step,
+                LodTree.LevelOrigin(level, step), last);
             sort(sortKey, perm, m);                                   // by the low half
             gather(m, perm.View, keyHi.View, sortKey.View, m);
             sort(sortKey, perm, m);                                   // then by the high half (stable)

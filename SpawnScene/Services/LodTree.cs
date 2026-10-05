@@ -34,6 +34,13 @@ public sealed class LodTree
     /// <summary>Grid growth per level (Spark's default r = 1.5).</summary>
     public const float LevelGrowth = 1.5f;
 
+    /// <summary>
+    /// The grid origin of a level: shifted by a golden-ratio fraction of a cell per level. With a fixed origin a cell
+    /// boundary sits at 0 on EVERY level, so two clusters either side of it never merge - Truck ran all 64 levels and
+    /// still ended with several roots (2026-10-05).
+    /// </summary>
+    public static float LevelOrigin(int level, float step) => step * (level * 0.6180339887f % 1f);
+
     /// <summary>World size of a splat row: 2 x its largest 1-sigma scale.</summary>
     public static float SizeOf(ReadOnlySpan<float> row) =>
         2f * MathF.Max(row[SplatFormat.OffScale], MathF.Max(row[SplatFormat.OffScale + 1], row[SplatFormat.OffScale + 2]));
@@ -71,11 +78,13 @@ public sealed class LodTree
             // Splats no larger than this level's cell take part; larger ones wait for a coarser level.
             var groups = new Dictionary<(long, long, long), List<int>>();
             var next = new List<int>();
+            float origin = LevelOrigin(level, step);
             foreach (int node in frontier)
             {
                 if (size[node] > step && level < maxLevels - 1) { next.Add(node); continue; }
                 int o = node * F;
-                var key = ((long)MathF.Floor(rows[o] / step), (long)MathF.Floor(rows[o + 1] / step), (long)MathF.Floor(rows[o + 2] / step));
+                var key = ((long)MathF.Floor((rows[o] - origin) / step), (long)MathF.Floor((rows[o + 1] - origin) / step),
+                    (long)MathF.Floor((rows[o + 2] - origin) / step));
                 if (!groups.TryGetValue(key, out var list)) groups[key] = list = new List<int>();
                 list.Add(node);
             }

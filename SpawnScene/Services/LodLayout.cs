@@ -64,10 +64,11 @@ public static class LodLayout
     }
 
     /// <summary>
-    /// Chunk boundaries for streaming a breadth-first tree: chunks of at most <paramref name="maxNodes"/> nodes that
-    /// never split a sibling run (the roots count as one run), so a node's children always share one chunk. Splitting
-    /// runs made each chunk need the next one (its last run straddled), and a streamed view loaded every chunk
-    /// (2026-10-05). Returns the chunk starts, then NodeCount.
+    /// Chunk boundaries for streaming a laid-out tree (any order with parents first and each node's children
+    /// contiguous): chunks of at most <paramref name="maxNodes"/> nodes that never split a sibling run - a run being
+    /// consecutive nodes with the same parent, the roots one run - so a node's children always share one chunk.
+    /// Splitting runs made each chunk need the next one (its last run straddled), and a streamed view loaded every
+    /// chunk (2026-10-05). Returns the chunk starts, then NodeCount.
     /// <para>
     /// Measured against TREELET chunks (each chunk a subtree expanded breadth-first) on a 20-room corridor seen from
     /// one end: breadth-first needed 58 / 18 of 130 chunks at tau 10 / 50 px, treelets 67 / 20 - not better.
@@ -77,16 +78,14 @@ public static class LodLayout
     {
         var starts = new List<int> { 0 };
         int chunkStart = 0, runStart = 0;
-        int roots = 0;
-        while (roots < t.NodeCount && t.Parent[roots] < 0) roots++;
-        void Run(int end)
+        for (int i = 1; i <= t.NodeCount; i++)
         {
-            if (end - runStart > maxNodes) throw new InvalidOperationException($"a sibling run of {end - runStart} nodes is over the chunk size {maxNodes}");
-            if (end - chunkStart > maxNodes) { starts.Add(runStart); chunkStart = runStart; }
-            runStart = end;
+            if (i < t.NodeCount && t.Parent[i] == t.Parent[i - 1]) continue;
+            // [runStart, i) is a run.
+            if (i - runStart > maxNodes) throw new InvalidOperationException($"a sibling run of {i - runStart} nodes is over the chunk size {maxNodes}");
+            if (i - chunkStart > maxNodes) { starts.Add(runStart); chunkStart = runStart; }
+            runStart = i;
         }
-        Run(roots);
-        for (int p = 0; p < t.NodeCount; p++) if (t.ChildCount[p] > 0) Run(t.FirstChild[p] + t.ChildCount[p]);
         starts.Add(t.NodeCount);
         return starts.ToArray();
     }

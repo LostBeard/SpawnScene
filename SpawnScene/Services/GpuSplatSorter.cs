@@ -414,7 +414,8 @@ public class GpuSplatSorter : IDisposable
     /// <summary>
     /// <see cref="CullAndDistanceLodKernel"/> over a paged pool (LodLayout.InCutPaged): slot i is drawn when it holds a
     /// node (parent slot != -2), its parent is too big (or it is a root), and it is small enough (leaves: size 0) or its
-    /// children's chunk is not resident - then it stands in for them and raises that chunk's want flag.
+    /// children's chunk is not resident - then it stands in for them and, when it is on screen, raises that chunk's
+    /// want flag (detail behind the camera is not streamed until the camera turns to it).
     /// </summary>
     private static void CullAndDistanceLodPagedKernel(
         Index1D index,
@@ -434,11 +435,12 @@ public class GpuSplatSorter : IDisposable
         if (i >= p.SplatCount) return;
         int parent = parentSlot[i];
         bool take = parent != -2 && (parent < 0 || LodPixelSize(parent, lodBounds, lodSize, p) > p.LodTau);
+        int wantChunk = -1;
         if (take && LodPixelSize(i, lodBounds, lodSize, p) > p.LodTau)
         {
             int cc = childChunk[i];
             if (cc >= 0 && chunkPage[cc] >= 0) take = false;   // its children are resident: they draw
-            else if (cc >= 0) want[cc] = 1;
+            else wantChunk = cc;
         }
         if (!take)
         {
@@ -466,6 +468,7 @@ public class GpuSplatSorter : IDisposable
             outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
             outIndices[i] = i;
             Atomic.Add(ref drawnCount[0], 1);
+            if (wantChunk >= 0) want[wantChunk] = 1;
             return;
         }
         outDistances[i] = -1;

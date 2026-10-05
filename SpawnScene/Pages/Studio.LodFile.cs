@@ -52,14 +52,27 @@ public partial class Studio
                 }
             }
 
+            // Chunk boundaries (whole sibling runs) and what each chunk needs, from the topology the file carries anyway.
+            // CPU transfer: file I/O - parent and child count of every node (they are written into the chunks).
             const int Chunk = LodChunkFile.DefaultChunkNodes;
+            await a.SynchronizeAsync();
+            var topo = new LodTree
+            {
+                NodeCount = nodes, LeafCount = n,
+                Parent = (await laid.Parent.CopyToHostAsync<int>(0, nodes)).ToArray(),
+                ChildCount = (await laid.ChildCount.CopyToHostAsync<int>(0, nodes)).ToArray(),
+            };
+            int roots = 0;
+            while (roots < nodes && topo.Parent[roots] < 0) roots++;
+            topo.FirstChild = new int[nodes];
+            for (int i = 0, next = roots; i < nodes; i++) { topo.FirstChild[i] = topo.ChildCount[i] > 0 ? next : -1; next += topo.ChildCount[i]; }
+            var starts = LodLayout.ChunkStarts(topo, Chunk);
             var chunks = new List<LodChunkFile.Chunk>();
             var zipped = new List<Uint8Array>();
             long offset = 0, rawTotal = 0;
-            int roots = 0;
-            for (int first = 0; first < nodes; first += Chunk)
+            for (int ci = 0; ci + 1 < starts.Length; ci++)
             {
-                int count = Math.Min(Chunk, nodes - first);
+                int first = starts[ci], count = starts[ci + 1] - first;
                 var part = new List<IDisposable>();
                 try
                 {
@@ -94,13 +107,6 @@ public partial class Studio
                     raw.Add(await laid.Bounds.CopyToHostUint8ArrayAsync((long)first * 16, (long)count * 16));
                     raw.Add(await laid.LodSize.CopyToHostUint8ArrayAsync((long)first * 4, (long)count * 4));
                     js.AddRange(raw);
-                    if (first == 0)
-                    {
-                        // Breadth-first: the roots are the first nodes, the ones with no parent.
-                        using var parents = new Int32Array(raw[shRows != null ? 3 : 2].Buffer, raw[shRows != null ? 3 : 2].ByteOffset, count);
-                        var p0 = parents.ToArray();
-                        while (roots < count && p0[roots] < 0) roots++;
-                    }
                     rawTotal += raw.Sum(r => (long)r.ByteLength);
                     using var blobIn = new Blob(raw, new BlobOptions { Type = "application/octet-stream" });
                     var z = await GzipAsync(blobIn, decompress: false);
@@ -110,7 +116,7 @@ public partial class Studio
                     chunks.Add(new LodChunkFile.Chunk(first, count, offset, z.ByteLength,
                         new[] { frame.MinX - frame.TailLoX, frame.MinY - frame.TailLoY, frame.MinZ - frame.TailLoZ,
                                 frame.MinX + frame.SizeX + frame.TailHiX, frame.MinY + frame.SizeY + frame.TailHiY, frame.MinZ + frame.SizeZ + frame.TailHiZ },
-                        frame.InnerArray()));
+                        frame.InnerArray(), LodLayout.ParentChunks(topo, starts, ci)));
                     offset += z.ByteLength;
                 }
                 finally { foreach (var d in part) d.Dispose(); }

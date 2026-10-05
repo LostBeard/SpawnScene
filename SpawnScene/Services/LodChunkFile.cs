@@ -9,7 +9,8 @@ namespace SpawnScene.Services;
 /// chunks of <see cref="Header3.ChunkNodes"/> nodes, each gzipped on its own so a viewer can fetch any chunk by its byte
 /// range (Plans/lod-streaming.md, phase B). Layout: "SPSCENE3", the header's byte length (int32 LE), the header (UTF-8
 /// JSON, <see cref="Header3"/>), then the chunks back to back. Chunk 0 is the top of the tree - on its own a coarse
-/// copy of the whole scene.
+/// copy of the whole scene. Chunks hold at most <see cref="Header3.ChunkNodes"/> nodes and never split a sibling run
+/// (LodLayout.ChunkStarts), so their sizes vary.
 /// <para>
 /// A chunk of n nodes, before gzip: the <see cref="SceneCodec"/> streams over the chunk's own frame (geometry n x 4
 /// words, appearance n x 3, SH n x 12 when the file has SH bands; internal nodes' SH are zero), then the cut's data,
@@ -29,7 +30,8 @@ public static class LodChunkFile
     /// <param name="Offset">Byte offset of the gzipped chunk from the first byte after the header (SceneFile.DataOffset).</param>
     /// <param name="Bounds">min x,y,z then max x,y,z of the chunk's node positions (the codec frame's outer box).</param>
     /// <param name="Inner">The frame's linear box (SceneCodec.QuantPosP), min then max.</param>
-    public sealed record Chunk(int First, int Count, long Offset, long Bytes, float[] Bounds, float[] Inner);
+    /// <param name="Needs">The chunks holding its nodes' parents (LodLayout.ParentChunks): load them first.</param>
+    public sealed record Chunk(int First, int Count, long Offset, long Bytes, float[] Bounds, float[] Inner, int[] Needs);
 
     /// <param name="LeafCount">The scene's splats (the leaves); the rest of the nodes are merges.</param>
     public sealed record Header3(

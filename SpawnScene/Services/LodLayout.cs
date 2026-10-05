@@ -64,6 +64,77 @@ public static class LodLayout
     }
 
     /// <summary>
+    /// Chunk boundaries for streaming a breadth-first tree: chunks of at most <paramref name="maxNodes"/> nodes that
+    /// never split a sibling run (the roots count as one run), so a node's children always share one chunk. Splitting
+    /// runs made each chunk need the next one (its last run straddled), and a streamed view loaded every chunk
+    /// (2026-10-05). Returns the chunk starts, then NodeCount.
+    /// <para>
+    /// Measured against TREELET chunks (each chunk a subtree expanded breadth-first) on a 20-room corridor seen from
+    /// one end: breadth-first needed 58 / 18 of 130 chunks at tau 10 / 50 px, treelets 67 / 20 - not better.
+    /// </para>
+    /// </summary>
+    public static int[] ChunkStarts(LodTree t, int maxNodes)
+    {
+        var starts = new List<int> { 0 };
+        int chunkStart = 0, runStart = 0;
+        int roots = 0;
+        while (roots < t.NodeCount && t.Parent[roots] < 0) roots++;
+        void Run(int end)
+        {
+            if (end - runStart > maxNodes) throw new InvalidOperationException($"a sibling run of {end - runStart} nodes is over the chunk size {maxNodes}");
+            if (end - chunkStart > maxNodes) { starts.Add(runStart); chunkStart = runStart; }
+            runStart = end;
+        }
+        Run(roots);
+        for (int p = 0; p < t.NodeCount; p++) if (t.ChildCount[p] > 0) Run(t.FirstChild[p] + t.ChildCount[p]);
+        starts.Add(t.NodeCount);
+        return starts.ToArray();
+    }
+
+    /// <summary>The chunk holding node <paramref name="i"/>, for chunk starts from <see cref="ChunkStarts"/>.</summary>
+    public static int ChunkOf(int[] starts, int i)
+    {
+        int k = Array.BinarySearch(starts, i);
+        return k >= 0 ? k : ~k - 1;
+    }
+
+    /// <summary>
+    /// The chunks a chunk needs resident with it: those holding the parents of its nodes (in breadth-first order a
+    /// contiguous span before it). Loading a chunk only with these, transitively,
+    /// keeps every resident node's ancestors resident, which is what makes <see cref="InCutPaged"/>'s local test exact.
+    /// </summary>
+    public static int[] ParentChunks(LodTree t, int[] starts, int chunk)
+    {
+        var set = new SortedSet<int>();
+        for (int i = starts[chunk]; i < starts[chunk + 1]; i++)
+        {
+            int p = t.Parent[i];
+            if (p < 0) continue;
+            int c = ChunkOf(starts, p);
+            if (c != chunk) set.Add(c);
+        }
+        return set.ToArray();
+    }
+
+    /// <summary>
+    /// The cut over a PARTLY resident tree (paging), node by node: drawn when its chunk is resident, its parent is too
+    /// big (or it is a root), and it is small enough on screen OR its children's chunk is not resident - it stands in
+    /// for them, and <paramref name="wantsChildren"/> says that chunk is the one to load. With the resident chunks
+    /// closed under <see cref="ParentChunks"/>, every leaf's root path has exactly one drawn node.
+    /// </summary>
+    public static bool InCutPaged(LodTree t, int i, System.Numerics.Vector3 cam, float focal, float tau, int[] starts,
+        Func<int, bool> chunkResident, out bool wantsChildren)
+    {
+        wantsChildren = false;
+        if (!chunkResident(ChunkOf(starts, i))) return false;
+        int p = t.Parent[i];
+        if (p >= 0 && t.PixelSize(p, cam, focal) <= tau) return false;
+        if (t.PixelSize(i, cam, focal) <= tau) return true;   // leaves: size 0
+        wantsChildren = !chunkResident(ChunkOf(starts, t.FirstChild[i]));
+        return wantsChildren;
+    }
+
+    /// <summary>
     /// The cut over a laid-out tree, as the GPU does it: node i is drawn when its view size is at most
     /// <paramref name="tau"/> (a leaf's is 0) and its parent's is larger (or it is a root).
     /// </summary>

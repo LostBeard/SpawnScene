@@ -39,9 +39,14 @@ public partial class Studio
     /// (SplatTrainerGpu.TrainableVolume), so everything outside it is frozen context. Null outside a block.</summary>
     SplatEditor.Volume? _frozenOutside;
 
-    /// <summary>Iterations already trained before this run (a block refining the coarse model): the SH degree
-    /// schedule continues from there instead of restarting at degree 0.</summary>
-    int _shScheduleOffset;
+    /// <summary>
+    /// The partitioned run's global clock: iterations already trained before this stage (a block refining the coarse
+    /// model) and the whole run's length. TrainOnTrainingViewsAsync runs every iteration schedule - SH degree, position
+    /// learning rate, densify window, opacity reset - on offset + iteration out of the total, so coarse + blocks follow
+    /// exactly a single run's schedule. Restarted per stage, the coarse model (3,500 of 7,000) never got the reset a
+    /// single run gets at 3,000 and each block restarted the position rate at its initial value. 0 = a normal run.
+    /// </summary>
+    int _scheduleOffset, _scheduleTotal;
 
     /// <summary>Prefix for the training HUD line ("Block 2 / 4 · "), empty for a single run.</summary>
     string _trainHudPrefix = "";
@@ -93,7 +98,10 @@ public partial class Studio
                 _trainHudPrefix = "Coarse model · ";
                 Console.WriteLine($"[Partition] coarse model: {coarseIters:N0} iterations over every view, up to {maxSplats / 2:N0} splats; " +
                     $"then {blockIters:N0} per block");
-                int ci = await TrainProjectSceneAsync(coarseIters, maxSplats / 2, maxDimension);
+                int ci;
+                _scheduleOffset = 0; _scheduleTotal = iterations;
+                try { ci = await TrainProjectSceneAsync(coarseIters, maxSplats / 2, maxDimension); }
+                finally { _scheduleTotal = 0; }
                 if (ci == 0) { Console.WriteLine("[Partition] FAIL - the coarse model did not train"); return 0; }
                 coarseN = _gpuRenderer.SplatCount;
                 coarseDegree = _gpuRenderer.ShDegree;
@@ -156,9 +164,10 @@ public partial class Studio
 
                 int it;
                 _frozenOutside = coarse != null ? trainBox : null;
-                _shScheduleOffset = coarse != null ? coarseIters : 0;
+                _scheduleOffset = coarse != null ? coarseIters : 0;
+                _scheduleTotal = coarse != null ? iterations : 0;
                 try { it = await TrainProjectSceneAsync(blockIters, maxSplats, maxDimension); }
-                finally { _frozenOutside = null; _shScheduleOffset = 0; }
+                finally { _frozenOutside = null; _scheduleOffset = 0; _scheduleTotal = 0; }
                 if (it == 0) { Console.WriteLine($"[Partition] block {block.Index}: FAIL - training did not run"); return 0; }
                 ranIters = Math.Max(ranIters, coarseIters + it);
                 if (coarse != null)

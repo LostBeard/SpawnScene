@@ -574,9 +574,13 @@ public partial class Studio
                     Console.WriteLine($"[Train] stopped on request after {it} of {iterations} iterations");
                     break;
                 }
-                // A block refining a coarse model continues its SH schedule (_shScheduleOffset): restarted at degree 0, the
-                // frozen context would render without the bands it learned.
-                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(it + _shScheduleOffset);
+                // Every schedule below runs on the GLOBAL iteration (Studio.Partition: a coarse model then blocks that
+                // refine it are one run's 0..total, not separate runs each starting at 0). Outside a partition g == it.
+                int g = it + _scheduleOffset;
+                int scheduleTotal = _scheduleTotal > 0 ? _scheduleTotal : iterations;
+                // A block continues the coarse model's SH schedule: restarted at degree 0, the frozen context would
+                // render without the bands it learned.
+                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(g);
                 if (it == 0 || it == 1000 || it == 2000 || it == 3000)
                     Console.WriteLine($"[Train] SH degree -> {_trainer.ActiveShDegree} at iter {it}");
 
@@ -588,7 +592,7 @@ public partial class Studio
                     {
                         PositionLr = TrainingSchedule.ExponentialLr(
                             positionLrInit, positionLrInit * PositionLrDecay,
-                            it, PositionLrMaxSteps),
+                            g, PositionLrMaxSteps),
                     };
 
                 // Slot in `supervised` for this iteration: file order, or a fresh permutation per epoch
@@ -693,24 +697,24 @@ public partial class Studio
 
                 // Density control on an ITERATION schedule, like the reference: every 100
                 // iterations from 500 until half way, then the model is left to settle.
-                if (it >= DensifyFromIter)
+                if (g >= DensifyFromIter)
                 {
                     // Kerbl densify_until_iter is absolute 15_000, not half the run. A 7k
                     // checkpoint densifies for the whole 7k; gating on iterations*0.5 stopped
                     // growth (and the opacity resets that share this gate) halfway through.
-                    bool stillGrowing = it < DensifyUntilIter;
+                    bool stillGrowing = g < DensifyUntilIter;
                     // Each schedule is checked on its OWN period. Nesting the reset inside the
                     // densify period would silently disable it whenever the two are not
                     // multiples of one another - a whitelist of one, in arithmetic form.
                     bool densifying = DensifyEveryIters > 0 && stillGrowing
-                        && (it + 1) % DensifyEveryIters == 0;
+                        && (g + 1) % DensifyEveryIters == 0;
                     // Skip an opacity reset that leaves less than one full interval to recover.
                     // MEASURED Truck 7K: reset at 6000 dropped held-out 16.51 -> 12.37 and
                     // COMPARE averaged the dip; Kerbl's 30k run has 9k settle after the last
                     // reset, a 7k run only has 1k. The reset still fires at 3000.
                     bool resetOpacity = OpacityResetEveryIters > 0 && stillGrowing
-                        && (it + 1) % OpacityResetEveryIters == 0
-                        && (iterations - (it + 1)) >= OpacityResetEveryIters;
+                        && (g + 1) % OpacityResetEveryIters == 0
+                        && (scheduleTotal - (g + 1)) >= OpacityResetEveryIters;
                     if (densifying || resetOpacity)
                     {
                         // Do NOT RecalibrateGradientScales here from fixed-point stats.

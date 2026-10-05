@@ -44,7 +44,7 @@
 		<PackageReference Include="SpawnDev.ILGPU.ML" Version="5.3.2" />
 		<!-- Direct, ahead of ILGPU.ML's own reference: 5.2.18-local.2+ fixes WebGPU loop exits that skip code
 		     (early return from nested loops), helpers taking LocalMemory views (GpuEpipolarRansac), and compiles one pipeline per kernel instead of one per dispatch size. local.3-.5 add WebGPUBufferAccounting (live buffers, creation sites). -->
-		<PackageReference Include="SpawnDev.ILGPU" Version="5.3.2" />
+		<PackageReference Include="SpawnDev.ILGPU" Version="5.3.3-local.1" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.12" PrivateAssets="all" />
 		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="3.0.2" />
 	</ItemGroup>

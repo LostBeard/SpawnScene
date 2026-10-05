@@ -30,9 +30,6 @@ public partial class Studio
     /// </summary>
     async Task OpenLodStreamAsync(ArrayBuffer bytes, LodChunkFile.Header3 h, long dataStart)
     {
-        var a = _gpuService.WebGPUAccelerator;
-        var t0 = DateTime.UtcNow;
-        _lodPager?.Dispose(); _lodPager = null;
         _lodFileBlob?.Dispose();
         using (var data = new Uint8Array(bytes, dataStart, bytes.ByteLength - dataStart))
             _lodFileBlob = new Blob(new[] { data }, new BlobOptions { Type = "application/octet-stream" });
@@ -42,12 +39,64 @@ public partial class Studio
             using var slice = blob.Slice(c.Offset, c.Offset + c.Bytes);
             return await GzipAsync(slice, decompress: true);
         }
+        await OpenLodStreamAsync(h, ChunkBytes, "in memory");
+    }
+
+    /// <summary>
+    /// ?import=&lt;url&gt;&amp;lodpool=N on a .spawnscene v3: read only its header, then each chunk by an HTTP Range request
+    /// when the cut asks for it - nothing else of the file is downloaded. False when the server does not answer Range
+    /// requests or the file is not v3 (the import then downloads it whole).
+    /// </summary>
+    async Task<bool> TryOpenLodUrlStreamAsync(string url)
+    {
+        async Task<ArrayBuffer?> RangeAsync(long start, long count)
+        {
+            using var window = _js.Get<Window>("window");
+            using var response = await window.Fetch(url, new SpawnDev.SpawnJS.FetchOptions
+            {
+                Headers = new Dictionary<string, string> { ["Range"] = $"bytes={start}-{start + count - 1}" },
+            });
+            if (response.Status != 206) return null;   // a whole-file answer: no Range support
+            return await response.ArrayBuffer();
+        }
+        using var prefix = await RangeAsync(0, 12);
+        if (prefix == null) return false;
+        byte[] first;
+        using (var u = new Uint8Array(prefix)) first = u.ReadBytes();
+        if (SceneFile.Version(first) != 3) return false;
+        int headerLen = SceneFile.HeaderLength(first);
+        using var headerBytes = await RangeAsync(12, headerLen);
+        if (headerBytes == null) return false;
+        LodChunkFile.Header3 h;
+        using (var u = new Uint8Array(headerBytes)) h = LodChunkFile.ParseHeader3(u.ReadBytes());
+        long dataStart = SceneFile.DataOffset(headerLen);
+        long fetched = 0;
+        async Task<ArrayBuffer> ChunkBytes(LodChunkFile.Chunk c)
+        {
+            using var zipped = await RangeAsync(dataStart + c.Offset, c.Bytes)
+                ?? throw new InvalidDataException("the server stopped answering Range requests");
+            fetched += c.Bytes;
+            using var blob = new Blob(new[] { zipped }, new BlobOptions { Type = "application/octet-stream" });
+            return await GzipAsync(blob, decompress: true);
+        }
+        await OpenLodStreamAsync(h, ChunkBytes, "HTTP Range");
+        Console.WriteLine($"[Import] streamed by Range: header {12 + headerLen:N0} bytes, chunk 0 {h.Chunks[0].Bytes / 1024:N0} KB " +
+            $"of a {(dataStart + h.Chunks.Sum(c => c.Bytes)) / (1024 * 1024):N0} MB file");
+        return true;
+    }
+
+    /// <summary>Open a v3 tree streamed from <paramref name="source"/> (<see cref="OpenLodStreamAsync(ArrayBuffer, LodChunkFile.Header3, long)"/>).</summary>
+    async Task OpenLodStreamAsync(LodChunkFile.Header3 h, GpuLodPager.ChunkBytes source, string from)
+    {
+        var a = _gpuService.WebGPUAccelerator;
+        var t0 = DateTime.UtcNow;
+        _lodPager?.Dispose(); _lodPager = null;
         _gpuRenderer.UseRgbColours();
         _gpuRenderer.ColoursAreShDc = h.ColoursAreShDc;
         _gpuRenderer.LodBudget = LodBudgetOption;
-        _lodPager = await GpuLodPager.CreateAsync(a, _gpuRenderer, h, ChunkBytes, LodPoolOption, LodTauOption > 0f ? LodTauOption : 1.5f);
-        Console.WriteLine($"[Import] '{h.Name}' (v3, streamed): {h.LeafCount:N0} splats, {h.NodeCount:N0} LOD nodes in {h.Chunks.Length} chunks, " +
-            $"chunk 0 on screen in {(DateTime.UtcNow - t0).TotalSeconds:F1}s");
+        _lodPager = await GpuLodPager.CreateAsync(a, _gpuRenderer, h, source, LodPoolOption, LodTauOption > 0f ? LodTauOption : 1.5f);
+        Console.WriteLine($"[Import] '{h.Name}' (v3, streamed {from}): {h.LeafCount:N0} splats, {h.NodeCount:N0} LOD nodes in " +
+            $"{h.Chunks.Length} chunks, chunk 0 on screen in {(DateTime.UtcNow - t0).TotalSeconds:F1}s");
         ShowLodScene(h);
         await SeatAtHomeViewAsync(new ProjectScene { HomeView = h.HomeView, TrainedIterations = h.TrainedIterations, SplatCount = h.LeafCount });
     }

@@ -67,6 +67,16 @@ http.createServer((req,res)=>{
       }
       return trySend(path.join(root, "index.html"), 200);
     }
+    // Range requests (a streamed .spawnscene v3 reads its chunks one byte range at a time, as from any static host).
+    const range = /^bytes=(\d+)-(\d*)$/.exec(req.headers.range || "");
+    if (range && st.isFile()) {
+      const start = +range[1], end = Math.min(range[2] ? +range[2] : st.size - 1, st.size - 1);
+      if (start > end) { res.writeHead(416, { "Content-Range": `bytes */${st.size}` }); return res.end(); }
+      const ext = path.extname(file).toLowerCase();
+      res.writeHead(206, { "Content-Type": mime[ext] || "application/octet-stream", "Content-Range": `bytes ${start}-${end}/${st.size}`,
+        "Content-Length": end - start + 1, "Accept-Ranges": "bytes", "Cache-Control": "no-cache", "Access-Control-Allow-Origin": "*" });
+      return fs.createReadStream(file, { start, end }).pipe(res);
+    }
     trySend(file, 200);
   });
 }).listen(port, "127.0.0.1", () => console.log("SPA listening", port, root));

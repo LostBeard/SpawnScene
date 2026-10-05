@@ -183,6 +183,12 @@ public partial class Studio
         if (!query.TryGetValue("import", out var importUrl) || string.IsNullOrWhiteSpace(importUrl)) return;
         try
         {
+            // A streamed v3 (&lodpool=N): only its header now, chunks by Range as the view needs them.
+            if (query.TryGetValue("lodpool", out var lpq0) && int.TryParse(lpq0, out var lpv0) && lpv0 > 0)
+            {
+                ApplyImportViewerOptions(query);
+                if (await TryOpenLodUrlStreamAsync(importUrl)) { await FinishImportAsync(query); return; }
+            }
             Console.WriteLine($"[Import] fetching {importUrl}");
             using var window = _js.Get<Window>("window");
             using var response = await window.Fetch(importUrl);

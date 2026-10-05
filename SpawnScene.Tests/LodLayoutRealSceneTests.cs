@@ -15,6 +15,8 @@ namespace SpawnScene.Tests;
 /// view the cut needs 1.14M nodes (ideal 18 chunks) and both layouts touch all 37; turned 180 deg, 310K nodes (ideal
 /// 5): breadth-first 24 chunks, band x space 31. A one-object capture seen from its photos needs half its tree -
 /// streaming pays on large multi-room scenes, not here - and the band x space order is no better: breadth-first stays.
+/// Chunk size, turned 180 deg: 64K chunks load 29 of 37 (closed), 16K 87 of 147, 8K 143 of 294 - smaller is more
+/// selective; LodChunkFile.DefaultChunkNodes is 16K.
 /// </para>
 /// </summary>
 [Explicit]
@@ -94,10 +96,12 @@ public class LodLayoutRealSceneTests
             ("turned 180", pos, -fwd),
         };
         const float focal = 950f, tau = 1.5f, cosHalf = 0.64f;   // ~100 deg cone, 1600 px wide at 80 deg
-        foreach (var (name, order) in new[] { ("breadth-first", LodLayout.BreadthFirst(t)), ("band x space", BandSpaceOrder(t)) })
+        var bfs = LodLayout.BreadthFirst(t);
+        foreach (var (name, order, chunkNodes) in new[] { ("breadth-first", bfs, 65536), ("band x space", BandSpaceOrder(t), 65536),
+            ("bf 16K", bfs, 16384), ("bf 8K", bfs, 8192) })
         {
             var l = LodLayout.Reorder(t, order);
-            var starts = LodLayout.ChunkStarts(l, 65536);
+            var starts = LodLayout.ChunkStarts(l, chunkNodes);
             int chunks = starts.Length - 1;
             foreach (var v in views)
             {
@@ -116,7 +120,7 @@ public class LodLayoutRealSceneTests
                 var closed = new HashSet<int>(needed);
                 var todo = new Stack<int>(closed);
                 while (todo.Count > 0) foreach (int pc in LodLayout.ParentChunks(l, starts, todo.Pop())) if (closed.Add(pc)) todo.Push(pc);
-                TestContext.Out.WriteLine($"{name,-14} {v.Name,-12}: {neededNodes,9:N0} nodes needed (ideal {(neededNodes + 65535) / 65536} chunks), " +
+                TestContext.Out.WriteLine($"{name,-14} {v.Name,-12}: {neededNodes,9:N0} nodes needed (ideal {(neededNodes + chunkNodes - 1) / chunkNodes} chunks), " +
                     $"in {needed.Count} chunks, {closed.Count} closed, of {chunks}");
             }
         }

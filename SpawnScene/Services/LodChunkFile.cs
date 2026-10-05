@@ -23,8 +23,12 @@ public static class LodChunkFile
 {
     public const string Magic3 = "SPSCENE3";
 
-    /// <summary>Nodes a chunk (Spark's page size).</summary>
-    public const int DefaultChunkNodes = 65536;
+    /// <summary>
+    /// Most nodes a chunk. Spark pages 64K splats; on TruckFull 30K (2.4M nodes) a view turned away from the truck
+    /// needed 310K nodes and 64K chunks made it load 78% of the file, 16K chunks 59%, 8K 49%
+    /// (LodLayoutRealSceneTests, 2026-10-05). 16K keeps the want readback and the request count small at 50M nodes.
+    /// </summary>
+    public const int DefaultChunkNodes = 16384;
 
     /// <param name="First">The chunk's first node (breadth-first index).</param>
     /// <param name="Offset">Byte offset of the gzipped chunk from the first byte after the header (SceneFile.DataOffset).</param>

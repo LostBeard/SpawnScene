@@ -12,7 +12,7 @@ namespace SpawnScene.Services;
 /// (bicycle, 3.28M splats, 2026-10-04).
 /// <para>
 /// Per splat, all 4-byte aligned so a GPU kernel writes words:
-/// geometry  w0 = x (24 bits over the scene bounds) | opacity (8) &lt;&lt; 24; w1 = y (24); w2 = z (24);
+/// geometry  w0 = x (24 bits, see <see cref="QuantPosP"/>) | opacity (8) &lt;&lt; 24; w1 = y (24); w2 = z (24);
 ///           w3 = rotation, smallest three of the unit quaternion: largest component's index (2 bits, 30-31) and the
 ///           other three in order (10 bits each, [-1/sqrt2, 1/sqrt2]), the largest made positive.
 /// appearance w4 = f16 log scale x | f16 log scale y &lt;&lt; 16; w5 = f16 log scale z | f16 colour r &lt;&lt; 16;
@@ -29,22 +29,51 @@ public static class SceneCodec
     const float InvSqrt2 = 0.70710678118654752f;
     const uint PosMax = (1u << 24) - 1u;
 
-    /// <summary>Quantization frame: the scene bounds the 24-bit positions span.</summary>
+    /// <summary>
+    /// Quantization frame. Per axis an inner box [Min, Min + Size] gets linear codes, and when <see cref="Piecewise"/> is
+    /// set the splats outside it get log-spaced codes out to TailLo below and TailHi above (<see cref="QuantPosP"/>).
+    /// Linear over the whole bounds let a few stray splats set the step for everything: the Truck's bounds run to
+    /// z = 13,737 while 98% of it is within 25 units, so the step was 1.2e-3 units and the truck's edges moved a median
+    /// 0.3 px, up to 13.7 px, after a round trip (2026-10-04).
+    /// </summary>
     public struct Frame
     {
         public float MinX, MinY, MinZ, SizeX, SizeY, SizeZ;
-        public int Count;
+        public float TailLoX, TailLoY, TailLoZ, TailHiX, TailHiY, TailHiZ;
+        public int Count, Piecewise;
 
-        public static Frame From(SplatBounds.Aabb b, int count)
+        static float Size(float lo, float hi) => hi > lo ? hi - lo : 1f;
+
+        /// <summary>Linear over <paramref name="b"/> (files written before the inner box: Header2.Inner null).</summary>
+        public static Frame From(SplatBounds.Aabb b, int count) => new Frame
         {
-            static float Size(float lo, float hi) => hi > lo ? hi - lo : 1f;
-            return new Frame
+            MinX = b.MinX, MinY = b.MinY, MinZ = b.MinZ,
+            SizeX = Size(b.MinX, b.MaxX), SizeY = Size(b.MinY, b.MaxY), SizeZ = Size(b.MinZ, b.MaxZ),
+            Count = count,
+        };
+
+        /// <summary>Linear over <paramref name="inner"/> (clipped to <paramref name="outer"/>), log tails out to <paramref name="outer"/>.</summary>
+        public static Frame From(SplatBounds.Aabb outer, SplatBounds.Aabb inner, int count)
+        {
+            float lx = MathF.Max(inner.MinX, outer.MinX), ly = MathF.Max(inner.MinY, outer.MinY), lz = MathF.Max(inner.MinZ, outer.MinZ);
+            float hx = MathF.Min(inner.MaxX, outer.MaxX), hy = MathF.Min(inner.MaxY, outer.MaxY), hz = MathF.Min(inner.MaxZ, outer.MaxZ);
+            if (hx <= lx) { lx = outer.MinX; hx = outer.MaxX; }
+            if (hy <= ly) { ly = outer.MinY; hy = outer.MaxY; }
+            if (hz <= lz) { lz = outer.MinZ; hz = outer.MaxZ; }
+            var f = new Frame
             {
-                MinX = b.MinX, MinY = b.MinY, MinZ = b.MinZ,
-                SizeX = Size(b.MinX, b.MaxX), SizeY = Size(b.MinY, b.MaxY), SizeZ = Size(b.MinZ, b.MaxZ),
-                Count = count,
+                MinX = lx, MinY = ly, MinZ = lz,
+                SizeX = Size(lx, hx), SizeY = Size(ly, hy), SizeZ = Size(lz, hz),
+                Count = count, Piecewise = 1,
             };
+            f.TailLoX = MathF.Max(0f, lx - outer.MinX); f.TailHiX = MathF.Max(0f, outer.MaxX - (lx + f.SizeX));
+            f.TailLoY = MathF.Max(0f, ly - outer.MinY); f.TailHiY = MathF.Max(0f, outer.MaxY - (ly + f.SizeY));
+            f.TailLoZ = MathF.Max(0f, lz - outer.MinZ); f.TailHiZ = MathF.Max(0f, outer.MaxZ - (lz + f.SizeZ));
+            return f;
         }
+
+        /// <summary>The inner box as min x,y,z then max x,y,z (Header2.Inner).</summary>
+        public readonly float[] InnerArray() => new[] { MinX, MinY, MinZ, MinX + SizeX, MinY + SizeY, MinZ + SizeZ };
     }
 
     // ── scalar building blocks (ILGPU-safe) ─────────────────────────────────────────────────────────────────
@@ -60,6 +89,63 @@ public static class SceneCodec
     }
 
     public static float DequantPos(uint q, float min, float size) => min + (q & PosMax) / (float)PosMax * size;
+
+    /// <summary>Codes per log tail; the inner box gets the other 2^24 - 2^21 (step = size / 14.7M).</summary>
+    const uint TailCodes = 1u << 20;
+    const uint InnerCodes = PosMax - 2u * TailCodes;
+    /// <summary>Log tails are spaced in units of size / 16, so a code just outside the box is ~1e-5 size.</summary>
+    const float TailScaleDiv = 16f;
+
+    /// <summary>
+    /// Piecewise position code: [min, min + size] linear over the middle 2^24 - 2^21 codes; below and above, the
+    /// distance e past the box as u = log(1 + e/s) / log(1 + tail/s), s = size/16, over 2^20 codes each. Floaters keep
+    /// relative precision without setting the step inside the box.
+    /// </summary>
+    public static uint QuantPosP(float v, float min, float size, float tailLo, float tailHi)
+    {
+        float hi = min + size;
+        if (v < min && tailLo > 0f)
+        {
+            float s = size / TailScaleDiv;
+            float u = XMath.Log(1f + (min - v) / s) / XMath.Log(1f + tailLo / s);
+            u = u > 1f ? 1f : u;
+            return TailCodes - 1u - (uint)(u * (TailCodes - 1u) + 0.5f);
+        }
+        if (v > hi && tailHi > 0f)
+        {
+            float s = size / TailScaleDiv;
+            float u = XMath.Log(1f + (v - hi) / s) / XMath.Log(1f + tailHi / s);
+            u = u > 1f ? 1f : u;
+            return PosMax - TailCodes + 1u + (uint)(u * (TailCodes - 1u) + 0.5f);
+        }
+        float t = (v - min) / size;
+        t = t < 0f ? 0f : t > 1f ? 1f : t;
+        uint q = (uint)(t * InnerCodes + 0.5f);
+        return TailCodes + (q > InnerCodes ? InnerCodes : q);
+    }
+
+    public static float DequantPosP(uint q, float min, float size, float tailLo, float tailHi)
+    {
+        q &= PosMax;
+        float s = size / TailScaleDiv;
+        if (q < TailCodes)
+        {
+            float u = (TailCodes - 1u - q) / (float)(TailCodes - 1u);
+            return min - s * (XMath.Exp(u * XMath.Log(1f + tailLo / s)) - 1f);
+        }
+        if (q > TailCodes + InnerCodes)
+        {
+            float u = (q - (PosMax - TailCodes + 1u)) / (float)(TailCodes - 1u);
+            return min + size + s * (XMath.Exp(u * XMath.Log(1f + tailHi / s)) - 1f);
+        }
+        return min + (q - TailCodes) / (float)InnerCodes * size;
+    }
+
+    static uint EncodeAxis(float v, float min, float size, float tailLo, float tailHi, int piecewise)
+        => piecewise != 0 ? QuantPosP(v, min, size, tailLo, tailHi) : QuantPos(v, min, size);
+
+    static float DecodeAxis(uint q, float min, float size, float tailLo, float tailHi, int piecewise)
+        => piecewise != 0 ? DequantPosP(q, min, size, tailLo, tailHi) : DequantPos(q, min, size);
 
     /// <summary>IEEE half from float, round to nearest even-ish (adds half an ulp), flushing below the half range to 0.</summary>
     public static uint FloatToHalf(float f)
@@ -148,9 +234,9 @@ public static class SceneCodec
         float op = packed[o + 9];
         op = op < 0f ? 0f : op > 1f ? 1f : op;
         uint opq = (uint)(op * 255f + 0.5f);
-        geo[ii * GeoWords + 0] = QuantPos(packed[o + 0], f.MinX, f.SizeX) | (opq << 24);
-        geo[ii * GeoWords + 1] = QuantPos(packed[o + 1], f.MinY, f.SizeY);
-        geo[ii * GeoWords + 2] = QuantPos(packed[o + 2], f.MinZ, f.SizeZ);
+        geo[ii * GeoWords + 0] = EncodeAxis(packed[o + 0], f.MinX, f.SizeX, f.TailLoX, f.TailHiX, f.Piecewise) | (opq << 24);
+        geo[ii * GeoWords + 1] = EncodeAxis(packed[o + 1], f.MinY, f.SizeY, f.TailLoY, f.TailHiY, f.Piecewise);
+        geo[ii * GeoWords + 2] = EncodeAxis(packed[o + 2], f.MinZ, f.SizeZ, f.TailLoZ, f.TailHiZ, f.Piecewise);
         geo[ii * GeoWords + 3] = PackRotation(packed[o + 10], packed[o + 11], packed[o + 12], packed[o + 13]);
 
         float sx = XMath.Max(packed[o + 6], 1e-9f), sy = XMath.Max(packed[o + 7], 1e-9f), sz = XMath.Max(packed[o + 8], 1e-9f);
@@ -186,9 +272,9 @@ public static class SceneCodec
         long ii = (int)i;
         long o = ii * SplatFormat.Floats;
         uint g0 = geo[ii * GeoWords + 0];
-        packed[o + 0] = DequantPos(g0, f.MinX, f.SizeX);
-        packed[o + 1] = DequantPos(geo[ii * GeoWords + 1], f.MinY, f.SizeY);
-        packed[o + 2] = DequantPos(geo[ii * GeoWords + 2], f.MinZ, f.SizeZ);
+        packed[o + 0] = DecodeAxis(g0, f.MinX, f.SizeX, f.TailLoX, f.TailHiX, f.Piecewise);
+        packed[o + 1] = DecodeAxis(geo[ii * GeoWords + 1], f.MinY, f.SizeY, f.TailLoY, f.TailHiY, f.Piecewise);
+        packed[o + 2] = DecodeAxis(geo[ii * GeoWords + 2], f.MinZ, f.SizeZ, f.TailLoZ, f.TailHiZ, f.Piecewise);
         packed[o + 9] = (g0 >> 24) / 255f;
         UnpackRotation(geo[ii * GeoWords + 3], out float qx, out float qy, out float qz, out float qw);
         packed[o + 10] = qx; packed[o + 11] = qy; packed[o + 12] = qz; packed[o + 13] = qw;

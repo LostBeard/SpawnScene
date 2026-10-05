@@ -41,9 +41,11 @@ public static class SceneFile
     /// <summary>The header's byte length from the first 12 bytes; throws if they are not a .spawnscene file.</summary>
     /// <param name="Bounds">min x,y,z then max x,y,z: the frame the 24-bit positions span.</param>
     /// <param name="StreamBytes">gzipped lengths of the geometry, appearance and SH streams (SH 0 when there are none).</param>
+    /// <param name="Inner">min x,y,z then max x,y,z of the box positions are linear in, with log-spaced tails out to
+    /// Bounds (SceneCodec.QuantPosP). Null in files written before it: linear over Bounds.</param>
     public sealed record Header2(
         string Name, int SplatCount, bool ColoursAreShDc, int ShDegree, int TrainedIterations, DateTime SavedAt,
-        float[]? HomeView, float[] Bounds, long[] StreamBytes, string Compression = "gzip");
+        float[]? HomeView, float[] Bounds, long[] StreamBytes, string Compression = "gzip", float[]? Inner = null);
 
     public static byte[] Prefix2(Header2 header)
     {

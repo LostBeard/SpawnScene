@@ -59,7 +59,12 @@ public partial class Studio
             }
 
             var box = await SplatBounds.ComputeAsync(a, keptPacked, count) ?? new SplatBounds.Aabb(0, 0, 0, 1, 1, 1);
-            var frame = SceneCodec.Frame.From(box, count);
+            // Linear codes over the box holding all but 0.5% at each end of each axis, padded by a quarter of its size;
+            // the floaters past it get log-spaced codes (SceneCodec.QuantPosP).
+            var robust = await SplatBounds.ComputeRobustAsync(a, keptPacked, count, 0.005) ?? box;
+            float px = 0.25f * (robust.MaxX - robust.MinX), py = 0.25f * (robust.MaxY - robust.MinY), pz = 0.25f * (robust.MaxZ - robust.MinZ);
+            var inner = new SplatBounds.Aabb(robust.MinX - px, robust.MinY - py, robust.MinZ - pz, robust.MaxX + px, robust.MaxY + py, robust.MaxZ + pz);
+            var frame = SceneCodec.Frame.From(box, inner, count);
             var (geo, app, shq) = SceneCodec.Encode(a, keptPacked, keptSh, frame);
             owned.Add(geo); owned.Add(app); owned.Add(shq);
             await a.SynchronizeAsync();
@@ -91,7 +96,7 @@ public partial class Studio
             var header = new SceneFile.Header2(name, count, _gpuRenderer.ColoursAreShDc, withSh ? _gpuRenderer.ShDegree : 0,
                 _viewedProjectScene?.TrainedIterations ?? 0, DateTime.UtcNow,
                 new[] { c.Position.X, c.Position.Y, c.Position.Z, c.Forward.X, c.Forward.Y, c.Forward.Z, c.Up.X, c.Up.Y, c.Up.Z },
-                new[] { box.MinX, box.MinY, box.MinZ, box.MaxX, box.MaxY, box.MaxZ }, lens);
+                new[] { box.MinX, box.MinY, box.MinZ, box.MaxX, box.MaxY, box.MaxZ }, lens, Inner: frame.InnerArray());
             var prefix = new Uint8Array(SceneFile.Prefix2(header)); js.Add(prefix);
             var fileParts = new List<Uint8Array> { prefix };
             fileParts.AddRange(zipped);
@@ -204,7 +209,10 @@ public partial class Studio
                         offset += len;
                     }
                     var b = h2.Bounds;
-                    var frame = SceneCodec.Frame.From(new SplatBounds.Aabb(b[0], b[1], b[2], b[3], b[4], b[5]), h2.SplatCount);
+                    var outer = new SplatBounds.Aabb(b[0], b[1], b[2], b[3], b[4], b[5]);
+                    var frame = h2.Inner is { Length: 6 } r
+                        ? SceneCodec.Frame.From(outer, new SplatBounds.Aabb(r[0], r[1], r[2], r[3], r[4], r[5]), h2.SplatCount)
+                        : SceneCodec.Frame.From(outer, h2.SplatCount);
                     var (dp, dsh) = SceneCodec.Decode(a, words[0]!, words[1]!, words[2], frame);
                     try
                     {

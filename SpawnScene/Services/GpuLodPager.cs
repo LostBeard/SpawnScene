@@ -98,8 +98,9 @@ public sealed class GpuLodPager : IDisposable
         await a.SynchronizeAsync();
         await r.InstallPagedLodAsync(pool, pages * pageNodes, h.ShDegree, pager._parentSlot, pager._bounds, pager._size,
             pager._childChunk, pager._chunkPage, pager._want, h.Chunks.Length, pageNodes, tau);
-        r.LodChunksWanted += pager.OnWanted;
         await pager.LoadWithNeedsAsync(0);
+        // Only now: a want arriving during chunk 0's load would start a second, concurrent load of it.
+        r.LodChunksWanted += pager.OnWanted;
         Console.WriteLine($"[LOD] pager: {h.Chunks.Length} chunks, pool {pages} pages x {pageNodes:N0} slots " +
             $"({(long)pages * pageNodes:N0} of {h.NodeCount:N0} nodes)");
         return pager;
@@ -174,6 +175,8 @@ public sealed class GpuLodPager : IDisposable
     /// <summary>
     /// A free page, or one freed by evicting the least recently used chunk that nothing resident needs and the latest
     /// cut did not draw from (evicting a page in use made a small pool thrash: load A, evict B, load B, evict A...).
+    /// "Latest" is the latest cut read back: a sort still in flight may draw from the page, and for that one sort its
+    /// slots show the new chunk's rows - a single-frame glitch, rare because in-use pages are kept.
     /// </summary>
     int FreePage()
     {

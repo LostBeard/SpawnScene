@@ -108,9 +108,13 @@ public partial class Studio
                 $"{saved.SplatCount:N0} splats, trained {saved.TrainedIterations:N0} iters, " +
                 $"shDc={saved.ColoursAreShDc}, shDegree={saved.ShDegree}, {saved.SizeBytes / (1024 * 1024)} MB, " +
                 $"{liveScene.TrainingViews.Count} training views");
-            if (saved.SplatCount > maxSplats)
+            // The cap bounds ONE training run. A partitioned scene (Studio.Partition) trains each block under it and merges
+            // what each keeps, so the scene may hold up to blocks x cap - growing past one run's budget is the point.
+            long sceneCap = (long)maxSplats * TrainingBlocks.Columns * TrainingBlocks.Rows;
+            if (saved.SplatCount > sceneCap)
             {
-                Console.WriteLine($"[Dataset] FAIL: {saved.SplatCount:N0} splats exceeds the project's cap {maxSplats:N0}");
+                Console.WriteLine($"[Dataset] FAIL: {saved.SplatCount:N0} splats exceeds the project's cap {sceneCap:N0}" +
+                    (sceneCap != maxSplats ? $" ({maxSplats:N0} a block)" : ""));
                 return;
             }
             if (trainIters > 0 && saved.TrainedIterations != trainIters)

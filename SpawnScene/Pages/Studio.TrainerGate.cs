@@ -144,6 +144,7 @@ public partial class Studio
 
             // -- The sort every forward pass depends on: exact against a CPU stable sort? --
             if (!await RadixSortGateAsync()) return;
+            if (!await ScanGateAsync()) { Console.WriteLine("[TrainerGate] FAIL exclusive scan"); return; }
 
             // ── GPU ──
             using var trainer = new SplatTrainerGpu(_gpuService);
@@ -307,6 +308,9 @@ public partial class Studio
 
             // -- Dense geometry Adam: a silent splat takes torch Adam's zero-gradient step, or none when off --
             if (!await DenseAdamGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
+            // -- Frozen context: splats outside the trainable volume never move (partitioned training) --
+            if (!await FreezeGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
             // -- SH forward: degree-3 colour through the part buffers and emit_keys' colour buffer, vs the CPU --
             if (!await ShForwardGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;

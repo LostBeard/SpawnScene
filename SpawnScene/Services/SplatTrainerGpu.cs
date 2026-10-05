@@ -104,6 +104,17 @@ public sealed class SplatTrainerGpu : IDisposable
     int _mipCamCount;
     GPUComputePipeline? _mipFloor;
 
+    // ── Partitioned training: only splats inside a volume train (SplatTrainerShaders.FreezeOutside) ──
+    GPUComputePipeline? _freezeOutside;
+    GPUBuffer? _freezeCfgBuf;
+
+    /// <summary>
+    /// When set, only splats inside this volume learn: every other splat renders - so it explains the pixels it
+    /// covers - but its gradients are zeroed before the Adam passes, so it never moves and densification never grows
+    /// it (Studio.Partition's frozen context). GpuDensify takes the same volume so it never prunes or resets them.
+    /// </summary>
+    public SplatEditor.Volume? TrainableVolume { get; set; }
+
     // ── Photometric camera refinement (SplatTrainerShaders.PoseGradPartial / PoseGradFinal) ──
     GPUComputePipeline? _posePartial, _poseFinal;
     MemoryBuffer1D<float, Stride1D.Dense>? _posePartials;   // 6 per workgroup of the last reduction
@@ -431,6 +442,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
         _adamGeometry = MakePipeline(SplatTrainerShaders.GeometryAdam, "adam_geometry");
         _mipFloor = MakePipeline(SplatTrainerShaders.MipScaleFloor, "mip_floor");
+        _freezeOutside = MakePipeline(SplatTrainerShaders.FreezeOutside, "freeze_outside");
         _posePartial = MakePipeline(SplatTrainerShaders.PoseGradPartial, "pose_partial");
         _poseFinal = MakePipeline(SplatTrainerShaders.PoseGradFinal, "pose_final");
         _evalSse = MakePipeline(SplatTrainerShaders.EvalSse, "eval_sse");
@@ -2000,6 +2012,7 @@ public sealed class SplatTrainerGpu : IDisposable
         });
 
         await PhaseAsync("scatter");
+        if (TrainableVolume is { } trainable) FreezeOutside(splatGpu, splatCount, trainable);
         // ── Adam ──
         _adamStepCount++;
         WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
@@ -2181,6 +2194,34 @@ public sealed class SplatTrainerGpu : IDisposable
         var bytes = new byte[16];
         Buffer.BlockCopy(f, 0, bytes, 0, 16);
         _queue!.WriteBuffer(buf, 0, bytes);
+    }
+
+    /// <summary>Zero this step's gradient totals of the splats outside <paramref name="v"/> (see <see cref="TrainableVolume"/>).</summary>
+    void FreezeOutside(GPUBuffer splatGpu, int splatCount, SplatEditor.Volume v)
+    {
+        _freezeCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 96,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        var f = new[]
+        {
+            v.M11, v.M21, v.M31, v.M41,   // dot with (x, y, z, 1) = SplatEditor.Inside's cx
+            v.M12, v.M22, v.M32, v.M42,
+            v.M13, v.M23, v.M33, v.M43,
+            v.M14, v.M24, v.M34, v.M44,
+            v.X0, v.X1, v.Y0, v.Y1,
+            v.Z0, v.Z1,
+        };
+        // FreezeBox: 22 floats, then the count as a real u32 (never as float bits - see the shader).
+        var bytes = new byte[96];
+        Buffer.BlockCopy(f, 0, bytes, 0, f.Length * sizeof(float));
+        BitConverter.TryWriteBytes(bytes.AsSpan(88), (uint)splatCount);
+        _queue!.WriteBuffer(_freezeCfgBuf, 0, bytes);
+        Dispatch(_freezeOutside!, (splatCount + 63) / 64, 1, new[]
+        {
+            Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!), Buf(2, _freezeCfgBuf),
+        });
     }
 
     void WriteVec4x2(GPUBuffer buf, float a, float b, float c, float d,

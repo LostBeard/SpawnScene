@@ -9,15 +9,39 @@ using SpawnScene.Services;
 namespace SpawnScene.Pages;
 
 /// <summary>
-/// Partitioned training (ScenePartition): a scene bigger than one training run's splat budget is trained as blocks -
-/// each block from the seed splats in its training box, supervised by its own views - and each block keeps only the
-/// splats inside its own cell, parked in OPFS until every block is done, then merged into one scene.
+/// Partitioned training (ScenePartition): a scene bigger than one training run's splat budget is trained as blocks,
+/// each supervised by its own views, and each block keeps only the splats inside its own cell, parked in OPFS until
+/// every block is done, then merged into one scene.
+/// <para>
+/// Blocks start from ONE coarse model of the whole scene (CityGaussian's coarse-then-refine): the coarse run trains
+/// the seed at <see cref="PartitionCoarseFraction"/> of the iterations and half the splat budget, then each block
+/// refines it with every splat outside its training box frozen (SplatTrainerGpu.TrainableVolume) - the rest of the
+/// scene still explains its own pixels, and the block's budget grows only inside its box. Trained from the seed
+/// alone, each block re-solved the whole scene its own way and the merged quadrants disagreed at the seams: TruckFull
+/// 7K 2x2 23.34 dB held out against 23.73 for one run, while every block alone scored 23.72 (2026-10-05).
+/// </para>
 /// </summary>
 public partial class Studio
 {
     /// <summary>Training blocks as columns x rows on the ground plane; 1 x 1 trains the scene in one run.
     /// URL: &amp;blocks=2x2.</summary>
     public static (int Columns, int Rows) TrainingBlocks { get; set; } = (1, 1);
+
+    /// <summary>Share of the iterations the coarse whole-scene model gets before the blocks refine it; 0 = no coarse
+    /// stage (each block trains from the seed, the first version). URL: &amp;coarse=0.5.</summary>
+    public static float PartitionCoarseFraction { get; set; } = 0.5f;
+
+    /// <summary>Diagnosis (&amp;frozendiag=1): the first densify step that drops frozen context reads both sides back and
+    /// logs which splats went and why.</summary>
+    public static bool DiagnoseFrozenDensify { get; set; }
+
+    /// <summary>The training box of the block being refined: TrainOnTrainingViewsAsync hands it to the trainer
+    /// (SplatTrainerGpu.TrainableVolume), so everything outside it is frozen context. Null outside a block.</summary>
+    SplatEditor.Volume? _frozenOutside;
+
+    /// <summary>Iterations already trained before this run (a block refining the coarse model): the SH degree
+    /// schedule continues from there instead of restarting at degree 0.</summary>
+    int _shScheduleOffset;
 
     /// <summary>Prefix for the training HUD line ("Block 2 / 4 · "), empty for a single run.</summary>
     string _trainHudPrefix = "";
@@ -56,35 +80,98 @@ public partial class Studio
         await _projectService.ClearWorkFilesAsync(project.Id);
         var parked = new List<(int Block, int Count, int ShParts)>();
         int shDegree = 0, ranIters = 0;
+        int coarseIters = (int)(iterations * Math.Clamp(PartitionCoarseFraction, 0f, 0.9f));
+        int blockIters = iterations - coarseIters;
+        // The coarse model: packed rows and SH parts, kept on the GPU while the blocks refine copies of it.
+        MemoryBuffer1D<float, Stride1D.Dense>? coarse = null;
+        MemoryBuffer1D<float, Stride1D.Dense>[]? coarseSh = null;
+        int coarseN = 0, coarseDegree = 0, coarseVisible = 0, frozenBefore = -1;
         try
         {
+            if (coarseIters > 0)
+            {
+                _trainHudPrefix = "Coarse model · ";
+                Console.WriteLine($"[Partition] coarse model: {coarseIters:N0} iterations over every view, up to {maxSplats / 2:N0} splats; " +
+                    $"then {blockIters:N0} per block");
+                int ci = await TrainProjectSceneAsync(coarseIters, maxSplats / 2, maxDimension);
+                if (ci == 0) { Console.WriteLine("[Partition] FAIL - the coarse model did not train"); return 0; }
+                coarseN = _gpuRenderer.SplatCount;
+                coarseDegree = _gpuRenderer.ShDegree;
+                coarse = a.Allocate1D<float>((long)coarseN * SplatFormat.Floats);
+                coarse.View.CopyFrom(_gpuRenderer.PackedSplatBuffer!.View.SubView(0, (long)coarseN * SplatFormat.Floats));
+                if (coarseDegree > 0 && _gpuRenderer.ShRestBuffers != null)
+                    coarseSh = Enumerable.Range(0, SphericalHarmonics.Parts).Select(part => _gpuRenderer.CopyShPartToIlgpu(a, part, coarseN)).ToArray();
+                await a.SynchronizeAsync();
+                coarseVisible = await _splatEditor.CountAsync(a, coarse, coarseN, SplatEditor.Volume.Rows(0, coarseN));
+                Console.WriteLine($"[Partition] coarse model: {coarseN:N0} splats ({coarseVisible:N0} visible), SH degree {coarseDegree}");
+            }
+
             foreach (var block in plan.Blocks)
             {
                 if (_trainStopRequested) break;
                 _trainHudPrefix = $"Block {block.Index + 1} / {plan.Blocks.Length} · ";
-                // CPU transfer: one count for the block's seed.
                 var trainBox = PlaneVolume(plan, block.TrainMin, block.TrainMax);
-                int m = await _splatEditor.CountAsync(a, seed, seedN, trainBox);
                 int supervised = block.Views.Count(i => allViews[i].UsedForSupervision);
-                if (m == 0 || supervised < 2)
+                if (coarse != null)
                 {
-                    Console.WriteLine($"[Partition] block {block.Index}: skipped ({m:N0} seed splats, {supervised} supervised views)");
-                    continue;
-                }
-                using (var idx = await SplatRows.SelectIndicesAsync(a, seed, seedN, trainBox, m))
-                {
-                    var blockSeed = SplatRows.GatherRows(a, seed, idx, m, SplatFormat.Floats);
+                    // CPU transfer: one count, for the log and the skip test.
+                    int inBox = await _splatEditor.CountAsync(a, coarse, coarseN, trainBox);
+                    frozenBefore = coarseVisible - inBox;
+                    if (inBox == 0 || supervised < 2)
+                    {
+                        Console.WriteLine($"[Partition] block {block.Index}: skipped ({inBox:N0} coarse splats in its box, {supervised} supervised views)");
+                        continue;
+                    }
+                    var copy = a.Allocate1D<float>((long)coarseN * SplatFormat.Floats);
+                    copy.View.CopyFrom(coarse.View);
                     await a.SynchronizeAsync();
-                    _gpuRenderer.SetShRest(null, 0);
-                    _gpuRenderer.ColoursAreShDc = seedDc;
-                    await _gpuRenderer.UploadSceneFromGpuBuffer(blockSeed, m);   // the sorter owns blockSeed now
+                    _gpuRenderer.ColoursAreShDc = true;
+                    await _gpuRenderer.UploadSceneFromGpuBuffer(copy, coarseN);   // the sorter owns copy now
+                    if (coarseSh != null)
+                        _gpuRenderer.SetShRest(coarseSh.Select(part => _gpuRenderer.NewShPartFrom(part, coarseN)).ToArray(), coarseDegree);
+                    else _gpuRenderer.SetShRest(null, 0);
+                    Console.WriteLine($"[Partition] block {block.Index}: refining {inBox:N0} of the coarse model's {coarseN:N0} splats " +
+                        $"(the rest frozen) against {block.Views.Length} views");
+                }
+                else
+                {
+                    // CPU transfer: one count for the block's seed.
+                    int m = await _splatEditor.CountAsync(a, seed, seedN, trainBox);
+                    if (m == 0 || supervised < 2)
+                    {
+                        Console.WriteLine($"[Partition] block {block.Index}: skipped ({m:N0} seed splats, {supervised} supervised views)");
+                        continue;
+                    }
+                    using (var idx = await SplatRows.SelectIndicesAsync(a, seed, seedN, trainBox, m))
+                    {
+                        var blockSeed = SplatRows.GatherRows(a, seed, idx, m, SplatFormat.Floats);
+                        await a.SynchronizeAsync();
+                        _gpuRenderer.SetShRest(null, 0);
+                        _gpuRenderer.ColoursAreShDc = seedDc;
+                        await _gpuRenderer.UploadSceneFromGpuBuffer(blockSeed, m);   // the sorter owns blockSeed now
+                    }
+                    Console.WriteLine($"[Partition] block {block.Index}: training {m:N0} seed splats against {block.Views.Length} views");
                 }
                 scene.TrainingViews = block.Views.Select(i => allViews[i]).ToList();
-                Console.WriteLine($"[Partition] block {block.Index}: training {m:N0} seed splats against {scene.TrainingViews.Count} views");
 
-                int it = await TrainProjectSceneAsync(iterations, maxSplats, maxDimension);
+                int it;
+                _frozenOutside = coarse != null ? trainBox : null;
+                _shScheduleOffset = coarse != null ? coarseIters : 0;
+                try { it = await TrainProjectSceneAsync(blockIters, maxSplats, maxDimension); }
+                finally { _frozenOutside = null; _shScheduleOffset = 0; }
                 if (it == 0) { Console.WriteLine($"[Partition] block {block.Index}: FAIL - training did not run"); return 0; }
-                ranIters = Math.Max(ranIters, it);
+                ranIters = Math.Max(ranIters, coarseIters + it);
+                if (coarse != null)
+                {
+                    // The frozen context must come out as it went in: nothing outside the box pruned (only clones that
+                    // drifted out of it can add). CPU transfer: two counts.
+                    var trained = _gpuRenderer.PackedSplatBuffer!;
+                    int n2 = _gpuRenderer.SplatCount;
+                    int visible2 = await _splatEditor.CountAsync(a, trained, n2, SplatEditor.Volume.Rows(0, n2));
+                    int frozenAfter = visible2 - await _splatEditor.CountAsync(a, trained, n2, trainBox);
+                    Console.WriteLine($"[Partition] block {block.Index}: frozen context {frozenBefore:N0} visible splats before, " +
+                        $"{frozenAfter:N0} after{(frozenAfter < frozenBefore ? " - LOST CONTEXT" : "")}");
+                }
                 shDegree = Math.Max(shDegree, _gpuRenderer.ShDegree);
 
                 var (kept, shParts) = await ParkBlockCoreAsync(project.Id, plan, block);
@@ -95,6 +182,8 @@ public partial class Studio
         {
             scene.TrainingViews = allViews;
             _trainHudPrefix = "";
+            coarse?.Dispose();
+            if (coarseSh != null) foreach (var part in coarseSh) part.Dispose();
         }
 
         if (parked.Count == 0) { Console.WriteLine("[Partition] FAIL: no block trained"); return 0; }

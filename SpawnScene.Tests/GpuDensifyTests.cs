@@ -188,6 +188,44 @@ public class GpuDensifyTests
             Assert.That(g[j * F + 9], Is.LessThanOrEqualTo(SplatDensityControl.OpacityResetTo), $"splat {j}");
     }
 
+    /// <summary>
+    /// Partitioned training's frozen context (Studio.Partition): with a trainable volume, every splat outside it comes
+    /// out exactly as it went in - not pruned (faint or bloated), not densified, its opacity not reset - while the
+    /// splats inside still get the full decision. Size prunes and the opacity reset are live, so all three paths that
+    /// could touch a frozen splat run.
+    /// </summary>
+    [Test]
+    public async Task TrainableVolume_LeavesTheFrozenContextUntouched()
+    {
+        const int n = 3000;
+        var (packed, stats, radius, _, _) = Scene(n, 11);
+        float savedRadius = SplatDensityControl.MaxScreenRadiusPx;
+        try
+        {
+            SplatDensityControl.MaxScreenRadiusPx = 80f;
+            // Trainable: x in [0, 2] (half of the 4-unit cube); everything else is frozen context.
+            var trainable = SplatEditor.Volume.From(System.Numerics.Matrix4x4.Identity, 0f, 2f, -1e30f, 1e30f, -1e30f, 1e30f);
+            var (g, _, feat, r) = await RunGpu(packed, stats, radius, n,
+                new GpuDensify.Options(Extent, AfterFirstOpacityReset: true, int.MaxValue, ResetOpacity: true, Seed: 3,
+                    Trainable: trainable));
+
+            var frozenIn = Enumerable.Range(0, n).Where(i => packed[i * F] > 2f).ToArray();
+            var frozenOut = Enumerable.Range(0, r.Count).Where(j => feat[j] >= 0 && packed[feat[j] * F] > 2f).ToArray();
+            Assert.That(frozenIn.Length, Is.GreaterThan(1000), "the scene has frozen context to protect");
+            Assert.That(frozenOut.Length, Is.EqualTo(frozenIn.Length), "frozen splats out = frozen splats in (none pruned, none added)");
+            foreach (int j in frozenOut)
+                for (int k = 0; k < F; k++)
+                    Assert.That(g[j * F + k], Is.EqualTo(packed[feat[j] * F + k]), $"frozen splat {feat[j]} float {k} changed");
+
+            // Inside, the decision still runs: something is pruned and something reset.
+            Assert.That(r.PrunedFaint + r.PrunedBig, Is.GreaterThan(0), "inside splats are still pruned");
+            Assert.That(Enumerable.Range(0, r.Count).Any(j => feat[j] >= 0 && packed[feat[j] * F] <= 2f
+                && packed[feat[j] * F + 9] > SplatDensityControl.OpacityResetTo && g[j * F + 9] <= SplatDensityControl.OpacityResetTo),
+                "inside splats still get the opacity reset");
+        }
+        finally { SplatDensityControl.MaxScreenRadiusPx = savedRadius; }
+    }
+
     [Test]
     public async Task NoOp_IsTheIdentity()
     {

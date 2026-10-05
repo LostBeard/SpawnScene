@@ -209,6 +209,10 @@ public partial class Studio : IAsyncDisposable
             if (bp.Length == 2 && int.TryParse(bp[0], out var bc) && int.TryParse(bp[1], out var br) && bc >= 1 && br >= 1)
                 TrainingBlocks = (Math.Min(bc, 8), Math.Min(br, 8));
         }
+        if (query.TryGetValue("frozendiag", out var fdq)) DiagnoseFrozenDensify = fdq is "1" or "true";
+        if (query.TryGetValue("coarse", out var crq) && float.TryParse(crq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var crv))
+            PartitionCoarseFraction = Math.Clamp(crv, 0f, 0.9f);
 
         // &xralpha=1: AR passthrough even when the session reports an opaque blend mode (the emulator has no
         // camera feed and reports opaque), to exercise the transparent path.

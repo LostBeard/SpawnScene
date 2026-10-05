@@ -40,25 +40,25 @@ public sealed class GpuDensify : IDisposable
 
     readonly Accelerator _accel;
     readonly Action<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>, ArrayView<int>,
-        ArrayView<int>, ArrayView<int>, ClassifyParams> _classify;
+        ArrayView<int>, ArrayView<int>, ClassifyParams, SplatEditor.Volume> _classify;
     readonly Action<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, int> _boundary;
     readonly Action<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>,
         ArrayView<int>, SelectParams> _select;
     readonly Action<Index1D, ArrayView<float>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>,
-        ArrayView<float>, ArrayView<int>, ArrayView<int>, CompactParams> _compact;
+        ArrayView<float>, ArrayView<int>, ArrayView<int>, CompactParams, SplatEditor.Volume> _compact;
     readonly Scan<int, Stride1D.Dense, Stride1D.Dense> _scan;
 
     public GpuDensify(Accelerator accelerator)
     {
         _accel = accelerator;
         _classify = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>,
-            ArrayView<float>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ClassifyParams>(ClassifyKernel);
+            ArrayView<float>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ClassifyParams, SplatEditor.Volume>(ClassifyKernel);
         _boundary = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, int>(
             BoundaryKernel);
         _select = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>,
             ArrayView<int>, ArrayView<int>, ArrayView<int>, SelectParams>(SelectKernel);
         _compact = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<int>, ArrayView<int>,
-            ArrayView<int>, ArrayView<int>, ArrayView<float>, ArrayView<int>, ArrayView<int>, CompactParams>(CompactKernel);
+            ArrayView<int>, ArrayView<int>, ArrayView<float>, ArrayView<int>, ArrayView<int>, CompactParams, SplatEditor.Volume>(CompactKernel);
         _scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Exclusive);
     }
 
@@ -69,7 +69,8 @@ public sealed class GpuDensify : IDisposable
         int MaxSplats,
         bool ResetOpacity,
         uint Seed,
-        bool NoOp = false);
+        bool NoOp = false,
+        SplatEditor.Volume? Trainable = null);
 
     /// <summary>
     /// The grown set. <see cref="Packed"/>, <see cref="AdamSources"/> and <see cref="FeatureSources"/> are owned
@@ -94,6 +95,7 @@ public sealed class GpuDensify : IDisposable
         public int Count;
         public float MinOpacity, MaxWorldSize, MaxScreenRadiusPx, GradientThreshold, SizeSplit;
         public int AfterReset, NoOp;
+        public int HasTrainable;            // 1: splats outside the trainable volume are frozen context - kept as they are
     }
 
     public struct SelectParams
@@ -111,6 +113,7 @@ public sealed class GpuDensify : IDisposable
         public float OpacityResetTo;
         public uint Seed;
         public float SplitScaleDivisor;
+        public int HasTrainable;            // 1: the opacity reset skips splats outside the trainable volume
     }
 
     /// <summary>
@@ -141,8 +144,12 @@ public sealed class GpuDensify : IDisposable
             SizeSplit = SplatDensityControl.PercentDense * o.SceneExtent,
             AfterReset = o.AfterFirstOpacityReset ? 1 : 0,
             NoOp = o.NoOp ? 1 : 0,
+            HasTrainable = o.Trainable.HasValue ? 1 : 0,
         };
-        _classify((Index1D)n, packed, densifyStats, maxRadius, action.View, bin.View, hist.View, counters.View, cp);
+        // The trainable volume is its own kernel parameter, as SplatEditor's kernels take it (nested in the params
+        // struct it is the only such layout in the app); an unused one is the identity, never read (HasTrainable 0).
+        var trainable = o.Trainable ?? SplatEditor.Volume.Rows(0, 0);
+        _classify((Index1D)n, packed, densifyStats, maxRadius, action.View, bin.View, hist.View, counters.View, cp, trainable);
 
         // CPU transfer: 6 counters + the 2048-bin growth histogram (8 KiB). Everything per-splat stays put.
         int[] c = await counters.CopyToHostAsync<int>(0, CounterSlots);
@@ -206,7 +213,8 @@ public sealed class GpuDensify : IDisposable
                 OpacityResetTo = SplatDensityControl.OpacityResetTo,
                 Seed = o.Seed,
                 SplitScaleDivisor = SplatDensityControl.SplitScaleDivisor,
-            });
+                HasTrainable = o.Trainable.HasValue ? 1 : 0,
+            }, trainable);
 
         // Clones and splits from the totals: added = clones + 2 splits, and every split parent left the kept set.
         int prunedFaint = c[PruneFaint], prunedBig = c[PruneBig];
@@ -228,7 +236,8 @@ public sealed class GpuDensify : IDisposable
     }
 
     static void ClassifyKernel(Index1D i, ArrayView<float> packed, ArrayView<float> stats, ArrayView<float> maxRadius,
-        ArrayView<int> action, ArrayView<int> bin, ArrayView<int> hist, ArrayView<int> counters, ClassifyParams p)
+        ArrayView<int> action, ArrayView<int> bin, ArrayView<int> hist, ArrayView<int> counters, ClassifyParams p,
+        SplatEditor.Volume trainable)
     {
         if (i >= p.Count) return;
         long o = (long)i.X * Floats;
@@ -242,7 +251,8 @@ public sealed class GpuDensify : IDisposable
 
         int a = Keep;
         int b = 0;
-        if (p.NoOp == 0)
+        bool frozen = p.HasTrainable != 0 && !SplatEditor.Inside(trainable, packed[o], packed[o + 1], packed[o + 2]);
+        if (p.NoOp == 0 && !frozen)
         {
             // Same order as the host: prune first, a splat being removed is never densified.
             if (opacity < p.MinOpacity) a = PruneFaint;
@@ -306,14 +316,17 @@ public sealed class GpuDensify : IDisposable
 
     static void CompactKernel(Index1D i, ArrayView<float> packed, ArrayView<int> keep, ArrayView<int> add,
         ArrayView<int> keepDst, ArrayView<int> addDst, ArrayView<float> outPacked,
-        ArrayView<int> adamSrc, ArrayView<int> featSrc, CompactParams p)
+        ArrayView<int> adamSrc, ArrayView<int> featSrc, CompactParams p, SplatEditor.Volume trainable)
     {
         if (i >= p.Count) return;
         long so = (long)i.X * Floats;
         if (keep[i] != 0)
         {
             int d = keepDst[i];
-            CopyRow(packed, so, outPacked, (long)d * Floats, p.ResetOpacity, p.OpacityResetTo);
+            // Frozen context keeps its opacity: with no gradient it could never earn it back.
+            int reset = p.ResetOpacity != 0
+                && (p.HasTrainable == 0 || SplatEditor.Inside(trainable, packed[so], packed[so + 1], packed[so + 2])) ? 1 : 0;
+            CopyRow(packed, so, outPacked, (long)d * Floats, reset, p.OpacityResetTo);
             adamSrc[d] = i;
             featSrc[d] = i;
         }

@@ -353,6 +353,9 @@ public partial class Studio
             w = tw; h = th;
 
             _trainer ??= new SplatTrainerGpu(_gpuService);
+            // Set on every run, so a block's frozen context never leaks into the next training (Studio.Partition).
+            _trainer.TrainableVolume = _frozenOutside;
+            if (_frozenOutside != null) Console.WriteLine("[Train] partitioned block: only splats inside its training box learn");
             _trainer.ProfilePhases = ProfileTrainPhases;
             _trainer.SkipZeroGradientSteps = SkipZeroGradientSteps;
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
@@ -571,7 +574,9 @@ public partial class Studio
                     Console.WriteLine($"[Train] stopped on request after {it} of {iterations} iterations");
                     break;
                 }
-                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(it);
+                // A block refining a coarse model continues its SH schedule (_shScheduleOffset): restarted at degree 0, the
+                // frozen context would render without the bands it learned.
+                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(it + _shScheduleOffset);
                 if (it == 0 || it == 1000 || it == 2000 || it == 3000)
                     Console.WriteLine($"[Train] SH degree -> {_trainer.ActiveShDegree} at iter {it}");
 
@@ -952,6 +957,12 @@ public partial class Studio
     private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> PruneUnconstrainedAsync(
         MemoryBuffer1D<float, Stride1D.Dense> packed, int n)
     {
+        if (_trainer!.TrainableVolume != null)
+        {
+            // Frozen context gets no gradient by design, so the census would call all of it unconstrained.
+            Console.WriteLine("[Train] prune unconstrained: skipped (partitioned block - the rest of the scene is frozen context)");
+            return null;
+        }
         uint[] support = await _trainer!.ReadViewSupportCountsAsync(n);
         var plan = SplatDensityControl.PruneUnconstrained(support);
         if (plan.Remove.Count == 0)
@@ -1027,12 +1038,57 @@ public partial class Studio
         _gpuDensify ??= new GpuDensify(_gpuService.WebGPUAccelerator);
         var r = await _gpuDensify.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
             new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity,
-                Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify));
+                Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify, Trainable: _trainer.TrainableVolume));
 
         // Always report, including - especially including - when the answer is "nothing".
         Console.WriteLine(
             $"[Densify] signal: {r.Visible * 100.0 / n:F1}% of {n:N0} splats visible, {r.Candidates:N0} over the " +
             $"{SplatDensityControl.GradientThreshold:G3} gradient bar; plan: {r}");
+        if (_trainer.TrainableVolume is { } frozenBox)
+        {
+            // Partitioned block: the frozen context must pass through densify untouched. CPU transfer: four counts.
+            var a = _gpuService.WebGPUAccelerator;
+            int pre = await _splatEditor.CountAsync(a, packed, n, SplatEditor.Volume.Rows(0, n)) - await _splatEditor.CountAsync(a, packed, n, frozenBox);
+            int post = await _splatEditor.CountAsync(a, r.Packed, r.Count, SplatEditor.Volume.Rows(0, r.Count)) - await _splatEditor.CountAsync(a, r.Packed, r.Count, frozenBox);
+            Console.WriteLine($"[Densify] frozen context (visible, outside the block's box): {pre:N0} before this step's plan, {post:N0} after" +
+                (post < pre ? " - LOST CONTEXT" : ""));
+            if (post < pre && DiagnoseFrozenDensify)
+            {
+                DiagnoseFrozenDensify = false;   // once: a ~35 MB readback
+                // CPU transfer: diagnosis only (&frozendiag=1) - which frozen splats the plan dropped, and why.
+                const int F = SplatFormat.Floats;
+                var pin = await packed.CopyToHostAsync<float>(0, (long)n * F);
+                var feat = await r.FeatureSources.CopyToHostAsync<int>(0, r.Count);
+                var st = await _trainer.DensifyStatsView.SubView(0, (long)n * 2).CopyToHostAsync();
+                var rad = await _trainer.MaxRadiusView.SubView(0, n).CopyToHostAsync();
+                var kept = new bool[n];
+                foreach (int s in feat) if (s >= 0) kept[s] = true;
+                int shown = 0, missing = 0, insideCpu = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    int o = i * F;
+                    if (kept[i] || pin[o + 9] <= 0f || SplatEditor.Inside(frozenBox, pin[o], pin[o + 1], pin[o + 2])) continue;
+                    missing++;
+                    if (shown++ < 8)
+                        Console.WriteLine($"[Densify] dropped frozen splat {i}: pos ({pin[o]:G6}, {pin[o + 1]:G6}, {pin[o + 2]:G6}) " +
+                            $"opacity {pin[o + 9]:G4} scale ({pin[o + 6]:G3}, {pin[o + 7]:G3}, {pin[o + 8]:G3}) " +
+                            $"grad sum {st[i * 2]:G3} over {st[i * 2 + 1]} views, max radius {rad[i]:G3} px");
+                }
+                for (int i = 0; i < n; i++) if (!kept[i] && SplatEditor.Inside(frozenBox, pin[i * F], pin[i * F + 1], pin[i * F + 2])) insideCpu++;
+                Console.WriteLine($"[Densify] frozen diagnosis: {missing:N0} frozen (CPU Inside) splats with no row in the plan; " +
+                    $"{insideCpu:N0} inside ones removed (prunes + split parents)");
+                // The same step on a FRESH GpuDensify: this one was first launched in the coarse run, with no volume.
+                var fresh = new GpuDensify(a);
+                var r2 = await fresh.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
+                    new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity,
+                        Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify, Trainable: frozenBox));
+                int post2 = await _splatEditor.CountAsync(a, r2.Packed, r2.Count, SplatEditor.Volume.Rows(0, r2.Count))
+                    - await _splatEditor.CountAsync(a, r2.Packed, r2.Count, frozenBox);
+                Console.WriteLine($"[Densify] frozen diagnosis: the same step on a fresh GpuDensify keeps {post2:N0} of {pre:N0} " +
+                    $"frozen ({r2})");
+                r2.Packed.Dispose(); r2.AdamSources.Dispose(); r2.FeatureSources.Dispose();
+            }
+        }
 
         if (r.Added == 0 && r.Removed == 0 && !resetOpacity && !DensifyNoOp)
         {

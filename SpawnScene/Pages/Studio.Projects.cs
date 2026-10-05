@@ -816,7 +816,10 @@ public partial class Studio
         // Camera refinement on for the user's own scenes. MEASURED 2026-10-04 (7K, own SfM): bicycle training-photo
         // fit 22.32 -> 23.16 dB / SSIM 0.692 -> 0.734, held-out +0.07 dB / +0.009 SSIM over test-view alignment alone;
         // TruckFull held-out +0.02 / +0.005. Small on new viewpoints, never worse, and the scene agrees with its photos.
-        RefinePoses = true;
+        // Not in a partitioned block: the views' cameras are shared and refined in place, so each block re-fitted all
+        // of them to its own region and the next block started from poses its coarse model was never fitted to
+        // (TruckFull 2x2: block 1 began at 21.91 dB against the coarse model's 22.16). The coarse run refines them once.
+        RefinePoses = _frozenOutside == null;
         long savedMaxKeys = SplatTrainerGpu.MaxTotalKeys;
         DensifyEveryIters = 100;
         OpacityResetEveryIters = 3000;

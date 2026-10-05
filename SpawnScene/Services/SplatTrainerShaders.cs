@@ -1924,6 +1924,43 @@ fn mip_floor(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 ";
 
+    /// <summary>
+    /// Partitioned training's frozen context: zero the step's gradient totals of every splat OUTSIDE the trainable
+    /// volume (SplatEditor.Inside, same test), after the scatter and before any Adam pass. Colour, opacity, SH and
+    /// geometry all read these totals, so the rest of the scene renders - and explains its own pixels - but never
+    /// moves, and densification (an average of zero) never grows it.
+    /// </summary>
+    public const string FreezeOutside = @"
+// The splat count is a real u32, not int bits stored in an f32: a count like 1,079,598 is a DENORMAL as f32 bits,
+// and the load may flush it to zero - the kernel then returned for every splat and froze nothing (2026-10-05).
+struct FreezeBox {
+    cols  : array<vec4<f32>, 4>,   // the volume matrix's columns: dot with (x, y, z, 1)
+    xy    : vec4<f32>,             // x0 x1 y0 y1
+    z     : vec2<f32>,             // z0 z1
+    count : u32,
+    pad   : u32,
+};
+@group(0) @binding(0) var<storage, read>       splats     : array<f32>;   // 14 per splat
+@group(0) @binding(1) var<storage, read_write> grad_fixed : array<u32>;   // f32 bits, 9 per splat
+@group(0) @binding(2) var<uniform>             box        : FreezeBox;
+
+@compute @workgroup_size(64)
+fn freeze_outside(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let i = gid.x;
+    if (i >= box.count) { return; }
+    let p = vec4<f32>(splats[i * 14u], splats[i * 14u + 1u], splats[i * 14u + 2u], 1.0);
+    let w = dot(box.cols[3], p);
+    var inside = w > 1e-7;
+    if (inside) {
+        let q = vec3<f32>(dot(box.cols[0], p), dot(box.cols[1], p), dot(box.cols[2], p)) / w;
+        inside = q.x >= box.xy.x && q.x <= box.xy.y && q.y >= box.xy.z && q.y <= box.xy.w
+            && q.z >= box.z.x && q.z <= box.z.y;
+    }
+    if (inside) { return; }
+    for (var k = 0u; k < 9u; k = k + 1u) { grad_fixed[i * 9u + k] = 0u; }
+}
+";
+
     public const string GeometryAdam = UniformsBlock + @"
 @group(0) @binding(1) var<storage, read_write> splats     : array<f32>;   // 14 per splat
 @group(0) @binding(2) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat

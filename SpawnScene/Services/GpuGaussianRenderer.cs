@@ -306,11 +306,12 @@ public class GpuGaussianRenderer : IDisposable
     public async Task InstallPagedLodAsync(MemoryBuffer1D<float, Stride1D.Dense> poolRows, int poolNodes, int shDegree,
         MemoryBuffer1D<int, Stride1D.Dense> parentSlot, MemoryBuffer1D<float, Stride1D.Dense> bounds,
         MemoryBuffer1D<float, Stride1D.Dense> size, MemoryBuffer1D<int, Stride1D.Dense> childChunk,
-        MemoryBuffer1D<int, Stride1D.Dense> chunkPage, MemoryBuffer1D<int, Stride1D.Dense> want, int chunkCount, float tau)
+        MemoryBuffer1D<int, Stride1D.Dense> chunkPage, MemoryBuffer1D<int, Stride1D.Dense> flags, int chunkCount, int pageNodes,
+        float tau)
     {
         RenderMode = SplatRenderMode.Sorted;
         await UploadSceneFromGpuBuffer(poolRows, poolNodes);
-        _sorter.SetLodPaged(parentSlot, bounds, size, childChunk, chunkPage, want, chunkCount);
+        _sorter.SetLodPaged(parentSlot, bounds, size, childChunk, chunkPage, flags, chunkCount, pageNodes, poolNodes / pageNodes);
         _sorter.LodTau = tau;
         if (shDegree > 0 && _device != null)
         {
@@ -337,8 +338,8 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>Cut and sort again on the next frame even with a still camera (the drawn rows changed).</summary>
     public void RequestResort() => _sorter.RequestResort();
 
-    /// <summary>The streamed tree's cut wants these chunks loaded (GpuSplatSorter.LodChunksWanted).</summary>
-    public event Action<int[]>? LodChunksWanted
+    /// <summary>The streamed tree's cut wants these chunks loaded and used these pages (GpuSplatSorter.LodChunksWanted).</summary>
+    public event Action<int[], bool[]>? LodChunksWanted
     {
         add => _sorter.LodChunksWanted += value;
         remove => _sorter.LodChunksWanted -= value;

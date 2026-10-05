@@ -39,6 +39,7 @@ public sealed class GpuLodPager : IDisposable
     // CPU mirror of the residency.
     readonly int[] _pageChunk, _chunkPageCpu, _dependents;
     readonly long[] _lastWanted;
+    bool[] _pageUsed;   // drawn from on screen in the latest cut: never evicted
     readonly Queue<int> _queue = new();
     readonly HashSet<int> _queued = new();
     bool _pumping, _poolFullLogged, _disposed;
@@ -51,7 +52,7 @@ public sealed class GpuLodPager : IDisposable
     readonly Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
         ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
         ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-        ArrayView1D<float, Stride1D.Dense>, SlotParams> _slots;
+        ArrayView1D<float, Stride1D.Dense>, LodPageKernels.SlotParams> _slots;
 
     GpuLodPager(WebGPUAccelerator a, GpuGaussianRenderer r, LodChunkFile.Header3 h, ChunkBytes bytes, int pages)
     {
@@ -65,17 +66,18 @@ public sealed class GpuLodPager : IDisposable
         _bounds = a.Allocate1D<float>((long)slots * 4);
         _size = a.Allocate1D<float>(slots);
         _chunkPage = a.Allocate1D<int>(chunks);
-        _want = a.Allocate1D<int>(chunks);
+        _want = a.Allocate1D<int>(chunks + pages);   // want flag a chunk, then used flag a page
+        _pageUsed = new bool[pages];
         _starts = a.Allocate1D(h.Chunks.Select(c => c.First).Append(h.NodeCount).ToArray());
         _pageChunk = Enumerable.Repeat(-1, pages).ToArray();
         _chunkPageCpu = Enumerable.Repeat(-1, chunks).ToArray();
         _dependents = new int[chunks];
         _lastWanted = new long[chunks];
-        _fill = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, int, int>(FillKernel);
+        _fill = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, int, int>(LodPageKernels.FillKernel);
         _slots = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
-            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, SlotParams>(SlotKernel);
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, LodPageKernels.SlotParams>(LodPageKernels.SlotKernel);
         _fill(slots, _parentSlot.View, 0, -2);
         _fill(chunks, _chunkPage.View, 0, -1);
         _want.MemSetToZero();
@@ -95,7 +97,7 @@ public sealed class GpuLodPager : IDisposable
         pool.MemSetToZero();
         await a.SynchronizeAsync();
         await r.InstallPagedLodAsync(pool, pages * pageNodes, h.ShDegree, pager._parentSlot, pager._bounds, pager._size,
-            pager._childChunk, pager._chunkPage, pager._want, h.Chunks.Length, tau);
+            pager._childChunk, pager._chunkPage, pager._want, h.Chunks.Length, pageNodes, tau);
         r.LodChunksWanted += pager.OnWanted;
         await pager.LoadWithNeedsAsync(0);
         Console.WriteLine($"[LOD] pager: {h.Chunks.Length} chunks, pool {pages} pages x {pageNodes:N0} slots " +
@@ -103,10 +105,13 @@ public sealed class GpuLodPager : IDisposable
         return pager;
     }
 
-    void OnWanted(int[] chunks)
+    void OnWanted(int[] chunks, bool[] pagesUsed)
     {
         if (_disposed) return;
+        _pageUsed = pagesUsed;
         long now = Environment.TickCount64;
+        for (int p = 0; p < Pages && p < pagesUsed.Length; p++)
+            if (pagesUsed[p] && _pageChunk[p] >= 0) _lastWanted[_pageChunk[p]] = now;
         foreach (int c in chunks)
         {
             _lastWanted[c] = now;
@@ -166,7 +171,10 @@ public sealed class GpuLodPager : IDisposable
         return true;
     }
 
-    /// <summary>A free page, or one freed by evicting the least recently wanted chunk nothing resident needs.</summary>
+    /// <summary>
+    /// A free page, or one freed by evicting the least recently used chunk that nothing resident needs and the latest
+    /// cut did not draw from (evicting a page in use made a small pool thrash: load A, evict B, load B, evict A...).
+    /// </summary>
     int FreePage()
     {
         for (int p = 0; p < Pages; p++) if (_pageChunk[p] < 0) return p;
@@ -174,7 +182,7 @@ public sealed class GpuLodPager : IDisposable
         for (int p = 0; p < Pages; p++)
         {
             int c = _pageChunk[p];
-            if (c <= 0 || _dependents[c] > 0) continue;
+            if (c <= 0 || _dependents[c] > 0 || (p < _pageUsed.Length && _pageUsed[p])) continue;
             if (victim < 0 || _lastWanted[c] < _lastWanted[_pageChunk[victim]]) victim = p;
         }
         if (victim < 0) return -1;
@@ -231,7 +239,7 @@ public sealed class GpuLodPager : IDisposable
             _fill(PageNodes, _parentSlot.View.SubView(slot0, PageNodes), 0, -2);
             _slots(n, parent.View, firstChild.View, bounds.View, size.View, _starts.View, _chunkPage.View,
                 _parentSlot.View, _childChunk.View, _bounds.View, _size.View,
-                new SlotParams { Slot0 = (int)slot0, PageNodes = PageNodes, Chunks = _h.Chunks.Length });
+                new LodPageKernels.SlotParams { Slot0 = (int)slot0, PageNodes = PageNodes, Chunks = _h.Chunks.Length });
             _fill(1, _chunkPage.View.SubView(c, 1), 0, page);
             await _a.SynchronizeAsync();
             if (rowsSh != null) for (int p = 0; p < rowsSh.Length; p++) _r.WriteShRows(p, rowsSh[p], slot0, n);
@@ -244,49 +252,6 @@ public sealed class GpuLodPager : IDisposable
         ResidentChunks++;
         Loads++;
         _r.RequestResort();
-    }
-
-    public struct SlotParams
-    {
-        public int Slot0, PageNodes, Chunks;
-    }
-
-    static void FillKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> dst, int offset, int value) => dst[offset + i] = value;
-
-    /// <summary>
-    /// Chunk node j into slot Slot0 + j: its parent as a SLOT (the parent's chunk is resident - loaded first - so its
-    /// page is known), its children's chunk, sphere and LOD size. Chunks are found by binary search over their starts.
-    /// </summary>
-    static void SlotKernel(Index1D j, ArrayView1D<int, Stride1D.Dense> parent, ArrayView1D<int, Stride1D.Dense> firstChild,
-        ArrayView1D<float, Stride1D.Dense> bounds, ArrayView1D<float, Stride1D.Dense> size, ArrayView1D<int, Stride1D.Dense> starts,
-        ArrayView1D<int, Stride1D.Dense> chunkPage, ArrayView1D<int, Stride1D.Dense> outParentSlot,
-        ArrayView1D<int, Stride1D.Dense> outChildChunk, ArrayView1D<float, Stride1D.Dense> outBounds,
-        ArrayView1D<float, Stride1D.Dense> outSize, SlotParams sp)
-    {
-        int slot = sp.Slot0 + j;
-        int p = parent[j];
-        if (p < 0) outParentSlot[slot] = -1;
-        else
-        {
-            int pc = ChunkOf(starts, sp.Chunks, p);
-            outParentSlot[slot] = chunkPage[pc] * sp.PageNodes + (p - starts[pc]);
-        }
-        int fc = firstChild[j];
-        outChildChunk[slot] = fc < 0 ? -1 : ChunkOf(starts, sp.Chunks, fc);
-        for (int k = 0; k < 4; k++) outBounds[slot * 4 + k] = bounds[j * 4 + k];
-        outSize[slot] = size[j];
-    }
-
-    /// <summary>The chunk holding node <paramref name="node"/>: the last start at or below it.</summary>
-    static int ChunkOf(ArrayView1D<int, Stride1D.Dense> starts, int chunks, int node)
-    {
-        int lo = 0, hi = chunks - 1;
-        while (lo < hi)
-        {
-            int mid = (lo + hi + 1) / 2;
-            if (starts[mid] <= node) lo = mid; else hi = mid - 1;
-        }
-        return lo;
     }
 
     /// <summary>Stop streaming (another scene is opening). The cut's arrays are the sorter's, dropped with the scene.</summary>

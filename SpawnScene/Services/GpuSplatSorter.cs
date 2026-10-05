@@ -60,12 +60,17 @@ public class GpuSplatSorter : IDisposable
         ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
         ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, CullParams>? _cullDistanceLodPagedKernel;
     MemoryBuffer1D<int, Stride1D.Dense>? _lodChildChunk, _lodChunkPage, _lodWant;
-    int _lodChunkCount;
+    int _lodChunkCount, _lodPageNodes;
     bool _lodPaged;
     Task<int[]>? _lodWantRead;
 
-    /// <summary>A paged tree's cut drew nodes in place of children whose chunks are not resident: those chunks.</summary>
-    public event Action<int[]>? LodChunksWanted;
+    int _lodPages;
+
+    /// <summary>
+    /// After each paged cut: the chunks it wanted (drawn nodes stand in for children whose chunk is not resident) and the
+    /// pages it drew from on screen - the pager must not evict those.
+    /// </summary>
+    public event Action<int[], bool[]>? LodChunksWanted;
 
     /// <summary>The LOD cut threshold in pixels: a node is drawn once its view size is at most this.</summary>
     public float LodTau { get; set; } = 1.5f;
@@ -106,8 +111,10 @@ public class GpuSplatSorter : IDisposable
             {
                 var flags = wantRead.Result;
                 var wanted = new List<int>();
-                for (int c = 0; c < flags.Length; c++) if (flags[c] != 0) wanted.Add(c);
-                if (wanted.Count > 0) LodChunksWanted?.Invoke(wanted.ToArray());
+                for (int c = 0; c < _lodChunkCount && c < flags.Length; c++) if (flags[c] != 0) wanted.Add(c);
+                var used = new bool[_lodPages];
+                for (int p = 0; p < _lodPages && _lodChunkCount + p < flags.Length; p++) used[p] = flags[_lodChunkCount + p] != 0;
+                LodChunksWanted?.Invoke(wanted.ToArray(), used);
             }
         }
         if (_lodCountRead is not { IsCompleted: true } read) return;
@@ -153,16 +160,18 @@ public class GpuSplatSorter : IDisposable
     /// <summary>
     /// Draw the current scene - a pool of pages a <c>GpuLodPager</c> fills - through a paged LOD cut
     /// (LodLayout.InCutPaged): per slot its parent slot (-1 root, -2 empty), sphere, LOD size (0 = leaf) and child chunk
-    /// (-1 = leaf); per chunk its page (-1 = not resident) and a want flag the cull raises. Takes ownership; the pager
-    /// keeps writing into them while the scene is up.
+    /// (-1 = leaf); per chunk its page (-1 = not resident); and <paramref name="flags"/>, chunkCount want flags then one
+    /// used flag a page (<paramref name="pageNodes"/> slots each), which the cull raises. Takes ownership; the pager keeps
+    /// writing into them while the scene is up.
     /// </summary>
     public void SetLodPaged(MemoryBuffer1D<int, Stride1D.Dense> parentSlot, MemoryBuffer1D<float, Stride1D.Dense> bounds,
         MemoryBuffer1D<float, Stride1D.Dense> size, MemoryBuffer1D<int, Stride1D.Dense> childChunk,
-        MemoryBuffer1D<int, Stride1D.Dense> chunkPage, MemoryBuffer1D<int, Stride1D.Dense> want, int chunkCount)
+        MemoryBuffer1D<int, Stride1D.Dense> chunkPage, MemoryBuffer1D<int, Stride1D.Dense> flags, int chunkCount, int pageNodes, int pages)
     {
         ClearLod();
         _lodParent = parentSlot; _lodBounds = bounds; _lodSize = size;
-        _lodChildChunk = childChunk; _lodChunkPage = chunkPage; _lodWant = want; _lodChunkCount = chunkCount;
+        _lodChildChunk = childChunk; _lodChunkPage = chunkPage; _lodWant = flags; _lodChunkCount = chunkCount;
+        _lodPageNodes = pageNodes; _lodPages = pages;
         _lodPaged = true;
         ResetSortState();
     }
@@ -283,6 +292,8 @@ public class GpuSplatSorter : IDisposable
         // LOD tree cut (CullAndDistanceLodKernel): leaves are rows 0..LodLeafCount-1, the cut threshold in pixels.
         public int LodLeafCount;
         public float LodTau;
+        // Paged LOD: slots a page, and where the page-used flags start in the want buffer (after the chunks' flags).
+        public int LodPageNodes, LodChunkCount;
     }
 
     // ═══════════════════════════════════════════════════════════
@@ -469,6 +480,7 @@ public class GpuSplatSorter : IDisposable
             outIndices[i] = i;
             Atomic.Add(ref drawnCount[0], 1);
             if (wantChunk >= 0) want[wantChunk] = 1;
+            want[p.LodChunkCount + i / p.LodPageNodes] = 1;   // this page is in use on screen
             return;
         }
         outDistances[i] = -1;
@@ -775,7 +787,9 @@ public class GpuSplatSorter : IDisposable
                     ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
                     ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
                     CullParams>(CullAndDistanceLodPagedKernel);
-                _lodWant!.View.SubView(0, _lodChunkCount).MemSetToZero();
+                cullParams.LodPageNodes = _lodPageNodes;
+                cullParams.LodChunkCount = _lodChunkCount;
+                _lodWant!.View.SubView(0, _lodChunkCount + _lodPages).MemSetToZero();
                 _cullDistanceLodPagedKernel(_splatCount, _packedDataBuf.View, _distanceBuf!.View, _indicesBuf.View,
                     _lodParent.View, _lodBounds!.View, _lodSize!.View, _lodDrawnCount.View, _lodChildChunk!.View,
                     _lodChunkPage!.View, _lodWant.View, cullParams);
@@ -829,7 +843,7 @@ public class GpuSplatSorter : IDisposable
             _lodCountRead = _lodDrawnCount.CopyToHostAsync<int>(0, 1);
         // CPU transfer: one int a chunk - which chunks the paged cut wants loaded.
         if (_lodPaged && _lodWant != null && _lodWantRead == null)
-            _lodWantRead = _lodWant.CopyToHostAsync<int>(0, _lodChunkCount);
+            _lodWantRead = _lodWant.CopyToHostAsync<int>(0, _lodChunkCount + _lodPages);
 
         _lastSortVisibleCount = _splatCount;
         return (_packedDataBuf, _indicesBuf, false, _splatCount);

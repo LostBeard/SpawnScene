@@ -14,7 +14,7 @@ public class LodTreeTests
 {
     const int F = SplatFormat.Floats;
 
-    static float[] Scene(int n, int seed)
+    internal static float[] Scene(int n, int seed)
     {
         var rng = new Random(seed);
         var rows = new float[n * F];

@@ -1022,6 +1022,7 @@ public partial class Studio
     private async Task LoadProjectSceneAsync(ProjectScene scene)
     {
         if (_activeProject == null) return;
+        _lodPager?.Dispose(); _lodPager = null;   // a streamed v3 file was open
 
         _statusMessage = $"Loading {scene.SplatCount:N0} splats from storage...";
         BuildProjectDetailUI();

@@ -17,6 +17,54 @@ public partial class Studio
     /// <summary>Node-ordered SH of the open v3 file: the renderer copied them, kept until the next open.</summary>
     MemoryBuffer1D<float, Stride1D.Dense>[]? _lodFileSh;
 
+    /// <summary>&amp;lodpool=N: stream a v3 file through a pool of about N node slots (0 = load every chunk).</summary>
+    public static int LodPoolOption { get; set; }
+
+    GpuLodPager? _lodPager;
+    Blob? _lodFileBlob;
+
+    /// <summary>
+    /// Open a .spawnscene v3 STREAMED (GpuLodPager): chunk 0 at once, then the chunks the cut asks for, through a pool
+    /// of <see cref="LodPoolOption"/> slots. The chunks come from a Blob of the file's data (here the fetched bytes; a
+    /// slice of it is what an HTTP Range read will return).
+    /// </summary>
+    async Task OpenLodStreamAsync(ArrayBuffer bytes, LodChunkFile.Header3 h, long dataStart)
+    {
+        var a = _gpuService.WebGPUAccelerator;
+        var t0 = DateTime.UtcNow;
+        _lodPager?.Dispose(); _lodPager = null;
+        _lodFileBlob?.Dispose();
+        using (var data = new Uint8Array(bytes, dataStart, bytes.ByteLength - dataStart))
+            _lodFileBlob = new Blob(new[] { data }, new BlobOptions { Type = "application/octet-stream" });
+        var blob = _lodFileBlob;
+        async Task<ArrayBuffer> ChunkBytes(LodChunkFile.Chunk c)
+        {
+            using var slice = blob.Slice(c.Offset, c.Offset + c.Bytes);
+            return await GzipAsync(slice, decompress: true);
+        }
+        _gpuRenderer.UseRgbColours();
+        _gpuRenderer.ColoursAreShDc = h.ColoursAreShDc;
+        _gpuRenderer.LodBudget = LodBudgetOption;
+        _lodPager = await GpuLodPager.CreateAsync(a, _gpuRenderer, h, ChunkBytes, LodPoolOption, LodTauOption > 0f ? LodTauOption : 1.5f);
+        Console.WriteLine($"[Import] '{h.Name}' (v3, streamed): {h.LeafCount:N0} splats, {h.NodeCount:N0} LOD nodes in {h.Chunks.Length} chunks, " +
+            $"chunk 0 on screen in {(DateTime.UtcNow - t0).TotalSeconds:F1}s");
+        ShowLodScene(h);
+        await SeatAtHomeViewAsync(new ProjectScene { HomeView = h.HomeView, TrainedIterations = h.TrainedIterations, SplatCount = h.LeafCount });
+    }
+
+    /// <summary>The viewer state for an open v3 file (no project behind it).</summary>
+    void ShowLodScene(LodChunkFile.Header3 h)
+    {
+        var gaussianScene = new GaussianScene { GpuSplatCount = h.LeafCount, SourceName = "lod-file" };
+        _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
+        _renderService.SetActiveSceneGpuLoaded(gaussianScene);
+        _sceneManager.ActiveScene = gaussianScene;
+        _statusMessage = null;
+        _state = StudioState.SceneViewer;
+        _cameraController?.FitToScene();
+        BuildViewerHudUI();
+    }
+
     /// <summary>Write the scene on screen as a .spawnscene v3 (LOD tree, chunked) download.</summary>
     async Task ExportLodSceneFileAsync()
     {
@@ -103,7 +151,7 @@ public partial class Studio
                     };
                     if (shRows != null) raw.Add(await shq.CopyToHostUint8ArrayAsync(0, (long)count * SceneCodec.ShWords * 4));
                     raw.Add(await laid.Parent.CopyToHostUint8ArrayAsync((long)first * 4, (long)count * 4));
-                    raw.Add(await laid.ChildCount.CopyToHostUint8ArrayAsync((long)first * 4, (long)count * 4));
+                    raw.Add(await laid.FirstChild.CopyToHostUint8ArrayAsync((long)first * 4, (long)count * 4));
                     raw.Add(await laid.Bounds.CopyToHostUint8ArrayAsync((long)first * 16, (long)count * 16));
                     raw.Add(await laid.LodSize.CopyToHostUint8ArrayAsync((long)first * 4, (long)count * 4));
                     js.AddRange(raw);
@@ -166,6 +214,8 @@ public partial class Studio
     /// </summary>
     async Task OpenLodFileAsync(ArrayBuffer bytes, LodChunkFile.Header3 h, long dataStart)
     {
+        if (LodPoolOption > 0) { await OpenLodStreamAsync(bytes, h, dataStart); return; }
+        _lodPager?.Dispose(); _lodPager = null;
         var a = _gpuService.WebGPUAccelerator;
         var t0 = DateTime.UtcNow;
         int nodes = h.NodeCount;
@@ -176,8 +226,8 @@ public partial class Studio
         laid.Parent = a.Allocate1D<int>(nodes);
         laid.Bounds = a.Allocate1D<float>((long)nodes * 4);
         laid.LodSize = a.Allocate1D<float>(nodes);
-        laid.ChildCount = a.Allocate1D<int>(nodes);
-        laid.FirstChild = a.Allocate1D<int>(1);
+        laid.FirstChild = a.Allocate1D<int>(nodes);
+        laid.ChildCount = a.Allocate1D<int>(1);
         laid.ChildList = a.Allocate1D<int>(1);
         var sh = withSh
             ? Enumerable.Range(0, SphericalHarmonics.Parts).Select(_ => a.Allocate1D<float>((long)nodes * SphericalHarmonics.PartFloatsPerSplat)).ToArray()
@@ -197,8 +247,8 @@ public partial class Studio
                 _gpuRenderer.WriteIlgpu(geo, 0, raw, (int)L.Geo, L.App - L.Geo);
                 _gpuRenderer.WriteIlgpu(app, 0, raw, (int)L.App, L.Sh - L.App);
                 if (shw != null) _gpuRenderer.WriteIlgpu(shw, 0, raw, (int)L.Sh, L.Parent - L.Sh);
-                _gpuRenderer.WriteIlgpu(laid.Parent, (long)c.First * 4, raw, (int)L.Parent, L.ChildCount - L.Parent);
-                _gpuRenderer.WriteIlgpu(laid.ChildCount, (long)c.First * 4, raw, (int)L.ChildCount, L.Bounds - L.ChildCount);
+                _gpuRenderer.WriteIlgpu(laid.Parent, (long)c.First * 4, raw, (int)L.Parent, L.FirstChild - L.Parent);
+                _gpuRenderer.WriteIlgpu(laid.FirstChild, (long)c.First * 4, raw, (int)L.FirstChild, L.Bounds - L.FirstChild);
                 _gpuRenderer.WriteIlgpu(laid.Bounds, (long)c.First * 16, raw, (int)L.Bounds, L.LodSize - L.Bounds);
                 _gpuRenderer.WriteIlgpu(laid.LodSize, (long)c.First * 4, raw, (int)L.LodSize, L.End - L.LodSize);
                 var (rows, rowsSh) = SceneCodec.Decode(a, geo, app, shw, LodChunkFile.FrameOf(c));
@@ -227,14 +277,7 @@ public partial class Studio
             _lodFileSh = sh;
             sh = null;
 
-            var gaussianScene = new GaussianScene { GpuSplatCount = h.LeafCount, SourceName = "lod-file" };
-            _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
-            _renderService.SetActiveSceneGpuLoaded(gaussianScene);
-            _sceneManager.ActiveScene = gaussianScene;
-            _statusMessage = null;
-            _state = StudioState.SceneViewer;
-            _cameraController?.FitToScene();
-            BuildViewerHudUI();
+            ShowLodScene(h);
             await SeatAtHomeViewAsync(new ProjectScene { HomeView = h.HomeView, TrainedIterations = h.TrainedIterations, SplatCount = h.LeafCount });
         }
         finally

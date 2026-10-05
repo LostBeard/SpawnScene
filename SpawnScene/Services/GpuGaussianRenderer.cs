@@ -299,6 +299,52 @@ public class GpuGaussianRenderer : IDisposable
     }
 
     /// <summary>
+    /// Show a STREAMED LOD tree: <paramref name="poolRows"/> (taken) is a pool of <paramref name="poolNodes"/> slots a
+    /// GpuLodPager fills page by page; SH bands get zeroed pool-sized parts the pager writes into
+    /// (<see cref="WriteShRows"/>). The paged cut's arrays stay the pager's (GpuSplatSorter.SetLodPaged).
+    /// </summary>
+    public async Task InstallPagedLodAsync(MemoryBuffer1D<float, Stride1D.Dense> poolRows, int poolNodes, int shDegree,
+        MemoryBuffer1D<int, Stride1D.Dense> parentSlot, MemoryBuffer1D<float, Stride1D.Dense> bounds,
+        MemoryBuffer1D<float, Stride1D.Dense> size, MemoryBuffer1D<int, Stride1D.Dense> childChunk,
+        MemoryBuffer1D<int, Stride1D.Dense> chunkPage, MemoryBuffer1D<int, Stride1D.Dense> want, int chunkCount, float tau)
+    {
+        RenderMode = SplatRenderMode.Sorted;
+        await UploadSceneFromGpuBuffer(poolRows, poolNodes);
+        _sorter.SetLodPaged(parentSlot, bounds, size, childChunk, chunkPage, want, chunkCount);
+        _sorter.LodTau = tau;
+        if (shDegree > 0 && _device != null)
+        {
+            ulong bytes = (ulong)poolNodes * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+            SetShRest(Enumerable.Range(0, SphericalHarmonics.Parts).Select(_ => NewShPart(bytes)).ToArray(), shDegree);
+        }
+        else SetShRest(null, 0);
+        Console.WriteLine($"[LOD] streaming through a {poolNodes:N0}-slot pool, cut at {tau} px, sorted mode");
+    }
+
+    /// <summary>Copy <paramref name="rows"/> SH rows of part <paramref name="part"/> from an ILGPU buffer to pool row <paramref name="dstRow"/>.</summary>
+    public void WriteShRows(int part, MemoryBuffer1D<float, Stride1D.Dense> src, long dstRow, int rows)
+    {
+        if (_shRest == null || _device == null || _queue == null) return;
+        ulong rowBytes = SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        using var encoder = _device.CreateCommandEncoder();
+        encoder.CopyBufferToBuffer(src.GetGPUBuffer()!, 0, _shRest[part], (ulong)dstRow * rowBytes, (ulong)rows * rowBytes);
+        using var cmd = encoder.Finish();
+        _submitArray[0] = cmd;
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
+    }
+
+    /// <summary>Cut and sort again on the next frame even with a still camera (the drawn rows changed).</summary>
+    public void RequestResort() => _sorter.RequestResort();
+
+    /// <summary>The streamed tree's cut wants these chunks loaded (GpuSplatSorter.LodChunksWanted).</summary>
+    public event Action<int[]>? LodChunksWanted
+    {
+        add => _sorter.LodChunksWanted += value;
+        remove => _sorter.LodChunksWanted -= value;
+    }
+
+    /// <summary>
     /// Copy <paramref name="bytes"/> bytes of <paramref name="src"/> from <paramref name="srcOffset"/> into an ILGPU
     /// buffer at byte <paramref name="dstOffset"/> (file I/O: a decoded file part straight to its place on the GPU).
     /// </summary>

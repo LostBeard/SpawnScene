@@ -14,9 +14,9 @@ namespace SpawnScene.Services;
 /// <para>
 /// A chunk of n nodes, before gzip: the <see cref="SceneCodec"/> streams over the chunk's own frame (geometry n x 4
 /// words, appearance n x 3, SH n x 12 when the file has SH bands; internal nodes' SH are zero), then the cut's data,
-/// raw so the cut stays exact: parent (n int32, -1 for a root), child count (n int32; a node's children are the run
-/// that starts where the previous nodes' children end, after the roots), bounding sphere (n x 4 float32), LOD size
-/// (n float32, 0 for a leaf - <see cref="LodLayout"/>).
+/// raw so the cut stays exact: parent (n int32, -1 for a root), first child (n int32, -1 for a leaf; the children are
+/// a run that never crosses a chunk), bounding sphere (n x 4 float32), LOD size (n float32, 0 for a leaf -
+/// <see cref="LodLayout"/>). Node indices are the file's (breadth-first) ones.
 /// </para>
 /// </summary>
 public static class LodChunkFile
@@ -39,14 +39,14 @@ public static class LodChunkFile
         DateTime SavedAt, float[]? HomeView, int ChunkNodes, Chunk[] Chunks, string Compression = "gzip");
 
     /// <summary>Where each part of a raw chunk of <paramref name="n"/> nodes starts (bytes).</summary>
-    public readonly record struct Layout(long Geo, long App, long Sh, long Parent, long ChildCount, long Bounds, long LodSize, long End)
+    public readonly record struct Layout(long Geo, long App, long Sh, long Parent, long FirstChild, long Bounds, long LodSize, long End)
     {
         public static Layout Of(int n, bool withSh)
         {
             long geo = 0, app = geo + (long)n * SceneCodec.GeoWords * 4, sh = app + (long)n * SceneCodec.AppWords * 4;
             long parent = sh + (withSh ? (long)n * SceneCodec.ShWords * 4 : 0);
-            long childCount = parent + (long)n * 4, bounds = childCount + (long)n * 4, lodSize = bounds + (long)n * 16;
-            return new Layout(geo, app, sh, parent, childCount, bounds, lodSize, lodSize + (long)n * 4);
+            long firstChild = parent + (long)n * 4, bounds = firstChild + (long)n * 4, lodSize = bounds + (long)n * 16;
+            return new Layout(geo, app, sh, parent, firstChild, bounds, lodSize, lodSize + (long)n * 4);
         }
     }
 

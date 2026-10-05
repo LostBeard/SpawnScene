@@ -300,6 +300,8 @@ public partial class Studio
             LodTauOption = Math.Max(0f, ltv);
         if (query.TryGetValue("lodbudget", out var lbq) && int.TryParse(lbq, out var lbv))
             LodBudgetOption = Math.Max(0, lbv);
+        if (query.TryGetValue("lodpool", out var lpoolq) && int.TryParse(lpoolq, out var lpoolv))
+            LodPoolOption = Math.Max(0, lpoolv);
         // &fpslog=1 (harness): log the frame rate each second; with SPAWNSCENE_CHROME_UNCAPPED=1 it is render cost.
         if (query.TryGetValue("fpslog", out var fpq) && fpq is "1" or "true")
             _renderService.OnFpsUpdated += fps => Console.WriteLine($"[FPS] {fps:F1}" +

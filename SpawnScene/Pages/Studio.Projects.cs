@@ -729,7 +729,9 @@ public partial class Studio
                 //
                 // Fallback poses are not recorded on purpose: they are a placeholder, not a
                 // measurement, and training against them would fit the scene to a fiction.
-                RecordTrainingViews(scene, images, fromProjectStore: true, holdOut: false);
+                // A measurement run (&llffhold=N) holds out every Nth photo here too, so the scene can be scored on
+                // photos it never saw; a user's project never sets it.
+                RecordTrainingViews(scene, images, fromProjectStore: true, holdOut: LlffHold > 0);
 
                 _renderService.SetActiveSceneGpuLoaded(scene);
                 _sceneManager.ActiveScene = scene;
@@ -744,8 +746,11 @@ public partial class Studio
                 int trainIters = _activeProject.Settings.TrainIterations;
                 int trainedIters = 0;
                 if (trainIters > 0 && scene.TrainingViews.Count > 0)
-                    trainedIters = await TrainProjectSceneAsync(
-                        trainIters, _activeProject.Settings.TrainMaxSplats, _activeProject.Settings.TrainMaxDimension);
+                    trainedIters = TrainingBlocks.Columns * TrainingBlocks.Rows > 1
+                        ? await TrainPartitionedAsync(
+                            trainIters, _activeProject.Settings.TrainMaxSplats, _activeProject.Settings.TrainMaxDimension)
+                        : await TrainProjectSceneAsync(
+                            trainIters, _activeProject.Settings.TrainMaxSplats, _activeProject.Settings.TrainMaxDimension);
                 else if (trainIters > 0)
                     Console.WriteLine("[Studio] not training: the pose recovery produced no usable camera poses");
 
@@ -830,7 +835,7 @@ public partial class Studio
         _unloadDepthBeforeTraining = true; // give the trainer the depth model's GPU memory
 
         _trainingActive = true;
-        _trainHudText = $"Preparing training ({iterations:N0} iterations)…";
+        _trainHudText = $"{_trainHudPrefix}Preparing training ({iterations:N0} iterations)…";
         if (_state == StudioState.SceneViewer) BuildViewerHudUI();
         int done = 0;
         try
@@ -844,7 +849,7 @@ public partial class Studio
                     var left = TimeSpan.FromSeconds((p.Total - p.Done) / Math.Max(rate, 1e-6));
                     _trainHudText = _trainStopRequested
                         ? "Stopping - finishing up and saving…"
-                        : $"Training {p.Done:N0} / {p.Total:N0} · {p.Splats:N0} splats · {rate:F1} it/s · " +
+                        : $"{_trainHudPrefix}Training {p.Done:N0} / {p.Total:N0} · {p.Splats:N0} splats · {rate:F1} it/s · " +
                           $"~{(int)left.TotalMinutes}m {left.Seconds:D2}s left";
                     if (_hudTrainLabel != null) _hudTrainLabel.Text = _trainHudText;
                 },

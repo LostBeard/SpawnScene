@@ -176,6 +176,42 @@ public class GpuGaussianRenderer : IDisposable
     }
 
     /// <summary>
+    /// <see cref="LoadShRest"/> for a scene made of blocks: each block's parts (one ArrayBuffer per SphericalHarmonics
+    /// part) written one after another into the same part buffers, in block order - the order the blocks' packed rows
+    /// were merged in. JS memory straight to the GPU.
+    /// </summary>
+    public void LoadShRestBlocks(IReadOnlyList<ArrayBuffer[]> blocks, int degree)
+    {
+        if (_device == null || _queue == null) return;
+        if (degree <= 0 || blocks.Count == 0 || blocks.Any(b => b.Length != SphericalHarmonics.Parts))
+        {
+            SetShRest(null, 0);
+            return;
+        }
+        var buffers = new GPUBuffer[SphericalHarmonics.Parts];
+        for (int part = 0; part < buffers.Length; part++)
+        {
+            long total = blocks.Sum(b => (long)b[part].ByteLength);
+            buffers[part] = NewShPart((ulong)Math.Max(4L, total));
+            long offset = 0;
+            foreach (var b in blocks)
+            {
+                if (b[part].ByteLength > 0) _queue.WriteBuffer(buffers[part], offset, b[part]);
+                offset += (long)b[part].ByteLength;
+            }
+        }
+        SetShRest(buffers, degree);
+    }
+
+    /// <summary>JS bytes into an ILGPU buffer at a byte offset (a parked block's rows into a merged scene).</summary>
+    public void WriteIlgpuBytes(MemoryBuffer1D<float, Stride1D.Dense> dst, long byteOffset, ArrayBuffer bytes)
+    {
+        if (bytes.ByteLength <= 0) return;
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        _queue!.WriteBuffer(dst.GetGPUBuffer()!, byteOffset, bytes);
+    }
+
+    /// <summary>
     /// Load SH saved before the part split (one file of RestFloatsPerSplat floats a splat, row-major): upload it and
     /// split it into the part buffers ON THE GPU. Such scenes are at most 11.9M splats - the old one-binding limit -
     /// so the row buffer still fits one binding.

@@ -1716,10 +1716,17 @@ public sealed class SplatTrainerGpu : IDisposable
         });
     }
 
-    /// <summary>Convert packed linear RGB to SH DC once before the first training step.</summary>
+    /// <summary>Convert packed linear RGB to SH DC once before the first training step (once per TRAINER: the gates
+    /// make one per check; the studio's trainer outlives its scenes and uses <see cref="ConvertRgbToShDc"/>).</summary>
     public void EnsureRgbConvertedToShDc(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
     {
         if (_rgbToDcDone) return;
+        ConvertRgbToShDc(splatBuf, splatCount);
+    }
+
+    /// <summary>Convert packed linear RGB to SH DC, unconditionally: the caller knows the colours are RGB.</summary>
+    public void ConvertRgbToShDc(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount)
+    {
         var splatGpu = splatBuf.GetGPUBuffer()!;
         WriteU32(_dimsBuf!, (uint)splatCount);
         Dispatch(_initRgbToDc!, (splatCount + 63) / 64, 1, new[]
@@ -1727,6 +1734,24 @@ public sealed class SplatTrainerGpu : IDisposable
             Buf(0, splatGpu), Buf(1, _dimsBuf!),
         });
         _rgbToDcDone = true;
+    }
+
+    /// <summary>
+    /// Start the trainer's SH rest bands from a scene's (the display renderer's parts, PartFloatsPerSplat floats a
+    /// splat), GPU to GPU, instead of zero: a saved trained scene trained further, or scored, keeps its view-dependent
+    /// colour. Call after <see cref="ResizeAsync"/> for the same splat count.
+    /// </summary>
+    public void SeedShRestFrom(GPUBuffer[] parts, int splatCount)
+    {
+        if (_shRest[0] == null || _device == null || _queue == null || splatCount <= 0) return;
+        if (parts.Length != SphericalHarmonics.Parts) throw new ArgumentException($"{parts.Length} SH parts, expected {SphericalHarmonics.Parts}");
+        ulong bytes = (ulong)splatCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        using var encoder = _device.CreateCommandEncoder();
+        for (int part = 0; part < parts.Length; part++)
+            encoder.CopyBufferToBuffer(parts[part], 0, _shRest[part]!.GetGPUBuffer()!, 0, bytes);
+        using var cmd = encoder.Finish();
+        RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, new[] { cmd });
     }
 
     /// <summary>

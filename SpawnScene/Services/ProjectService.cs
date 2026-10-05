@@ -437,6 +437,50 @@ public class ProjectService
         await SaveIndexAsync();
     }
 
+    // ─── Work files: intermediate data a long job parks in OPFS (projects/{id}/work/), not part of any scene ───
+
+    /// <summary>Write JS bytes to projects/{id}/work/{name} (a trained block of a partitioned run waiting to be merged).</summary>
+    public async Task WriteWorkFileAsync(string projectId, string name, Uint8Array data)
+    {
+        using var root = await GetRootDirAsync();
+        using var projDir = await GetProjectDirAsync(root, projectId);
+        using var workDir = await projDir.GetDirectoryHandle("work", create: true);
+        await WriteBinaryAsync(workDir, name, data);
+    }
+
+    /// <summary>A work file as a JS ArrayBuffer (never the .NET heap), or null when it is missing. Caller disposes.</summary>
+    public async Task<ArrayBuffer?> ReadWorkFileAsync(string projectId, string name)
+    {
+        try
+        {
+            using var root = await GetRootDirAsync();
+            using var projDir = await GetProjectDirAsync(root, projectId);
+            using var workDir = await projDir.GetDirectoryHandle("work");
+            using var fileHandle = await workDir.GetFileHandle(name);
+            using var file = await fileHandle.GetFile();
+            return await file.ArrayBuffer();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Delete the project's work files (after a merge, or before a new partitioned run).</summary>
+    public async Task ClearWorkFilesAsync(string projectId)
+    {
+        try
+        {
+            using var root = await GetRootDirAsync();
+            using var projDir = await GetProjectDirAsync(root, projectId);
+            await projDir.RemoveEntry("work", recursive: true);
+        }
+        catch
+        {
+            // Nothing parked.
+        }
+    }
+
     // ─── OPFS Helpers ───
 
     private async Task<FileSystemDirectoryHandle> GetRootDirAsync()

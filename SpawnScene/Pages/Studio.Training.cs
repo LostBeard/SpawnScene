@@ -357,7 +357,11 @@ public partial class Studio
             _trainer.SkipZeroGradientSteps = SkipZeroGradientSteps;
             if (!_trainerInitialized) { _trainer.Initialize(); _trainerInitialized = true; }
             await _trainer.ResizeAsync(w, h, n, keysPerSplat);
-            _trainer.EnsureRgbConvertedToShDc(packed, n);
+            // By what the colours ARE (every scene load sets the renderer's flag), not by whether this trainer ever
+            // converted: that once-flag outlived its scene, so a second RGB scene trained in the same tab (a second
+            // project, every block after the first of a partitioned run) started from RGB read as SH DC. And a trained
+            // scene trained further was converted AGAIN when the trainer was new.
+            if (!_gpuRenderer.ColoursAreShDc) _trainer.ConvertRgbToShDc(packed, n);
             // Pack must DcToRgb from here on; without this the viewer clamps raw DC as unorm8.
             _gpuRenderer.ColoursAreShDc = true;
 
@@ -512,6 +516,16 @@ public partial class Studio
                     // reallocates the trainer's own per-frame buffers.
                     await _trainer.ResizeAsync(w, h, n, want);
                 }
+            }
+
+            // A scene that already has SH bands (a saved trained scene, a merged partitioned one) keeps them: the
+            // trainer's bands start from the scene's rather than zero, so the baseline below - and a 0-iteration call,
+            // which only scores - sees the colours the viewer draws.
+            if (_gpuRenderer.ColoursAreShDc && _gpuRenderer.ShDegree > 0 && _gpuRenderer.ShRestBuffers is { } sceneSh)
+            {
+                _trainer.SeedShRestFrom(sceneSh, n);
+                _trainer.ActiveShDegree = _gpuRenderer.ShDegree;
+                Console.WriteLine($"[Train] SH bands from the scene (degree {_gpuRenderer.ShDegree})");
             }
 
             // -- Baseline: how well does the untrained scene already explain each photo? --

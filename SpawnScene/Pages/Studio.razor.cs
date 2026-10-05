@@ -199,6 +199,17 @@ public partial class Studio : IAsyncDisposable
         if (!query.TryGetValue("autotest", out var mode))
             return;
 
+        // Any autotest mode (the dataset AND project paths): &llffhold=N holds out every Nth photo by image index;
+        // &blocks=CxR trains in C columns by R rows of blocks (Studio.Partition). Parsed in the dataset branch only,
+        // the project path silently ran a single, unscored run (2026-10-05).
+        if (query.TryGetValue("llffhold", out var lhq) && int.TryParse(lhq, out var lhv)) LlffHold = Math.Max(0, lhv);
+        if (query.TryGetValue("blocks", out var blq))
+        {
+            var bp = blq.Split('x', 'X');
+            if (bp.Length == 2 && int.TryParse(bp[0], out var bc) && int.TryParse(bp[1], out var br) && bc >= 1 && br >= 1)
+                TrainingBlocks = (Math.Min(bc, 8), Math.Min(br, 8));
+        }
+
         // &xralpha=1: AR passthrough even when the session reports an opaque blend mode (the emulator has no
         // camera feed and reports opaque), to exercise the transparent path.
         if (query.TryGetValue("xralpha", out var xrAlphaQ))
@@ -478,7 +489,6 @@ public partial class Studio : IAsyncDisposable
                 _gpuRenderer.LodCullPixels = Math.Max(0f, lpxv);
             if (query.TryGetValue("trainprofile", out var tpv))
                 ProfileTrainPhases = tpv is "1" or "true";
-            if (query.TryGetValue("llffhold", out var lhq) && int.TryParse(lhq, out var lhv)) LlffHold = Math.Max(0, lhv);
             if (query.TryGetValue("targetmb", out var tmb) && int.TryParse(tmb, out var tmbi) && tmbi > 0)
                 MaxTargetStackBytes = (long)tmbi * 1024 * 1024;
             if (query.TryGetValue("badump", out var bdv))

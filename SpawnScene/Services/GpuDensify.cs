@@ -40,7 +40,7 @@ public sealed class GpuDensify : IDisposable
 
     readonly Accelerator _accel;
     readonly Action<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>, ArrayView<int>,
-        ArrayView<int>, ArrayView<int>, ClassifyParams, SplatEditor.Volume> _classify;
+        ArrayView<int>, ArrayView<int>, ClassifyParams, SplatEditor.Volume, SplatEditor.Volume> _classify;
     readonly Action<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, int> _boundary;
     readonly Action<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>,
         ArrayView<int>, SelectParams> _select;
@@ -52,7 +52,8 @@ public sealed class GpuDensify : IDisposable
     {
         _accel = accelerator;
         _classify = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>,
-            ArrayView<float>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ClassifyParams, SplatEditor.Volume>(ClassifyKernel);
+            ArrayView<float>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ClassifyParams, SplatEditor.Volume,
+            SplatEditor.Volume>(ClassifyKernel);
         _boundary = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>, int>(
             BoundaryKernel);
         _select = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>,
@@ -70,7 +71,8 @@ public sealed class GpuDensify : IDisposable
         bool ResetOpacity,
         uint Seed,
         bool NoOp = false,
-        SplatEditor.Volume? Trainable = null);
+        SplatEditor.Volume? Trainable = null,
+        SplatEditor.Volume? GrowOnlyInside = null);
 
     /// <summary>
     /// The grown set. <see cref="Packed"/>, <see cref="AdamSources"/> and <see cref="FeatureSources"/> are owned
@@ -96,6 +98,7 @@ public sealed class GpuDensify : IDisposable
         public float MinOpacity, MaxWorldSize, MaxScreenRadiusPx, GradientThreshold, SizeSplit;
         public int AfterReset, NoOp;
         public int HasTrainable;            // 1: splats outside the trainable volume are frozen context - kept as they are
+        public int HasGrowVolume;           // 1: only splats inside the grow volume are cloned or split
     }
 
     public struct SelectParams
@@ -145,11 +148,13 @@ public sealed class GpuDensify : IDisposable
             AfterReset = o.AfterFirstOpacityReset ? 1 : 0,
             NoOp = o.NoOp ? 1 : 0,
             HasTrainable = o.Trainable.HasValue ? 1 : 0,
+            HasGrowVolume = o.GrowOnlyInside.HasValue ? 1 : 0,
         };
         // The trainable volume is its own kernel parameter, as SplatEditor's kernels take it (nested in the params
         // struct it is the only such layout in the app); an unused one is the identity, never read (HasTrainable 0).
         var trainable = o.Trainable ?? SplatEditor.Volume.Rows(0, 0);
-        _classify((Index1D)n, packed, densifyStats, maxRadius, action.View, bin.View, hist.View, counters.View, cp, trainable);
+        var grow = o.GrowOnlyInside ?? SplatEditor.Volume.Rows(0, 0);
+        _classify((Index1D)n, packed, densifyStats, maxRadius, action.View, bin.View, hist.View, counters.View, cp, trainable, grow);
 
         // CPU transfer: 6 counters + the 2048-bin growth histogram (8 KiB). Everything per-splat stays put.
         int[] c = await counters.CopyToHostAsync<int>(0, CounterSlots);
@@ -237,7 +242,7 @@ public sealed class GpuDensify : IDisposable
 
     static void ClassifyKernel(Index1D i, ArrayView<float> packed, ArrayView<float> stats, ArrayView<float> maxRadius,
         ArrayView<int> action, ArrayView<int> bin, ArrayView<int> hist, ArrayView<int> counters, ClassifyParams p,
-        SplatEditor.Volume trainable)
+        SplatEditor.Volume trainable, SplatEditor.Volume grow)
     {
         if (i >= p.Count) return;
         long o = (long)i.X * Floats;
@@ -257,7 +262,10 @@ public sealed class GpuDensify : IDisposable
             // Same order as the host: prune first, a splat being removed is never densified.
             if (opacity < p.MinOpacity) a = PruneFaint;
             else if (p.AfterReset != 0 && (maxScale > p.MaxWorldSize || maxRadius[i] > p.MaxScreenRadiusPx)) a = PruneBig;
-            else if (avg >= p.GradientThreshold)
+            // A partitioned block grows only in the cell it keeps: a clone in its overlap margin is trained and then
+            // dropped at the merge - 330K of a 500K block budget went there (TruckFull 2x2, 2026-10-05).
+            else if (avg >= p.GradientThreshold
+                && (p.HasGrowVolume == 0 || SplatEditor.Inside(grow, packed[o], packed[o + 1], packed[o + 2])))
             {
                 a = maxScale > p.SizeSplit ? SplitCandidate : CloneCandidate;
                 b = GradientBin(avg, p.GradientThreshold);

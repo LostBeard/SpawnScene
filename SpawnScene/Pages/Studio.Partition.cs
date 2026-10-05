@@ -39,6 +39,10 @@ public partial class Studio
     /// (SplatTrainerGpu.TrainableVolume), so everything outside it is frozen context. Null outside a block.</summary>
     SplatEditor.Volume? _frozenOutside;
 
+    /// <summary>The cell of the block being refined: densification grows only inside it (SplatTrainerGpu.GrowOnlyInside).
+    /// Null outside a block.</summary>
+    SplatEditor.Volume? _growOnlyInside;
+
     /// <summary>
     /// The partitioned run's global clock: iterations already trained before this stage (a block refining the coarse
     /// model) and the whole run's length. TrainOnTrainingViewsAsync runs every iteration schedule - SH degree, position
@@ -164,10 +168,11 @@ public partial class Studio
 
                 int it;
                 _frozenOutside = coarse != null ? trainBox : null;
+                _growOnlyInside = coarse != null ? PlaneVolume(plan, block.CoreMin, block.CoreMax) : null;
                 _scheduleOffset = coarse != null ? coarseIters : 0;
                 _scheduleTotal = coarse != null ? iterations : 0;
                 try { it = await TrainProjectSceneAsync(blockIters, maxSplats, maxDimension); }
-                finally { _frozenOutside = null; _scheduleOffset = 0; _scheduleTotal = 0; }
+                finally { _frozenOutside = null; _growOnlyInside = null; _scheduleOffset = 0; _scheduleTotal = 0; }
                 if (it == 0) { Console.WriteLine($"[Partition] block {block.Index}: FAIL - training did not run"); return 0; }
                 ranIters = Math.Max(ranIters, coarseIters + it);
                 if (coarse != null)

@@ -226,6 +226,31 @@ public class GpuDensifyTests
         finally { SplatDensityControl.MaxScreenRadiusPx = savedRadius; }
     }
 
+    /// <summary>
+    /// A partitioned block grows only in its own cell: with a grow volume, no splat outside it is cloned or split, while
+    /// inside it every candidate still is - and the prunes still run everywhere trainable.
+    /// </summary>
+    [Test]
+    public async Task GrowOnlyInside_ClonesAndSplitsOnlyInsideTheVolume()
+    {
+        const int n = 3000;
+        var (packed, stats, radius, _, _) = Scene(n, 13);
+        // Grow only where x <= 1 (a quarter of the 4-unit cube).
+        var grow = SplatEditor.Volume.From(System.Numerics.Matrix4x4.Identity, -1e30f, 1f, -1e30f, 1e30f, -1e30f, 1e30f);
+        var (g, _, feat, r) = await RunGpu(packed, stats, radius, n,
+            new GpuDensify.Options(Extent, AfterFirstOpacityReset: false, int.MaxValue, ResetOpacity: false, Seed: 4,
+                GrowOnlyInside: grow));
+        var (_, _, featAll, rAll) = await RunGpu(packed, stats, radius, n,
+            new GpuDensify.Options(Extent, AfterFirstOpacityReset: false, int.MaxValue, ResetOpacity: false, Seed: 4));
+
+        int kept = r.Count - r.Added;
+        var parents = feat.Skip(kept).Distinct().ToArray();
+        Assert.That(parents.Length, Is.GreaterThan(0), "something inside still grows");
+        Assert.That(parents.All(i => packed[i * F] <= 1f), "every grown splat's parent is inside the grow volume");
+        Assert.That(rAll.Added, Is.GreaterThan(r.Added), "without the volume, splats outside it grow too");
+        Assert.That(r.PrunedFaint, Is.EqualTo(rAll.PrunedFaint), "prunes are unaffected");
+    }
+
     [Test]
     public async Task NoOp_IsTheIdentity()
     {

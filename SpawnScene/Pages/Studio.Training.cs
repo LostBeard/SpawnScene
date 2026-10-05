@@ -355,6 +355,7 @@ public partial class Studio
             _trainer ??= new SplatTrainerGpu(_gpuService);
             // Set on every run, so a block's frozen context never leaks into the next training (Studio.Partition).
             _trainer.TrainableVolume = _frozenOutside;
+            _trainer.GrowOnlyInside = _growOnlyInside;
             if (_frozenOutside != null) Console.WriteLine("[Train] partitioned block: only splats inside its training box learn");
             _trainer.ProfilePhases = ProfileTrainPhases;
             _trainer.SkipZeroGradientSteps = SkipZeroGradientSteps;
@@ -1042,7 +1043,8 @@ public partial class Studio
         _gpuDensify ??= new GpuDensify(_gpuService.WebGPUAccelerator);
         var r = await _gpuDensify.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
             new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity,
-                Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify, Trainable: _trainer.TrainableVolume));
+                Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify, Trainable: _trainer.TrainableVolume,
+                GrowOnlyInside: _trainer.GrowOnlyInside));
 
         // Always report, including - especially including - when the answer is "nothing".
         Console.WriteLine(

@@ -115,6 +115,10 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public SplatEditor.Volume? TrainableVolume { get; set; }
 
+    /// <summary>When set, densification clones and splits only splats inside this volume (a partitioned block's own
+    /// cell): the rest still train, but growth outside the cell would be dropped at the merge.</summary>
+    public SplatEditor.Volume? GrowOnlyInside { get; set; }
+
     // ── Photometric camera refinement (SplatTrainerShaders.PoseGradPartial / PoseGradFinal) ──
     GPUComputePipeline? _posePartial, _poseFinal;
     MemoryBuffer1D<float, Stride1D.Dense>? _posePartials;   // 6 per workgroup of the last reduction

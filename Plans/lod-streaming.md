@@ -50,3 +50,19 @@ GPU-first (the project rule): the cut runs on the GPU in parallel, not as a CPU 
 - **B. Chunked format + paging + streaming:** OPFS first, then HTTP Range. Gates: coarse frame within ~1 s of open;
   memory stays at the pool size for a scene 4x larger than the pool; no holes (ancestor fallback) while streaming.
 - **C. VR + device budgets.**
+
+## Status (2026-10-05)
+
+Phase A is in: LodMerge/LodTree (CPU oracles + tests), GpuLodTree (GPU build: Truck 997,615 leaves -> 1,343,516 nodes,
+36 levels, 1.9 s), the GPU cut in GpuSplatSorter (exact, monotone metric), a drawn counter (one atomic int, read
+back without blocking) steering tau to `&lodbudget=N`, and the cut packed and drawn INDIRECT (sentinels sort last,
+so the first drawn-count indices are the cut; a one-thread WGSL pass writes the dispatch + draw arguments).
+
+- (a) tau -> 0: 74.3 dB vs the normal path (Truck parked view).
+- (c) quality vs budget (sorted, vs the full render): Truck 400K 43.0 / 200K 26.5 / 100K 23.9 / 50K 21.9 dB;
+  Bicycle 30K (3.28M) 2M 35.8 / 1M 30.1 / 500K 25.0 dB (a 2M budget then capped at the 1.30M in view).
+- (d) uncapped FPS (SPAWNSCENE_CHROME_UNCAPPED=1, `&fpslog=1`), still camera: Truck full 365 -> 500K-budget 405;
+  Bicycle full 222 -> 500K-budget 403. Same budget, same FPS, whatever the scene's size.
+
+Open in A: the radix sort still runs over every node (sorting only the cut needs a compacted count on the GPU);
+stochastic mode has no cut yet; internal nodes carry no SH (view-independent colour).

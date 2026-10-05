@@ -68,6 +68,12 @@ public class GpuSplatSorter : IDisposable
     public int LodDrawn { get; private set; } = -1;
 
     MemoryBuffer1D<int, Stride1D.Dense>? _lodDrawnCount;
+
+    /// <summary>
+    /// While an LOD tree is drawn: the GPU count of nodes the last submitted cut drew. The sort puts culled sentinels
+    /// last, so the first that-many sorted indices are the cut; the renderer packs and draws only those (indirect).
+    /// </summary>
+    public MemoryBuffer1D<int, Stride1D.Dense>? LodDrawnCountBuffer => _lodParent != null ? _lodDrawnCount : null;
     Task<int[]>? _lodCountRead;
     long _lodLogTick;
     bool _lodSettledLogged;
@@ -88,7 +94,7 @@ public class GpuSplatSorter : IDisposable
         {
             float ratio = MathF.Sqrt(drawn / (float)LodBudget);
             ratio = Math.Clamp(ratio, 0.7f, 1.4f);
-            float next = Math.Clamp(LodTau * ratio, 0.05f, 256f);
+            float next = Math.Clamp(LodTau * ratio, 1e-4f, 256f);
             if (MathF.Abs(next - LodTau) > 0.02f * LodTau)
             {
                 LodTau = next;

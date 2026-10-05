@@ -91,6 +91,12 @@ async function ensureChrome({ headless = false } = {}) {
     args.unshift('--enable-features=WinSboxHighGPUJobMemoryLimits');
     console.log('[chrome] GPU process job memory limit lifted (WinSboxHighGPUJobMemoryLimits)');
   }
+  // SPAWNSCENE_CHROME_UNCAPPED=1: no vsync, no frame-rate cap, so requestAnimationFrame runs as fast as the GPU
+  // allows and the app's FPS measures render cost (the &fpslog=1 line), not the display's refresh.
+  if (process.env.SPAWNSCENE_CHROME_UNCAPPED === '1') {
+    args.unshift('--disable-gpu-vsync', '--disable-frame-rate-limit');
+    console.log('[chrome] vsync and the frame-rate limit are off');
+  }
   // SPAWNSCENE_CHROME_LOG=<file>: Chrome's own log (browser + GPU process). The page only ever sees
   // "A valid external Instance reference no longer exists" when the GPU process drops its Dawn
   // instance; WHY (D3D12 DEVICE_REMOVED hresult, GPU process exit code, Dawn OOM) is logged

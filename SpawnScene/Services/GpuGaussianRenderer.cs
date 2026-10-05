@@ -65,6 +65,14 @@ public class GpuGaussianRenderer : IDisposable
     // Pack compute pipeline: converts Float32 sort output → packed vertex format
     private GPUComputePipeline? _packPipeline;
     private GPUBindGroup? _packBindGroup;
+
+    // LOD cut, drawn indirect: a one-thread pass turns the cull's drawn count into the pack dispatch (u32 0..2) and the
+    // splat draw (u32 4..7) arguments, so frame cost follows the cut, not the tree's size. Valid after a cut was packed.
+    private GPUComputePipeline? _lodArgsPipeline;
+    private GPUBindGroup? _lodArgsBindGroup;
+    private GPUBuffer? _lodArgsBuf;
+    private GPUBuffer? _lodArgsCountCached;
+    private bool _lodArgsValid;
     private GPUBuffer? _srcDataCached; // cached ILGPU data buffer handle for bind group invalidation
     private GPUBuffer? _srcIdxCached;  // cached ILGPU index buffer handle for bind group invalidation
 
@@ -1466,6 +1474,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
         using var encoder = _device.CreateCommandEncoder();
         AppendPackComputePass(encoder, dataBuf, idxBuf, _splatCount);
+        _lodArgsValid = false;   // the buffer holds every row now, not a cut
         using var cmdBuf = encoder.Finish();
         _submitArray[0] = cmdBuf;
         RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
@@ -1653,7 +1662,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         using var encoder = _device!.CreateCommandEncoder();
 
         if (sortRan && dataBuf != null && idxBuf != null)
-            AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount);
+            AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount, _sorter.LodDrawnCountBuffer);
 
         // Always the f32-precision path: splats blend into the rgba16float offscreen target, then the CAS
         // pass writes the canvas. Strength 0 (or low-res motion) makes CAS an exact copy.
@@ -1661,7 +1670,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         splatPass.SetPipeline(_splatPipeline!);
         splatPass.SetBindGroup(0, _uniformBindGroupSorted!);
         splatPass.SetVertexBuffer(0, _splatBuffer!);
-        splatPass.Draw(6, (uint)visibleCount, 0, 0);
+        DrawSortedSplats(splatPass, visibleCount);
         splatPass.End();
 
         {
@@ -2043,7 +2052,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         if (!sortRan || dataBuf == null || idxBuf == null) return;
         _packCameraPos = head.Position;
         using var encoder = _device.CreateCommandEncoder();
-        AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount);
+        AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount, _sorter.LodDrawnCountBuffer);
         using var cmd = encoder.Finish();
         _submitArray[0] = cmd;
         RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
@@ -2113,7 +2122,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
             splatPass.SetPipeline(_splatPipeline);
             splatPass.SetBindGroup(0, _uniformBindGroupSorted!);
             splatPass.SetVertexBuffer(0, _splatBuffer);
-            splatPass.Draw(6, (uint)_xrSortedVisible, 0, 0);
+            DrawSortedSplats(splatPass, _xrSortedVisible);
             splatPass.End();
         }
         _casData[0] = applyCAS ? _sharpeningStrength : 0f;
@@ -2256,7 +2265,8 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         GPUCommandEncoder encoder,
         MemoryBuffer1D<float, Stride1D.Dense> dataBuf,
         MemoryBuffer1D<int, Stride1D.Dense> idxBuf,
-        int visibleCount)
+        int visibleCount,
+        MemoryBuffer1D<int, Stride1D.Dense>? lodDrawnCount = null)
     {
         if (_splatBuffer == null || _device == null || _packPipeline == null || _packCountBuf == null) return;
 
@@ -2320,12 +2330,92 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         uint totalWG = (uint)((visibleCount + 63) / 64);
         uint wgX = Math.Min(totalWG, maxWG);
         uint wgY = (totalWG + maxWG - 1) / maxWG;
+        var countBuffer = lodDrawnCount?.GetGPUBuffer();
+        if (countBuffer != null)
+        {
+            AppendLodArgsPass(encoder, countBuffer);
+            using var lodPass = encoder.BeginComputePass();
+            lodPass.SetPipeline(_packPipeline);
+            lodPass.SetBindGroup(0, _packBindGroup);
+            lodPass.DispatchWorkgroupsIndirect(_lodArgsBuf!, 0);
+            lodPass.End();
+            _lodArgsValid = true;
+            return;
+        }
         using var pass = encoder.BeginComputePass();
         pass.SetPipeline(_packPipeline);
         pass.SetBindGroup(0, _packBindGroup);
         pass.DispatchWorkgroups(wgX, wgY, 1);
         pass.End();
     }
+
+    /// <summary>Write the LOD cut's indirect arguments from the cull's drawn count (one GPU thread, no readback).</summary>
+    private void AppendLodArgsPass(GPUCommandEncoder encoder, GPUBuffer countBuffer)
+    {
+        if (_lodArgsPipeline == null)
+        {
+            using var module = _device!.CreateShaderModule(new GPUShaderModuleDescriptor { Code = LodArgsSource });
+            _lodArgsPipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
+            {
+                Layout = "auto",
+                Compute = new GPUProgrammableStage { Module = module, EntryPoint = "lod_args" },
+            });
+            _lodArgsBuf = _device.CreateBuffer(new GPUBufferDescriptor
+            {
+                Size = 32,
+                Usage = GPUBufferUsage.Storage | GPUBufferUsage.Indirect,
+            });
+        }
+        if (_lodArgsBindGroup == null || !ReferenceEquals(_lodArgsCountCached, countBuffer))
+        {
+            _lodArgsBindGroup?.Dispose();
+            _lodArgsCountCached = countBuffer;
+            using var layout = _lodArgsPipeline.GetBindGroupLayout(0);
+            _lodArgsBindGroup = _device!.CreateBindGroup(new GPUBindGroupDescriptor
+            {
+                Layout = layout,
+                Entries = new GPUBindGroupEntry[]
+                {
+                    new() { Binding = 0, Resource = new GPUBufferBinding { Buffer = countBuffer } },
+                    new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = _lodArgsBuf! } },
+                }
+            });
+        }
+        using var pass = encoder.BeginComputePass();
+        pass.SetPipeline(_lodArgsPipeline);
+        pass.SetBindGroup(0, _lodArgsBindGroup);
+        pass.DispatchWorkgroups(1, 1, 1);
+        pass.End();
+    }
+
+    /// <summary>The sorted splat draw: only the LOD cut (indirect) once one was packed, else every packed slot.</summary>
+    private void DrawSortedSplats(GPURenderPassEncoder pass, int count)
+    {
+        if (_lodArgsValid && _sorter.LodActive && _lodArgsBuf != null) pass.DrawIndirect(_lodArgsBuf, 16);
+        else pass.Draw(6, (uint)count, 0, 0);
+    }
+
+    // The pack dispatch (2D past 65535 groups, as AppendPackComputePass) and the draw (6 vertices an instance) for the
+    // first n sorted rows, n = the LOD cull's drawn count.
+    private const string LodArgsSource = @"
+@group(0) @binding(0) var<storage, read>       drawn : array<u32>;
+@group(0) @binding(1) var<storage, read_write> args  : array<u32>;
+
+@compute @workgroup_size(1)
+fn lod_args() {
+    let n = drawn[0];
+    let groups = (n + 63u) / 64u;
+    let wgX = min(groups, 65535u);
+    args[0] = wgX;
+    args[1] = select(1u, (groups + 65534u) / 65535u, groups > 0u);
+    args[2] = 1u;
+    args[3] = 0u;
+    args[4] = 6u;
+    args[5] = n;
+    args[6] = 0u;
+    args[7] = 0u;
+}
+";
 
     public void Dispose()
     {
@@ -2355,6 +2445,9 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         _splatPipeline?.Dispose();
         _casPipeline?.Dispose();
         _packCountBuf?.Destroy();
+        _lodArgsBuf?.Destroy(); _lodArgsBuf?.Dispose();
+        _lodArgsBindGroup?.Dispose();
+        _lodArgsPipeline?.Dispose();
         _packCountBuf?.Dispose();
         _packCountJsArray?.Dispose();
 

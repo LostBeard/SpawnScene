@@ -275,6 +275,10 @@ public partial class Studio
                 LodTauOption = Math.Max(0f, ltv);
             if (query.TryGetValue("lodbudget", out var lbq) && int.TryParse(lbq, out var lbv))
                 LodBudgetOption = Math.Max(0, lbv);
+            // &fpslog=1 (harness): log the frame rate each second; with SPAWNSCENE_CHROME_UNCAPPED=1 it is render cost.
+            if (query.TryGetValue("fpslog", out var fpq) && fpq is "1" or "true")
+                _renderService.OnFpsUpdated += fps => Console.WriteLine($"[FPS] {fps:F1}" +
+                    (_gpuRenderer.LodDrawn >= 0 ? $" ({_gpuRenderer.LodDrawn:N0} drawn by the LOD cut)" : ""));
             if (query.TryGetValue("lodpx", out var lpq) && float.TryParse(lpq, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var lpv))
                 _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);

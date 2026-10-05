@@ -45,6 +45,7 @@ public sealed class GpuLodPager : IDisposable
     bool _pumping, _poolFullLogged, _disposed;
 
     public int ResidentChunks { get; private set; }
+    public int ChunkCount => _h.Chunks.Length;
     public int Loads { get; private set; }
     public int Evictions { get; private set; }
 

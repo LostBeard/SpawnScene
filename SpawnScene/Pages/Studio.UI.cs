@@ -362,6 +362,9 @@ public partial class Studio
             // Through an LOD tree: what the cut draws in view, then the scene's size.
             int drawn = _gpuRenderer.LodDrawn;
             _hudSplatLabel.Text = drawn >= 0 ? $"{drawn:N0} drawn (LOD) of {total}" : total;
+            // A streamed file: how much of it is on the GPU.
+            if (_lodPager is { } pager)
+                _hudSplatLabel.Text += $", {pager.ResidentChunks} of {pager.ChunkCount} chunks streamed";
         }
         if (_hudFpsLabel != null)
             _hudFpsLabel.Text = $"{_renderService.Fps:F0} FPS";

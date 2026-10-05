@@ -122,13 +122,17 @@ public partial class Studio
     static async Task<ArrayBuffer> GzipAsync(Blob input, bool decompress)
     {
         using var src = input.Stream();
-        // SpawnJS types PipeThrough as TransformStream, which (De)CompressionStream is not - in JS either: pipeThrough takes
-        // any {readable, writable} pair. Viewed through the same JS object. (Lib follow-up: a PipeThrough overload for them.)
-        using SpawnJSObject codec = decompress ? new DecompressionStream("gzip") : new CompressionStream("gzip");
-        using var t = codec.JSRef!.As<TransformStream>();
-        using var piped = src.PipeThrough(t);
-        using var resp = new Response(piped, (ResponseOptions?)null);
-        return await resp.ArrayBuffer();
+        if (decompress)
+        {
+            using var gunzip = new DecompressionStream("gzip");
+            using var piped = src.PipeThrough(gunzip);
+            using var resp = new Response(piped, (ResponseOptions?)null);
+            return await resp.ArrayBuffer();
+        }
+        using var gzip = new CompressionStream("gzip");
+        using var zipped = src.PipeThrough(gzip);
+        using var zresp = new Response(zipped, (ResponseOptions?)null);
+        return await zresp.ArrayBuffer();
     }
 
     /// <summary>

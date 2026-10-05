@@ -46,7 +46,7 @@
 		     (early return from nested loops), helpers taking LocalMemory views (GpuEpipolarRansac), and compiles one pipeline per kernel instead of one per dispatch size. local.3-.5 add WebGPUBufferAccounting (live buffers, creation sites). -->
 		<PackageReference Include="SpawnDev.ILGPU" Version="5.3.2-local.5" />
 		<PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.DevServer" Version="10.0.12" PrivateAssets="all" />
-		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="3.0.1-local.1" />
+		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="3.0.2" />
 	</ItemGroup>
 
 

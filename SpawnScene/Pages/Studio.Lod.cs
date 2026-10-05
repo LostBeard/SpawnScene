@@ -10,12 +10,15 @@ namespace SpawnScene.Pages;
 /// <summary>
 /// Level-of-detail viewing (Plans/lod-streaming.md, phase A): a loaded scene is turned into an LOD tree on the GPU
 /// (GpuLodTree) and drawn through its cut (GpuSplatSorter's LOD cull), so the splats drawn each frame depend on the
-/// view, not on the scene's size. URL: &amp;lodtau=1.5 (pixels; 0 = off).
+/// view, not on the scene's size. URL: &amp;lodtau=1.5 (pixels; 0 = off), &amp;lodbudget=N (splats a frame; tau follows it).
 /// </summary>
 public partial class Studio
 {
     /// <summary>LOD cut threshold in pixels for a loaded scene; 0 draws the scene as it is.</summary>
     public static float LodTauOption { get; set; }
+
+    /// <summary>Splats a frame the LOD cut is steered to (0 = the fixed <see cref="LodTauOption"/>).</summary>
+    public static int LodBudgetOption { get; set; }
 
     GpuRadixSort? _lodSort;
 
@@ -54,6 +57,7 @@ public partial class Studio
         });
         Console.WriteLine($"[LOD] tree built in {(DateTime.UtcNow - t0).TotalSeconds:F1}s: {n:N0} leaves -> {tree.NodeCount:N0} nodes, " +
             $"{tree.Levels} levels, base cell {baseStep:G3}");
+        _gpuRenderer.LodBudget = LodBudgetOption;
         await _gpuRenderer.InstallLodAsync(tree, LodTauOption);
         tree.Dispose();   // what the renderer did not take (child lists, counters)
     }

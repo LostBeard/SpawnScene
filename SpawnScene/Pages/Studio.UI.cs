@@ -357,7 +357,12 @@ public partial class Studio
     private void UpdateViewerHud()
     {
         if (_hudSplatLabel != null)
-            _hudSplatLabel.Text = $"{_sceneManager.ActiveScene?.Count.ToString("N0") ?? "0"} splats";
+        {
+            string total = $"{_sceneManager.ActiveScene?.Count.ToString("N0") ?? "0"} splats";
+            // Through an LOD tree: what the cut draws in view, then the scene's size.
+            int drawn = _gpuRenderer.LodDrawn;
+            _hudSplatLabel.Text = drawn >= 0 ? $"{drawn:N0} drawn (LOD) of {total}" : total;
+        }
         if (_hudFpsLabel != null)
             _hudFpsLabel.Text = $"{_renderService.Fps:F0} FPS";
     }

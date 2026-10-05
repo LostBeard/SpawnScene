@@ -212,6 +212,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("lodtau", out var ltq) && float.TryParse(ltq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var ltv))
             LodTauOption = Math.Max(0f, ltv);
+        if (query.TryGetValue("lodbudget", out var lbq) && int.TryParse(lbq, out var lbv))
+            LodBudgetOption = Math.Max(0, lbv);
         if (query.TryGetValue("frozendiag", out var fdq)) DiagnoseFrozenDensify = fdq is "1" or "true";
         if (query.TryGetValue("coarse", out var crq) && float.TryParse(crq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var crv))

@@ -273,6 +273,8 @@ public partial class Studio
             if (query.TryGetValue("lodtau", out var ltq) && float.TryParse(ltq, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var ltv))
                 LodTauOption = Math.Max(0f, ltv);
+            if (query.TryGetValue("lodbudget", out var lbq) && int.TryParse(lbq, out var lbv))
+                LodBudgetOption = Math.Max(0, lbv);
             if (query.TryGetValue("lodpx", out var lpq) && float.TryParse(lpq, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var lpv))
                 _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);

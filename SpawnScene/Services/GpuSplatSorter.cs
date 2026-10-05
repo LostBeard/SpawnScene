@@ -45,7 +45,7 @@ public class GpuSplatSorter : IDisposable
 
     private Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
         ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-        ArrayView1D<float, Stride1D.Dense>, CullParams>? _cullDistanceLodKernel;
+        ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, CullParams>? _cullDistanceLodKernel;
 
     // ── LOD tree cut (Plans/lod-streaming.md): when set, the scene's rows are the tree's nodes ──
     MemoryBuffer1D<int, Stride1D.Dense>? _lodParent;
@@ -57,6 +57,54 @@ public class GpuSplatSorter : IDisposable
 
     /// <summary>True while the scene is an LOD tree drawn through its cut.</summary>
     public bool LodActive => _lodParent != null;
+
+    /// <summary>
+    /// Splats to draw a frame through the LOD cut; 0 keeps <see cref="LodTau"/> fixed. With a budget, tau follows the
+    /// measured count (Spark's model: a constant number of splats a frame, whatever the scene's size).
+    /// </summary>
+    public int LodBudget { get; set; }
+
+    /// <summary>Nodes the last completed LOD cut drew (in view), or -1 before the first count arrives.</summary>
+    public int LodDrawn { get; private set; } = -1;
+
+    MemoryBuffer1D<int, Stride1D.Dense>? _lodDrawnCount;
+    Task<int[]>? _lodCountRead;
+    long _lodLogTick;
+    bool _lodSettledLogged;
+
+    /// <summary>
+    /// Fold a finished drawn-count readback in and, with a budget, steer tau toward it. On a surface the drawn count
+    /// goes roughly as 1 / tau^2, so tau moves by the square root of the ratio, damped and clamped.
+    /// </summary>
+    void UpdateLodBudget()
+    {
+        if (_lodCountRead is not { IsCompleted: true } read) return;
+        _lodCountRead = null;
+        if (read.IsFaulted) return;
+        int drawn = read.Result[0];
+        LodDrawn = drawn;
+        bool settled = true;
+        if (LodBudget > 0 && drawn > 0)
+        {
+            float ratio = MathF.Sqrt(drawn / (float)LodBudget);
+            ratio = Math.Clamp(ratio, 0.7f, 1.4f);
+            float next = Math.Clamp(LodTau * ratio, 0.05f, 256f);
+            if (MathF.Abs(next - LodTau) > 0.02f * LodTau)
+            {
+                LodTau = next;
+                _sortPending = true;   // re-cut at the new threshold
+                settled = false;
+            }
+        }
+        // Log every 2 s while it moves, and once whenever it settles (a still camera stops sorting, so stops counting).
+        if (Environment.TickCount64 - _lodLogTick > 2000 || (settled && !_lodSettledLogged))
+        {
+            _lodLogTick = Environment.TickCount64;
+            Console.WriteLine($"[LOD] drawn {drawn:N0} of {_splatCount:N0} nodes, tau {LodTau:G3} px" +
+                (LodBudget > 0 ? $", budget {LodBudget:N0}" : "") + (settled ? " (settled)" : ""));
+        }
+        _lodSettledLogged = settled;
+    }
 
     /// <summary>
     /// Draw the current scene (whose rows must be an LOD tree's nodes, leaves first) through its cut. Takes ownership of
@@ -76,6 +124,8 @@ public class GpuSplatSorter : IDisposable
         _lodBounds?.Dispose(); _lodBounds = null;
         _lodSize?.Dispose(); _lodSize = null;
         _lodLeafCount = 0;
+        _lodCountRead = null;
+        LodDrawn = -1;
     }
 
     // WGSL radix sort (8 bits a pass, one submission): 16-bit keys = 2 passes, 32-bit = 4. The
@@ -266,6 +316,7 @@ public class GpuSplatSorter : IDisposable
         ArrayView1D<int, Stride1D.Dense> lodParent,
         ArrayView1D<float, Stride1D.Dense> lodBounds,
         ArrayView1D<float, Stride1D.Dense> lodSize,
+        ArrayView1D<int, Stride1D.Dense> drawnCount,
         CullParams p)
     {
         int i = index;
@@ -298,6 +349,7 @@ public class GpuSplatSorter : IDisposable
             int qDist = (int)(dist * p.DistScale);
             outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
             outIndices[i] = i;
+            Atomic.Add(ref drawnCount[0], 1);
             return;
         }
         outDistances[i] = -1;
@@ -532,6 +584,8 @@ public class GpuSplatSorter : IDisposable
         _prevFrameCameraPos = camPos;
         _prevFrameCameraFwd = camFwd;
 
+        UpdateLodBudget();
+
         // ── In-flight GPU sort check ──
         // Only one sort is submitted at a time. While the GPU is sorting, we render with
         // the stale vertex buffer — no queue backpressure, no blocking CPU wait.
@@ -591,9 +645,12 @@ public class GpuSplatSorter : IDisposable
             cullParams.LodTau = LodTau;
             _cullDistanceLodKernel ??= accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>,
                 ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
-                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, CullParams>(CullAndDistanceLodKernel);
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+                CullParams>(CullAndDistanceLodKernel);
+            _lodDrawnCount ??= accelerator.Allocate1D<int>(1);
+            _lodDrawnCount.MemSetToZero();
             _cullDistanceLodKernel(_splatCount, _packedDataBuf.View, _distanceBuf!.View, _indicesBuf.View,
-                _lodParent.View, _lodBounds!.View, _lodSize!.View, cullParams);
+                _lodParent.View, _lodBounds!.View, _lodSize!.View, _lodDrawnCount.View, cullParams);
         }
         else
         _cullDistanceKernel(
@@ -635,6 +692,9 @@ public class GpuSplatSorter : IDisposable
         // Non-blocking async wait — RAF loop continues at full rate while GPU sorts.
         // _syncTask.IsCompleted is polled each frame; sortRan=true fires on completion frame.
         _syncTask = accelerator.DefaultStream.SynchronizeAsync();
+        // CPU transfer: one int - how many nodes the LOD cut drew - read when the GPU gets to it, never awaited here.
+        if (_lodParent != null && _lodDrawnCount != null && _lodCountRead == null)
+            _lodCountRead = _lodDrawnCount.CopyToHostAsync<int>(0, 1);
 
         _lastSortVisibleCount = _splatCount;
         return (_packedDataBuf, _indicesBuf, false, _splatCount);
@@ -700,7 +760,11 @@ public class GpuSplatSorter : IDisposable
         ClearLod();
     }
 
-    public void Dispose() => DisposeBuffers();
+    public void Dispose()
+    {
+        DisposeBuffers();
+        _lodDrawnCount?.Dispose(); _lodDrawnCount = null;
+    }
 
     void EnsureRadixSort(WebGPUAccelerator accelerator, int count)
     {

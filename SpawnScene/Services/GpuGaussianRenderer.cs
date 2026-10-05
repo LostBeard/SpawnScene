@@ -255,6 +255,12 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>The LOD cut threshold in pixels (when a tree is installed).</summary>
     public float LodTau { get => _sorter.LodTau; set => _sorter.LodTau = value; }
 
+    /// <summary>Splats a frame the LOD cut aims for (0 = a fixed <see cref="LodTau"/>).</summary>
+    public int LodBudget { get => _sorter.LodBudget; set => _sorter.LodBudget = value; }
+
+    /// <summary>Nodes the last LOD cut drew, -1 before the first count.</summary>
+    public int LodDrawn => _sorter.LodDrawn;
+
     /// <summary>JS bytes into an ILGPU buffer at a byte offset (a parked block's rows into a merged scene).</summary>
     public void WriteIlgpuBytes(MemoryBuffer1D<float, Stride1D.Dense> dst, long byteOffset, ArrayBuffer bytes)
     {

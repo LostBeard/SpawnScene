@@ -1125,8 +1125,39 @@ public class MultiViewGenerationService
         _gaussianKernel = gaussianKernel;
     }
 
+    /// <summary>
+    /// Multi-view generation (<see cref="GenerateCoreAsync"/>), then the reconstruction turned upright: the cameras' mean
+    /// up vector rotated to +Y, cameras and seed splats alike. SfM fixes a world only up to a rotation, and our own put
+    /// DrJohnson's cameras at a mean up of (-0.04, -1.00, 0.00) - the scene trained fine (training does not care) and
+    /// then showed upside down in the viewer, the saved scene and VR, where WebXR's gravity is +Y (2026-10-05).
+    /// </summary>
     public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
         GenerateAsync(IReadOnlyList<ImportedImage> images, int subsample = 2, float edgeSharpness = 0.3f)
+    {
+        var result = await GenerateCoreAsync(images, subsample, edgeSharpness);
+        if (result is not { } r || r.splatCount <= 0) return result;
+        var up = System.Numerics.Vector3.Zero;
+        int posed = 0;
+        foreach (var c in LastCameras) if (c != null) { up += c.Up; posed++; }
+        if (posed == 0 || SplatRows.UprightRotation(up) is not { } rot) return result;
+
+        var turned = new HashSet<CameraParams>(ReferenceEqualityComparer.Instance);   // a camera listed twice turns once
+        foreach (var c in LastCameras)
+        {
+            if (c == null || !turned.Add(c)) continue;
+            c.Position = System.Numerics.Vector3.Transform(c.Position, rot);
+            c.Forward = System.Numerics.Vector3.Transform(c.Forward, rot);
+            c.Up = System.Numerics.Vector3.Transform(c.Up, rot);
+        }
+        SplatRows.Rotate(_gpu.WebGPUAccelerator, r.packedBuf, r.splatCount, rot);
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        var n = System.Numerics.Vector3.Normalize(up);
+        Console.WriteLine($"[MultiView] turned the reconstruction upright: the {posed} cameras' mean up ({n.X:F2}, {n.Y:F2}, {n.Z:F2}) -> +Y");
+        return result;
+    }
+
+    async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
+        GenerateCoreAsync(IReadOnlyList<ImportedImage> images, int subsample = 2, float edgeSharpness = 0.3f)
     {
         if (images.Count < 2)
             throw new ArgumentException("Multi-view generation requires at least 2 images.");

@@ -69,6 +69,58 @@ public static class SplatRows
 
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>? _convert;
 
+    /// <summary>
+    /// One packed row rotated by the unit quaternion (rx, ry, rz, rw) about the origin: the position turned, and the
+    /// splat's orientation composed AFTER its own (q' = r * q, Hamilton, x y z w - the convention GpuDensify's split and
+    /// System.Numerics' Vector3.Transform use). Scalar, so the kernel and the CPU tests run the same code.
+    /// </summary>
+    public static void RotateRow(ArrayView1D<float, Stride1D.Dense> packed, long o, float rx, float ry, float rz, float rw)
+    {
+        float px = packed[o], py = packed[o + 1], pz = packed[o + 2];
+        // v' = v + 2w (r x v) + 2 r x (r x v)
+        float tx = 2f * (ry * pz - rz * py), ty = 2f * (rz * px - rx * pz), tz = 2f * (rx * py - ry * px);
+        packed[o] = px + rw * tx + (ry * tz - rz * ty);
+        packed[o + 1] = py + rw * ty + (rz * tx - rx * tz);
+        packed[o + 2] = pz + rw * tz + (rx * ty - ry * tx);
+        long q = o + 10;
+        float qx = packed[q], qy = packed[q + 1], qz = packed[q + 2], qw = packed[q + 3];
+        packed[q] = rw * qx + rx * qw + ry * qz - rz * qy;
+        packed[q + 1] = rw * qy - rx * qz + ry * qw + rz * qx;
+        packed[q + 2] = rw * qz + rx * qy - ry * qx + rz * qw;
+        packed[q + 3] = rw * qw - rx * qx - ry * qy - rz * qz;
+    }
+
+    static void RotateKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, int n, float rx, float ry, float rz, float rw)
+    {
+        if (i >= n) return;
+        RotateRow(packed, (long)i.X * SplatFormat.Floats, rx, ry, rz, rw);
+    }
+
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, float, float, float, float>? _rotate;
+
+    /// <summary>Rotate <paramref name="n"/> packed splats about the origin by unit quaternion <paramref name="r"/>
+    /// (positions and orientations), in place on the GPU.</summary>
+    public static void Rotate(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, System.Numerics.Quaternion r)
+    {
+        Load(a);
+        if (n > 0) _rotate!(n, packed.View, n, r.X, r.Y, r.Z, r.W);
+    }
+
+    /// <summary>
+    /// The rotation that turns <paramref name="meanUp"/> to +Y (the shortest arc), or null when it already points
+    /// within ~3 degrees of +Y - a scene that is upright stays bit-identical.
+    /// </summary>
+    public static System.Numerics.Quaternion? UprightRotation(System.Numerics.Vector3 meanUp)
+    {
+        if (meanUp.LengthSquared() < 1e-12f) return null;
+        var u = System.Numerics.Vector3.Normalize(meanUp);
+        float c = u.Y;   // dot(u, +Y)
+        if (c > 0.9986f) return null;
+        var axis = System.Numerics.Vector3.Cross(u, System.Numerics.Vector3.UnitY);
+        if (axis.LengthSquared() < 1e-12f) axis = System.Numerics.Vector3.UnitX;   // exactly upside down: any horizontal axis
+        return System.Numerics.Quaternion.CreateFromAxisAngle(System.Numerics.Vector3.Normalize(axis), MathF.Acos(Math.Clamp(c, -1f, 1f)));
+    }
+
     /// <summary>Rewrite <paramref name="n"/> packed splats' colours as SH DC coefficients (from RGB) or as RGB (from
     /// SH DC - the view-dependent bands are dropped by the caller): so splats from a trained and an untrained scene
     /// can live in one scene.</summary>
@@ -85,7 +137,8 @@ public static class SplatRows
 
     static void Load(Accelerator a)
     {
-        if (!ReferenceEquals(_loadedFor, a)) { _select = null; _gather = null; _append = null; _convert = null; _loadedFor = a; }
+        if (!ReferenceEquals(_loadedFor, a)) { _select = null; _gather = null; _append = null; _convert = null; _rotate = null; _loadedFor = a; }
+        _rotate ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, float, float, float, float>(RotateKernel);
         _convert ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>(ConvertColoursKernel);
         _select ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SelectKernel);
         _gather ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int>(GatherKernel);

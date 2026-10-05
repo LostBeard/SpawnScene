@@ -96,6 +96,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         }
         console.log('downloads: ' + fs.readdirSync(dl).join(', '));
       }
+      // SPAWNSCENE_EDIT_SHOT=1: a screenshot of what the viewer ends on (e.g. is the scene upright).
+      if (process.env.SPAWNSCENE_EDIT_SHOT) { await sleep(5000); await shot('final'); }
       return;
     }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'export') {

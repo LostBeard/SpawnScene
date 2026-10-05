@@ -53,6 +53,7 @@
     <Compile Include="..\SpawnScene\Services\ScenePartition.cs" Link="Linked\ScenePartition.cs" />
     <Compile Include="..\SpawnScene\Services\LodMerge.cs" Link="Linked\LodMerge.cs" />
     <Compile Include="..\SpawnScene\Services\LodTree.cs" Link="Linked\LodTree.cs" />
+    <Compile Include="..\SpawnScene\Services\GpuLodTree.cs" Link="Linked\GpuLodTree.cs" />
     <Compile Include="..\SpawnScene\Services\SceneCodec.cs" Link="Linked\SceneCodec.cs" />
     <Compile Include="..\SpawnScene\Services\SplatRows.cs" Link="Linked\SplatRows.cs" />
     <Compile Include="..\SpawnScene\Services\XRMenuGeometry.cs" Link="Linked\XRMenuGeometry.cs" />

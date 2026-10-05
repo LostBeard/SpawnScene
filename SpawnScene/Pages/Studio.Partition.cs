@@ -89,7 +89,12 @@ public partial class Studio
         await _projectService.ClearWorkFilesAsync(project.Id);
         var parked = new List<(int Block, int Count, int ShParts)>();
         int shDegree = 0, ranIters = 0;
-        int coarseIters = (int)(iterations * Math.Clamp(PartitionCoarseFraction, 0f, 0.9f));
+        // The coarse stage takes its fraction of the run - but never more than that fraction of the DENSIFY window, so the
+        // blocks still grow: on the global schedule densification stops at DensifyUntilIter (Kerbl's 15,000), and a 30K run
+        // at 0.5 gave the coarse model 0..15,000 and left every block nothing to grow in (DrJohnson 2x2: block 0 ended at
+        // exactly the coarse model's 1,749,642 splats, 2026-10-05). 7K: 3,500 either way; 30K: 7,500.
+        float coarseShare = Math.Clamp(PartitionCoarseFraction, 0f, 0.9f);
+        int coarseIters = (int)Math.Min(iterations * coarseShare, DensifyUntilIter * coarseShare);
         int blockIters = iterations - coarseIters;
         // The coarse model: packed rows and SH parts, kept on the GPU while the blocks refine copies of it.
         MemoryBuffer1D<float, Stride1D.Dense>? coarse = null;

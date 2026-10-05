@@ -209,6 +209,10 @@ public partial class Studio : IAsyncDisposable
             if (bp.Length == 2 && int.TryParse(bp[0], out var bc) && int.TryParse(bp[1], out var br) && bc >= 1 && br >= 1)
                 TrainingBlocks = (Math.Min(bc, 8), Math.Min(br, 8));
         }
+        // &gpumem=N: this run's training GPU memory budget in GB (the Settings choice; not saved - a fresh harness
+        // profile would otherwise always train at Auto).
+        if (query.TryGetValue("gpumem", out var gmq) && int.TryParse(gmq, out var gmi) && GpuMemoryBudget.ChoicesGB.Contains(gmi))
+            _gpuMemoryGB = gmi;
         if (query.TryGetValue("lodtau", out var ltq) && float.TryParse(ltq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var ltv))
             LodTauOption = Math.Max(0f, ltv);
@@ -520,10 +524,6 @@ public partial class Studio : IAsyncDisposable
             // gave each view ~31k splats where a 6-view run gave ~40k each.
             if (query.TryGetValue("budget", out var bg) && int.TryParse(bg, out var bgi))
                 _multiViewService.SplatBudget = bgi;
-            // ?gpumem=N: this run's training GPU memory budget in GB (the Settings choice; not saved, a fresh harness
-            // profile would otherwise always train at Auto).
-            if (query.TryGetValue("gpumem", out var gm) && int.TryParse(gm, out var gmi) && GpuMemoryBudget.ChoicesGB.Contains(gmi))
-                _gpuMemoryGB = gmi;
             // ?maxscale=N caps a splat at N * scene diagonal; ?poslr=N scales the position rate.
             if (query.TryGetValue("maxscale", out var ms) && float.TryParse(ms, out var msf))
                 MaxScaleFraction = msf;

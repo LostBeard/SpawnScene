@@ -60,12 +60,12 @@ public static class SceneFile
     public static Header2 ParseHeader2(ReadOnlySpan<byte> json)
         => JsonSerializer.Deserialize<Header2>(json) ?? throw new InvalidDataException("empty .spawnscene header");
 
-    /// <summary>The format version of a file from its first bytes: 1, 2, or 0 when it is not a .spawnscene.</summary>
+    /// <summary>The format version of a file from its first bytes: 1, 2, 3 (an LOD tree, LodChunkFile), or 0 when it is not a .spawnscene.</summary>
     public static int Version(ReadOnlySpan<byte> first8)
     {
         if (first8.Length < 8) return 0;
         string m = Encoding.ASCII.GetString(first8[..8]);
-        return m == Magic ? 1 : m == Magic2 ? 2 : 0;
+        return m == Magic ? 1 : m == Magic2 ? 2 : m == LodChunkFile.Magic3 ? 3 : 0;
     }
 
     public static int HeaderLength(ReadOnlySpan<byte> first12)

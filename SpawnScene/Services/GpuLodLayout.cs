@@ -83,6 +83,27 @@ public static class GpuLodLayout
         return r;
     }
 
+    /// <summary>
+    /// Per-leaf rows (SH parts) for the laid-out nodes: row k is <paramref name="src"/>'s row order[k] when that node is
+    /// a leaf (the built tree keeps its leaves first, at their input rows), zeros for a merge.
+    /// </summary>
+    public static MemoryBuffer1D<float, Stride1D.Dense> GatherLeafRows(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> src,
+        MemoryBuffer1D<int, Stride1D.Dense> order, int leafCount, int nodeCount, int width)
+    {
+        var dst = a.Allocate1D<float>((long)nodeCount * width);
+        var k = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, int, int>(GatherLeafRowsKernel);
+        k(nodeCount, src.View, order.View, dst.View, leafCount, width);
+        return dst;
+    }
+
+    static void GatherLeafRowsKernel(Index1D k, ArrayView1D<float, Stride1D.Dense> src, ArrayView1D<int, Stride1D.Dense> order,
+        ArrayView1D<float, Stride1D.Dense> dst, int leafCount, int width)
+    {
+        int o = order[k];
+        for (int f = 0; f < width; f++) dst[k * width + f] = o < leafCount ? src[o * width + f] : 0f;
+    }
+
     /// <summary>CPU transfer: two ints - the last flag and its exclusive prefix, i.e. the sum over the range.</summary>
     static async Task<int> TotalAsync(Accelerator a, MemoryBuffer1D<int, Stride1D.Dense> flag, MemoryBuffer1D<int, Stride1D.Dense> slot, int m)
     {

@@ -260,6 +260,54 @@ public class GpuGaussianRenderer : IDisposable
             $"({tree.Levels} levels), cut at {tau} px, sorted mode");
     }
 
+    /// <summary>
+    /// Show an LOD tree already laid out breadth-first (LodLayout: leaves anywhere, told apart by LOD size 0) - a
+    /// .spawnscene v3 file. Takes the tree's nodes and cut arrays like <see cref="InstallLodAsync"/>; the SH bands come
+    /// node-ordered in <paramref name="nodeSh"/> (copied on the GPU, the caller keeps them).
+    /// </summary>
+    public async Task InstallLaidLodAsync(GpuLodTree laid, MemoryBuffer1D<float, Stride1D.Dense>[]? nodeSh, int shDegree, float tau)
+    {
+        var nodes = laid.Nodes;
+        laid.Nodes = null!;
+        RenderMode = SplatRenderMode.Sorted;
+        await UploadSceneFromGpuBuffer(nodes, laid.NodeCount);
+        _sorter.SetLod(laid.Parent, laid.Bounds, laid.LodSize, 0);
+        laid.Parent = null!; laid.Bounds = null!; laid.LodSize = null!;
+        _sorter.LodTau = tau;
+        if (nodeSh is { Length: SphericalHarmonics.Parts } && shDegree > 0 && _device != null && _queue != null)
+        {
+            ulong nodeBytes = (ulong)laid.NodeCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
+            var parts = new GPUBuffer[nodeSh.Length];
+            _gpu.WebGPUAccelerator.FlushPendingCommands();
+            using (var encoder = _device.CreateCommandEncoder())
+            {
+                for (int p = 0; p < parts.Length; p++)
+                {
+                    parts[p] = NewShPart(nodeBytes);
+                    encoder.CopyBufferToBuffer(nodeSh[p].GetGPUBuffer()!, 0, parts[p], 0, nodeBytes);
+                }
+                using var cmd = encoder.Finish();
+                _submitArray[0] = cmd;
+                RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue, _submitArray);
+            }
+            SetShRest(parts, shDegree);
+        }
+        else SetShRest(null, 0);
+        RepackForDisplay();
+        Console.WriteLine($"[LOD] drawing {laid.LeafCount:N0} splats through a {laid.NodeCount:N0}-node laid-out tree, " +
+            $"cut at {tau} px, sorted mode");
+    }
+
+    /// <summary>
+    /// Copy <paramref name="bytes"/> bytes of <paramref name="src"/> from <paramref name="srcOffset"/> into an ILGPU
+    /// buffer at byte <paramref name="dstOffset"/> (file I/O: a decoded file part straight to its place on the GPU).
+    /// </summary>
+    public void WriteIlgpu(MemoryBuffer dst, long dstOffset, ArrayBuffer src, int srcOffset, long bytes)
+    {
+        _gpu.WebGPUAccelerator.FlushPendingCommands();
+        _queue!.WriteBuffer(dst.GetGPUBuffer()!, dstOffset, src, srcOffset, bytes);
+    }
+
     /// <summary>The LOD cut threshold in pixels (when a tree is installed).</summary>
     public float LodTau { get => _sorter.LodTau; set => _sorter.LodTau = value; }
 

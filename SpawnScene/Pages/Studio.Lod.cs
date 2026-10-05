@@ -30,8 +30,18 @@ public partial class Studio
         if (packed == null || n < 2 || LodTauOption <= 0f) return;
         var a = _gpuService.WebGPUAccelerator;
         var t0 = DateTime.UtcNow;
+        float baseStep = await LodBaseStepAsync(a, packed, n);
+        var tree = await GpuLodTree.BuildAsync(a, packed, n, baseStep, LodSortPairs());
+        Console.WriteLine($"[LOD] tree built in {(DateTime.UtcNow - t0).TotalSeconds:F1}s: {n:N0} leaves -> {tree.NodeCount:N0} nodes, " +
+            $"{tree.Levels} levels, base cell {baseStep:G3}");
+        _gpuRenderer.LodBudget = LodBudgetOption;
+        await _gpuRenderer.InstallLodAsync(tree, LodTauOption);
+        tree.Dispose();   // what the renderer did not take (child lists, counters)
+    }
 
-        // The first level's cell: the median splat size, from a strided sample (CPU transfer: <= 10K x 3 floats).
+    /// <summary>The first level's grid cell: the median splat size, from a strided sample (CPU transfer: <= 10K x 3 floats).</summary>
+    static async Task<float> LodBaseStepAsync(WebGPUAccelerator a, ILGPU.Runtime.MemoryBuffer1D<float, Stride1D.Dense> packed, int n)
+    {
         int k = Math.Min(n, 10_000);
         var picks = new int[k];
         for (int i = 0; i < k; i++) picks[i] = (int)((long)i * n / k);
@@ -46,19 +56,18 @@ public partial class Studio
             Array.Sort(sizes);
             baseStep = Math.Max(sizes[k / 2], 1e-6f);
         }
+        return baseStep;
+    }
 
-        var device = a.NativeAccelerator.NativeDevice!;
-        var queue = a.NativeAccelerator.Queue!;
-        _lodSort ??= new GpuRadixSort(device, queue, a);
-        var tree = await GpuLodTree.BuildAsync(a, packed, n, baseStep, (keys, values, count) =>
+    /// <summary>The tree build's key sort: the WGSL radix sort, 32-bit keys.</summary>
+    GpuLodTree.SortPairs LodSortPairs()
+    {
+        var a = _gpuService.WebGPUAccelerator;
+        _lodSort ??= new GpuRadixSort(a.NativeAccelerator.NativeDevice!, a.NativeAccelerator.Queue!, a);
+        return (keys, values, count) =>
         {
             _lodSort.EnsureCapacity(count);
             _lodSort.Sort(keys.GetGPUBuffer()!, values.GetGPUBuffer()!, count, 32);
-        });
-        Console.WriteLine($"[LOD] tree built in {(DateTime.UtcNow - t0).TotalSeconds:F1}s: {n:N0} leaves -> {tree.NodeCount:N0} nodes, " +
-            $"{tree.Levels} levels, base cell {baseStep:G3}");
-        _gpuRenderer.LodBudget = LodBudgetOption;
-        await _gpuRenderer.InstallLodAsync(tree, LodTauOption);
-        tree.Dispose();   // what the renderer did not take (child lists, counters)
+        };
     }
 }

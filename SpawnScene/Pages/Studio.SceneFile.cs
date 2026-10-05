@@ -101,13 +101,7 @@ public partial class Studio
             var fileParts = new List<Uint8Array> { prefix };
             fileParts.AddRange(zipped);
             using var blob = new Blob(fileParts, new BlobOptions { Type = "application/octet-stream" });
-            string url = blob.ToObjectURL();
-            using var document = _js.Get<Document>("document");
-            using var anchor = document.CreateElement<HTMLAnchorElement>("a");
-            anchor.Href = url;
-            anchor.Download = string.Concat(name.Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '_')) + SceneFile.Extension;
-            anchor.Click();
-            _ = Task.Delay(120_000).ContinueWith(_ => URL.RevokeObjectURL(url));
+            DownloadSceneBlob(blob, name);
             long rawV1 = (long)count * (SplatFormat.Floats + (withSh ? 45 : 0)) * sizeof(float);
             _editNote = $"Exported {count:N0} splats ({blob.Size / (1024 * 1024)} MB)";
             Console.WriteLine($"[Edit] exported '{name}': {count:N0} splats" + (withSh ? $", SH degree {header.ShDegree}" : "") +
@@ -121,6 +115,18 @@ public partial class Studio
             _editBusy = false;
             RefreshEditStatus();
         }
+    }
+
+    /// <summary>Hand a finished .spawnscene to the browser as a download named after the scene.</summary>
+    void DownloadSceneBlob(Blob blob, string name)
+    {
+        string url = blob.ToObjectURL();
+        using var document = _js.Get<Document>("document");
+        using var anchor = document.CreateElement<HTMLAnchorElement>("a");
+        anchor.Href = url;
+        anchor.Download = string.Concat(name.Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '_')) + SceneFile.Extension;
+        anchor.Click();
+        _ = Task.Delay(120_000).ContinueWith(_ => URL.RevokeObjectURL(url));
     }
 
     /// <summary>gzip (or gunzip) a blob through the browser's CompressionStream - streamed, no second full copy in .NET.</summary>
@@ -157,7 +163,9 @@ public partial class Studio
             Console.WriteLine($"[Export] '{project.Name}' scene {scene.Id}: {scene.SplatCount:N0} splats");
             OnOpenProject(project);
             await LoadProjectSceneAsync(scene);
-            await ExportSceneFileAsync();
+            // &lodfile=1: the scene as its LOD tree (.spawnscene v3, Studio.LodFile) instead of the flat v2 file.
+            if (uri.Query.Contains("lodfile=1", StringComparison.OrdinalIgnoreCase)) await ExportLodSceneFileAsync();
+            else await ExportSceneFileAsync();
             Console.WriteLine($"[Export] DONE: {_editNote}");
         }
         catch (Exception ex) { Console.WriteLine($"[Export] FAIL: {ex.Message}"); }
@@ -186,6 +194,14 @@ public partial class Studio
             int headerLen = SceneFile.HeaderLength(firstBytes);
             using var headerView = new Uint8Array(bytes, 12, headerLen);
             long offset = SceneFile.DataOffset(headerLen);
+            if (version == 3)
+            {
+                // An LOD tree (.spawnscene v3): a viewer file, opened as it is - not copied into a project.
+                ApplyImportViewerOptions(query);
+                await OpenLodFileAsync(bytes, LodChunkFile.ParseHeader3(headerView.ReadBytes()), offset);
+                await FinishImportAsync(query);
+                return;
+            }
             Uint8Array packedU8;
             var sh = new List<Uint8Array>();
             ProjectScene scene;
@@ -268,52 +284,63 @@ public partial class Studio
             _projects = await _projectService.ListProjectsAsync();
             var opened = _projects.First(p => p.Id == project.Id);
             OnOpenProject(opened);
-            // Viewer options an import is opened with (the autotest branch that parses them never runs for an import):
-            // &lodtau=N draws the scene through its LOD tree (Studio.Lod); &lodpx=N is the sub-pixel cull (0 = none).
-            if (query.TryGetValue("lodtau", out var ltq) && float.TryParse(ltq, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var ltv))
-                LodTauOption = Math.Max(0f, ltv);
-            if (query.TryGetValue("lodbudget", out var lbq) && int.TryParse(lbq, out var lbv))
-                LodBudgetOption = Math.Max(0, lbv);
-            // &fpslog=1 (harness): log the frame rate each second; with SPAWNSCENE_CHROME_UNCAPPED=1 it is render cost.
-            if (query.TryGetValue("fpslog", out var fpq) && fpq is "1" or "true")
-                _renderService.OnFpsUpdated += fps => Console.WriteLine($"[FPS] {fps:F1}" +
-                    (_gpuRenderer.LodDrawn >= 0 ? $" ({_gpuRenderer.LodDrawn:N0} drawn by the LOD cut)" : ""));
-            if (query.TryGetValue("lodpx", out var lpq) && float.TryParse(lpq, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var lpv))
-                _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);
+            ApplyImportViewerOptions(query);
             await LoadProjectSceneAsync(opened.Scenes.First(s => s.Id == scene.Id));
-            // &park=w,h,fx,fy,cx,cy,px,py,pz,fwdx,fwdy,fwdz,upx,upy,upz (harness): seat the viewer at an EXACT camera,
-            // intrinsics and roll included, so a reference renderer can draw the identical view for a side by side. The
-            // home view goes through yaw/pitch (roll dropped), which is right for a person and wrong for an A/B.
-            if (query.TryGetValue("park", out var parkQ))
-            {
-                var v = parkQ.Split(',').Select(t => float.Parse(t, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
-                if (v.Length == 15)
-                {
-                    var cam = new CameraParams
-                    {
-                        Width = (int)v[0], Height = (int)v[1], FocalX = v[2], FocalY = v[3], CenterX = v[4], CenterY = v[5],
-                        Position = new(v[6], v[7], v[8]), Forward = new(v[9], v[10], v[11]), Up = new(v[12], v[13], v[14]),
-                    };
-                    // Deterministic: the stochastic renderer needs many still frames to converge, and a harness tab ran at
-                    // 0.2 fps - its captures were a few noisy samples (pastel speckle, broken needles), not the scene.
-                    if (!query.ContainsKey("render")) _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
-                    await ParkOnGroundTruthPoseAsync("park", cam);
-                    Console.WriteLine("[Import] PARKED");
-                }
-            }
-            // &xrhook=1 (harness): the XR entry hook, as the Room autotest offers it (tools/_cdp_xr.js).
-            if (query.ContainsKey("xrhook"))
-            {
-                _xrHook ??= new SpawnDev.SpawnJS.ActionCallback<string>(m => _ = EnterXRAsync(m));
-                _js.Set("__spawnsceneEnterXR", _xrHook);
-                Console.WriteLine("[Autotest] XR hook ready");
-            }
-            if (query.TryGetValue("render", out var rmode))
-                _gpuRenderer.RenderMode = rmode == "sorted" ? SplatRenderMode.Sorted : SplatRenderMode.Stochastic;
-            Console.WriteLine($"[Import] DONE (render mode {_gpuRenderer.RenderMode})");
+            await FinishImportAsync(query);
         }
         catch (Exception ex) { Console.WriteLine($"[Import] FAIL: {ex.Message}"); }
+    }
+
+    /// <summary>Viewer options an import is opened with (the autotest branch that parses them never runs for an import).</summary>
+    void ApplyImportViewerOptions(Dictionary<string, string> query)
+    {
+        // &lodtau=N draws the scene through its LOD tree (Studio.Lod); &lodpx=N is the sub-pixel cull (0 = none).
+        if (query.TryGetValue("lodtau", out var ltq) && float.TryParse(ltq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var ltv))
+            LodTauOption = Math.Max(0f, ltv);
+        if (query.TryGetValue("lodbudget", out var lbq) && int.TryParse(lbq, out var lbv))
+            LodBudgetOption = Math.Max(0, lbv);
+        // &fpslog=1 (harness): log the frame rate each second; with SPAWNSCENE_CHROME_UNCAPPED=1 it is render cost.
+        if (query.TryGetValue("fpslog", out var fpq) && fpq is "1" or "true")
+            _renderService.OnFpsUpdated += fps => Console.WriteLine($"[FPS] {fps:F1}" +
+                (_gpuRenderer.LodDrawn >= 0 ? $" ({_gpuRenderer.LodDrawn:N0} drawn by the LOD cut)" : ""));
+        if (query.TryGetValue("lodpx", out var lpq) && float.TryParse(lpq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var lpv))
+            _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);
+    }
+
+    /// <summary>What every import does once its scene is on screen: the harness's exact camera, XR hook, render mode.</summary>
+    async Task FinishImportAsync(Dictionary<string, string> query)
+    {
+        // &park=w,h,fx,fy,cx,cy,px,py,pz,fwdx,fwdy,fwdz,upx,upy,upz (harness): seat the viewer at an EXACT camera,
+        // intrinsics and roll included, so a reference renderer can draw the identical view for a side by side. The
+        // home view goes through yaw/pitch (roll dropped), which is right for a person and wrong for an A/B.
+        if (query.TryGetValue("park", out var parkQ))
+        {
+            var v = parkQ.Split(',').Select(t => float.Parse(t, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            if (v.Length == 15)
+            {
+                var cam = new CameraParams
+                {
+                    Width = (int)v[0], Height = (int)v[1], FocalX = v[2], FocalY = v[3], CenterX = v[4], CenterY = v[5],
+                    Position = new(v[6], v[7], v[8]), Forward = new(v[9], v[10], v[11]), Up = new(v[12], v[13], v[14]),
+                };
+                // Deterministic: the stochastic renderer needs many still frames to converge, and a harness tab ran at
+                // 0.2 fps - its captures were a few noisy samples (pastel speckle, broken needles), not the scene.
+                if (!query.ContainsKey("render")) _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
+                await ParkOnGroundTruthPoseAsync("park", cam);
+                Console.WriteLine("[Import] PARKED");
+            }
+        }
+        // &xrhook=1 (harness): the XR entry hook, as the Room autotest offers it (tools/_cdp_xr.js).
+        if (query.ContainsKey("xrhook"))
+        {
+            _xrHook ??= new SpawnDev.SpawnJS.ActionCallback<string>(m => _ = EnterXRAsync(m));
+            _js.Set("__spawnsceneEnterXR", _xrHook);
+            Console.WriteLine("[Autotest] XR hook ready");
+        }
+        if (query.TryGetValue("render", out var rmode))
+            _gpuRenderer.RenderMode = rmode == "sorted" ? SplatRenderMode.Sorted : SplatRenderMode.Stochastic;
+        Console.WriteLine($"[Import] DONE (render mode {_gpuRenderer.RenderMode})");
     }
 }

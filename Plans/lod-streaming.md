@@ -66,3 +66,24 @@ so the first drawn-count indices are the cut; a one-thread WGSL pass writes the 
 
 Open in A: the radix sort still runs over every node (sorting only the cut needs a compacted count on the GPU);
 stochastic mode has no cut yet; internal nodes carry no SH (view-independent colour).
+
+### Phase B status (2026-10-05, evening)
+
+In code, CPU-tested; browser checks pending where noted:
+- **Layout** (LodLayout / GpuLodLayout): breadth-first, leaves told apart by LOD size 0; GPU layout == CPU oracle
+  bit for bit (3K, 20K leaves).
+- **Chunks** (LodLayout.ChunkStarts): at most 16K nodes, never splitting a sibling run (split runs made every chunk
+  need the next: a streamed view loaded all of them). 16K measured on TruckFull: a view turned away from the truck
+  loads 59% of the file vs 78% at 64K (LodLayoutRealSceneTests). Treelet and detail-band x Morton orders were tried
+  and were not better than breadth-first.
+- **Paged cut** (LodLayout.InCutPaged, GpuSplatSorter.CullAndDistanceLodPagedKernel): a node whose children's chunk
+  is missing draws in their place and (when on screen) asks for it. Exact when the resident set is closed under
+  ParentChunks (a chunk loads after its nodes' parents' chunks); random closed sets draw every leaf path once, and
+  streaming from chunk 0 settles on exactly the full cut, loading exactly the closure of what the cut needs.
+- **File** (.spawnscene v3, LodChunkFile): per chunk a SceneCodec frame + raw parent / first child / sphere / LOD
+  size, gzipped alone; header lists each chunk's byte range and Needs. Export + full open checked in the browser:
+  TruckFull 30K 1.9M splats -> 2.4M nodes, 141 MB, all leaves vs the flat scene 52.5 dB at photo 1's camera
+  (before the 16K / first-child changes - re-check pending).
+- **Pager** (GpuLodPager, &lodpool=N): fixed pool of pages, chunk 0 pinned, LRU eviction of chunks nothing resident
+  needs; chunks from memory or by HTTP Range (header first, chunks on demand; tools/_spa_server.js serves Range).
+  Browser test pending.

@@ -102,6 +102,10 @@ In code, CPU-tested; browser checks pending where noted:
   1 MB chunk 0, on screen in 0.9 s; the home view (one room) needs 85 of 186 chunks (the one-object Truck needed 138
   of 147); a 1M-slot pool (a third of the tree) holds 62 chunks and draws the room at 36.5 dB vs the unconstrained.
   Merged nodes carry SH now (a6e6c31).
+- **AbsGS refresh (10-06 14:40, c46):** the same run on the AbsGS densify default (e2296db) -> 1,469,473 splats
+  (half), held-out-free supervised 36.27 dB / SSIM 0.9649 vs 36.32 / 0.9666 -> Export streaming: 1,614,172 nodes,
+  100 chunks, 96 MB. The home view needs 59 of 100 chunks and draws 160K (was 316K), visually the same room. This
+  file replaced samples/drjohnson_lod.spawnscene.
 - **Next:** a hosted massive scene (GitHub Pages serves Range); Quest on-device check of the budget; scenes larger
   than one GPU (train per block, export per block, one tree).
 

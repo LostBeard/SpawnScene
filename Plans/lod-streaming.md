@@ -132,6 +132,9 @@ partitioned runs over 2x a run's splat cap (or &streamed=1) saved as a streamed 
 lod, scenes/{id}.spawnscene) and opened streamed. c40: TruckFull 2x2 7K &streamed=1 -> 4 blocks -> 1,619,434 splats,
 2,094,712 nodes, 131 chunks, 119 MB; opened streamed (chunk 0 in 0.6 s), reopened from the project (0.1 s).
 Memory stays bounded: a block trains with the half-cap coarse model plus its own growth; viewing is the pool.
+c41 (the automatic case, 21538e4): DrJohnsonFull 2x2 30K at a 2 GB budget, no flag - 1,552,199 splats in 4 blocks,
+over one run's 1,491,308 cap, so saved streamed by itself (1,692,704 nodes, 106 chunks, 104 MB, written in 17.7 s),
+opened and reopened streamed; the project card's thumbnail waited for the room's chunks.
 
 Gates: a 2x2 block export of TruckFull equal (cut for cut) to the one-tree export where both apply; a scene of 4
 blocks each at a full run's budget (bigger than one GPU's) exported and streamed with memory at the pool size;

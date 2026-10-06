@@ -318,6 +318,9 @@ public partial class Studio
             // -- Key growth: a frame over the key capacity grows the buffers and renders complete --
             if (!await KeyGrowthGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
+            // -- Past 65535 workgroups: a per-splat pass over more than 4,194,240 splats reaches every one --
+            if (!await LinearDispatchGateAsync(trainer)) return;
+
             Console.WriteLine("[TrainerGate] PASS");
         }
         catch (Exception ex)

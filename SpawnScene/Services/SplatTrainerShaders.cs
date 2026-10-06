@@ -926,8 +926,8 @@ fn adam(value : f32, grad : f32, lr : f32, step : f32, m : ptr<function, f32>, v
 }
 
 @compute @workgroup_size(64)
-fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= u32(cfg.w)) { return; }
 
     let o = i * FLOATS_PER_SPLAT;
@@ -1174,8 +1174,8 @@ fn max_magnitude(
 @group(0) @binding(2) var<uniform>             dims   : vec4<u32>;
 
 @compute @workgroup_size(256)
-fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= dims.x) { return; }
     let idx = i * dims.y;
     out_s[i] = select(0.0, src[idx], idx < dims.z);
@@ -1197,8 +1197,8 @@ fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>) {
 const GRADS_PER_SPLAT : u32 = 9u;
 
 @compute @workgroup_size(256)
-fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= dims.x) { return; }
 
     // The reference criterion (Kerbl train.py add_densification_stats): the norm of this
@@ -1254,8 +1254,8 @@ fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>) {
 const GRADS_PER_SPLAT : u32 = 9u;
 
 @compute @workgroup_size(256)
-fn accumulate_support(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn accumulate_support(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= dims.x) { return; }
 
     let b = i * GRADS_PER_SPLAT;
@@ -1386,10 +1386,10 @@ fn luma_ref(base : u32) -> f32 {
 }
 
 @compute @workgroup_size(64)
-fn ssim_rows(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn ssim_rows(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
     let wx = dims.x;
     let srcH = dims.y + WINDOW - 1u;
-    let i = gid.x;
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= wx * srcH) { return; }
 
     let y = i / wx;
@@ -1532,10 +1532,10 @@ fn weight(t : u32) -> f32 {
 }
 
 @compute @workgroup_size(256)
-fn ssim_win_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn ssim_win_grad(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
     let wx = dims.x;
     let wy = dims.y;
-    let j = gid.x;
+    let j = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
     if (j >= wx * wy) { return; }
 
     let y = j / wx;
@@ -1617,11 +1617,11 @@ fn weight(t : u32) -> f32 {
 }
 
 @compute @workgroup_size(256)
-fn ssim_rows_bwd(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn ssim_rows_bwd(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
     let wx = dims.x;
     let wy = dims.y;
     let srcH = dims.z;
-    let i = gid.x;
+    let i = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= wx * srcH) { return; }
 
     let y = i / wx;
@@ -1681,11 +1681,11 @@ fn weight(t : u32) -> f32 {
 }
 
 @compute @workgroup_size(256)
-fn ssim_pix_bwd(@builtin(global_invocation_id) gid : vec3<u32>) {
+fn ssim_pix_bwd(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
     let wx = dims.x;
     let srcW = dims.y;
     let srcH = dims.z;
-    let p = gid.x;
+    let p = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
     if (p >= srcW * srcH) { return; }
 
     let py = p / srcW;
@@ -1736,8 +1736,8 @@ fn ssim_pix_bwd(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(2) var<uniform>             dims : vec4<u32>;    // x=pixels y=dstOff z=srcOff
 
 @compute @workgroup_size(64)
-fn unpack_target(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let p = gid.x;
+fn unpack_target(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let p = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (p >= dims.x) { return; }
     let v = src[dims.z + p];
     let o = dims.y + p * 3u;
@@ -1756,8 +1756,8 @@ const FLOATS_PER_SPLAT : u32 = 14u;
 const SH_C0 : f32 = 0.28209479177387814;
 
 @compute @workgroup_size(64)
-fn init_rgb_to_dc(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn init_rgb_to_dc(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= cfg.x) { return; }
     let o = i * FLOATS_PER_SPLAT;
     for (var c = 0u; c < 3u; c = c + 1u) {
@@ -1776,8 +1776,8 @@ const FLOATS_PER_SPLAT : u32 = 14u;
 const MIN_SCALE : f32 = 1e-7;
 
 @compute @workgroup_size(64)
-fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn init_logits(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= cfg.x) { return; }
     let o = i * FLOATS_PER_SPLAT;
 
@@ -1902,8 +1902,8 @@ fn pose_final(@builtin(local_invocation_index) li : u32) {
 @group(0) @binding(3) var<uniform>             cfg       : vec4<f32>;         // x splat count, y camera count, z filter size
 
 @compute @workgroup_size(64)
-fn mip_floor(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn mip_floor(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= u32(cfg.x)) { return; }
     let p = vec3<f32>(splats[i * 14u], splats[i * 14u + 1u], splats[i * 14u + 2u]);
     var nu = 0.0;
@@ -1945,8 +1945,8 @@ struct FreezeBox {
 @group(0) @binding(2) var<uniform>             box        : FreezeBox;
 
 @compute @workgroup_size(64)
-fn freeze_outside(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn freeze_outside(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= box.count) { return; }
     let p = vec4<f32>(splats[i * 14u], splats[i * 14u + 1u], splats[i * 14u + 2u], 1.0);
     let w = dot(box.cols[3], p);
@@ -2038,8 +2038,8 @@ fn dense_zero_step(i : u32, o : u32) {
 }
 
 @compute @workgroup_size(64)
-fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= u32(g.limit.x)) { return; }
 
     let gb = i * GRADS_PER_SPLAT;
@@ -2281,8 +2281,8 @@ fn put_grad_sh(i : u32, k : u32, v : f32) {
 }
 
 @compute @workgroup_size(64)
-fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn scatter_sh_grad(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= u32(cfg.w)) { return; }
     if (u.sh_degree < 1u) { return; }
 
@@ -2409,8 +2409,8 @@ fn to_bf16_sr(x : f32, noise : u32) -> u32 {
 }
 
 @compute @workgroup_size(64)
-fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= u32(cfg.w)) { return; }
     let step = cfg.z;
     let lr = cfg.x;
@@ -2455,8 +2455,8 @@ fn adam_sh_rest(@builtin(global_invocation_id) gid : vec3<u32>) {
 @group(0) @binding(3) var<uniform>             cfg     : vec4<u32>; // x=newCount y=stride z=oldCount w=zeroSlotOr!0
 
 @compute @workgroup_size(64)
-fn remap_float_rows(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let i = gid.x;
+fn remap_float_rows(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
     if (i >= cfg.x) { return; }
     let src = sources[i];
     let stride = cfg.y;

@@ -215,7 +215,7 @@ public sealed class SplatTrainerGpu : IDisposable
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
         WriteVec4(_mipCfgBuf, splatCount, _mipCamCount, MipFilter, 0f);
-        Dispatch(_mipFloor!, (splatCount + 63) / 64, 1, new[]
+        DispatchLinear(_mipFloor!, splatCount, new[]
         {
             Buf(0, splatGpu), Buf(1, _mipCamsBuf), Buf(2, _scaleFloor.GetGPUBuffer()!), Buf(3, _mipCfgBuf),
         });
@@ -338,7 +338,7 @@ public sealed class SplatTrainerGpu : IDisposable
         int stride = Math.Max(1, (int)(count / n));
         n = (int)Math.Min(FitSampleCount, (count + stride - 1) / stride);
         WriteU32x4(_dimsBuf!, (uint)n, (uint)stride, (uint)Math.Min(count, _logScale.Length), 0);
-        Dispatch(_sampleStride, (n + 255) / 256, 1, new[]
+        DispatchLinear(_sampleStride, n, groupSize: 256, entries: new[]
         {
             Buf(0, _logScale.GetGPUBuffer()!), Buf(1, _fitSample.GetGPUBuffer()!), Buf(2, _dimsBuf!),
         });
@@ -981,7 +981,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // held 62 views as floats and holds 187 packed. Views are the scarce resource here -
         // the reference trains drjohnson on about 230 images and we were using 33.
         WriteU32x4(_dimsBuf!, (uint)pixels, 0, (uint)off, 0);
-        Dispatch(_unpackTarget!, (int)((pixels + 63) / 64), 1, new[]
+        DispatchLinear(_unpackTarget!, pixels, new[]
         {
             Buf(0, stack.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!), Buf(2, _dimsBuf!),
         });
@@ -1204,7 +1204,7 @@ public sealed class SplatTrainerGpu : IDisposable
         uint z = zeroSlot >= 0 && zeroSlot < stride ? (uint)zeroSlot : uint.MaxValue;
         if (TraceCarrySteps) Console.WriteLine($"[Trainer]   carry bank: remap dispatch {(newCount + 63) / 64} groups");
         WriteU32x4(_dimsBuf!, (uint)newCount, (uint)stride, (uint)priorCount, z);
-        Dispatch(_remapFloatRows!, (newCount + 63) / 64, 1, new[]
+        DispatchLinear(_remapFloatRows!, newCount, new[]
         {
             Buf(0, prior.GetGPUBuffer()!), Buf(1, next.GetGPUBuffer()!),
             Buf(2, sources.GetGPUBuffer()!), Buf(3, _dimsBuf!),
@@ -1317,7 +1317,7 @@ public sealed class SplatTrainerGpu : IDisposable
         int stride = Math.Max(1, (int)(count / n));
         n = (int)Math.Min(FitSampleCount, (count + stride - 1) / stride);
         WriteU32x4(_dimsBuf!, (uint)n, (uint)stride, (uint)Math.Min(count, buf.Length), 0);
-        Dispatch(_sampleStride, (n + 255) / 256, 1, new[]
+        DispatchLinear(_sampleStride, n, groupSize: 256, entries: new[]
         {
             Buf(0, buf.GetGPUBuffer()!), Buf(1, _fitSample.GetGPUBuffer()!), Buf(2, _dimsBuf!),
         });
@@ -1406,7 +1406,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public void AccumulateDensifyStats(int splatCount)
     {
         WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height, DensifyDenominatorFrustum ? 1u : 0u);
-        Dispatch(_densifyAccum!, (splatCount + 255) / 256, 1, new[]
+        DispatchLinear(_densifyAccum!, splatCount, groupSize: 256, entries: new[]
         {
             Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
             Buf(2, _dimsBuf!), Buf(3, _screenRadius!.GetGPUBuffer()!), Buf(4, _maxRadius!.GetGPUBuffer()!),
@@ -1483,7 +1483,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public void AccumulateViewSupport(int splatCount)
     {
         WriteU32x4(_dimsBuf!, (uint)splatCount, 0, 0, 0);
-        Dispatch(_accumulateSupport!, (splatCount + 255) / 256, 1, new[]
+        DispatchLinear(_accumulateSupport!, splatCount, groupSize: 256, entries: new[]
         {
             Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _viewSupport!.GetGPUBuffer()!),
             Buf(2, _dimsBuf!),
@@ -1645,7 +1645,7 @@ public sealed class SplatTrainerGpu : IDisposable
             // reads eleven rows above each window, so the rows above the last window position
             // are still needed.
             int rowThreads = SsimWindowsX * _height;
-            Dispatch(_ssimRowsPipe!, (rowThreads + 63) / 64, 1, new[]
+            DispatchLinear(_ssimRowsPipe!, rowThreads, new[]
             {
                 Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
                 Buf(2, _ssimRows!.GetGPUBuffer()!), Buf(3, _ssimDimsBuf!), Buf(4, _ssimCfgBuf!),
@@ -1725,7 +1725,7 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         var splatGpu = splatBuf.GetGPUBuffer()!;
         WriteU32(_dimsBuf!, (uint)splatCount);
-        Dispatch(_initLogits!, (splatCount + 63) / 64, 1, new[]
+        DispatchLinear(_initLogits!, splatCount, new[]
         {
             Buf(0, splatGpu), Buf(1, _opacityLogit!.GetGPUBuffer()!), Buf(2, _dimsBuf!),
             Buf(3, _logScale!.GetGPUBuffer()!),
@@ -1745,7 +1745,7 @@ public sealed class SplatTrainerGpu : IDisposable
     {
         var splatGpu = splatBuf.GetGPUBuffer()!;
         WriteU32(_dimsBuf!, (uint)splatCount);
-        Dispatch(_initRgbToDc!, (splatCount + 63) / 64, 1, new[]
+        DispatchLinear(_initRgbToDc!, splatCount, new[]
         {
             Buf(0, splatGpu), Buf(1, _dimsBuf!),
         });
@@ -1950,7 +1950,7 @@ public sealed class SplatTrainerGpu : IDisposable
             // ssim_rows dims: wx, wy (=height-10), srcW, targetOffset. srcH = wy+10.
             WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_width, 0);
             int rowThreads = SsimWindowsX * _height;
-            Dispatch(_ssimRowsPipe!, (rowThreads + 63) / 64, 1, new[]
+            DispatchLinear(_ssimRowsPipe!, rowThreads, new[]
             {
                 Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
                 Buf(2, _ssimRows!.GetGPUBuffer()!), Buf(3, _ssimDimsBuf!), Buf(4, _ssimCfgBuf!),
@@ -1959,21 +1959,21 @@ public sealed class SplatTrainerGpu : IDisposable
             WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_width, 0);
             WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaDssim / ssimPasses, 0f, 0f, 0f);
             int winThreads = SsimWindowsX * SsimWindowsY;
-            Dispatch(_ssimWinGradPipe!, (winThreads + 255) / 256, 1, new[]
+            DispatchLinear(_ssimWinGradPipe!, winThreads, groupSize: 256, entries: new[]
             {
                 Buf(0, _ssimRows!.GetGPUBuffer()!), Buf(1, _ssimWinGrad!.GetGPUBuffer()!),
                 Buf(2, _ssimDimsBuf!), Buf(3, _ssimCfgBuf!), Buf(4, _lossWeightsBuf!),
             });
 
             WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_height, 0);
-            Dispatch(_ssimRowsBwdPipe!, (rowThreads + 255) / 256, 1, new[]
+            DispatchLinear(_ssimRowsBwdPipe!, rowThreads, groupSize: 256, entries: new[]
             {
                 Buf(0, _ssimWinGrad!.GetGPUBuffer()!), Buf(1, _ssimDRows!.GetGPUBuffer()!),
                 Buf(2, _ssimDimsBuf!), Buf(3, _ssimCfgBuf!),
             });
 
             WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)_width, (uint)_height, 0);
-            Dispatch(_ssimPixBwdPipe!, (pixels + 255) / 256, 1, new[]
+            DispatchLinear(_ssimPixBwdPipe!, pixels, groupSize: 256, entries: new[]
             {
                 Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
                 Buf(2, _ssimDRows!.GetGPUBuffer()!), Buf(3, _dLdPix!.GetGPUBuffer()!),
@@ -2021,7 +2021,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _adamStepCount++;
         WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
         WriteVec4(_adamFlagsBuf!, SkipZeroGradientSteps ? 1f : 0f, 0f, 0f, 0f);
-        Dispatch(_adamStep!, (splatCount + 63) / 64, 1, new[]
+        DispatchLinear(_adamStep!, splatCount, new[]
         {
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),
             Buf(2, _opacityLogit!.GetGPUBuffer()!), Buf(3, _adamM!.GetGPUBuffer()!),
@@ -2035,7 +2035,7 @@ public sealed class SplatTrainerGpu : IDisposable
             accel.FlushPendingCommands();
             // Scatter cfg: .w = splat count (matches shader).
             WriteVec4(_adamCfgBuf!, 0f, 0f, 0f, splatCount);
-            Dispatch(_scatterShGrad, (splatCount + 63) / 64, 1, new[]
+            DispatchLinear(_scatterShGrad, splatCount, new[]
             {
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
                 Buf(3, _gradShRest[0]!.GetGPUBuffer()!), Buf(4, _adamCfgBuf!),
@@ -2046,7 +2046,7 @@ public sealed class SplatTrainerGpu : IDisposable
             for (int part = 0; part < SphericalHarmonics.Parts; part++)
             {
                 WriteVec4(_adamCfgBuf!, colourLr / 20f, part, _adamStepCount, splatCount);
-                Dispatch(_adamShRest, (splatCount + 63) / 64, 1, new[]
+                DispatchLinear(_adamShRest, splatCount, new[]
                 {
                     Buf(0, _shRest[part]!.GetGPUBuffer()!), Buf(1, _gradShRest[part]!.GetGPUBuffer()!),
                     Buf(2, _adamShM[part]!.GetGPUBuffer()!), Buf(3, _adamShV[part]!.GetGPUBuffer()!),
@@ -2065,7 +2065,7 @@ public sealed class SplatTrainerGpu : IDisposable
             WriteVec4x2(_geomCfgBuf!,
                 geo.PositionLr, geo.LogScaleLr, geo.RotationLr, _adamStepCount,
                 splatCount, geo.MaxScale, geo.MinScale, DenseGeometryAdam ? 1f : 0f);
-            Dispatch(_adamGeometry!, (splatCount + 63) / 64, 1, new[]
+            DispatchLinear(_adamGeometry!, splatCount, new[]
             {
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
                 Buf(3, _logScale!.GetGPUBuffer()!), Buf(4, _adamM!.GetGPUBuffer()!),
@@ -2155,16 +2155,16 @@ public sealed class SplatTrainerGpu : IDisposable
     /// and a room-scale scene emits more keys than that, so every key-indexed pass needs this.
     /// The shader recovers the flat index from workgroup_id and num_workgroups.
     /// </summary>
-    void DispatchLinear(GPUComputePipeline pipeline, long threads, GPUBindGroupEntry[] entries)
+    void DispatchLinear(GPUComputePipeline pipeline, long threads, GPUBindGroupEntry[] entries, int groupSize = 64)
     {
-        var (wgX, wgY) = LinearGrid(threads);
+        var (wgX, wgY) = LinearGrid(threads, groupSize);
         Dispatch(pipeline, wgX, wgY, entries);
     }
 
     /// <summary>Workgroup grid covering <paramref name="threads"/> at 64 per group.</summary>
-    static (int X, int Y) LinearGrid(long threads)
+    static (int X, int Y) LinearGrid(long threads, int groupSize = 64)
     {
-        long groups = Math.Max(1, (threads + 63) / 64);
+        long groups = Math.Max(1, (threads + groupSize - 1) / groupSize);
         int x = (int)Math.Min(groups, MaxWorkgroupsPerDim);
         int y = (int)((groups + MaxWorkgroupsPerDim - 1) / MaxWorkgroupsPerDim);
         return (x, y);
@@ -2222,7 +2222,7 @@ public sealed class SplatTrainerGpu : IDisposable
         Buffer.BlockCopy(f, 0, bytes, 0, f.Length * sizeof(float));
         BitConverter.TryWriteBytes(bytes.AsSpan(88), (uint)splatCount);
         _queue!.WriteBuffer(_freezeCfgBuf, 0, bytes);
-        Dispatch(_freezeOutside!, (splatCount + 63) / 64, 1, new[]
+        DispatchLinear(_freezeOutside!, splatCount, new[]
         {
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!), Buf(2, _freezeCfgBuf),
         });

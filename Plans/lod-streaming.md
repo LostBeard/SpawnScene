@@ -91,5 +91,11 @@ In code, CPU-tested; browser checks pending where noted:
 - **Browser (20:15):** v3 export 147 chunks / 142 MB in 19 s; full open, all leaves vs flat 52.56 dB; streamed at
   photo 1, tau 1.5 vs the full open: pool 3M 83.0 dB (138 chunks in 2.5 s), pool 600K 20.5 dB with the near truck
   refined first, 300K 18.1 dB; HTTP Range: 34 KB header + 855 KB chunk 0, on screen in 0.9 s, 72.8 dB settled.
-- **Next:** the gh-pages host serves Range (GitHub Pages does) - a hosted massive scene; budgets per device (Quest);
-  sort only the cut (the radix sort still runs over every pool slot); a UI entry for v3 export / open.
+- **Done since (22:00-22:45):** UI - "Open scene file" on the project browser (a v3 streams straight from the picked
+  File by slices, 4M-slot pool; v1/v2 imported) and "Export streaming" in the Edit toolbar; no Edit while an LOD tree
+  is shown; LOD scenes always draw sorted. The cut is written compacted and only ~1.25x the last drawn count is
+  sorted (TruckFull 2.4M pool: ~960K keys, not 2.4M; 59 dB vs before). XR: the cut measures at the eye's pixel
+  density (emulated Quest: 1.13M drawn, 144/147 chunks, vs ~795K through the wide head camera), and an XR session on
+  an LOD scene without &lodbudget gets a device budget (600K Quest browser, 1.5M tethered; emulator check pending).
+- **Next:** a hosted massive scene (GitHub Pages serves Range); a multi-room scene end to end (partitioned training ->
+  Export streaming -> open); merged SH for internal nodes; Quest on-device check of the budget.

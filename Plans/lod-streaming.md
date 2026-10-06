@@ -104,3 +104,28 @@ In code, CPU-tested; browser checks pending where noted:
   Merged nodes carry SH now (a6e6c31).
 - **Next:** a hosted massive scene (GitHub Pages serves Range); Quest on-device check of the budget; scenes larger
   than one GPU (train per block, export per block, one tree).
+
+## Phase D: scenes larger than one GPU (design, 2026-10-06)
+
+Today a partitioned run (Studio.Partition) parks each block in OPFS but MERGES them into one scene, and Export
+streaming builds the tree over that whole scene on one GPU - so the biggest streamable scene is the biggest scene one
+GPU holds. Phase D keeps every step per block:
+
+1. **Train per block** (as now: coarse model, then each block refines with outside frozen). Keep each block's own
+   splats (its cell) in OPFS - already done - and never merge them.
+2. **A subtree per block:** GpuLodTree + GpuLodLayout over ONE block's splats (fits: a block is at most one run's
+   budget), merged SH, then that block's chunks (ChunkStarts) written as a run of chunks, its node indices offset by
+   where the block starts in the file.
+3. **One top over the blocks:** each block's roots merge into a single "block node" (LodMerge over the roots; its
+   sphere over theirs, LOD size raised to their max), so a block node's children are exactly that block's root run -
+   contiguous, the first nodes of the block's region. A small tree over the block nodes (the same GpuLodTree build on
+   B rows) gives the file's top; laid out breadth-first it is chunk 0 (and more if B is large).
+4. **File order:** top chunks, then block 1's chunks, block 2's, ... Every rule the pager relies on still holds:
+   parents come first (a block's roots hang off a top node), sibling runs never cross a chunk (each block's root run
+   is its own first run), and a chunk's Needs are the top chunk + its own block's earlier chunks.
+5. **Memory:** the export holds one block at a time (its rows, SH, tree) plus B block nodes. Writing streams chunk by
+   chunk to a Blob list (as now). The pager is unchanged.
+
+Gates: a 2x2 block export of TruckFull equal (cut for cut) to the one-tree export where both apply; a scene of 4
+blocks each at a full run's budget (bigger than one GPU's) exported and streamed with memory at the pool size;
+LodLayout/LodPagerSim tests on a forest-with-top layout (exactly one drawn node per leaf path, streaming == full cut).

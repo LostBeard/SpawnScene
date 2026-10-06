@@ -11,9 +11,10 @@ namespace SpawnScene.Services;
 /// Streams a .spawnscene v3 LOD tree (<see cref="LodChunkFile"/>) through a fixed GPU pool of pages, one chunk a page
 /// (Plans/lod-streaming.md, phase B): the renderer draws the pool through the paged cut (LodLayout.InCutPaged,
 /// GpuSplatSorter.SetLodPaged), which draws a node in place of children whose chunk is not resident and asks for that
-/// chunk; the pager loads it - after the chunks it needs (its nodes' parents), so the resident set stays closed - and
-/// when the pool is full evicts the least recently wanted chunk nothing resident depends on. Chunk 0 (the top of the
-/// tree) is loaded first and never evicted, so a coarse whole scene is on screen at once.
+/// chunk; the pager loads it - after the chunks it needs (its nodes' parents), so the resident set stays closed -
+/// biggest stand-in first, and when the pool is full evicts a page nothing resident depends on whose loss would matter
+/// less (by screen size) than the chunk it makes room for. Chunk 0 (the top of the tree) is loaded first and never
+/// evicted, so a coarse whole scene is on screen at once.
 /// </summary>
 public sealed class GpuLodPager : IDisposable
 {
@@ -39,9 +40,14 @@ public sealed class GpuLodPager : IDisposable
     // CPU mirror of the residency.
     readonly int[] _pageChunk, _chunkPageCpu, _dependents;
     readonly long[] _lastWanted;
-    bool[] _pageUsed;   // drawn from on screen in the latest cut: never evicted
-    readonly Queue<int> _queue = new();
-    readonly HashSet<int> _queued = new();
+    int[] _pagePriority;   // latest cut: 0 = not drawn from on screen, else 1 + 16 x px of what eviction would show
+    readonly int[] _wantPriority;
+    // Cut readbacks so far, and the count when each page was filled: a page is not judged unused until two readbacks
+    // have come in since its load (the latest one may be from a cut sorted before the load). Judging it by the older
+    // cut evicted fresh chunks before any cut saw them: a 600K pool on TruckFull loaded 2, evicted 2, forever.
+    long _readbacks;
+    readonly long[] _pageLoadedAt;
+    readonly List<int> _queue = new();   // wanted chunks, highest priority first
     bool _pumping, _poolFullLogged, _disposed;
 
     public int ResidentChunks { get; private set; }
@@ -68,7 +74,9 @@ public sealed class GpuLodPager : IDisposable
         _size = a.Allocate1D<float>(slots);
         _chunkPage = a.Allocate1D<int>(chunks);
         _want = a.Allocate1D<int>(chunks + pages);   // want flag a chunk, then used flag a page
-        _pageUsed = new bool[pages];
+        _pagePriority = new int[pages];
+        _wantPriority = new int[chunks];
+        _pageLoadedAt = new long[pages];
         _starts = a.Allocate1D(h.Chunks.Select(c => c.First).Append(h.NodeCount).ToArray());
         _pageChunk = Enumerable.Repeat(-1, pages).ToArray();
         _chunkPageCpu = Enumerable.Repeat(-1, chunks).ToArray();
@@ -107,19 +115,23 @@ public sealed class GpuLodPager : IDisposable
         return pager;
     }
 
-    void OnWanted(int[] chunks, bool[] pagesUsed)
+    void OnWanted(int[] chunkPriority, int[] pagePriority)
     {
         if (_disposed) return;
-        _pageUsed = pagesUsed;
+        _pagePriority = pagePriority;
+        _readbacks++;
         long now = Environment.TickCount64;
-        for (int p = 0; p < Pages && p < pagesUsed.Length; p++)
-            if (pagesUsed[p] && _pageChunk[p] >= 0) _lastWanted[_pageChunk[p]] = now;
-        foreach (int c in chunks)
+        for (int p = 0; p < Pages && p < pagePriority.Length; p++)
+            if (pagePriority[p] > 0 && _pageChunk[p] >= 0) _lastWanted[_pageChunk[p]] = now;
+        // The queue is what THIS cut wants, biggest stand-in first (the previous cut's wants are stale).
+        _queue.Clear();
+        for (int c = 0; c < chunkPriority.Length; c++)
         {
-            _lastWanted[c] = now;
-            if (_chunkPageCpu[c] < 0 && _queued.Add(c)) _queue.Enqueue(c);
+            _wantPriority[c] = chunkPriority[c];
+            if (chunkPriority[c] > 0 && _chunkPageCpu[c] < 0) { _lastWanted[c] = now; _queue.Add(c); }
         }
-        if (!_pumping) _ = PumpAsync();
+        _queue.Sort((x, y) => chunkPriority[y].CompareTo(chunkPriority[x]));
+        if (!_pumping && _queue.Count > 0) _ = PumpAsync();
     }
 
     async Task PumpAsync()
@@ -131,12 +143,11 @@ public sealed class GpuLodPager : IDisposable
         {
             while (_queue.Count > 0 && !_disposed)
             {
-                int c = _queue.Dequeue();
-                _queued.Remove(c);
-                if (!await LoadWithNeedsAsync(c))
+                int c = _queue[0];
+                _queue.RemoveAt(0);
+                if (!await LoadWithNeedsAsync(c, _wantPriority[c]))
                 {
-                    // The pool is full of chunks the view still needs: drop what is queued, the cut asks again.
-                    foreach (int q in _queue) _queued.Remove(q);
+                    // The pool holds what matters more than anything still queued: stop; the next cut asks again.
                     _queue.Clear();
                     break;
                 }
@@ -153,16 +164,19 @@ public sealed class GpuLodPager : IDisposable
         }
     }
 
-    /// <summary>Make chunk <paramref name="c"/> resident, the chunks it needs first. False when the pool has no room.</summary>
-    async Task<bool> LoadWithNeedsAsync(int c)
+    /// <summary>
+    /// Make chunk <paramref name="c"/> resident, the chunks it needs first, for a stand-in of priority
+    /// <paramref name="priority"/>. False when no page may be given up for it.
+    /// </summary>
+    async Task<bool> LoadWithNeedsAsync(int c, int priority = int.MaxValue)
     {
         if (_chunkPageCpu[c] >= 0) return true;
         var needs = _h.Chunks[c].Needs;
         foreach (int need in needs)
-            if (!await LoadWithNeedsAsync(need)) return false;
+            if (!await LoadWithNeedsAsync(need, priority)) return false;
         // Hold what it needs while a page is found (they must not be evicted for it).
         foreach (int need in needs) _dependents[need]++;
-        int page = FreePage();
+        int page = FreePage(priority);
         if (page < 0)
         {
             foreach (int need in needs) _dependents[need]--;
@@ -174,20 +188,26 @@ public sealed class GpuLodPager : IDisposable
     }
 
     /// <summary>
-    /// A free page, or one freed by evicting the least recently used chunk that nothing resident needs and the latest
-    /// cut did not draw from (evicting a page in use made a small pool thrash: load A, evict B, load B, evict A...).
-    /// "Latest" is the latest cut read back: a sort still in flight may draw from the page, and for that one sort its
-    /// slots show the new chunk's rows - a single-frame glitch, rare because in-use pages are kept.
+    /// A free page, or one freed by evicting a chunk nothing resident needs, judged by the latest cut: one it did not
+    /// draw from (least recently used first), else the one whose loss would show the smallest stand-in - and only if
+    /// that matters well under <paramref name="priority"/> (1.5x: without the gap two chunks of a full pool trade
+    /// places forever; a 600K pool on TruckFull did, and filled itself with background while the near truck stayed
+    /// coarse). A page loaded since the previous readback is never judged (no cut has seen it yet). A sort still in
+    /// flight may draw from an evicted page: for that one sort its slots show the new chunk's rows - a rare glitch.
     /// </summary>
-    int FreePage()
+    int FreePage(int priority)
     {
         for (int p = 0; p < Pages; p++) if (_pageChunk[p] < 0) return p;
         int victim = -1;
         for (int p = 0; p < Pages; p++)
         {
             int c = _pageChunk[p];
-            if (c <= 0 || _dependents[c] > 0 || (p < _pageUsed.Length && _pageUsed[p])) continue;
-            if (victim < 0 || _lastWanted[c] < _lastWanted[_pageChunk[victim]]) victim = p;
+            if (c <= 0 || _dependents[c] > 0 || _readbacks - _pageLoadedAt[p] < 2) continue;
+            int pp = p < _pagePriority.Length ? _pagePriority[p] : 0;
+            if (pp > 0 && (long)pp * 3 >= (long)priority * 2) continue;   // matters too much to give up for this
+            if (victim < 0) { victim = p; continue; }
+            int vp = victim < _pagePriority.Length ? _pagePriority[victim] : 0;
+            if (pp < vp || (pp == vp && _lastWanted[c] < _lastWanted[_pageChunk[victim]])) victim = p;
         }
         if (victim < 0) return -1;
         Evict(_pageChunk[victim]);
@@ -252,6 +272,7 @@ public sealed class GpuLodPager : IDisposable
         finally { foreach (var t in temps) t.Dispose(); }
         _chunkPageCpu[c] = page;
         _pageChunk[page] = c;
+        _pageLoadedAt[page] = _readbacks;
         _lastWanted[c] = Environment.TickCount64;
         ResidentChunks++;
         Loads++;

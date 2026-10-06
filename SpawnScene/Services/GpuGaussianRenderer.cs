@@ -338,8 +338,8 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>Cut and sort again on the next frame even with a still camera (the drawn rows changed).</summary>
     public void RequestResort() => _sorter.RequestResort();
 
-    /// <summary>The streamed tree's cut wants these chunks loaded and used these pages (GpuSplatSorter.LodChunksWanted).</summary>
-    public event Action<int[], bool[]>? LodChunksWanted
+    /// <summary>The streamed tree's cut: chunk and page priorities (GpuSplatSorter.LodChunksWanted).</summary>
+    public event Action<int[], int[]>? LodChunksWanted
     {
         add => _sorter.LodChunksWanted += value;
         remove => _sorter.LodChunksWanted -= value;

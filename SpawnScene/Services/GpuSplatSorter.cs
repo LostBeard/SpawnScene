@@ -67,10 +67,11 @@ public class GpuSplatSorter : IDisposable
     int _lodPages;
 
     /// <summary>
-    /// After each paged cut: the chunks it wanted (drawn nodes stand in for children whose chunk is not resident) and the
-    /// pages it drew from on screen - the pager must not evict those.
+    /// After each paged cut, one value a chunk then one a page (0 = none): a wanted chunk's priority (1 + 16 x the px
+    /// of the node standing in for it) and a page's (1 + 16 x the px of its drawn nodes' largest parent, i.e. what an
+    /// eviction would show instead). GpuLodPager loads and evicts by them.
     /// </summary>
-    public event Action<int[], bool[]>? LodChunksWanted;
+    public event Action<int[], int[]>? LodChunksWanted;
 
     /// <summary>The LOD cut threshold in pixels: a node is drawn once its view size is at most this.</summary>
     public float LodTau { get; set; } = 1.5f;
@@ -110,11 +111,8 @@ public class GpuSplatSorter : IDisposable
             if (!wantRead.IsFaulted)
             {
                 var flags = wantRead.Result;
-                var wanted = new List<int>();
-                for (int c = 0; c < _lodChunkCount && c < flags.Length; c++) if (flags[c] != 0) wanted.Add(c);
-                var used = new bool[_lodPages];
-                for (int p = 0; p < _lodPages && _lodChunkCount + p < flags.Length; p++) used[p] = flags[_lodChunkCount + p] != 0;
-                LodChunksWanted?.Invoke(wanted.ToArray(), used);
+                if (flags.Length >= _lodChunkCount + _lodPages)
+                    LodChunksWanted?.Invoke(flags[.._lodChunkCount], flags[_lodChunkCount..(_lodChunkCount + _lodPages)]);
             }
         }
         if (_lodCountRead is not { IsCompleted: true } read) return;
@@ -445,13 +443,19 @@ public class GpuSplatSorter : IDisposable
         int i = index;
         if (i >= p.SplatCount) return;
         int parent = parentSlot[i];
-        bool take = parent != -2 && (parent < 0 || LodPixelSize(parent, lodBounds, lodSize, p) > p.LodTau);
+        float parentPx = parent >= 0 ? LodPixelSize(parent, lodBounds, lodSize, p) : 1e6f;
+        bool take = parent != -2 && parentPx > p.LodTau;
         int wantChunk = -1;
-        if (take && LodPixelSize(i, lodBounds, lodSize, p) > p.LodTau)
+        float selfPx = 0f;
+        if (take)
         {
-            int cc = childChunk[i];
-            if (cc >= 0 && chunkPage[cc] >= 0) take = false;   // its children are resident: they draw
-            else wantChunk = cc;
+            selfPx = LodPixelSize(i, lodBounds, lodSize, p);
+            if (selfPx > p.LodTau)
+            {
+                int cc = childChunk[i];
+                if (cc >= 0 && chunkPage[cc] >= 0) take = false;   // its children are resident: they draw
+                else wantChunk = cc;
+            }
         }
         if (!take)
         {
@@ -479,8 +483,10 @@ public class GpuSplatSorter : IDisposable
             outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
             outIndices[i] = i;
             Atomic.Add(ref drawnCount[0], 1);
-            if (wantChunk >= 0) want[wantChunk] = 1;
-            want[p.LodChunkCount + i / p.LodPageNodes] = 1;   // this page is in use on screen
+            // Priorities in 1/16 px: a wanted chunk by the size of the node standing in for it, a page by its drawn
+            // nodes' largest parent - the stand-in that would show if it were evicted (GpuLodPager weighs the two).
+            if (wantChunk >= 0) Atomic.Max(ref want[wantChunk], 1 + (int)XMath.Min(selfPx * 16f, 1e8f));
+            Atomic.Max(ref want[p.LodChunkCount + i / p.LodPageNodes], 1 + (int)XMath.Min(parentPx * 16f, 1e8f));
             return;
         }
         outDistances[i] = -1;

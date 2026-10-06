@@ -61,6 +61,16 @@ public class GpuSplatSorter : IDisposable
         ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, CullParams>? _cullDistanceLodPagedKernel;
     MemoryBuffer1D<int, Stride1D.Dense>? _lodChildChunk, _lodChunkPage, _lodWant;
     int _lodChunkCount, _lodPageNodes;
+    int _lodSortCount;
+    Action<Index1D, ArrayView1D<int, Stride1D.Dense>, int, int>? _fillInt;
+
+    /// <summary>
+    /// How many sorted entries an LOD cut gets: the last drawn count with room to grow (x1.25 + 8192), all of them
+    /// before the first count. A cut that outgrows it draws its overflow unsorted until the next sort (one sort,
+    /// rarely): a 4M-slot pool drawing 500K no longer sorts 4M keys.
+    /// </summary>
+    static int SortCountFor(int lastDrawn, int slots)
+        => lastDrawn < 0 ? slots : (int)Math.Min(slots, lastDrawn + lastDrawn / 4L + 8192);
     bool _lodPaged;
     Task<int[]>? _lodWantRead;
 
@@ -388,12 +398,7 @@ public class GpuSplatSorter : IDisposable
         bool smallEnough = i < p.LodLeafCount || LodPixelSize(i, lodBounds, lodSize, p) <= p.LodTau;
         int parent = lodParent[i];
         bool parentTooBig = parent < 0 || LodPixelSize(parent, lodBounds, lodSize, p) > p.LodTau;
-        if (!(smallEnough && parentTooBig))
-        {
-            outDistances[i] = -1;
-            outIndices[i] = -1;
-            return;
-        }
+        if (!(smallEnough && parentTooBig)) return;   // not in the cut: no entry (the prefix was filled with sentinels)
         int o = i * FloatsPerSplat;
         float x = packedData[o], y = packedData[o + 1], z = packedData[o + 2];
         float s0 = packedData[o + 6], s1 = packedData[o + 7], s2 = packedData[o + 8];
@@ -410,14 +415,12 @@ public class GpuSplatSorter : IDisposable
         float dist = (x - p.CamPosX) * p.CamFwdX + (y - p.CamPosY) * p.CamFwdY + (z - p.CamPosZ) * p.CamFwdZ;
         if (visible && dist > 0f)
         {
+            // Compacted: the cut fills the front of the arrays, so the sort only needs a prefix (SortCountFor).
             int qDist = (int)(dist * p.DistScale);
-            outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
-            outIndices[i] = i;
-            Atomic.Add(ref drawnCount[0], 1);
-            return;
+            int slot = Atomic.Add(ref drawnCount[0], 1);
+            outDistances[slot] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
+            outIndices[slot] = i;
         }
-        outDistances[i] = -1;
-        outIndices[i] = -1;
     }
 
     /// <summary>
@@ -457,12 +460,7 @@ public class GpuSplatSorter : IDisposable
                 else wantChunk = cc;
             }
         }
-        if (!take)
-        {
-            outDistances[i] = -1;
-            outIndices[i] = -1;
-            return;
-        }
+        if (!take) return;   // no entry (the prefix was filled with sentinels)
         int o = i * FloatsPerSplat;
         float x = packedData[o], y = packedData[o + 1], z = packedData[o + 2];
         float s0 = packedData[o + 6], s1 = packedData[o + 7], s2 = packedData[o + 8];
@@ -480,17 +478,14 @@ public class GpuSplatSorter : IDisposable
         if (visible && dist > 0f)
         {
             int qDist = (int)(dist * p.DistScale);
-            outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
-            outIndices[i] = i;
-            Atomic.Add(ref drawnCount[0], 1);
+            int slot = Atomic.Add(ref drawnCount[0], 1);
+            outDistances[slot] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
+            outIndices[slot] = i;
             // Priorities in 1/16 px: a wanted chunk by the size of the node standing in for it, a page by its drawn
             // nodes' largest parent - the stand-in that would show if it were evicted (GpuLodPager weighs the two).
             if (wantChunk >= 0) Atomic.Max(ref want[wantChunk], 1 + (int)XMath.Min(selfPx * 16f, 1e8f));
             Atomic.Max(ref want[p.LodChunkCount + i / p.LodPageNodes], 1 + (int)XMath.Min(parentPx * 16f, 1e8f));
-            return;
         }
-        outDistances[i] = -1;
-        outIndices[i] = -1;
     }
 
     /// <summary>LodTree.PixelSize on the GPU: LOD size x focal / max(distance to the bounding sphere, 0.1).</summary>
@@ -786,6 +781,12 @@ public class GpuSplatSorter : IDisposable
                 CullParams>(CullAndDistanceLodKernel);
             _lodDrawnCount ??= accelerator.Allocate1D<int>(1);
             _lodDrawnCount.MemSetToZero();
+            // The LOD culls write the cut COMPACTED to the front; the sort covers only a prefix sized from the last
+            // count, which must hold sentinels where no entry lands (stale entries would sort into the cut).
+            _lodSortCount = SortCountFor(LodDrawn, _splatCount);
+            _fillInt ??= accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, int, int>(LodPageKernels.FillKernel);
+            _fillInt(_lodSortCount, _distanceBuf!.View, 0, -1);
+            _fillInt(_lodSortCount, _indicesBuf.View, 0, -1);
             if (_lodPaged)
             {
                 _cullDistanceLodPagedKernel ??= accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>,
@@ -830,8 +831,8 @@ public class GpuSplatSorter : IDisposable
             // The cull kernel is in ILGPU's pending encoder and the sort is a raw submission: submit the
             // cull first or the sort runs on last frame's keys (see RemapGpuFencedAsync for that bug).
             accelerator.FlushPendingCommands();
-            _radixSort!.Sort(_distanceBuf.GetGPUBuffer()!, _indicesBuf.GetGPUBuffer()!, _splatCount,
-                Use16BitSort ? 16 : 32);
+            _radixSort!.Sort(_distanceBuf.GetGPUBuffer()!, _indicesBuf.GetGPUBuffer()!,
+                _lodParent != null ? _lodSortCount : _splatCount, Use16BitSort ? 16 : 32);
         }
 
         // ── Diagnostic: one-time async readback to validate sort output ──

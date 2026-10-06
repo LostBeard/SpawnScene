@@ -143,6 +143,31 @@ public static class GpuLodLayout
         }
     }
 
+    /// <summary>
+    /// A laid-out block's parent and first-child indices as FILE indices (LodLayout.Forest): every index moved by
+    /// <paramref name="offset"/>, and the block's roots (parent -1) hung off <paramref name="rootParent"/>.
+    /// </summary>
+    public static (MemoryBuffer1D<int, Stride1D.Dense> Parent, MemoryBuffer1D<int, Stride1D.Dense> FirstChild)
+        OffsetIndices(Accelerator a, GpuLodTree laid, int offset, int rootParent)
+    {
+        int n = laid.NodeCount;
+        var parent = a.Allocate1D<int>(n);
+        var first = a.Allocate1D<int>(n);
+        var k = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+            ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int>(OffsetKernel);
+        k(n, laid.Parent.View, laid.FirstChild.View, parent.View, first.View, offset, rootParent);
+        return (parent, first);
+    }
+
+    static void OffsetKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> parent, ArrayView1D<int, Stride1D.Dense> first,
+        ArrayView1D<int, Stride1D.Dense> outParent, ArrayView1D<int, Stride1D.Dense> outFirst, int offset, int rootParent)
+    {
+        int p = parent[i];
+        outParent[i] = p < 0 ? rootParent : p + offset;
+        int f = first[i];
+        outFirst[i] = f < 0 ? -1 : f + offset;
+    }
+
     /// <summary>CPU transfer: two ints - the last flag and its exclusive prefix, i.e. the sum over the range.</summary>
     static async Task<int> TotalAsync(Accelerator a, MemoryBuffer1D<int, Stride1D.Dense> flag, MemoryBuffer1D<int, Stride1D.Dense> slot, int m)
     {

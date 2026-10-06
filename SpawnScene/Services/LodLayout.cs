@@ -204,15 +204,26 @@ public static class LodLayout
     /// <summary>Node p's sphere around its children's [first, first+count) spheres; its LOD size at least theirs.</summary>
     static void Enclose(LodTree t, int p, int first, int count)
     {
-        float cx = t.Rows[p * SplatFormat.Floats], cy = t.Rows[p * SplatFormat.Floats + 1], cz = t.Rows[p * SplatFormat.Floats + 2];
-        float rad = 0f, size = LodTree.SizeOf(t.Rows.AsSpan(p * SplatFormat.Floats, SplatFormat.Floats));
-        for (int c = first; c < first + count; c++)
+        Enclose(t.Rows.AsSpan(p * SplatFormat.Floats, SplatFormat.Floats), t.Bounds.AsSpan(first * 4, count * 4),
+            t.LodSize.AsSpan(first, count), t.Bounds.AsSpan(p * 4, 4), out t.LodSize[p]);
+    }
+
+    /// <summary>
+    /// A merged node's sphere (centred on its row's position, around every child sphere) and LOD size (its own, raised to
+    /// its children's largest) - what keeps the cut's metric from growing parent to child.
+    /// </summary>
+    public static void Enclose(ReadOnlySpan<float> row, ReadOnlySpan<float> childBounds, ReadOnlySpan<float> childSizes,
+        Span<float> bounds, out float size)
+    {
+        float cx = row[0], cy = row[1], cz = row[2];
+        float rad = 0f;
+        size = LodTree.SizeOf(row);
+        for (int c = 0; c < childSizes.Length; c++)
         {
-            float dx = t.Bounds[c * 4] - cx, dy = t.Bounds[c * 4 + 1] - cy, dz = t.Bounds[c * 4 + 2] - cz;
-            rad = MathF.Max(rad, MathF.Sqrt(dx * dx + dy * dy + dz * dz) + t.Bounds[c * 4 + 3]);
-            size = MathF.Max(size, t.LodSize[c]);
+            float dx = childBounds[c * 4] - cx, dy = childBounds[c * 4 + 1] - cy, dz = childBounds[c * 4 + 2] - cz;
+            rad = MathF.Max(rad, MathF.Sqrt(dx * dx + dy * dy + dz * dz) + childBounds[c * 4 + 3]);
+            size = MathF.Max(size, childSizes[c]);
         }
-        t.Bounds[p * 4] = cx; t.Bounds[p * 4 + 1] = cy; t.Bounds[p * 4 + 2] = cz; t.Bounds[p * 4 + 3] = rad;
-        t.LodSize[p] = size;
+        bounds[0] = cx; bounds[1] = cy; bounds[2] = cz; bounds[3] = rad;
     }
 }

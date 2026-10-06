@@ -63,7 +63,8 @@ public static class LodMerge
         }
     }
 
-    static float WeightOf(float[] rows, int o)
+    /// <summary><see cref="Weight"/> on a CPU array.</summary>
+    public static float WeightOf(float[] rows, int o)
     {
         float sx = rows[o + SplatFormat.OffScale], sy = rows[o + SplatFormat.OffScale + 1], sz = rows[o + SplatFormat.OffScale + 2];
         return MathF.Max(1e-12f, rows[o + SplatFormat.OffOpacity] * Area(sx, sy, sz));

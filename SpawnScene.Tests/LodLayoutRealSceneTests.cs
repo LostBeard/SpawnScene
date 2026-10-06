@@ -80,6 +80,8 @@ public class LodLayoutRealSceneTests
     [Test]
     public void Layouts_OnTruck30K()
     {
+        // The c14 sample (reference densify, v1 flat rows) was replaced 2026-10-06 by the AbsGS v3 tree; any v1 export works.
+        if (!File.Exists(Sample)) Assert.Ignore($"needs a v1 TruckFull export at {Sample}");
         var (rows, n, home) = LoadV1(Sample);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var t = LodTree.Build(rows, n);

@@ -106,6 +106,11 @@ In code, CPU-tested; browser checks pending where noted:
   (half), held-out-free supervised 36.27 dB / SSIM 0.9649 vs 36.32 / 0.9666 -> Export streaming: 1,614,172 nodes,
   100 chunks, 96 MB. The home view needs 59 of 100 chunks and draws 160K (was 316K), visually the same room. This
   file replaced samples/drjohnson_lod.spawnscene.
+- **Truck refresh (10-06 15:50, c47):** TruckFull 30K (c14's user path, own SfM, 979 px) on AbsGS -> 891,623 splats
+  (c14: 1,898,002), supervised 27.26 dB / SSIM 0.910 (26.79 / 0.900), 29 min of training -> Export streaming 76 MB,
+  74 chunks; the home view draws 382K (was 766K). Tread, rim lugs and door lettering are crisper; parked 25 deg either
+  side of the photo the wheels and bumper stay clean (only unseen surfaces - bed floor from above, under the chassis -
+  are soft). samples/truck_absgs30k_lod.spawnscene replaced truck_ours30k + truck_ours30k_lod.
 - **Next:** a hosted massive scene (GitHub Pages serves Range); Quest on-device check of the budget; scenes larger
   than one GPU (train per block, export per block, one tree).
 

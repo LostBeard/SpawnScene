@@ -36,6 +36,20 @@ public sealed class SplatEditor : IDisposable
         public float SizeAbove;
         /// <summary>1: the region is the editor's per-splat selection mask (<see cref="CombineAsync"/>), not a box or rows.</summary>
         public int UseMask;
+        /// <summary>1: the x/y range is an ellipse inscribed in it, not the box - a round brush dab on screen. Only ever
+        /// combined into the mask (<see cref="CombineAsync"/>), so the renderer's tint test never sees it.</summary>
+        public int Round;
+
+        /// <summary>A round dab of <paramref name="radiusPx"/> around <paramref name="centrePx"/> on a
+        /// <paramref name="width"/> x <paramref name="height"/> screen, near to far (see <see cref="ScreenRect"/>).</summary>
+        public static Volume ScreenCircle(Matrix4x4 viewProjection, Vector2 centrePx, float radiusPx, float width, float height)
+        {
+            float cx = centrePx.X / width * 2f - 1f, cy = 1f - centrePx.Y / height * 2f;
+            float rx = radiusPx / width * 2f, ry = radiusPx / height * 2f;
+            var v = ScreenRect(viewProjection, cx - rx, cx + rx, cy - ry, cy + ry);
+            v.Round = 1;
+            return v;
+        }
 
         /// <summary>The editor's mask as the region: what add / subtract selections built.</summary>
         public static Volume Masked() => new() { UseMask = 1, M44 = 1 };
@@ -142,7 +156,13 @@ public sealed class SplatEditor : IDisposable
         float cw = x * v.M14 + y * v.M24 + z * v.M34 + v.M44;
         if (cw <= 1e-7f) return false;
         float nx = cx / cw, ny = cy / cw, nz = cz / cw;
-        return nx >= v.X0 && nx <= v.X1 && ny >= v.Y0 && ny <= v.Y1 && nz >= v.Z0 && nz <= v.Z1;
+        if (nz < v.Z0 || nz > v.Z1) return false;
+        if (v.Round != 0)
+        {
+            float ex = (2f * nx - v.X0 - v.X1) / (v.X1 - v.X0), ey = (2f * ny - v.Y0 - v.Y1) / (v.Y1 - v.Y0);
+            return ex * ex + ey * ey <= 1f;
+        }
+        return nx >= v.X0 && nx <= v.X1 && ny >= v.Y0 && ny <= v.Y1;
     }
 
     static void CountKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, ArrayView1D<int, Stride1D.Dense> mask,

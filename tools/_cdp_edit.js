@@ -147,17 +147,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     }
     // Top bar: Edit sits left of AR (canvas 1600 wide, Send to Headset hidden on loopback). Toolbar: left edge,
     // buttons 42 px apart from y 97: Select, Delete, Keep only, Copy, Cut, Paste, Undo, Clear selection, Save.
-    // Toolbar (Studio.Edit BuildEditToolbar): two columns centred at x 79 / 193, rows 42 px apart from y 97 - row 2 is
-    // the New / Add / Subtract strip (three buttons centred at x 60 / 136 / 212); the two filter sliders under the move
+    // Toolbar (Studio.Edit BuildEditToolbar): two columns centred at x 79 / 193, rows 42 px apart from y 97 - rows 1
+    // (Select / Brush / Undo) and 2 (New / Add / Subtract) are three buttons centred at x 60 / 136 / 212; the two filter sliders under the move
     // buttons, their tracks 224 px wide from x 24.
     const B = {
-      select: [79, 97], undo: [193, 97], modeNew: [60, 139], modeAdd: [136, 139], modeSubtract: [212, 139],
+      select: [60, 97], brush: [136, 97], undo: [212, 97], modeNew: [60, 139], modeAdd: [136, 139], modeSubtract: [212, 139],
       del: [79, 181], keep: [193, 181], all: [79, 223], invert: [193, 223], clear: [79, 265], insert: [193, 265],
       copy: [79, 307], cut: [193, 307], paste: [79, 349], save: [193, 349], exportFile: [79, 391], exportStreaming: [193, 391],
       moveUp: [79, 519],
     };
     const Y = { faintSlider: 634, largeSlider: 680 };
     const sliderX = f => 24 + f * 224;
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'brush') {
+      // SPAWNSCENE_EDIT_FLOW=brush (after importing the Bicycle sample): Brush, one stroke along the top tube; a Ctrl
+      // stroke through its middle takes part back; Delete, Undo. Counts print as [Edit].
+      await click(1288, 28); await sleep(800);                       // Edit
+      await click(...B.brush); await sleep(500);
+      await drag(640, 330, 900, 330);                                 // along the top tube
+      await sleep(2500); await shot('b0_stroke');
+      await keyDown('ControlLeft', 'Control', 17);
+      await drag(770, 250, 770, 420);                                 // - a vertical stroke through the middle
+      await keyUp('ControlLeft', 'Control', 17);
+      await sleep(2500); await shot('b1_minus');
+      await click(...B.del); await sleep(2000); await shot('b2_deleted');
+      await click(...B.undo); await sleep(2000);
+      return;
+    }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'mask') {
       // SPAWNSCENE_EDIT_FLOW=mask (after importing the Bicycle sample): Select the front wheel; Shift-drag adds the rear
       // wheel; the Subtract button, then a drag takes the rear hub back out; Delete, Undo. Counts print as [Edit].

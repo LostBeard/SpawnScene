@@ -149,6 +149,20 @@ public class SplatEditorTests
     }
 
     [Test]
+    public void ScreenCircle_IsRoundOnScreen_NotItsBox()
+    {
+        // The identity as view * projection: NDC = world x, y; a 1000 x 500 screen, a 100 px dab at its centre covers
+        // NDC x within 0.2 and y within 0.4.
+        var v = SplatEditor.Volume.ScreenCircle(Matrix4x4.Identity, new Vector2(500, 250), 100, 1000, 500);
+        Assert.That(SplatEditor.Inside(v, 0f, 0f, 0.5f), Is.True, "centre");
+        Assert.That(SplatEditor.Inside(v, 0.19f, 0f, 0.5f), Is.True, "inside on x");
+        Assert.That(SplatEditor.Inside(v, 0f, 0.39f, 0.5f), Is.True, "inside on y");
+        Assert.That(SplatEditor.Inside(v, 0.15f, 0.3f, 0.5f), Is.False, "the box's corner, outside the circle");
+        Assert.That(SplatEditor.Inside(v, 0.21f, 0f, 0.5f), Is.False, "past the radius");
+        Assert.That(SplatEditor.Inside(v, 0f, 0f, 1.5f), Is.False, "past far");
+    }
+
+    [Test]
     public async Task MaskSelection_ReplaceAddSubtract_FiltersOnTop_DrivesTheEdits()
     {
         using var context = Context.Create(b => b.CPU());

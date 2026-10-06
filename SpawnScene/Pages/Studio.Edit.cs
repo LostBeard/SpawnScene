@@ -36,11 +36,22 @@ public partial class Studio
     bool _countRunning, _countAgain;
     /// <summary>How a dragged rectangle combines with the selection when no key says otherwise (Shift adds, Ctrl subtracts).</summary>
     SplatEditor.Combine _combineMode = SplatEditor.Combine.Replace;
+    /// <summary>Select mode paints round dabs into the selection instead of dragging a rectangle.</summary>
+    bool _brushMode;
+    float _brushRadius = 30f;
+    UIPanel? _brushCursor;
+    /// <summary>The stroke in progress: how its dabs combine (a New stroke's first dab replaces, the rest add), the last
+    /// dab, and dabs waiting while one is on the GPU.</summary>
+    SplatEditor.Combine _strokeOp;
+    Vector2 _lastDab;
+    readonly List<Vector2> _pendingDabs = new();
+    bool _dabRunning;
 
     /// <summary>The Edit toolbar (left edge, under the top bar), built with the viewer HUD when Edit is open.</summary>
     void BuildEditToolbar()
     {
         _selectRect = null;
+        _brushCursor = null;
         _editStatus = null;
         _selectButton = null;
         if (!_editOpen) return;
@@ -65,13 +76,35 @@ public partial class Studio
             if (++col == 2) { col = 0; by += h + gap; }
             return b;
         }
-        _selectButton = Add(_selectMode ? "Selecting..." : "Select", () =>
+        // Select (rectangle) / Brush / Undo: the first two pick what a drag in select mode does.
         {
-            _selectMode = !_selectMode;
-            ReleasePointerLock();
-            BuildViewerHudUI();
-        }, _selectMode);
-        Add("Undo", () => _ = UndoEditAsync());
+            float tw = (w - 8) / 3f;
+            UIButton Tool(int k, string text, bool on, Action click)
+            {
+                var b = panel.AddChild(new UIButton
+                {
+                    X = 12 + k * (tw + 4), Y = by, Width = tw, Height = h, Text = text, FontSize = FontSize.Caption, OnClick = click,
+                });
+                if (on) b.NormalColor = AccentSelected;
+                return b;
+            }
+            _selectButton = Tool(0, _selectMode && !_brushMode ? "Selecting..." : "Select", _selectMode && !_brushMode, () =>
+            {
+                _selectMode = !(_selectMode && !_brushMode);
+                _brushMode = false;
+                ReleasePointerLock();
+                BuildViewerHudUI();
+            });
+            Tool(1, _selectMode && _brushMode ? "Brushing..." : "Brush", _selectMode && _brushMode, () =>
+            {
+                _selectMode = !(_selectMode && _brushMode);
+                _brushMode = _selectMode;
+                ReleasePointerLock();
+                BuildViewerHudUI();
+            });
+            Tool(2, "Undo", false, () => _ = UndoEditAsync());
+            by += h + gap;
+        }
         // New / Add / Subtract for the next rectangle (Shift = add, Ctrl = subtract while dragging, whatever this says).
         {
             float sw = (w - 8) / 3f;
@@ -150,6 +183,13 @@ public partial class Studio
             X = 12, Y = my, Width = w, Height = 40, Label = "Largest % of splats",
             MinValue = 0f, MaxValue = 10f, Value = _sizeFilterPercent,
             OnChanged = val => _ = SetSizeFilterAsync(val),
+        });
+        my += 46;
+        panel.AddChild(new UISlider
+        {
+            X = 12, Y = my, Width = w, Height = 40, Label = "Brush size (px)",
+            MinValue = 5f, MaxValue = 150f, Value = _brushRadius,
+            OnChanged = val => _brushRadius = val,
         });
         my += 46;
         panel.Height = my + 8;
@@ -386,6 +426,101 @@ public partial class Studio
         : _selection != null ? $"{_selectedCount:N0} selected"
         : _selectMode ? "Drag over the scene" : "Nothing selected";
 
+    // -- Brush: round dabs along the stroke, each combined into the selection mask on the GPU --
+
+    bool HandleBrushPointer(SpawnDev.GameUI.Input.Pointer p, Vector2 pos)
+    {
+        ShowBrushCursor(pos);
+        if (p.WasPressed)
+        {
+            var hit = _uiRoot.HitTest(pos);
+            if (hit != null && !ReferenceEquals(hit, _selectRect) && !ReferenceEquals(hit, _brushCursor)) return false;
+            var keys = _gameUI.Input.Keyboard;
+            _strokeOp = keys.IsKeyDown("ShiftLeft") || keys.IsKeyDown("ShiftRight") ? SplatEditor.Combine.Add
+                : keys.IsKeyDown("ControlLeft") || keys.IsKeyDown("ControlRight") ? SplatEditor.Combine.Subtract
+                : _combineMode;
+            _dragging = true;
+            _dragStart = _dragEnd = null;
+            if (_selectRect != null) _selectRect.Visible = false;
+            _editNote = null;
+            QueueDab(pos);
+            return true;
+        }
+        if (!_dragging) return false;
+        if (p.IsPressed)
+        {
+            // Dabs a third of the radius apart, so a fast stroke leaves no gaps.
+            float step = MathF.Max(2f, _brushRadius / 3f);
+            float d = Vector2.Distance(_lastDab, pos);
+            for (float t = step; t <= d; t += step) QueueDab(Vector2.Lerp(_lastDab, pos, t / d));
+            return true;
+        }
+        _dragging = false;
+        _ = CountSelectionAsync();
+        return true;
+    }
+
+    void QueueDab(Vector2 pos)
+    {
+        _lastDab = pos;
+        _pendingDabs.Add(pos);
+        if (!_dabRunning) _ = RunDabsAsync();
+    }
+
+    /// <summary>Combine the waiting dabs, one GPU pass each, in order: a New stroke replaces on its first dab and adds after.</summary>
+    async Task RunDabsAsync()
+    {
+        var packed = _gpuRenderer.PackedSplatBuffer;
+        if (packed == null) { _pendingDabs.Clear(); return; }
+        _dabRunning = true;
+        try
+        {
+            var accel = _gpuService.WebGPUAccelerator;
+            var cam = _sceneManager.Camera;
+            var vp = cam.ViewMatrix * cam.ProjectionMatrix;
+            while (_pendingDabs.Count > 0)
+            {
+                var c = _pendingDabs[0];
+                _pendingDabs.RemoveAt(0);
+                var prior = _selection;
+                var op = _strokeOp;
+                if (op == SplatEditor.Combine.Subtract && prior == null) continue;
+                if (prior == null) op = SplatEditor.Combine.Replace;
+                else if (op != SplatEditor.Combine.Replace && prior.Value.UseMask == 0)
+                {
+                    var regionOnly = prior.Value; regionOnly.OpacityBelow = 0f; regionOnly.SizeAbove = 0f;
+                    await _splatEditor.CombineAsync(accel, packed, _gpuRenderer.SplatCount, regionOnly, SplatEditor.Combine.Replace);
+                }
+                var dab = SplatEditor.Volume.ScreenCircle(vp, c, _brushRadius, Math.Max(1, _canvasWidth), Math.Max(1, _canvasHeight));
+                await _splatEditor.CombineAsync(accel, packed, _gpuRenderer.SplatCount, dab, op);
+                if (_strokeOp == SplatEditor.Combine.Replace) _strokeOp = SplatEditor.Combine.Add;   // the rest of a New stroke adds
+                var next = SplatEditor.Volume.Masked();
+                if (prior is { } f) { next.OpacityBelow = f.OpacityBelow; next.SizeAbove = f.SizeAbove; }
+                _selection = next;
+            }
+        }
+        catch (Exception ex) { Console.WriteLine($"[Edit] brush failed: {ex.Message}"); _pendingDabs.Clear(); }
+        finally { _dabRunning = false; }
+        if (!_dragging) await CountSelectionAsync();
+    }
+
+    void ShowBrushCursor(Vector2 pos)
+    {
+        if (_brushCursor == null)
+        {
+            // Disabled: drawn, but never hit - it sits under the pointer, and would otherwise take every toolbar click.
+            _brushCursor = _uiRoot.AddChild(new UIPanel
+            {
+                Enabled = false,
+                BackgroundColor = Color.FromArgb(30, 255, 200, 90),
+                BorderColor = Color.FromArgb(220, 255, 200, 90), BorderWidth = 2,
+            });
+        }
+        _brushCursor.X = pos.X - _brushRadius; _brushCursor.Y = pos.Y - _brushRadius;
+        _brushCursor.Width = _brushCursor.Height = 2 * _brushRadius;
+        _brushCursor.CornerRadius = _brushRadius;
+    }
+
     void ShowSelectRect(Vector2 a, Vector2 b)
     {
         float x0 = MathF.Min(a.X, b.X), y0 = MathF.Min(a.Y, b.Y);
@@ -409,6 +544,7 @@ public partial class Studio
     bool HandleSelectPointer(SpawnDev.GameUI.Input.Pointer? p)
     {
         if (!_selectMode || p == null || p.ScreenPosition is not { } pos) return false;
+        if (_brushMode) return HandleBrushPointer(p, pos);
         if (p.WasPressed)
         {
             // A click on the toolbar is not a selection - but the last rectangle's outline is UI too, and a Subtract drag

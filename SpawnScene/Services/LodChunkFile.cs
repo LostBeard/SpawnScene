@@ -13,7 +13,7 @@ namespace SpawnScene.Services;
 /// (LodLayout.ChunkStarts), so their sizes vary.
 /// <para>
 /// A chunk of n nodes, before gzip: the <see cref="SceneCodec"/> streams over the chunk's own frame (geometry n x 4
-/// words, appearance n x 3, SH n x 12 when the file has SH bands; internal nodes' SH are zero), then the cut's data,
+/// words, appearance n x 3, SH n x 12 when the file has SH bands; a merged node's are its children's weighted mean), then the cut's data,
 /// raw so the cut stays exact: parent (n int32, -1 for a root), first child (n int32, -1 for a leaf; the children are
 /// a run that never crosses a chunk), bounding sphere (n x 4 float32), LOD size (n float32, 0 for a leaf -
 /// <see cref="LodLayout"/>). Node indices are the file's (breadth-first) ones.

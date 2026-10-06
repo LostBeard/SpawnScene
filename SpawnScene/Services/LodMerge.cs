@@ -31,6 +31,44 @@ public static class LodMerge
         return MathF.PI * a * b;
     }
 
+    /// <summary>A splat's merge weight, opacity x area (as <see cref="Add"/> weighs it), from a packed row at <paramref name="o"/>.</summary>
+    public static float Weight(ILGPU.Runtime.ArrayView1D<float, ILGPU.Stride1D.Dense> rows, int o)
+    {
+        float sx = rows[o + SplatFormat.OffScale], sy = rows[o + SplatFormat.OffScale + 1], sz = rows[o + SplatFormat.OffScale + 2];
+        return XMathMax(1e-12f, rows[o + SplatFormat.OffOpacity] * Area(sx, sy, sz));
+    }
+
+    static float XMathMax(float a, float b) => a > b ? a : b;
+
+    /// <summary>
+    /// The CPU oracle for merged SH (GpuLodLayout.MergeSh) on a parent-first tree: walking the nodes backwards, each
+    /// merge takes the opacity x area weighted mean of its children's <paramref name="width"/>-float rows.
+    /// </summary>
+    public static void MergeShBottomUp(LodTree laid, float[] sh, int width)
+    {
+        for (int p = laid.NodeCount - 1; p >= 0; p--)
+        {
+            int c = laid.ChildCount[p];
+            if (c == 0) continue;
+            int first = laid.FirstChild[p];
+            float wsum = 0f;
+            for (int j = 0; j < c; j++) wsum += WeightOf(laid.Rows, (first + j) * F);
+            float inv = wsum > 0f ? 1f / wsum : 0f;
+            for (int f = 0; f < width; f++)
+            {
+                float acc = 0f;
+                for (int j = 0; j < c; j++) acc += WeightOf(laid.Rows, (first + j) * F) * sh[(first + j) * width + f];
+                sh[p * width + f] = acc * inv;
+            }
+        }
+    }
+
+    static float WeightOf(float[] rows, int o)
+    {
+        float sx = rows[o + SplatFormat.OffScale], sy = rows[o + SplatFormat.OffScale + 1], sz = rows[o + SplatFormat.OffScale + 2];
+        return MathF.Max(1e-12f, rows[o + SplatFormat.OffOpacity] * Area(sx, sy, sz));
+    }
+
     /// <summary>Add one packed splat row to <paramref name="acc"/>.</summary>
     public static void Add(ref Accum acc, ReadOnlySpan<float> row)
     {

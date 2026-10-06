@@ -141,7 +141,8 @@ public partial class Studio
             owned.Add(laid); owned.Add(order!);
             int nodes = laid.NodeCount;
 
-            // SH for every node, in the new order: the leaves' own, zero for merges.
+            // SH for every node, in the new order: the leaves' own, and each merge the weighted mean of its children's
+            // (GpuLodLayout.MergeSh) - a distant merged region keeps its view-dependent colour.
             bool withSh = _gpuRenderer.ShDegree > 0 && _gpuRenderer.ShRestBuffers != null;
             MemoryBuffer1D<float, Stride1D.Dense>[]? sh = null;
             if (withSh)
@@ -152,6 +153,7 @@ public partial class Studio
                     using var whole = _gpuRenderer.CopyShPartToIlgpu(a, p, n);
                     sh[p] = GpuLodLayout.GatherLeafRows(a, whole, order!, n, nodes, SphericalHarmonics.PartFloatsPerSplat);
                     owned.Add(sh[p]);
+                    GpuLodLayout.MergeSh(a, laid, sh[p], SphericalHarmonics.PartFloatsPerSplat);
                     await a.SynchronizeAsync();   // the gather has read `whole` before it goes
                 }
             }

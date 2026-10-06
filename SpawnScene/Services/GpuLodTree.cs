@@ -33,6 +33,9 @@ public sealed class GpuLodTree : IDisposable
     public MemoryBuffer1D<int, Stride1D.Dense> FirstChild = null!, ChildCount = null!, ChildList = null!;
     public int LeafCount, NodeCount, Levels;
 
+    /// <summary>A breadth-first layout's depth ranges (GpuLodLayout): depth d is nodes DepthStarts[d] .. DepthStarts[d+1]-1.</summary>
+    public int[]? DepthStarts;
+
     // Counters: [0] next node id (absolute), [1] next frontier length, [2] child-list fill.
     MemoryBuffer1D<int, Stride1D.Dense>? _counters;
 

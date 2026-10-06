@@ -47,6 +47,7 @@ public static class GpuLodLayout
         scan(stream, flag.View.SubView(0, n), slot.View.SubView(0, n), scanTemp.View);
         rootPlace(n, t.Parent.View.SubView(0, n), slot.View, ord.View, newIndex.View);
         int lo = 0, hi = await TotalAsync(a, flag, slot, n);
+        var depthStarts = new List<int> { 0, hi };
 
         // Then each depth's children after it.
         while (hi > lo && hi < n)
@@ -58,10 +59,11 @@ public static class GpuLodLayout
             int added = await TotalAsync(a, flag, slot, m);
             if (added == 0) break;
             lo = hi; hi += added;
+            depthStarts.Add(hi);
         }
         if (hi != n) throw new InvalidOperationException($"LOD layout reached {hi:N0} of {n:N0} nodes from the roots");
 
-        var r = new GpuLodTree { LeafCount = t.LeafCount, NodeCount = n, Levels = t.Levels };
+        var r = new GpuLodTree { LeafCount = t.LeafCount, NodeCount = n, Levels = t.Levels, DepthStarts = depthStarts.ToArray() };
         r.Nodes = a.Allocate1D<float>((long)n * F);
         r.Parent = a.Allocate1D<int>(n);
         r.Bounds = a.Allocate1D<float>((long)n * 4);
@@ -102,6 +104,43 @@ public static class GpuLodLayout
     {
         int o = order[k];
         for (int f = 0; f < width; f++) dst[k * width + f] = o < leafCount ? src[o * width + f] : 0f;
+    }
+
+    /// <summary>
+    /// SH bands for the merged nodes of a laid-out tree (<paramref name="laid"/>, with DepthStarts): each takes the
+    /// opacity x area weighted mean of its children's - the weights LodMerge gives their base colour - deepest merges
+    /// first, so every parent averages finished children. <paramref name="sh"/> holds every node's rows of
+    /// <paramref name="width"/> floats, the leaves' filled (GatherLeafRows); merges are written in place.
+    /// </summary>
+    public static void MergeSh(Accelerator a, GpuLodTree laid, MemoryBuffer1D<float, Stride1D.Dense> sh, int width)
+    {
+        var ds = laid.DepthStarts ?? throw new InvalidOperationException("the tree was not laid out (no depth ranges)");
+        var k = a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+            ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int>(MergeShKernel);
+        // DepthStarts ends with NodeCount; the deepest depth has no children to average.
+        for (int d = ds.Length - 3; d >= 0; d--)
+        {
+            int count = ds[d + 1] - ds[d];
+            if (count > 0) k(count, laid.Nodes.View, laid.FirstChild.View, laid.ChildCount.View, sh.View, ds[d], width);
+        }
+    }
+
+    static void MergeShKernel(Index1D k, ArrayView1D<float, Stride1D.Dense> nodes, ArrayView1D<int, Stride1D.Dense> firstChild,
+        ArrayView1D<int, Stride1D.Dense> childCount, ArrayView1D<float, Stride1D.Dense> sh, int start, int width)
+    {
+        int p = start + k;
+        int c = childCount[p];
+        if (c == 0) return;
+        int first = firstChild[p];
+        float wsum = 0f;
+        for (int j = 0; j < c; j++) wsum += LodMerge.Weight(nodes, (first + j) * F);
+        float inv = wsum > 0f ? 1f / wsum : 0f;
+        for (int f = 0; f < width; f++)
+        {
+            float acc = 0f;
+            for (int j = 0; j < c; j++) acc += LodMerge.Weight(nodes, (first + j) * F) * sh[(first + j) * width + f];
+            sh[p * width + f] = acc * inv;
+        }
     }
 
     /// <summary>CPU transfer: two ints - the last flag and its exclusive prefix, i.e. the sum over the range.</summary>

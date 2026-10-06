@@ -121,10 +121,13 @@ public partial class Studio
     /// <summary>Write the scene on screen as a .spawnscene v3 (LOD tree, chunked) download.</summary>
     async Task ExportLodSceneFileAsync()
     {
+        if (_editBusy) return;
         var a = _gpuService.WebGPUAccelerator;
         var packed = _gpuRenderer.PackedSplatBuffer;
         int n = _gpuRenderer.SplatCount;
         if (packed == null || n < 2) { _editNote = "Nothing to export"; return; }
+        if (_gpuRenderer.LodActive) { _editNote = "Already an LOD scene"; RefreshEditStatus(); return; }
+        _editBusy = true; _editNote = "Building the LOD tree..."; RefreshEditStatus();
         var owned = new List<IDisposable>();
         var js = new List<IDisposable>();
         try
@@ -244,6 +247,8 @@ public partial class Studio
         {
             foreach (var d in js) d.Dispose();
             foreach (var d in owned) d.Dispose();
+            _editBusy = false;
+            RefreshEditStatus();
         }
     }
 

@@ -364,6 +364,9 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>Nodes the last LOD cut drew, -1 before the first count.</summary>
     public int LodDrawn => _sorter.LodDrawn;
 
+    /// <summary>True while an LOD tree is drawn: the rows are tree nodes (or a streaming pool), not the scene's splats.</summary>
+    public bool LodActive => _sorter.LodActive;
+
     /// <summary>JS bytes into an ILGPU buffer at a byte offset (a parked block's rows into a merged scene).</summary>
     public void WriteIlgpuBytes(MemoryBuffer1D<float, Stride1D.Dense> dst, long byteOffset, ArrayBuffer bytes)
     {

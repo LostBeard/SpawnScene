@@ -38,7 +38,7 @@ public partial class Studio
         float y = 68;
         var panel = _uiRoot.AddChild(new UIPanel
         {
-            X = x, Y = y, Width = w + 24, Height = 11 * (h + gap) + 54,
+            X = x, Y = y, Width = w + 24, Height = 12 * (h + gap) + 54,
             BackgroundColor = Color.FromArgb(200, 12, 16, 22),
         });
         float by = 12;
@@ -68,6 +68,8 @@ public partial class Studio
         Add("Clear selection", () => { _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null; BuildViewerHudUI(); });
         Add("Save as new scene", () => _ = SaveEditedSceneAsync());
         Add("Export file", () => _ = ExportSceneFileAsync());
+        // The same scene as an LOD tree in chunks (.spawnscene v3): opens at once and streams, however large.
+        Add("Export streaming", () => _ = ExportLodSceneFileAsync());
         _editStatus = panel.AddChild(new UILabel
         {
             X = 12, Y = by + 2, Text = EditStatusText(), FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,

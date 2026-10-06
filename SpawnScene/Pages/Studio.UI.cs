@@ -222,6 +222,10 @@ public partial class Studio
             });
         }
 
+        // An LOD tree on screen is a view (its rows are tree nodes or a streaming pool, not the scene's splats): no Edit.
+        if (_gpuRenderer.LodActive) _editOpen = false;
+        else
+        {
         btnRight -= 80;
         _uiRoot.AddChild(new UIButton
         {
@@ -238,6 +242,7 @@ public partial class Studio
                 BuildViewerHudUI();
             },
         });
+        }
 
         BuildEditToolbar();
 

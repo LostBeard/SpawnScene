@@ -76,6 +76,79 @@ public class SplatEditorTests
     }
 
     [Test]
+    public async Task Filters_AndInvert_SelectByOpacityAndSize_OnTheGpuKernels()
+    {
+        using var context = Context.Create(b => b.CPU());
+        using var accel = context.CreateCPUAccelerator(0);
+        // Six splats at x = 0..5: opacity 0.05 / 0.9 alternating, largest axis 0.01 for x < 3 and 0.5 from x = 3.
+        const int F = SplatFormat.Floats;
+        var data = new float[6 * F];
+        for (int i = 0; i < 6; i++)
+        {
+            data[i * F] = i;
+            data[i * F + SplatFormat.OffOpacity] = i % 2 == 0 ? 0.05f : 0.9f;
+            float s = i < 3 ? 0.01f : 0.5f;
+            data[i * F + 6] = s * 0.2f; data[i * F + 7] = s; data[i * F + 8] = s * 0.5f;   // the largest is not always x
+        }
+        using var packed = accel.Allocate1D(data);
+        var editor = new SplatEditor();
+        var all = SplatEditor.Volume.All();
+        Assert.That(await editor.CountAsync(accel, packed, 6, all), Is.EqualTo(6));
+
+        var faint = all; faint.OpacityBelow = 0.1f;
+        Assert.That(await editor.CountAsync(accel, packed, 6, faint), Is.EqualTo(3), "x = 0, 2, 4");
+        var large = all; large.SizeAbove = 0.1f;
+        Assert.That(await editor.CountAsync(accel, packed, 6, large), Is.EqualTo(3), "x = 3, 4, 5 by their y axis");
+        var both = faint; both.SizeAbove = 0.1f;
+        Assert.That(await editor.CountAsync(accel, packed, 6, both), Is.EqualTo(1), "x = 4 only");
+
+        // A box around x = 1..2, inverted: x = 0, 3, 4, 5; with the faint filter: 0 and 4.
+        var box = SplatEditor.Volume.Box(Matrix4x4.CreateScale(0.6f, 1, 1) * Matrix4x4.CreateTranslation(1.5f, 0, 0));
+        var outside = box; outside.Invert = 1;
+        Assert.That(await editor.CountAsync(accel, packed, 6, outside), Is.EqualTo(4));
+        var outsideFaint = outside; outsideFaint.OpacityBelow = 0.1f;
+        await editor.ApplyAsync(accel, packed, 6, outsideFaint, SplatEditor.Mode.DeleteInside);
+        float[] op = packed.GetAsArray1D().Where((_, k) => k % F == SplatFormat.OffOpacity).ToArray();
+        Assert.That(op, Is.EqualTo(new[] { 0f, 0.9f, 0.05f, 0.9f, 0f, 0.9f }));
+        Assert.That(await editor.UndoAsync(accel, packed, 6), Is.True);
+
+        // A moved region keeps its filters.
+        var moved = outsideFaint.MovedBy(new Vector3(1, 0, 0));
+        Assert.That(moved.Invert, Is.EqualTo(1));
+        Assert.That(moved.OpacityBelow, Is.EqualTo(0.1f));
+        Assert.That(await editor.CountAsync(accel, packed, 6, moved), Is.EqualTo(2), "box now x = 2..3: outside and faint = 0, 4");
+        editor.Dispose();
+    }
+
+    [Test]
+    public async Task LargestPercent_SelectsThatShareOfTheVisibleSplats()
+    {
+        using var context = Context.Create(b => b.CPU());
+        using var accel = context.CreateCPUAccelerator(0);
+        const int F = SplatFormat.Floats, n = 10_000;
+        var rng = new Random(4);
+        var data = new float[n * F];
+        for (int i = 0; i < n; i++)
+        {
+            data[i * F] = i;
+            data[i * F + SplatFormat.OffOpacity] = i < 1000 ? 0f : 0.7f;              // 1000 deleted: not counted
+            float s = MathF.Exp((float)(rng.NextDouble() * 8 - 7));                     // log-uniform, ~1e-3 .. 2.7
+            data[i * F + 6] = s * 0.3f; data[i * F + 7] = s * 0.1f; data[i * F + 8] = s;
+        }
+        using var packed = accel.Allocate1D(data);
+        var editor = new SplatEditor();
+        foreach (double f in new[] { 0.01, 0.05, 0.1 })
+        {
+            var v = SplatEditor.Volume.All();
+            v.SizeAbove = await editor.SizeQuantileAsync(accel, packed, n, f);
+            int got = await editor.CountAsync(accel, packed, n, v);
+            // The bin edge under the quantile: at least the share, and at most one 1/64-octave bin more.
+            Assert.That(got, Is.InRange((int)(9000 * f), (int)(9000 * f) + 60), $"largest {f:P0}");
+        }
+        editor.Dispose();
+    }
+
+    [Test]
     public async Task MoveRows_ThenDelete_UndoesInOrder()
     {
         using var context = Context.Create(b => b.CPU());

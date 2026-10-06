@@ -249,7 +249,7 @@ public partial class Studio
     {
         // Edits and their undo snapshots belong to the scene they were made on.
         _splatEditor.ClearUndo();
-        _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null; _editNote = null;
+        _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null; _editNote = null; _sizeFilterPercent = 0f;
         _state = StudioState.SceneViewer;
         _cameraController?.FitToScene();
         BuildViewerHudUI();

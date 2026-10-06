@@ -26,6 +26,9 @@ public partial class Studio
     UIPanel? _selectRect;
     UILabel? _editStatus;
     UIButton? _selectButton;
+    /// <summary>The "Largest % of splats" slider's value (0 = off), kept for the toolbar's next build.</summary>
+    float _sizeFilterPercent;
+    bool _countRunning, _countAgain;
 
     /// <summary>The Edit toolbar (left edge, under the top bar), built with the viewer HUD when Edit is open.</summary>
     void BuildEditToolbar()
@@ -34,22 +37,25 @@ public partial class Studio
         _editStatus = null;
         _selectButton = null;
         if (!_editOpen) return;
-        const float x = 12, w = 132, h = 34, gap = 8;
+        // Two columns of buttons (w = both columns), so the whole toolbar with its filters stays clear of the HUD
+        // in the bottom-left corner on a 1000 px tall window.
+        const float x = 12, w = 224, h = 34, gap = 8, cw = (w - 4) / 2f;
         float y = 68;
         var panel = _uiRoot.AddChild(new UIPanel
         {
-            X = x, Y = y, Width = w + 24, Height = 12 * (h + gap) + 54,
+            X = x, Y = y, Width = w + 24, Height = 600,
             BackgroundColor = Color.FromArgb(200, 12, 16, 22),
         });
         float by = 12;
+        int col = 0;
         UIButton Add(string text, Action click, bool accent = false)
         {
             var b = panel.AddChild(new UIButton
             {
-                X = 12, Y = by, Width = w, Height = h, Text = text, FontSize = FontSize.Caption, OnClick = click,
+                X = 12 + col * (cw + 4), Y = by, Width = cw, Height = h, Text = text, FontSize = FontSize.Caption, OnClick = click,
             });
             if (accent) b.NormalColor = AccentSelected;
-            by += h + gap;
+            if (++col == 2) { col = 0; by += h + gap; }
             return b;
         }
         _selectButton = Add(_selectMode ? "Selecting..." : "Select", () =>
@@ -58,18 +64,21 @@ public partial class Studio
             ReleasePointerLock();
             BuildViewerHudUI();
         }, _selectMode);
+        Add("Undo", () => _ = UndoEditAsync());
         Add("Delete", () => _ = ApplyEditAsync(SplatEditor.Mode.DeleteInside));
         Add("Keep only", () => _ = ApplyEditAsync(SplatEditor.Mode.KeepInside));
+        Add("Select all", () => { _dragStart = _dragEnd = null; _selection = SplatEditor.Volume.All(); _ = CountSelectionAsync(); BuildViewerHudUI(); });
+        Add("Invert selection", () => ChangeSelection(v => { v.Invert ^= 1; return v; }, rebuild: true));
+        Add("Clear selection", () => { _selection = null; _selectedCount = 0; _sizeFilterPercent = 0f; _dragStart = _dragEnd = null; BuildViewerHudUI(); });
+        Add(_insertListOpen ? "Insert scene  <" : "Insert scene  >", () => _ = ToggleInsertListAsync());
         Add("Copy", () => _ = CopySelectionAsync(cut: false));
         Add("Cut", () => _ = CopySelectionAsync(cut: true));
         Add("Paste", () => _ = PasteClipboardAsync());
-        Add(_insertListOpen ? "Insert scene  <" : "Insert scene  >", () => _ = ToggleInsertListAsync());
-        Add("Undo", () => _ = UndoEditAsync());
-        Add("Clear selection", () => { _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null; BuildViewerHudUI(); });
-        Add("Save as new scene", () => _ = SaveEditedSceneAsync());
+        Add("Save as new", () => _ = SaveEditedSceneAsync());
         Add("Export file", () => _ = ExportSceneFileAsync());
         // The same scene as an LOD tree in chunks (.spawnscene v3): opens at once and streams, however large.
         Add("Export streaming", () => _ = ExportLodSceneFileAsync());
+        if (col != 0) { col = 0; by += h + gap; }
         _editStatus = panel.AddChild(new UILabel
         {
             X = 12, Y = by + 2, Text = EditStatusText(), FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
@@ -94,7 +103,27 @@ public partial class Studio
                 OnClick = () => _ = MoveSelectionAsync(dir(CameraAxes())),
             });
         }
-        panel.Height = my + 3 * (h + 4) + 8;
+        my += 3 * (h + 4) + 6;
+
+        // Filters on the selection (or the whole scene when nothing is selected): what floater clean-up needs -
+        // the faint haze and the oversized blobs - then Delete. 0 = off.
+        panel.AddChild(new UILabel { X = 12, Y = my, Text = "Filter selection", FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary });
+        my += 20;
+        panel.AddChild(new UISlider
+        {
+            X = 12, Y = my, Width = w, Height = 40, Label = "Fainter than",
+            MinValue = 0f, MaxValue = 0.5f, Value = _selection?.OpacityBelow ?? 0f,
+            OnChanged = val => ChangeSelection(v => { v.OpacityBelow = val < 0.005f ? 0f : val; return v; }),
+        });
+        my += 46;
+        panel.AddChild(new UISlider
+        {
+            X = 12, Y = my, Width = w, Height = 40, Label = "Largest % of splats",
+            MinValue = 0f, MaxValue = 10f, Value = _sizeFilterPercent,
+            OnChanged = val => _ = SetSizeFilterAsync(val),
+        });
+        my += 46;
+        panel.Height = my + 8;
         if (_dragStart is { } a && _dragEnd is { } b2) ShowSelectRect(a, b2);
         if (_insertListOpen) BuildInsertList(x + w + 24 + 8, y);
     }
@@ -397,14 +426,51 @@ public partial class Studio
 
     async Task CountSelectionAsync()
     {
+        // A slider fires many changes while it is dragged: one count at a time, and one more for the latest change.
+        if (_countRunning) { _countAgain = true; return; }
         var packed = _gpuRenderer.PackedSplatBuffer;
-        if (packed == null || _selection is not { } v) return;
-        _editBusy = true; RefreshEditStatus();
-        try { _selectedCount = await _splatEditor.CountAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v); }
+        if (packed == null || _selection is null) return;
+        _countRunning = true; _editBusy = true; RefreshEditStatus();
+        try
+        {
+            do
+            {
+                _countAgain = false;
+                if (_selection is not { } v) break;
+                _selectedCount = await _splatEditor.CountAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, v);
+            } while (_countAgain);
+        }
         catch (Exception ex) { Console.WriteLine($"[Edit] count failed: {ex.Message}"); }
-        finally { _editBusy = false; }
+        finally { _editBusy = false; _countRunning = false; }
         Console.WriteLine($"[Edit] selected {_selectedCount:N0} splats");
         RefreshEditStatus();
+    }
+
+    /// <summary>
+    /// Change the selection's invert / filters (starting from the whole scene when nothing is selected), tint and count
+    /// it. <paramref name="rebuild"/> redraws the toolbar; a slider must not (it would be rebuilt under the drag).
+    /// </summary>
+    void ChangeSelection(Func<SplatEditor.Volume, SplatEditor.Volume> change, bool rebuild = false)
+    {
+        _selection = change(_selection ?? SplatEditor.Volume.All());
+        _ = CountSelectionAsync();
+        if (rebuild) BuildViewerHudUI();
+    }
+
+    /// <summary>
+    /// The size filter as the largest <paramref name="percent"/>% of the visible splats (SplatEditor.SizeQuantileAsync).
+    /// Not a fraction of the scene's size: training caps a splat's scale (0.05 of the camera rig), so nothing in a trained
+    /// scene is "3% of the scene" and that filter selected nobody on Bicycle (MEASURED 2026-10-06).
+    /// </summary>
+    async Task SetSizeFilterAsync(float percent)
+    {
+        _sizeFilterPercent = percent;
+        var packed = _gpuRenderer.PackedSplatBuffer;
+        if (packed == null) return;
+        float size = percent < 0.01f ? 0f
+            : await _splatEditor.SizeQuantileAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount, percent / 100.0);
+        if (percent != _sizeFilterPercent) return;   // a later slider value is already on its way
+        ChangeSelection(v => { v.SizeAbove = size; return v; });
     }
 
     async Task ApplyEditAsync(SplatEditor.Mode mode)
@@ -419,7 +485,7 @@ public partial class Studio
             Console.WriteLine($"[Edit] {(mode == SplatEditor.Mode.DeleteInside ? "deleted" : "kept only")} {_selectedCount:N0} splats (undo depth {_splatEditor.UndoDepth})");
         }
         finally { _editBusy = false; }
-        _selection = null; _selectedCount = 0; _dragStart = _dragEnd = null;
+        _selection = null; _selectedCount = 0; _sizeFilterPercent = 0f; _dragStart = _dragEnd = null;
         BuildViewerHudUI();
     }
 

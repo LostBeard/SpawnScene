@@ -1,4 +1,5 @@
 using ILGPU;
+using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU;
 using System.Numerics;
@@ -27,6 +28,23 @@ public sealed class SplatEditor : IDisposable
         /// <summary>When RowTo &gt; RowFrom the selection is the rows RowFrom..RowTo instead of a region - what a
         /// paste or an inserted scene just added, so it can be moved without catching the scene around it.</summary>
         public int RowFrom, RowTo;
+        /// <summary>1: the selection is everything the region (or row range) does NOT take.</summary>
+        public int Invert;
+        /// <summary>When &gt; 0, only splats fainter than this (opacity) are selected - floaters and haze.</summary>
+        public float OpacityBelow;
+        /// <summary>When &gt; 0, only splats whose largest axis is longer than this (scene units) - blobs and needles.</summary>
+        public float SizeAbove;
+
+        /// <summary>This selection with the same invert and filters as <paramref name="from"/>.</summary>
+        public Volume WithFiltersOf(Volume from)
+        {
+            var v = this;
+            v.Invert = from.Invert; v.OpacityBelow = from.OpacityBelow; v.SizeAbove = from.SizeAbove;
+            return v;
+        }
+
+        /// <summary>Whether this selection filters by anything besides its region.</summary>
+        public readonly bool Filtered => Invert != 0 || OpacityBelow > 0f || SizeAbove > 0f;
 
         /// <summary>The same selection after its splats moved by <paramref name="offset"/>: a region moves with
         /// them (so a second move takes the same splats); a row range is unchanged.</summary>
@@ -35,7 +53,7 @@ public sealed class SplatEditor : IDisposable
             if (RowTo > RowFrom) return this;
             var m = new Matrix4x4(M11, M12, M13, M14, M21, M22, M23, M24, M31, M32, M33, M34, M41, M42, M43, M44);
             var moved = From(Matrix4x4.CreateTranslation(-offset) * m, X0, X1, Y0, Y1, Z0, Z1);
-            return moved;
+            return moved.WithFiltersOf(this);
         }
 
         /// <summary>Rows <paramref name="from"/>..<paramref name="to"/> (exclusive).</summary>
@@ -56,6 +74,9 @@ public sealed class SplatEditor : IDisposable
             => From(viewProjection, MathF.Min(ndcX0, ndcX1), MathF.Max(ndcX0, ndcX1),
                 MathF.Min(ndcY0, ndcY1), MathF.Max(ndcY0, ndcY1), 0f, 1f);
 
+        /// <summary>The whole scene (a box no splat can leave): the region for "select all" and for filters alone.</summary>
+        public static Volume All() => From(Matrix4x4.Identity, -3e38f, 3e38f, -3e38f, 3e38f, -3e38f, 3e38f);
+
         /// <summary>Inside a box whose transform maps the cube -1..1 into the scene.</summary>
         public static Volume Box(Matrix4x4 boxToScene)
         {
@@ -66,9 +87,27 @@ public sealed class SplatEditor : IDisposable
 
     public enum Mode { DeleteInside = 0, KeepInside = 1 }
 
-    /// <summary>Whether splat <paramref name="i"/> at (x, y, z) is selected: by row range or by region.</summary>
-    public static bool Selected(Volume v, int i, float x, float y, float z)
-        => v.RowTo > v.RowFrom ? i >= v.RowFrom && i < v.RowTo : Inside(v, x, y, z);
+    /// <summary>
+    /// Whether splat <paramref name="i"/> at (x, y, z) with this opacity and largest scale is selected: the filters
+    /// first (fainter than, larger than), then the row range or region, inverted when asked.
+    /// </summary>
+    public static bool Selected(Volume v, int i, float x, float y, float z, float opacity, float maxScale)
+    {
+        if (v.OpacityBelow > 0f && opacity >= v.OpacityBelow) return false;
+        if (v.SizeAbove > 0f && maxScale <= v.SizeAbove) return false;
+        bool region = v.RowTo > v.RowFrom ? i >= v.RowFrom && i < v.RowTo : Inside(v, x, y, z);
+        return region != (v.Invert != 0);
+    }
+
+    /// <summary><see cref="Selected(Volume, int, float, float, float, float, float)"/> for row <paramref name="i"/> of a packed buffer.</summary>
+    public static bool SelectedRow(Volume v, ArrayView1D<float, Stride1D.Dense> packed, int i)
+    {
+        int o = i * SplatFormat.Floats;
+        float s = packed[o + 6];
+        if (packed[o + 7] > s) s = packed[o + 7];
+        if (packed[o + 8] > s) s = packed[o + 8];
+        return Selected(v, i, packed[o], packed[o + 1], packed[o + 2], packed[o + SplatFormat.OffOpacity], s);
+    }
 
     /// <summary>The selection test, shared by the kernels and the tests.</summary>
     public static bool Inside(Volume v, float x, float y, float z)
@@ -87,7 +126,7 @@ public sealed class SplatEditor : IDisposable
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        if (Selected(v, i, packed[o], packed[o + 1], packed[o + 2])) Atomic.Add(ref count[0], 1);
+        if (SelectedRow(v, packed, i)) Atomic.Add(ref count[0], 1);
     }
 
     static void ApplyKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, int keepInside, int n)
@@ -95,7 +134,7 @@ public sealed class SplatEditor : IDisposable
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        bool inside = Selected(v, i, packed[o], packed[o + 1], packed[o + 2]);
+        bool inside = SelectedRow(v, packed, i);
         if (inside != (keepInside != 0)) packed[o + SplatFormat.OffOpacity] = 0f;
     }
 
@@ -116,7 +155,7 @@ public sealed class SplatEditor : IDisposable
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        if (!Selected(v, i, packed[o], packed[o + 1], packed[o + 2])) return;
+        if (!SelectedRow(v, packed, i)) return;
         packed[o] += dx; packed[o + 1] += dy; packed[o + 2] += dz;
     }
 
@@ -142,6 +181,7 @@ public sealed class SplatEditor : IDisposable
 
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>? _zeroFrom;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int>? _count;
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>? _sizeHist;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, int, int>? _apply;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>? _save, _restore, _savePos, _restorePos;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, float, float, float, int>? _move;
@@ -165,6 +205,7 @@ public sealed class SplatEditor : IDisposable
     void Load(Accelerator a)
     {
         _count ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int>(CountKernel);
+        _sizeHist ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SizeHistogramKernel);
         _apply ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, int, int>(ApplyKernel);
         _save ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(SaveOpacityKernel);
         _restore ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(RestoreOpacityKernel);
@@ -186,6 +227,55 @@ public sealed class SplatEditor : IDisposable
         // CPU transfer: one int, the selected count for the UI.
         var c = await count.CopyToHostAsync<int>(0, 1);
         return c[0];
+    }
+
+    // Size histogram: log2 of a splat's largest axis, SizeBinsPerOctave bins an octave from 2^SizeLog2Min.
+    public const int SizeBins = 2048;
+    const float SizeLog2Min = -24f, SizeBinsPerOctave = 64f;
+
+    /// <summary>
+    /// The largest-axis length above which the largest <paramref name="fraction"/> of the visible splats lie (the
+    /// "Largest N%" filter): a 2048-bin log2 histogram on the device, walked from the top on the host. Bins are 1/64
+    /// octave (1.1%) wide, so the result is the lower edge of the bin the quantile falls in. 0 when nothing is visible.
+    /// </summary>
+    public async Task<float> SizeQuantileAsync(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, double fraction)
+    {
+        if (n <= 0 || fraction <= 0) return 0f;
+        Load(a);
+        using var hist = a.Allocate1D<int>(SizeBins);
+        hist.MemSetToZero();
+        _sizeHist!(n, packed.View, hist.View, n);
+        await a.SynchronizeAsync();
+        // CPU transfer: the 8 KiB histogram.
+        var h = await hist.CopyToHostAsync<int>(0, SizeBins);
+        return SizeQuantile(h, fraction);
+    }
+
+    /// <summary>The host half of <see cref="SizeQuantileAsync"/>, shared with the tests.</summary>
+    public static float SizeQuantile(int[] hist, double fraction)
+    {
+        long total = 0;
+        foreach (int c in hist) total += c;
+        if (total == 0) return 0f;
+        long want = Math.Max(1, (long)Math.Ceiling(total * fraction)), run = 0;
+        for (int b = hist.Length - 1; b >= 0; b--)
+        {
+            run += hist[b];
+            if (run >= want) return MathF.Pow(2f, SizeLog2Min + b / SizeBinsPerOctave);
+        }
+        return MathF.Pow(2f, SizeLog2Min);
+    }
+
+    static void SizeHistogramKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, ArrayView1D<int, Stride1D.Dense> hist, int n)
+    {
+        if (i >= n) return;
+        int o = i * SplatFormat.Floats;
+        if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
+        float s = XMath.Max(packed[o + 6], XMath.Max(packed[o + 7], packed[o + 8]));
+        if (!(s > 0f)) return;
+        int b = (int)((XMath.Log2(s) - SizeLog2Min) * SizeBinsPerOctave);
+        b = b < 0 ? 0 : b >= SizeBins ? SizeBins - 1 : b;
+        Atomic.Add(ref hist[b], 1);
     }
 
     /// <summary>Delete the volume's splats, or keep only them; undoable.</summary>

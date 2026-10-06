@@ -800,7 +800,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
     // ── Selection highlight (Edit tools) ─────────────────────────────────────────────────────────────────────
     GPUBuffer? _selBuf;
-    readonly float[] _selData = new float[28];   // mat4 (16) + lo (4) + hi (4) + rows (4, as i32 bits)
+    readonly float[] _selData = new float[32];   // mat4 (16) + lo (4) + hi (4) + rows (4, as i32 bits) + filt (4)
 
     GPUBuffer EnsureSelectionBuffer()
     {
@@ -840,6 +840,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
             _selData[20] = v.X1; _selData[21] = v.Y1; _selData[22] = v.Z1;
             _selData[24] = BitConverter.Int32BitsToSingle(v.RowFrom);
             _selData[25] = BitConverter.Int32BitsToSingle(v.RowTo);
+            _selData[28] = v.OpacityBelow; _selData[29] = v.SizeAbove; _selData[30] = v.Invert != 0 ? 1f : 0f;
         }
         if (_device == null) return;
         EnsureSelectionBuffer();
@@ -3147,16 +3148,26 @@ struct Selection {
     lo   : vec4<f32>,     // x0, y0, z0, enabled
     hi   : vec4<f32>,     // x1, y1, z1, -
     rows : vec4<i32>,     // rowFrom, rowTo (a row range when rowTo > rowFrom), -, -
+    filt : vec4<f32>,     // opacity below (0 = off), largest axis above (0 = off), invert (1 = on), -
 }
 @group(0) @binding(7) var<uniform> sel : Selection;
 
-fn is_selected(i : u32, p : vec3<f32>) -> bool {
+// SplatEditor.Selected: the filters, then the row range or region, inverted when asked.
+fn is_selected(i : u32, o : u32) -> bool {
     if (sel.lo.w == 0.0) { return false; }
-    if (sel.rows.y > sel.rows.x) { return i32(i) >= sel.rows.x && i32(i) < sel.rows.y; }
-    let c = sel.m * vec4<f32>(p, 1.0);
-    if (c.w <= 1e-7) { return false; }
-    let n = c.xyz / c.w;
-    return all(n >= sel.lo.xyz) && all(n <= sel.hi.xyz);
+    if (sel.filt.x > 0.0 && src[o + 9u] >= sel.filt.x) { return false; }
+    if (sel.filt.y > 0.0 && max(src[o + 6u], max(src[o + 7u], src[o + 8u])) <= sel.filt.y) { return false; }
+    var region = false;
+    if (sel.rows.y > sel.rows.x) {
+        region = i32(i) >= sel.rows.x && i32(i) < sel.rows.y;
+    } else {
+        let c = sel.m * vec4<f32>(src[o], src[o + 1u], src[o + 2u], 1.0);
+        if (c.w > 1e-7) {
+            let n = c.xyz / c.w;
+            region = all(n >= sel.lo.xyz) && all(n <= sel.hi.xyz);
+        }
+    }
+    return region != (sel.filt.z != 0.0);
 }
 
 const SH_C0 : f32 = 0.28209479177387814;
@@ -3209,7 +3220,7 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
         rgb = sh_view_rgb(u32(origIdx), normalize(pos - u.cam_pos.xyz), rgb, u.sh_degree);
     }
     // Selected (Edit tools): amber-tinted, so what Delete / Move / Copy will take is visible first.
-    if (is_selected(u32(origIdx), vec3<f32>(src[srcOff + 0u], src[srcOff + 1u], src[srcOff + 2u]))) {
+    if (is_selected(u32(origIdx), srcOff)) {
         rgb = mix(rgb, vec3<f32>(1.0, 0.72, 0.15), 0.5);
     }
     dst[dstOff + 3u] = pack2x16float(vec2<f32>(max(rgb.r, 0.0), max(rgb.g, 0.0)));

@@ -119,7 +119,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await click(253, 264); await sleep(10000);          // Open (first scene card)
       await shot('e0_scene');
       await click(1288, 28); await sleep(600);            // Edit (a project scene's viewer: no Depth button)
-      await click(90, 517); await sleep(60000);           // Export file (the 11th toolbar button)
+      await click(79, 349); await sleep(60000);           // Export file (Studio.Edit toolbar, row 7 left)
       console.log('downloads: ' + fs.readdirSync(dir).join(', '));
       return;
     }
@@ -130,12 +130,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await click(253, 264); await sleep(8000);          // Open (first scene card)
       await shot('t1_trained');
       await click(1288, 28); await sleep(600);            // Edit
-      await click(90, 97);                                // Select
+      await click(79, 97);                                // Select
       await drag(300, 150, 700, 800);     // right of the toolbar (a drag that starts on it is a toolbar click)
-      await click(90, 223); await sleep(2500);            // Copy
-      await click(90, 307); await sleep(4000);            // Paste
+      await click(79, 265); await sleep(2500);            // Copy
+      await click(79, 307); await sleep(4000);            // Paste
       await shot('t2_pasted');
-      await click(90, 475); await sleep(10000);           // Save as new scene
+      await click(193, 307); await sleep(10000);          // Save as new scene
       await click(80, 28); await sleep(3000);             // back to the project
       await shot('t3_project');
       await click(795, 264); await sleep(8000);           // Open the second card (the edited copy)
@@ -144,12 +144,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     }
     // Top bar: Edit sits left of AR (canvas 1600 wide, Send to Headset hidden on loopback). Toolbar: left edge,
     // buttons 42 px apart from y 97: Select, Delete, Keep only, Copy, Cut, Paste, Undo, Clear selection, Save.
-    const Y = { select: 97, del: 139, keep: 181, copy: 223, cut: 265, paste: 307, insert: 349, undo: 391, clear: 433, save: 475 };
+    // Toolbar (Studio.Edit BuildEditToolbar): two columns centred at x 79 / 193, rows 42 px apart from y 97; the two
+    // filter sliders under the move buttons, their tracks 224 px wide from x 24.
+    const B = {
+      select: [79, 97], undo: [193, 97], del: [79, 139], keep: [193, 139], all: [79, 181], invert: [193, 181],
+      clear: [79, 223], insert: [193, 223], copy: [79, 265], cut: [193, 265], paste: [79, 307], save: [193, 307],
+      exportFile: [79, 349], exportStreaming: [193, 349],
+    };
+    const Y = { faintSlider: 592, largeSlider: 638 };
+    const sliderX = f => 24 + f * 224;
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'filter') {
+      // SPAWNSCENE_EDIT_FLOW=filter (after an import): the selection filters on the whole scene - fainter than 0.2,
+      // Delete, Undo; Select all + Invert (nothing); the largest 3% of the splats, Delete, Undo. Counts print as [Edit].
+      await click(1288, 28); await sleep(800);                       // Edit (an imported scene: Edit AR VR Settings)
+      await shot('f0_edit');
+      await click(sliderX(0.4), Y.faintSlider); await sleep(2500);   // 0.4 of 0..0.5 = fainter than 0.2
+      await shot('f1_faint');
+      await click(...B.del); await sleep(2000);
+      await shot('f2_faint_deleted');
+      await click(...B.undo); await sleep(2000);
+      await click(...B.all); await sleep(1500);
+      await click(...B.invert); await sleep(1500);                  // everything, inverted: nothing
+      await click(...B.clear); await sleep(800);
+      await click(sliderX(0.3), Y.largeSlider); await sleep(4000);   // 0.3 of 0..10% = the largest 3% of the splats
+      await shot('f3_large');
+      await click(...B.del); await sleep(2000);
+      await shot('f4_large_deleted');
+      await click(...B.undo); await sleep(2000);
+      await shot('f5_undone');
+      return;
+    }
     await click(1208, 28); await sleep(500);
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'insert') {
       // SPAWNSCENE_EDIT_FLOW=insert: Insert scene -> the newest other saved scene (this profile keeps earlier runs'
       // projects), then back off with touch pinch-ins to see both side by side.
-      await click(90, Y.insert); await sleep(1500);   // Insert scene >
+      await click(...B.insert); await sleep(1500);   // Insert scene >
       await shot('i0_list');
       await click(338, 119); await sleep(5000);  // the first scene in the list
       await shot('i1_inserted');
@@ -166,31 +195,31 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'copy') {
       // SPAWNSCENE_EDIT_FLOW=copy: select the red pillow, Copy, Paste (lands to its right), Undo.
-      await click(90, Y.select);
+      await click(...B.select);
       await drag(720, 570, 910, 735);
       await shot('c0_selected');
-      await click(90, Y.copy); await sleep(1500);
-      await click(90, Y.paste); await sleep(2500);
+      await click(...B.copy); await sleep(1500);
+      await click(...B.paste); await sleep(2500);
       await shot('c1_pasted');
-      // Move the pasted copy (selected after the paste): Up twice. Move buttons, 2 columns under the status line.
-      await click(56, 603); await sleep(1200);
-      await click(56, 603); await sleep(1500);
+      // Move the pasted copy (selected after the paste): Up twice (the move grid's left column, second row).
+      await click(79, 477); await sleep(1200);
+      await click(79, 477); await sleep(1500);
       await shot('c1b_moved_up');
-      await click(90, Y.undo); await sleep(1500);
+      await click(...B.undo); await sleep(1500);
       await shot('c2_undone');
       return;
     }
-    await click(90, Y.select);                   // Select
+    await click(...B.select);                   // Select
     await drag(600, 520, 1000, 800);             // over the sofa and table
     await shot('0_selected');
-    await click(90, Y.del); await sleep(1500);   // Delete
+    await click(...B.del); await sleep(1500);   // Delete
     await shot('1_deleted');
-    await click(90, Y.undo); await sleep(1500);  // Undo
+    await click(...B.undo); await sleep(1500);  // Undo
     await shot('2_undone');
     await drag(600, 520, 1000, 800);             // select again (still in Select mode)
-    await click(90, Y.keep); await sleep(1500);  // Keep only
+    await click(...B.keep); await sleep(1500);  // Keep only
     await shot('3_kept');
-    await click(90, Y.save); await sleep(4000);  // Save as new scene
+    await click(...B.save); await sleep(4000);  // Save as new scene
     await shot('4_saved');
     await click(80, 28); await sleep(2500);      // back to the project page
     await shot('5_project');

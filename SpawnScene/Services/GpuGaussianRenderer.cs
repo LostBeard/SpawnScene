@@ -230,6 +230,7 @@ public class GpuGaussianRenderer : IDisposable
         _sorter.SetLod(tree.Parent, tree.Bounds, tree.LodSize, tree.LeafCount);
         tree.Parent = null!; tree.Bounds = null!; tree.LodSize = null!;
         _sorter.LodTau = tau;
+        _sorter.LodTauFloor = tau;
         if (oldSh != null && degree > 0 && _device != null && _queue != null)
         {
             ulong leafBytes = (ulong)tree.LeafCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
@@ -274,6 +275,7 @@ public class GpuGaussianRenderer : IDisposable
         _sorter.SetLod(laid.Parent, laid.Bounds, laid.LodSize, 0);
         laid.Parent = null!; laid.Bounds = null!; laid.LodSize = null!;
         _sorter.LodTau = tau;
+        _sorter.LodTauFloor = tau;
         if (nodeSh is { Length: SphericalHarmonics.Parts } && shDegree > 0 && _device != null && _queue != null)
         {
             ulong nodeBytes = (ulong)laid.NodeCount * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);
@@ -313,6 +315,7 @@ public class GpuGaussianRenderer : IDisposable
         await UploadSceneFromGpuBuffer(poolRows, poolNodes);
         _sorter.SetLodPaged(parentSlot, bounds, size, childChunk, chunkPage, flags, chunkCount, pageNodes, poolNodes / pageNodes);
         _sorter.LodTau = tau;
+        _sorter.LodTauFloor = tau;
         if (shDegree > 0 && _device != null)
         {
             ulong bytes = (ulong)poolNodes * SphericalHarmonics.PartFloatsPerSplat * sizeof(float);

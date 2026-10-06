@@ -87,6 +87,14 @@ public class GpuSplatSorter : IDisposable
     public float LodTau { get; set; } = 1.5f;
 
     /// <summary>
+    /// The scene's own threshold, the budget's floor: a budget only coarsens the cut when it is over (tau above this),
+    /// never refines it below the scene's quality setting. Steering below it chased a count that residency (a stream
+    /// still loading) or saturation (every leaf already drawn) held down: DrJohnson in VR sank tau to 0.0007 px and
+    /// climbed back ~2.6% a readback.
+    /// </summary>
+    public float LodTauFloor { get; set; } = 1e-4f;
+
+    /// <summary>
     /// When &gt; 0, the focal length (px) the LOD cut measures node sizes with, instead of the sort camera's. XR sorts
     /// once for both eyes through a wide ~182 px head camera; an eye has ~4x the pixel density, so measuring with the
     /// head camera would stop refining ~4x too early - a blurry headset view.
@@ -142,7 +150,7 @@ public class GpuSplatSorter : IDisposable
         {
             float ratio = MathF.Sqrt(drawn / (float)LodBudget);
             ratio = Math.Clamp(ratio, 0.7f, 1.4f);
-            float next = Math.Clamp(LodTau * ratio, 1e-4f, 256f);
+            float next = Math.Clamp(LodTau * ratio, MathF.Max(1e-4f, LodTauFloor), 256f);
             if (MathF.Abs(next - LodTau) > 0.02f * LodTau)
             {
                 LodTau = next;

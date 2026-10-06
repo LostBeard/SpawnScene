@@ -1405,13 +1405,22 @@ public sealed class SplatTrainerGpu : IDisposable
     /// </summary>
     public void AccumulateDensifyStats(int splatCount)
     {
-        WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height, DensifyDenominatorFrustum ? 1u : 0u);
+        WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height,
+            (DensifyDenominatorFrustum ? 1u : 0u) | (AbsGrad ? 2u : 0u));
         DispatchLinear(_densifyAccum!, splatCount, groupSize: 256, entries: new[]
         {
             Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
             Buf(2, _dimsBuf!), Buf(3, _screenRadius!.GetGPUBuffer()!), Buf(4, _maxRadius!.GetGPUBuffer()!),
+            Buf(5, _densifyAbs!.GetGPUBuffer()!),
         });
     }
+
+    /// <summary>
+    /// Densify on AbsGS's signal (gsplat absgrad): per view the sum over a splat's pixels of |dL/dmean2D|, the
+    /// magnitude taken per pixel - not the reference's signed sum, in which opposite pulls inside one splat cancel and
+    /// fine texture (grass, foliage) stays under-densified. Its bar is higher: gsplat uses 8e-4 with absgrad.
+    /// </summary>
+    public bool AbsGrad { get; set; }
 
     /// <summary>
     /// Read the accumulated densification statistics.

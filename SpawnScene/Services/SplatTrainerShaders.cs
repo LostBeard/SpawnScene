@@ -526,11 +526,21 @@ fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
 @group(0) @binding(7) var<storage, read_write> grad_a : array<f32>;   // dR, dG, dB
 @group(0) @binding(8) var<storage, read_write> grad_b : array<f32>;   // dOpacity, dCentre.x, dCentre.y
 @group(0) @binding(9) var<storage, read_write> grad_c : array<f32>;   // dConic a, b, c
-// Per-pixel |dL/dmean2D| for densify (AbsGS / gsplat absgrad). Signed centre cancels inside
-// the tile reduction below; abs must be reduced separately or densify never clears 2e-4.
-// f32 bit patterns in a u32 atomic: for non-negative floats the IEEE bit order IS the numeric
-// order, so atomicMax on the bits is an exact float max. No fixed-point scale, no quantum.
-@group(0) @binding(10) var<storage, read_write> densify_abs : array<atomic<u32>>; // 2 per splat: max |dPx|,|dPy|
+// AbsGS / gsplat absgrad: per splat and view, the SUM over its pixels of |dL/dmean2D| per axis - the
+// abs taken PER PIXEL, before any sum, so opposite pulls inside one splat do not cancel (they do in
+// the reference's signed sum: fine texture like grass under-densifies). Read by densify_accum when
+// SplatTrainerGpu.AbsGrad is on. f32 bit patterns in u32 atomics, added by compare-exchange (WGSL has
+// no float atomics); a splat's tiles are few, so the loop rarely spins.
+@group(0) @binding(10) var<storage, read_write> densify_abs : array<atomic<u32>>; // 2 per splat: sum |dPx|,|dPy|
+
+fn densify_abs_add(i : u32, v : f32) {
+    var old = atomicLoad(&densify_abs[i]);
+    loop {
+        let r = atomicCompareExchangeWeak(&densify_abs[i], old, bitcast<u32>(bitcast<f32>(old) + v));
+        if (r.exchanged) { break; }
+        old = r.old_value;
+    }
+}
 
 // Three tile-wide reductions, plus abs centre. 256*(16+16+4+8)=11 KB against 16 KB min.
 // One pass rather than three sequential ones: the space is affordable and tripling the barrier
@@ -696,10 +706,10 @@ fn raster_backward(
                 redA[li] = redA[li] + redA[li + stride];
                 redB[li] = redB[li] + redB[li + stride];
                 redC[li] = redC[li] + redC[li + stride];
-                // MAX of |dCentre|, not sum: sum scales with footprint so only large Gaussians
-                // cleared the densify bar (MEASURED Truck 7K: 828 splits, 0 clones; median SfM
-                // spacing 0.067 already above sizeSplit 0.053). Peak |grad| is size-fair.
-                redAbs[li] = max(redAbs[li], redAbs[li + stride]);
+                // SUM of per-pixel |dCentre| (AbsGS). The earlier MAX dated from a pixel-unit,
+                // fixed-point bar (Truck 7K: 828 splits, 0 clones); with the reference's NDC scaling
+                // and gsplat's 8e-4 absgrad bar the sum is the published criterion.
+                redAbs[li] = redAbs[li] + redAbs[li + stride];
             }
             workgroupBarrier();
             stride = stride >> 1u;
@@ -717,16 +727,10 @@ fn raster_backward(
             grad_c[b3 + 1u] = redB[0].w;
             grad_c[b3 + 2u] = redC[0];
 
-            // Peak per-pixel |dCentre| into densify_abs as exact f32 bits. The fixed-point
-            // version at 2^20 put densifygrad=1e-6 at ONE quantum, so the densify decision was
-            // made on a value rounded to 0 or 1.
+            // This tile's sum of per-pixel |dCentre| into the splat's per-view total.
             let splat = values[k];
-            if (redAbs[0].x != 0.0) {
-                atomicMax(&densify_abs[splat * 2u], bitcast<u32>(redAbs[0].x));
-            }
-            if (redAbs[0].y != 0.0) {
-                atomicMax(&densify_abs[splat * 2u + 1u], bitcast<u32>(redAbs[0].y));
-            }
+            if (redAbs[0].x != 0.0) { densify_abs_add(splat * 2u, redAbs[0].x); }
+            if (redAbs[0].y != 0.0) { densify_abs_add(splat * 2u + 1u, redAbs[0].y); }
         }
         workgroupBarrier();
     }
@@ -1183,9 +1187,8 @@ fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
 ";
 
     /// <summary>
-    /// Accumulate AbsGS densify signal: peak per-pixel |dL/dPx|, |dL/dPy| from raster_backward
-    /// (max across tiles/pixels, not sum - sum made only large footprints clear the bar).
-    /// Pixel units; start at Kerbl's 2e-4 and retune from the densify signal log.
+    /// Accumulate the densify signal: this view's |dL/dmean2D| in NDC units - the reference's signed sum over the
+    /// splat's pixels, or (dims.w bit 2, SplatTrainerGpu.AbsGrad) AbsGS's sum of per-pixel magnitudes.
     /// </summary>
     public const string DensifyAccum = @"
 @group(0) @binding(0) var<storage, read>       grad_fixed : array<u32>;   // f32 bits, 9 per splat
@@ -1193,6 +1196,7 @@ fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
 @group(0) @binding(2) var<uniform>             dims       : vec4<u32>;    // x=count y=width z=height w=denominator mode
 @group(0) @binding(3) var<storage, read>       screen_radius : array<f32>; // this view, from emit_keys (0 = not emitted)
 @group(0) @binding(4) var<storage, read_write> max_radius : array<f32>;   // running max over the window
+@group(0) @binding(5) var<storage, read>       densify_abs : array<u32>;  // f32 bits, 2 per splat: sum |dPx|, |dPy|
 
 const GRADS_PER_SPLAT : u32 = 9u;
 
@@ -1211,13 +1215,14 @@ fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
     // fixed-point centre gradients that rounded to zero or saturated. With exact f32 sums the
     // reference quantity is available directly.
     let b = i * GRADS_PER_SPLAT;
-    let px = bitcast<f32>(grad_fixed[b + 4u]);
-    let py = bitcast<f32>(grad_fixed[b + 5u]);
+    let abs_mode = (dims.w & 2u) != 0u;
+    let px = select(bitcast<f32>(grad_fixed[b + 4u]), bitcast<f32>(densify_abs[i * 2u]), abs_mode);
+    let py = select(bitcast<f32>(grad_fixed[b + 5u]), bitcast<f32>(densify_abs[i * 2u + 1u]), abs_mode);
     // Which steps count toward the average (the denominator):
     //   w = 0: steps where the splat received a centre gradient (contributed to a pixel).
     //   w = 1: the reference's visibility_filter, radii > 0 - emitted keys this step, even if fully
     //          occluded (a zero gradient then lowers its average, as in add_densification_stats).
-    if (dims.w == 1u) {
+    if ((dims.w & 1u) == 1u) {
         if (screen_radius[i] <= 0.0) { return; }
     } else if (px == 0.0 && py == 0.0) { return; }
     // Contributed or emitted this step, so screen_radius[i] is this view's.

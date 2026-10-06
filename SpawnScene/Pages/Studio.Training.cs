@@ -65,6 +65,9 @@ public partial class Studio
     /// </summary>
     public static long MaxTargetStackBytes { get; set; } = 256L * 1024 * 1024;
 
+    /// <summary>&amp;absgrad=1: densify on AbsGS's signal (SplatTrainerGpu.AbsGrad), its bar 8e-4 unless &amp;densifygrad says otherwise.</summary>
+    public static bool AbsGradOption { get; set; }
+
     /// <summary><c>&amp;shdeg=N</c>: cap the viewer's SH degree after training (diagnostic A/B; the trainer dump follows).</summary>
     public static int? ViewerShDegreeCap { get; set; }
 
@@ -355,6 +358,7 @@ public partial class Studio
             _trainer ??= new SplatTrainerGpu(_gpuService);
             // Set on every run, so a block's frozen context never leaks into the next training (Studio.Partition).
             _trainer.TrainableVolume = _frozenOutside;
+            _trainer.AbsGrad = AbsGradOption;
             _trainer.GrowOnlyInside = _growOnlyInside;
             if (_frozenOutside != null) Console.WriteLine("[Train] partitioned block: only splats inside its training box learn");
             _trainer.ProfilePhases = ProfileTrainPhases;

@@ -242,8 +242,9 @@ public class SplatDensityControlTests
         Assert.That(SplatDensityControl.PixelGradientToNdc(3f, 4f, 640, 480),
             Is.EqualTo(960f * MathF.Sqrt(2f)).Within(1e-2f));
 
-        // Default bar is the published one.
-        Assert.That(SplatDensityControl.GradientThreshold, Is.EqualTo(2e-4f).Within(1e-12f));
+        // The default bar is gsplat's absgrad 8e-4: training densifies on AbsGS's signal by default
+        // (Studio.AbsGradOption, 2026-10-06); &absgrad=0 restores Kerbl's published 2e-4. Both in these NDC units.
+        Assert.That(SplatDensityControl.GradientThreshold, Is.EqualTo(8e-4f).Within(1e-12f));
     }
 
     [Test]

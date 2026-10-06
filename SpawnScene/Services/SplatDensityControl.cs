@@ -40,8 +40,12 @@ public static class SplatDensityControl
     /// 2^-20 quantum (MEASURED Truck 2K: p90 = 9.54e-7 exactly), so every nonzero value sat at
     /// the bar. Override with <c>?densifygrad=</c>. Training uses <c>0.8 L1 + 0.2 D-SSIM</c>
     /// (<see cref="ImageQuality.LambdaDssim"/>).
+    /// <para>
+    /// The default is 8e-4 since training densifies on AbsGS's signal by default (Studio.AbsGradOption; gsplat's absgrad
+    /// bar); &amp;absgrad=0 restores the reference signal and its 2e-4.
+    /// </para>
     /// </summary>
-    public static float GradientThreshold { get; set; } = 2e-4f;
+    public static float GradientThreshold { get; set; } = 8e-4f;
 
     /// <summary>Alias: the threshold IS in NDC units, as the reference's is.</summary>
     public static float GradientThresholdNdc

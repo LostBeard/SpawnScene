@@ -65,8 +65,13 @@ public partial class Studio
     /// </summary>
     public static long MaxTargetStackBytes { get; set; } = 256L * 1024 * 1024;
 
-    /// <summary>&amp;absgrad=1: densify on AbsGS's signal (SplatTrainerGpu.AbsGrad), its bar 8e-4 unless &amp;densifygrad says otherwise.</summary>
-    public static bool AbsGradOption { get; set; }
+    /// <summary>
+    /// Densify on AbsGS's signal (SplatTrainerGpu.AbsGrad) - the DEFAULT since 2026-10-06; &amp;absgrad=0 goes back to the
+    /// reference signed sum. 7K, COLMAP poses, held out (llffhold=8): Bicycle 24.04 -> 24.47 dB, SSIM 0.699 -> 0.737 with
+    /// 3.39M -> 2.36M splats, the foreground grass streaks gone; TruckFull 23.83 -> 23.74 dB, SSIM 0.857 both, with
+    /// 1.91M -> 0.82M splats and 345 -> 230 s.
+    /// </summary>
+    public static bool AbsGradOption { get; set; } = true;
 
     /// <summary><c>&amp;shdeg=N</c>: cap the viewer's SH degree after training (diagnostic A/B; the trainer dump follows).</summary>
     public static int? ViewerShDegreeCap { get; set; }

@@ -210,11 +210,12 @@ public partial class Studio : IAsyncDisposable
             if (bp.Length == 2 && int.TryParse(bp[0], out var bc) && int.TryParse(bp[1], out var br) && bc >= 1 && br >= 1)
                 TrainingBlocks = (Math.Min(bc, 8), Math.Min(br, 8));
         }
-        // &absgrad=1: densify on AbsGS's per-pixel |grad| sums, at gsplat's absgrad bar (8e-4) unless &densifygrad sets one.
+        // &absgrad=0: densify on the reference signed sum at its 2e-4 bar instead of AbsGS (the default, 8e-4).
+        // &densifygrad sets the bar either way.
         if (query.TryGetValue("absgrad", out var agq))
         {
-            AbsGradOption = agq is "1" or "true";
-            if (AbsGradOption && !query.ContainsKey("densifygrad")) SplatDensityControl.GradientThreshold = 8e-4f;
+            AbsGradOption = agq is not ("0" or "false");
+            if (!query.ContainsKey("densifygrad")) SplatDensityControl.GradientThreshold = AbsGradOption ? 8e-4f : 2e-4f;
         }
         // &streamed=1: a partitioned run is saved as a streamed scene (Studio.Partition) even when it would fit merged.
         if (query.TryGetValue("streamed", out var stq)) StreamedPartitionOption = stq is "1" or "true";

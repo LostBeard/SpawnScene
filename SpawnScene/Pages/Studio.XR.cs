@@ -35,6 +35,7 @@ public partial class Studio
 
             // Pause canvas RAF loop — XR has its own render loop
             _xrActive = true;
+            ApplyXrLodBudget();
 
             await _xrService.EnterSessionAsync(mode);
             // Passthrough: draw only the splats; the real world shows wherever the scene has nothing.
@@ -310,6 +311,7 @@ public partial class Studio
 
         // Resume canvas RAF loop
         _xrActive = false;
+        RestoreLodBudgetAfterXr();
         Console.WriteLine("[Studio] XR session ended, resuming canvas rendering");
         RequestFrame();
     }

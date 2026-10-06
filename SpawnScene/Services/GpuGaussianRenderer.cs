@@ -1689,7 +1689,9 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         // ── Upload MVP + camera basis + viewport uniforms ──
         WriteCameraUniforms(mvp, view, _canvasWidth, _canvasHeight, fx, fy);
 
-        if (RenderMode == SplatRenderMode.Stochastic)
+        // An LOD tree is only ever drawn through its cut, which lives in the sorted path: stochastic would draw every
+        // node - merges on top of the children they stand for - whatever the mode setting says.
+        if (RenderMode == SplatRenderMode.Stochastic && !_sorter.LodActive)
         {
             RenderStochastic(camera, mvp);
         }
@@ -2134,9 +2136,11 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// Start an XR frame on the sorted path: hand the sorter the head pose (in scene space) and a frustum wide enough for
     /// both eyes; when a sort has completed, repack the vertex buffer in its order (SH colour for the head position).
     /// </summary>
-    public void BeginXRFrameSorted(CameraParams head, Matrix4x4 cullMvp)
+    public void BeginXRFrameSorted(CameraParams head, Matrix4x4 cullMvp, float eyeFocal = 0f)
     {
         if (_device == null || _splatBuffer == null || _splatCount == 0) return;
+        // An LOD cut measures node sizes at the EYE's pixel density (eyeFocal), not the wide sort camera's.
+        _sorter.LodFocalOverride = eyeFocal;
         // No sub-pixel LOD cull in XR: a scene shrunk by the grips or placed as an AR miniature is made of splats far
         // under 0.3 px (more so through this wide ~182 px-focal sort camera), and culling them removed the whole
         // miniature once it was set on the floor 1.5 m away (emulator, 2026-10-03). Together they ARE the image.
@@ -2144,7 +2148,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         _sorter.LodCullPixels = 0f;
         (MemoryBuffer1D<float, Stride1D.Dense>? dataBuf, MemoryBuffer1D<int, Stride1D.Dense>? idxBuf, bool sortRan, int visibleCount) sorted;
         try { sorted = _sorter.Sort(head, cullMvp); }
-        finally { _sorter.LodCullPixels = lod; }
+        finally { _sorter.LodCullPixels = lod; _sorter.LodFocalOverride = 0f; }
         var (dataBuf, idxBuf, sortRan, visibleCount) = sorted;
         _xrSortedVisible = visibleCount;
         if (!sortRan || dataBuf == null || idxBuf == null) return;

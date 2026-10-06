@@ -86,6 +86,13 @@ public class GpuSplatSorter : IDisposable
     /// <summary>The LOD cut threshold in pixels: a node is drawn once its view size is at most this.</summary>
     public float LodTau { get; set; } = 1.5f;
 
+    /// <summary>
+    /// When &gt; 0, the focal length (px) the LOD cut measures node sizes with, instead of the sort camera's. XR sorts
+    /// once for both eyes through a wide ~182 px head camera; an eye has ~4x the pixel density, so measuring with the
+    /// head camera would stop refining ~4x too early - a blurry headset view.
+    /// </summary>
+    public float LodFocalOverride { get; set; }
+
     /// <summary>True while the scene is an LOD tree drawn through its cut.</summary>
     public bool LodActive => _lodParent != null;
 
@@ -769,7 +776,8 @@ public class GpuSplatSorter : IDisposable
         float distScale = Use16BitSort ? 500f : 10000f;
         int distMax = Use16BitSort ? 65534 : int.MaxValue;
         float focalLength = MathF.Max(camera.FocalX, camera.FocalY);
-        var cullParams = BuildCullParams(mvp, camPos, camFwd, _splatCount, distScale, distMax, focalLength,
+        var cullParams = BuildCullParams(mvp, camPos, camFwd, _splatCount, distScale, distMax,
+            LodFocalOverride > 0f && _lodParent != null ? LodFocalOverride : focalLength,
             LodCullPixels);
         if (_lodParent != null)
         {

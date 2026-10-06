@@ -249,7 +249,11 @@ public partial class Studio
             };
             var cullProj = CameraParams.CreateWebGpuProjection(head.FocalX, head.FocalY, head.CenterX, head.CenterY,
                 head.Width, head.Height, head.Near, head.Far);
-            _gpuRenderer.BeginXRFrameSorted(head, head.ViewMatrix * cullProj);
+            // The eye's focal length in pixels (WebXR projection x scale x half the viewport): the LOD cut's measure.
+            float eyeFocal = 0f;
+            foreach (var view in frameData.Views)
+                eyeFocal = MathF.Max(eyeFocal, 0.5f * (float)view.Viewport.Width * MathF.Abs(view.ProjectionMatrix.M11));
+            _gpuRenderer.BeginXRFrameSorted(head, head.ViewMatrix * cullProj, eyeFocal);
             var layer = _xrService.WebGLLayer!;
             foreach (var view in frameData.Views)
             {

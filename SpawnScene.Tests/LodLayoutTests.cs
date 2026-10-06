@@ -212,6 +212,89 @@ public class LodLayoutTests
         }
     }
 
+    /// <summary>Four blocks of a scene, 100 units apart along x, each its own LOD tree.</summary>
+    static LodTree[] Blocks(int perBlock, int seed)
+    {
+        var trees = new LodTree[4];
+        for (int k = 0; k < 4; k++)
+        {
+            var rows = LodTreeTests.Scene(perBlock, seed + k);
+            for (int i = 0; i < perBlock; i++) rows[i * F] += k * 100f;
+            trees[k] = LodTree.Build(rows, perBlock);
+        }
+        return trees;
+    }
+
+    [Test]
+    public void Forest_ParentsFirst_RunsInOneChunk_BlocksOwnTheirChunks()
+    {
+        var blocks = Blocks(1500, 40);
+        var (l, starts) = LodLayout.Forest(blocks, 256);
+        Assert.That(l.NodeCount, Is.EqualTo(1 + 4 + blocks.Sum(t => t.NodeCount)));
+        Assert.That(l.LeafCount, Is.EqualTo(4 * 1500));
+        Assert.That(starts[0], Is.EqualTo(0)); Assert.That(starts[1], Is.EqualTo(5), "the top is chunk 0");
+        Assert.That(starts[^1], Is.EqualTo(l.NodeCount));
+        for (int c = 0; c + 1 < starts.Length; c++) Assert.That(starts[c + 1] - starts[c], Is.InRange(1, 256));
+        int at = 5;
+        foreach (var t in blocks) { Assert.That(starts, Does.Contain(at), "each block starts a chunk"); at += t.NodeCount; }
+        for (int i = 0; i < l.NodeCount; i++)
+        {
+            if (l.Parent[i] >= 0) Assert.That(l.Parent[i], Is.LessThan(i), $"node {i}'s parent comes first");
+            if (l.ChildCount[i] == 0) { Assert.That(l.LodSize[i], Is.EqualTo(0f), "leaves by zero size"); continue; }
+            for (int k = 0; k < l.ChildCount[i]; k++)
+            {
+                int c = l.FirstChild[i] + k;
+                Assert.That(l.Parent[c], Is.EqualTo(i), $"node {i}'s children are its run");
+                Assert.That(l.LodSize[c], Is.LessThanOrEqualTo(l.LodSize[i]), $"node {i}: a child's LOD size never exceeds its parent's");
+                float dx = l.Bounds[c * 4] - l.Bounds[i * 4], dy = l.Bounds[c * 4 + 1] - l.Bounds[i * 4 + 1], dz = l.Bounds[c * 4 + 2] - l.Bounds[i * 4 + 2];
+                Assert.That(MathF.Sqrt(dx * dx + dy * dy + dz * dz) + l.Bounds[c * 4 + 3], Is.LessThanOrEqualTo(l.Bounds[i * 4 + 3] * 1.0001f + 1e-5f),
+                    $"node {i}'s sphere holds child {c}'s");
+            }
+            Assert.That(LodLayout.ChunkOf(starts, l.FirstChild[i]), Is.EqualTo(LodLayout.ChunkOf(starts, l.FirstChild[i] + l.ChildCount[i] - 1)),
+                $"node {i}'s children share a chunk");
+        }
+    }
+
+    [Test]
+    public void Forest_CutDrawsEveryPathOnce_AndStreamsToIt()
+    {
+        var (l, starts) = LodLayout.Forest(Blocks(1500, 50), 256);
+        var rng = new Random(11);
+        for (int trial = 0; trial < 20; trial++)
+        {
+            var cam = new Vector3((float)rng.NextDouble() * 330f - 15f, (float)rng.NextDouble() * 4f, (float)rng.NextDouble() * 8f - 1.5f);
+            float tau = (float)Math.Pow(10, rng.NextDouble() * 2);
+            var drawn = new bool[l.NodeCount];
+            for (int i = 0; i < l.NodeCount; i++) drawn[i] = LodLayout.InCut(l, i, cam, 1000f, tau);
+            for (int i = 0; i < l.NodeCount; i++)
+            {
+                if (l.ChildCount[i] != 0) continue;
+                int hits = 0;
+                for (int a = i; a >= 0; a = l.Parent[a]) if (drawn[a]) hits++;
+                Assert.That(hits, Is.EqualTo(1), $"trial {trial}: leaf {i} drawn {hits} times");
+            }
+            var (resident, rounds) = Stream(l, starts, cam, tau);
+            for (int i = 0; i < l.NodeCount; i++)
+                Assert.That(LodLayout.InCutPaged(l, i, cam, 1000f, tau, starts, resident.Contains, out _), Is.EqualTo(drawn[i]),
+                    $"trial {trial}: node {i} after {rounds} rounds");
+        }
+    }
+
+    [Test]
+    public void Forest_AViewOfOneBlock_StreamsMostlyThatBlock()
+    {
+        var blocks = Blocks(3000, 60);
+        var (l, starts) = LodLayout.Forest(blocks, 256);
+        int b0End = 5 + blocks[0].NodeCount;
+        // Inside block 0 at 20 px: a block 100 units off needs nodes up to ~2 units - its coarse levels. (At 4 px it needs
+        // near-leaf detail at that distance with this 1000 px focal: 30 of its 60 chunks, the geometry not the layout.)
+        var (resident, _) = Stream(l, starts, new Vector3(2.5f, 1.5f, 2.5f), 20f);
+        int own = resident.Count(c => c > 0 && starts[c] < b0End), other = resident.Count(c => starts[c] >= b0End);
+        int otherTotal = Enumerable.Range(0, starts.Length - 1).Count(c => starts[c] >= b0End);
+        TestContext.Out.WriteLine($"block 0's view: {own} of its chunks, {other} of the other blocks' {otherTotal}");
+        Assert.That(other, Is.LessThan(otherTotal / 4), "the far blocks stream coarse");
+    }
+
     [Test]
     public void ChunkZero_IsACoarseWholeScene()
     {

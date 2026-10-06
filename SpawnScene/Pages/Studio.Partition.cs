@@ -37,8 +37,12 @@ public partial class Studio
     /// </summary>
     public static bool StreamedPartitionOption { get; set; }
 
-    /// <summary>Merged, a partitioned scene over this many single-run splat caps is past what one GPU views whole.</summary>
-    public const int StreamAboveRunCaps = 2;
+    /// <summary>
+    /// A partitioned scene over this many single-run splat caps is saved streamed. 1: past what one training run on
+    /// this device holds is past what it should hold whole. (It was 2, which partitioned runs almost never reach - each
+    /// block's cap also holds the frozen coarse context: DrJohnson 2x2 at 2 GB, cap 1.49M, kept ~1.7M in total.)
+    /// </summary>
+    public const int StreamAboveRunCaps = 1;
 
     /// <summary>Set when a partitioned run saved itself as a streamed scene, so the caller does not save the view too.</summary>
     bool _partitionSavedStreamed;

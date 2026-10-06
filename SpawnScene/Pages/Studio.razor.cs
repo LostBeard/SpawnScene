@@ -212,6 +212,8 @@ public partial class Studio : IAsyncDisposable
         }
         // &absgrad=0: densify on the reference signed sum at its 2e-4 bar instead of AbsGS (the default, 8e-4).
         // &densifygrad sets the bar either way.
+        // &mcmc=1: MCMC density (Studio.Training McmcOption) instead of clone/split/prune.
+        if (query.TryGetValue("mcmc", out var mcq)) McmcOption = mcq is "1" or "true";
         if (query.TryGetValue("absgrad", out var agq))
         {
             AbsGradOption = agq is not ("0" or "false");

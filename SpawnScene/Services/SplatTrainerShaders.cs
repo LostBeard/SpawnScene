@@ -911,7 +911,7 @@ fn loss_reduce(@builtin(local_invocation_index) lid : u32) {
 @group(0) @binding(3) var<storage, read_write> adam_m     : array<f32>;       // 14 per splat
 @group(0) @binding(4) var<storage, read_write> adam_v     : array<f32>;       // 14 per splat
 @group(0) @binding(5) var<uniform>             cfg        : vec4<f32>;        // x=colourLr y=opacityLr z=step w=splatCount
-@group(0) @binding(6) var<uniform>             flags      : vec4<f32>;        // x=skip zero-gradient splats
+@group(0) @binding(6) var<uniform>             flags      : vec4<f32>;        // x=skip zero-gradient splats, y=opacity reg / N
 
 const FLOATS_PER_SPLAT : u32 = 14u;
 const GRADS_PER_SPLAT : u32 = 9u;
@@ -969,7 +969,8 @@ fn adam_step(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgr
     // Opacity, optimised in logit space.
     let a = splats[o + 9u];
     let g_op = bitcast<f32>(grad_fixed[i * GRADS_PER_SPLAT + 3u]);
-    let g_logit = g_op * a * (1.0 - a);
+    // MCMC's opacity regulariser (gsplat opacity_reg * mean(sigmoid(logit))): flags.y = reg / splat count.
+    let g_logit = (g_op + flags.y) * a * (1.0 - a);
     var m3 = adam_m[i * ADAM_SLOTS + 3u];
     var v3 = adam_v[i * ADAM_SLOTS + 3u];
     let new_logit = adam(opacity_logit[i], g_logit, cfg.y, step, &m3, &v3);
@@ -1976,6 +1977,7 @@ fn freeze_outside(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_w
 struct GeomCfg {
     lr    : vec4<f32>,   // x = position, y = log-scale, z = rotation, w = Adam step number
     limit : vec4<f32>,   // x = splat count, y = max scale, z = min scale, w = 1: dense Adam (step untouched splats)
+    reg   : vec4<f32>,   // x = MCMC scale regulariser / (3 x splat count): d/d(log s) of reg * mean(s) is that times s
 };
 @group(0) @binding(6) var<uniform> g : GeomCfg;
 // 10 per splat: dL/d(pos xyz, scale xyz, quat xyzw), written before the step.
@@ -2018,7 +2020,7 @@ fn dense_zero_step(i : u32, o : u32) {
     for (var c = 0u; c < 3u; c = c + 1u) {
         var m = adam_m[ab + ADAM_SCALE + c];
         var v = adam_v[ab + ADAM_SCALE + c];
-        let updated = adam(log_scale[i * 3u + c], 0.0, g.lr.y, step, &m, &v);
+        let updated = adam(log_scale[i * 3u + c], g.reg.x * exp(log_scale[i * 3u + c]), g.lr.y, step, &m, &v);
         adam_m[ab + ADAM_SCALE + c] = m;
         adam_v[ab + ADAM_SCALE + c] = v;
         let lo = min(log(max(g.limit.z, scale_floor[i])), log(g.limit.y));
@@ -2234,7 +2236,7 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
         let live = select(0.0, 1.0, s_raw[c] > 1e-9);
         var m = adam_m[ab + ADAM_SCALE + c];
         var v = adam_v[ab + ADAM_SCALE + c];
-        let updated = adam(log_scale[i * 3u + c], gs[c] * sc3[c] * live, g.lr.y, step, &m, &v);
+        let updated = adam(log_scale[i * 3u + c], (gs[c] * live + g.reg.x) * sc3[c], g.lr.y, step, &m, &v);
         adam_m[ab + ADAM_SCALE + c] = m;
         adam_v[ab + ADAM_SCALE + c] = v;
         let lo = min(log(max(g.limit.z, scale_floor[i])), log(g.limit.y));
@@ -2260,6 +2262,63 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
     splats[o + 11u] = qout.y;
     splats[o + 12u] = qout.z;
     splats[o + 13u] = qout.w;
+}
+";
+
+    /// <summary>
+    /// MCMC's position noise (gsplat inject_noise_to_position), after the optimiser step: each centre moves by its own
+    /// covariance times a standard normal, times <c>cfg.x</c> = position lr x noise lr, gated by
+    /// <c>sigmoid(-100 (opacity - 0.005))</c> - so it explores with the nearly dead and leaves the opaque alone.
+    /// The RNG is GpuMcmc's hash with Box-Muller, so the gate can reproduce it on the host.
+    /// </summary>
+    public const string McmcNoise = @"
+@group(0) @binding(0) var<storage, read_write> splats : array<f32>;   // 14 per splat
+@group(0) @binding(1) var<uniform>             cfg    : vec4<f32>;    // x = scaler, y = splat count, z = seed
+
+fn hash(x_in : u32) -> u32 {
+    var x = x_in;
+    x = x ^ (x >> 16u); x = x * 0x7feb352du;
+    x = x ^ (x >> 15u); x = x * 0x846ca68bu;
+    x = x ^ (x >> 16u);
+    return x;
+}
+
+fn normal(seed : u32, i : u32, slot : u32) -> f32 {
+    let h1 = hash(seed ^ hash(i * 8u + slot * 2u));
+    let h2 = hash(seed ^ hash(i * 8u + slot * 2u + 1u) ^ 0x9e3779b9u);
+    let u1 = (f32(h1) + 1.0) * (1.0 / 4294967296.0);
+    let u2 = f32(h2) * (1.0 / 4294967296.0);
+    return sqrt(-2.0 * log(u1)) * cos(6.28318530718 * u2);
+}
+
+@compute @workgroup_size(64)
+fn mcmc_noise(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;   // 2D past 65535 groups (DispatchLinear)
+    if (i >= u32(cfg.y)) { return; }
+    let o = i * 14u;
+    let a = splats[o + 9u];
+    let gate = 1.0 / (1.0 + exp(-100.0 * ((1.0 - a) - 0.995)));
+    if (gate < 1e-12) { return; }
+
+    let ql = length(vec4<f32>(splats[o + 10u], splats[o + 11u], splats[o + 12u], splats[o + 13u]));
+    var q = vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    if (ql > 1e-20) { q = vec4<f32>(splats[o + 10u], splats[o + 11u], splats[o + 12u], splats[o + 13u]) / ql; }
+    let xx = q.x * q.x; let yy = q.y * q.y; let zz = q.z * q.z;
+    let xy = q.x * q.y; let xz = q.x * q.z; let yz = q.y * q.z;
+    let wx = q.w * q.x; let wy = q.w * q.y; let wz = q.w * q.z;
+    // Columns of R.
+    let R = mat3x3<f32>(
+        vec3<f32>(1.0 - 2.0 * (yy + zz), 2.0 * (xy + wz), 2.0 * (xz - wy)),
+        vec3<f32>(2.0 * (xy - wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz + wx)),
+        vec3<f32>(2.0 * (xz + wy), 2.0 * (yz - wx), 1.0 - 2.0 * (xx + yy)));
+    let s = vec3<f32>(splats[o + 6u], splats[o + 7u], splats[o + 8u]);
+    let seed = u32(cfg.z);
+    let e = vec3<f32>(normal(seed, i, 0u), normal(seed, i, 1u), normal(seed, i, 2u)) * (gate * cfg.x);
+    // cov e = R S^2 R^T e
+    let d = R * ((transpose(R) * e) * s * s);
+    splats[o + 0u] = splats[o + 0u] + d.x;
+    splats[o + 1u] = splats[o + 1u] + d.y;
+    splats[o + 2u] = splats[o + 2u] + d.z;
 }
 ";
 

@@ -45,6 +45,7 @@ public partial class Studio
     public static float MaxScaleFraction { get; set; } = 0.05f;
 
     GpuDensify? _gpuDensify;
+    GpuMcmc? _gpuMcmc;
 
     /// <summary>Multiplier on the position learning rate, for measuring rather than guessing.</summary>
     public static float PositionLrScale { get; set; } = 1f;
@@ -74,6 +75,22 @@ public partial class Studio
     /// so 8e-4 stays. At 30K (c44, the user path): Bicycle 2.94M splats vs 4.81M, crisp grass where it had streaks.
     /// </summary>
     public static bool AbsGradOption { get; set; } = true;
+
+    /// <summary>
+    /// <c>&amp;mcmc=1</c>: density by "3DGS as MCMC" (gsplat MCMCStrategy) instead of clone/split/prune + opacity resets -
+    /// dead Gaussians relocated onto live ones by opacity and 5% growth per step toward the cap (GpuMcmc) every
+    /// <see cref="DensifyEveryIters"/> from 500 to <see cref="McmcUntilIter"/>, opacity and scale regularisers 0.01, position
+    /// noise for the nearly transparent, and the start reset to opacity 0.5 / scale x0.1 (gsplat's MCMC config).
+    /// <para>
+    /// OPT-IN: it lost the A/B against the AbsGS default (c48, 2026-10-06, 7K, COLMAP poses, llffhold=8, held out).
+    /// TruckFull at the same 820K splats: 23.66 dB / SSIM 0.844 vs 23.74 / 0.857. Bicycle capped at the default's 2.36M:
+    /// 5% growth per step from the 49.6K SfM points reached only 1.18M by 7K, 23.21 / 0.619 vs 24.47 / 0.737.
+    /// </para>
+    /// </summary>
+    public static bool McmcOption { get; set; }
+
+    /// <summary>gsplat MCMCStrategy.refine_stop_iter: relocation and growth stop here (noise and the regularisers do not).</summary>
+    public static int McmcUntilIter { get; set; } = 25_000;
 
     /// <summary><c>&amp;shdeg=N</c>: cap the viewer's SH degree after training (diagnostic A/B; the trainer dump follows).</summary>
     public static int? ViewerShDegreeCap { get; set; }
@@ -366,6 +383,9 @@ public partial class Studio
             // Set on every run, so a block's frozen context never leaks into the next training (Studio.Partition).
             _trainer.TrainableVolume = _frozenOutside;
             _trainer.AbsGrad = AbsGradOption;
+            _trainer.McmcOpacityReg = McmcOption ? 0.01f : 0f;
+            _trainer.McmcScaleReg = McmcOption ? 0.01f : 0f;
+            _trainer.McmcNoiseLr = McmcOption ? 5e5f : 0f;
             _trainer.GrowOnlyInside = _growOnlyInside;
             if (_frozenOutside != null) Console.WriteLine("[Train] partitioned block: only splats inside its training box learn");
             _trainer.ProfilePhases = ProfileTrainPhases;
@@ -547,6 +567,13 @@ public partial class Studio
             var baseline = await EvaluateAsync(_trainer, packed, n, views, targets, box);
             WarnOnEvalOverflow(baseline, views.Count);
 
+            if (McmcOption && _scheduleOffset == 0 && _frozenOutside == null)
+            {
+                _gpuMcmc ??= new GpuMcmc(accel);
+                _gpuMcmc.Reinitialise(packed.View, n, 0.5f, 0.1f);
+                Console.WriteLine($"[MCMC] start: {n:N0} Gaussians at opacity 0.5, scale x0.1; relocation + growth every " +
+                    $"{DensifyEveryIters} iters from {DensifyFromIter} to {McmcUntilIter}, cap {Math.Min(MaxDensifiedSplats, _trainer.MaxTrainableSplats(_trainer.KeysPerSplat)):N0}");
+            }
             _trainer.InitOptimizerState(packed, n);
 
             // -- Optimise --
@@ -705,7 +732,7 @@ public partial class Studio
                         }
                     }
                 }
-                if (DensifyEveryIters > 0) _trainer.AccumulateDensifyStats(n);
+                if (DensifyEveryIters > 0 && !McmcOption) _trainer.AccumulateDensifyStats(n);   // MCMC samples by opacity
 
                 // Density control on an ITERATION schedule, like the reference: every 100
                 // iterations from 500 until half way, then the model is left to settle.
@@ -714,7 +741,7 @@ public partial class Studio
                     // Kerbl densify_until_iter is absolute 15_000, not half the run. A 7k
                     // checkpoint densifies for the whole 7k; gating on iterations*0.5 stopped
                     // growth (and the opacity resets that share this gate) halfway through.
-                    bool stillGrowing = g < DensifyUntilIter;
+                    bool stillGrowing = g < (McmcOption ? McmcUntilIter : DensifyUntilIter);
                     // Each schedule is checked on its OWN period. Nesting the reset inside the
                     // densify period would silently disable it whenever the two are not
                     // multiples of one another - a whitelist of one, in arithmetic form.
@@ -724,7 +751,7 @@ public partial class Studio
                     // MEASURED Truck 7K: reset at 6000 dropped held-out 16.51 -> 12.37 and
                     // COMPARE averaged the dip; Kerbl's 30k run has 9k settle after the last
                     // reset, a 7k run only has 1k. The reset still fires at 3000.
-                    bool resetOpacity = OpacityResetEveryIters > 0 && stillGrowing
+                    bool resetOpacity = !McmcOption && OpacityResetEveryIters > 0 && stillGrowing
                         && (g + 1) % OpacityResetEveryIters == 0
                         && (scheduleTotal - (g + 1)) >= OpacityResetEveryIters;
                     if (densifying || resetOpacity)
@@ -734,9 +761,11 @@ public partial class Studio
                         // re-fitting from post-scatter quanta at 25% target fought that and left
                         // conic live at ~0.1% (MEASURED truck7k-initcap). Densify only grows
                         // the model; scales stay where the last step put them.
-                        var grown = await DensifyAsync(
-                            packed, n, rigRadius, densifying, resetOpacity,
-                            (views, targets, box, supervised));
+                        var grown = McmcOption
+                            ? await McmcStepAsync(packed, n, (uint)(4321 + g))
+                            : await DensifyAsync(
+                                packed, n, rigRadius, densifying, resetOpacity,
+                                (views, targets, box, supervised));
                         if (grown != null)
                         {
                             (packed, n) = grown.Value;
@@ -1027,6 +1056,31 @@ public partial class Studio
             string.Join(", ", dead.Take(8).Select(v => $"{v}:{ShortName(views[v].ImageName)}")) +
             (dead.Count > 8 ? ", ..." : ""));
         return kept;
+    }
+
+    /// <summary>
+    /// One MCMC density step (<see cref="McmcOption"/>, <see cref="GpuMcmc"/>): relocate the dead, grow 5% toward the cap,
+    /// install the result like a densify. Null when there was nothing to do.
+    /// </summary>
+    private async Task<(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)?> McmcStepAsync(
+        MemoryBuffer1D<float, Stride1D.Dense> packed, int n, uint seed)
+    {
+        int cap = Math.Min(MaxDensifiedSplats, _trainer!.MaxTrainableSplats(_trainer.KeysPerSplat));
+        _gpuMcmc ??= new GpuMcmc(_gpuService.WebGPUAccelerator);
+        var step = await _gpuMcmc.RunAsync(packed.View, n, cap, grow: true, seed, _trainer.TrainableVolume);
+        _trainer.ResetDensifyStats();
+        if (step == null) return null;
+        var (r, s) = step.Value;
+        try
+        {
+            return await InstallGrownSetAsync(r.Packed, n, r.Count, false, "MCMC", s.ToString(),
+                (prior, grown, zeroSlot) => _trainer.CarryOptimizerRowsAsync(prior, grown, r.AdamSources, r.FeatureSources, zeroSlot));
+        }
+        finally
+        {
+            r.AdamSources.Dispose();
+            r.FeatureSources.Dispose();
+        }
     }
 
     /// <summary>

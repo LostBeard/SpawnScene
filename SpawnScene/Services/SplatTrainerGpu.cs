@@ -41,6 +41,8 @@ public sealed class SplatTrainerGpu : IDisposable
     GPUComputePipeline? _adamStep;
     GPUComputePipeline? _initLogits;
     GPUComputePipeline? _adamGeometry;
+    GPUComputePipeline? _mcmcNoise;
+    GPUBuffer? _mcmcNoiseCfgBuf;
     GPUComputePipeline? _evalSse;
     GPUComputePipeline? _ssimRowsPipe;
     GPUComputePipeline? _ssimReducePipe;
@@ -445,6 +447,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _adamStep = MakePipeline(SplatTrainerShaders.AdamStep, "adam_step");
         _initLogits = MakePipeline(SplatTrainerShaders.InitLogits, "init_logits");
         _adamGeometry = MakePipeline(SplatTrainerShaders.GeometryAdam, "adam_geometry");
+        _mcmcNoise = MakePipeline(SplatTrainerShaders.McmcNoise, "mcmc_noise");
         _mipFloor = MakePipeline(SplatTrainerShaders.MipScaleFloor, "mip_floor");
         _freezeOutside = MakePipeline(SplatTrainerShaders.FreezeOutside, "freeze_outside");
         _posePartial = MakePipeline(SplatTrainerShaders.PoseGradPartial, "pose_partial");
@@ -505,7 +508,12 @@ public sealed class SplatTrainerGpu : IDisposable
 
         _geomCfgBuf = _device.CreateBuffer(new GPUBufferDescriptor
         {
-            Size = 32,
+            Size = 48,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        _mcmcNoiseCfgBuf = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
 
@@ -1423,6 +1431,21 @@ public sealed class SplatTrainerGpu : IDisposable
     public bool AbsGrad { get; set; }
 
     /// <summary>
+    /// MCMC's opacity regulariser (gsplat opacity_reg; 0.01 in its MCMC config, 0 = off): the loss gains
+    /// reg * mean(opacity), which keeps pushing Gaussians that earn nothing toward the dead line where GpuMcmc relocates them.
+    /// </summary>
+    public float McmcOpacityReg { get; set; }
+
+    /// <summary>MCMC's scale regulariser (gsplat scale_reg; 0.01 in its MCMC config, 0 = off): reg * mean(scale).</summary>
+    public float McmcScaleReg { get; set; }
+
+    /// <summary>
+    /// MCMC position noise (gsplat noise_lr, 5e5; 0 = off): after every step each centre moves by its covariance times a
+    /// normal deviate times position lr x this, gated to the nearly transparent (SplatTrainerShaders.McmcNoise).
+    /// </summary>
+    public float McmcNoiseLr { get; set; }
+
+    /// <summary>
     /// Read the accumulated densification statistics.
     ///
     /// CPU transfer: 8 bytes per splat, and the decision it feeds changes the splat COUNT, which
@@ -2029,7 +2052,7 @@ public sealed class SplatTrainerGpu : IDisposable
         // ── Adam ──
         _adamStepCount++;
         WriteVec4(_adamCfgBuf!, colourLr, opacityLr, _adamStepCount, splatCount);
-        WriteVec4(_adamFlagsBuf!, SkipZeroGradientSteps ? 1f : 0f, 0f, 0f, 0f);
+        WriteVec4(_adamFlagsBuf!, SkipZeroGradientSteps ? 1f : 0f, McmcOpacityReg / Math.Max(1, splatCount), 0f, 0f);
         DispatchLinear(_adamStep!, splatCount, new[]
         {
             Buf(0, splatGpu), Buf(1, _gradFixed!.GetGPUBuffer()!),
@@ -2074,6 +2097,7 @@ public sealed class SplatTrainerGpu : IDisposable
             WriteVec4x2(_geomCfgBuf!,
                 geo.PositionLr, geo.LogScaleLr, geo.RotationLr, _adamStepCount,
                 splatCount, geo.MaxScale, geo.MinScale, DenseGeometryAdam ? 1f : 0f);
+            WriteVec4(_geomCfgBuf!, McmcScaleReg / (3f * Math.Max(1, splatCount)), 0f, 0f, 0f, offset: 32);
             DispatchLinear(_adamGeometry!, splatCount, new[]
             {
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
@@ -2083,6 +2107,8 @@ public sealed class SplatTrainerGpu : IDisposable
             });
             // This view's camera-pose gradient, from the splat position gradients just written (poseSlot >= 0).
             if (poseSlot >= 0) DispatchPoseGrad(splatGpu, splatCount, cam.Position, poseSlot);
+            // MCMC exploration, after the step as gsplat does it (step_post_backward follows optimizer.step()).
+            if (McmcNoiseLr > 0f) InjectMcmcNoise(splatGpu, splatCount, geo.PositionLr * McmcNoiseLr, (uint)_adamStepCount);
         }
 
         await PhaseAsync("geometry");
@@ -2201,12 +2227,19 @@ public sealed class SplatTrainerGpu : IDisposable
         _queue!.WriteBuffer(buf, 0, bytes);
     }
 
-    void WriteVec4(GPUBuffer buf, float x, float y, float z, float w)
+    void WriteVec4(GPUBuffer buf, float x, float y, float z, float w, ulong offset = 0)
     {
         var f = new[] { x, y, z, w };
         var bytes = new byte[16];
         Buffer.BlockCopy(f, 0, bytes, 0, 16);
-        _queue!.WriteBuffer(buf, 0, bytes);
+        _queue!.WriteBuffer(buf, offset, bytes);
+    }
+
+    /// <summary>One MCMC noise pass over the splat buffer (<see cref="McmcNoiseLr"/>); public for the trainer gate.</summary>
+    public void InjectMcmcNoise(GPUBuffer splatGpu, int splatCount, float scaler, uint seed)
+    {
+        WriteVec4(_mcmcNoiseCfgBuf!, scaler, splatCount, seed, 0f);
+        DispatchLinear(_mcmcNoise!, splatCount, new[] { Buf(0, splatGpu), Buf(1, _mcmcNoiseCfgBuf!) });
     }
 
     /// <summary>Zero this step's gradient totals of the splats outside <paramref name="v"/> (see <see cref="TrainableVolume"/>).</summary>
@@ -2419,5 +2452,7 @@ public sealed class SplatTrainerGpu : IDisposable
         _ssimPixBwdPipe?.Dispose();
         _adamStep?.Dispose();
         _initLogits?.Dispose();
+        _mcmcNoise?.Dispose();
+        _mcmcNoiseCfgBuf?.Destroy(); _mcmcNoiseCfgBuf?.Dispose();
     }
 }

@@ -69,7 +69,9 @@ public partial class Studio
     /// Densify on AbsGS's signal (SplatTrainerGpu.AbsGrad) - the DEFAULT since 2026-10-06; &amp;absgrad=0 goes back to the
     /// reference signed sum. 7K, COLMAP poses, held out (llffhold=8): Bicycle 24.04 -> 24.47 dB, SSIM 0.699 -> 0.737 with
     /// 3.39M -> 2.36M splats, the foreground grass streaks gone; TruckFull 23.83 -> 23.74 dB, SSIM 0.857 both, with
-    /// 1.91M -> 0.82M splats and 345 -> 230 s.
+    /// 1.91M -> 0.82M splats and 345 -> 230 s. Bar 6e-4 instead of 8e-4 (c45): Bicycle 24.44 dB / 0.743 with 3.52M splats
+    /// in 609 s, Truck 23.71 / 0.859 with 1.20M in 307 s - SSIM +0.002..0.006 for ~50% more splats and ~35% more time,
+    /// so 8e-4 stays. At 30K (c44, the user path): Bicycle 2.94M splats vs 4.81M, crisp grass where it had streaks.
     /// </summary>
     public static bool AbsGradOption { get; set; } = true;
 

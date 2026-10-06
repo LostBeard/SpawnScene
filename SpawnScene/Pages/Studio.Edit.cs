@@ -4,6 +4,7 @@ using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.GameUI;
 using SpawnDev.GameUI.Elements;
+using SpawnDev.ILGPU.WebGPU;
 using SpawnScene.Services;
 
 namespace SpawnScene.Pages;
@@ -20,7 +21,11 @@ public partial class Studio
     SplatEditor.Volume? _selection
     {
         get => _selectionValue;
-        set { _selectionValue = value; _gpuRenderer.SetSelectionHighlight(value); }
+        set
+        {
+            _selectionValue = value;
+            _gpuRenderer.SetSelectionHighlight(value, value is { UseMask: not 0 } ? _splatEditor.Mask?.GetGPUBuffer() : null);
+        }
     }
     int _selectedCount;
     UIPanel? _selectRect;
@@ -29,6 +34,8 @@ public partial class Studio
     /// <summary>The "Largest % of splats" slider's value (0 = off), kept for the toolbar's next build.</summary>
     float _sizeFilterPercent;
     bool _countRunning, _countAgain;
+    /// <summary>How a dragged rectangle combines with the selection when no key says otherwise (Shift adds, Ctrl subtracts).</summary>
+    SplatEditor.Combine _combineMode = SplatEditor.Combine.Replace;
 
     /// <summary>The Edit toolbar (left edge, under the top bar), built with the viewer HUD when Edit is open.</summary>
     void BuildEditToolbar()
@@ -65,11 +72,33 @@ public partial class Studio
             BuildViewerHudUI();
         }, _selectMode);
         Add("Undo", () => _ = UndoEditAsync());
+        // New / Add / Subtract for the next rectangle (Shift = add, Ctrl = subtract while dragging, whatever this says).
+        {
+            float sw = (w - 8) / 3f;
+            (string Label, SplatEditor.Combine Mode)[] modes =
+                { ("New", SplatEditor.Combine.Replace), ("Add", SplatEditor.Combine.Add), ("Subtract", SplatEditor.Combine.Subtract) };
+            for (int k = 0; k < modes.Length; k++)
+            {
+                var mode = modes[k].Mode;
+                var b = panel.AddChild(new UIButton
+                {
+                    X = 12 + k * (sw + 4), Y = by, Width = sw, Height = h, Text = modes[k].Label, FontSize = FontSize.Caption,
+                    OnClick = () => { _combineMode = mode; BuildViewerHudUI(); },
+                });
+                if (mode == _combineMode) b.NormalColor = AccentSelected;
+            }
+            by += h + gap;
+        }
         Add("Delete", () => _ = ApplyEditAsync(SplatEditor.Mode.DeleteInside));
         Add("Keep only", () => _ = ApplyEditAsync(SplatEditor.Mode.KeepInside));
         Add("Select all", () => { _dragStart = _dragEnd = null; _selection = SplatEditor.Volume.All(); _ = CountSelectionAsync(); BuildViewerHudUI(); });
         Add("Invert selection", () => ChangeSelection(v => { v.Invert ^= 1; return v; }, rebuild: true));
-        Add("Clear selection", () => { _selection = null; _selectedCount = 0; _sizeFilterPercent = 0f; _dragStart = _dragEnd = null; BuildViewerHudUI(); });
+        Add("Clear selection", () =>
+        {
+            _selection = null; _selectedCount = 0; _sizeFilterPercent = 0f; _dragStart = _dragEnd = null;
+            _splatEditor.ClearMask();
+            BuildViewerHudUI();
+        });
         Add(_insertListOpen ? "Insert scene  <" : "Insert scene  >", () => _ = ToggleInsertListAsync());
         Add("Copy", () => _ = CopySelectionAsync(cut: false));
         Add("Cut", () => _ = CopySelectionAsync(cut: true));
@@ -382,11 +411,13 @@ public partial class Studio
         if (!_selectMode || p == null || p.ScreenPosition is not { } pos) return false;
         if (p.WasPressed)
         {
-            if (_uiRoot.HitTest(pos) != null) return false;   // a click on the toolbar, not a selection
+            // A click on the toolbar is not a selection - but the last rectangle's outline is UI too, and a Subtract drag
+            // starts inside it by nature.
+            var hit = _uiRoot.HitTest(pos);
+            if (hit != null && !ReferenceEquals(hit, _selectRect)) return false;
             _dragStart = _dragEnd = pos;
             _dragging = true;
-            _editNote = null;
-            _selection = null;
+            _editNote = null;   // the selection stays: an Add / Subtract drag combines with it
             ShowSelectRect(pos, pos);
             return true;
         }
@@ -409,8 +440,14 @@ public partial class Studio
 
     void FinishSelection(Vector2 a, Vector2 b)
     {
+        var keys = _gameUI.Input.Keyboard;
+        var op = keys.IsKeyDown("ShiftLeft") || keys.IsKeyDown("ShiftRight") ? SplatEditor.Combine.Add
+            : keys.IsKeyDown("ControlLeft") || keys.IsKeyDown("ControlRight") ? SplatEditor.Combine.Subtract
+            : _combineMode;
         if (MathF.Abs(a.X - b.X) < 3 || MathF.Abs(a.Y - b.Y) < 3)
         {
+            // A click, not a drag: in New mode it deselects; adding or subtracting nothing changes nothing.
+            if (op == SplatEditor.Combine.Replace) { _selection = null; _selectedCount = 0; }
             _dragStart = _dragEnd = null;
             BuildViewerHudUI();
             return;
@@ -420,8 +457,41 @@ public partial class Studio
         float Nx(float px) => px / Math.Max(1, _canvasWidth) * 2f - 1f;
         float Ny(float py) => 1f - py / Math.Max(1, _canvasHeight) * 2f;
         var cam = _sceneManager.Camera;
-        _selection = SplatEditor.Volume.ScreenRect(cam.ViewMatrix * cam.ProjectionMatrix, Nx(a.X), Nx(b.X), Ny(a.Y), Ny(b.Y));
-        _ = CountSelectionAsync();
+        var rect = SplatEditor.Volume.ScreenRect(cam.ViewMatrix * cam.ProjectionMatrix, Nx(a.X), Nx(b.X), Ny(a.Y), Ny(b.Y));
+        _ = CombineSelectionAsync(rect, op);
+    }
+
+    /// <summary>
+    /// Combine <paramref name="region"/> into the selection (the editor's per-splat mask): replace, add or subtract. A
+    /// selection that is still a single region (a rectangle, Select all, an XR box, pasted rows) goes into the mask first,
+    /// its invert with it; the opacity and size filters stay live on top of the mask.
+    /// </summary>
+    async Task CombineSelectionAsync(SplatEditor.Volume region, SplatEditor.Combine op)
+    {
+        var packed = _gpuRenderer.PackedSplatBuffer;
+        if (packed == null || _editBusy) return;
+        var accel = _gpuService.WebGPUAccelerator;
+        int n = _gpuRenderer.SplatCount;
+        var prior = _selection;
+        if (op == SplatEditor.Combine.Subtract && prior == null) { RefreshEditStatus(); return; }   // nothing to take from
+        if (prior == null) op = SplatEditor.Combine.Replace;   // adding to nothing: the mask may hold an old selection
+        _editBusy = true; RefreshEditStatus();
+        try
+        {
+            if (op != SplatEditor.Combine.Replace && prior is { } p && p.UseMask == 0)
+            {
+                var regionOnly = p; regionOnly.OpacityBelow = 0f; regionOnly.SizeAbove = 0f;
+                await _splatEditor.CombineAsync(accel, packed, n, regionOnly, SplatEditor.Combine.Replace);
+            }
+            await _splatEditor.CombineAsync(accel, packed, n, region, op);
+            var next = SplatEditor.Volume.Masked();
+            if (prior is { } f) { next.OpacityBelow = f.OpacityBelow; next.SizeAbove = f.SizeAbove; }
+            _selection = next;
+        }
+        catch (Exception ex) { Console.WriteLine($"[Edit] selection failed: {ex.Message}"); }
+        finally { _editBusy = false; }
+        Console.WriteLine($"[Edit] {op} selection");
+        await CountSelectionAsync();
     }
 
     async Task CountSelectionAsync()

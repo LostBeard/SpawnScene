@@ -34,6 +34,11 @@ public sealed class SplatEditor : IDisposable
         public float OpacityBelow;
         /// <summary>When &gt; 0, only splats whose largest axis is longer than this (scene units) - blobs and needles.</summary>
         public float SizeAbove;
+        /// <summary>1: the region is the editor's per-splat selection mask (<see cref="CombineAsync"/>), not a box or rows.</summary>
+        public int UseMask;
+
+        /// <summary>The editor's mask as the region: what add / subtract selections built.</summary>
+        public static Volume Masked() => new() { UseMask = 1, M44 = 1 };
 
         /// <summary>This selection with the same invert and filters as <paramref name="from"/>.</summary>
         public Volume WithFiltersOf(Volume from)
@@ -50,7 +55,7 @@ public sealed class SplatEditor : IDisposable
         /// them (so a second move takes the same splats); a row range is unchanged.</summary>
         public Volume MovedBy(Vector3 offset)
         {
-            if (RowTo > RowFrom) return this;
+            if (RowTo > RowFrom || UseMask != 0) return this;   // rows and mask bits follow their splats
             var m = new Matrix4x4(M11, M12, M13, M14, M21, M22, M23, M24, M31, M32, M33, M34, M41, M42, M43, M44);
             var moved = From(Matrix4x4.CreateTranslation(-offset) * m, X0, X1, Y0, Y1, Z0, Z1);
             return moved.WithFiltersOf(this);
@@ -91,22 +96,41 @@ public sealed class SplatEditor : IDisposable
     /// Whether splat <paramref name="i"/> at (x, y, z) with this opacity and largest scale is selected: the filters
     /// first (fainter than, larger than), then the row range or region, inverted when asked.
     /// </summary>
-    public static bool Selected(Volume v, int i, float x, float y, float z, float opacity, float maxScale)
+    public static bool Selected(Volume v, int i, float x, float y, float z, float opacity, float maxScale, int maskBit = 0)
     {
         if (v.OpacityBelow > 0f && opacity >= v.OpacityBelow) return false;
         if (v.SizeAbove > 0f && maxScale <= v.SizeAbove) return false;
-        bool region = v.RowTo > v.RowFrom ? i >= v.RowFrom && i < v.RowTo : Inside(v, x, y, z);
+        bool region = v.UseMask != 0 ? maskBit != 0
+            : v.RowTo > v.RowFrom ? i >= v.RowFrom && i < v.RowTo : Inside(v, x, y, z);
         return region != (v.Invert != 0);
     }
 
-    /// <summary><see cref="Selected(Volume, int, float, float, float, float, float)"/> for row <paramref name="i"/> of a packed buffer.</summary>
-    public static bool SelectedRow(Volume v, ArrayView1D<float, Stride1D.Dense> packed, int i)
+    /// <summary>
+    /// <see cref="Selected(Volume, int, float, float, float, float, float, int)"/> for row <paramref name="i"/> of a packed
+    /// buffer; <paramref name="mask"/> is read only for a <see cref="Volume.UseMask"/> selection (else any view).
+    /// </summary>
+    public static bool SelectedRow(Volume v, ArrayView1D<float, Stride1D.Dense> packed, ArrayView1D<int, Stride1D.Dense> mask, int i)
     {
         int o = i * SplatFormat.Floats;
         float s = packed[o + 6];
         if (packed[o + 7] > s) s = packed[o + 7];
         if (packed[o + 8] > s) s = packed[o + 8];
-        return Selected(v, i, packed[o], packed[o + 1], packed[o + 2], packed[o + SplatFormat.OffOpacity], s);
+        int bit = v.UseMask != 0 ? mask[i] : 0;
+        return Selected(v, i, packed[o], packed[o + 1], packed[o + 2], packed[o + SplatFormat.OffOpacity], s, bit);
+    }
+
+    /// <summary>How a new region combines with the selection mask.</summary>
+    public enum Combine { Replace = 0, Add = 1, Subtract = 2 }
+
+    static void CombineKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume region,
+        ArrayView1D<int, Stride1D.Dense> regionMask, ArrayView1D<int, Stride1D.Dense> mask, int op, int n)
+    {
+        if (i >= n) return;
+        bool inside = packed[i * SplatFormat.Floats + SplatFormat.OffOpacity] > 0f && SelectedRow(region, packed, regionMask, i);
+        int m = op == 0 ? 0 : mask[i];
+        if (op == 2) { if (inside) m = 0; }
+        else if (inside) m = 1;
+        mask[i] = m;
     }
 
     /// <summary>The selection test, shared by the kernels and the tests.</summary>
@@ -121,20 +145,22 @@ public sealed class SplatEditor : IDisposable
         return nx >= v.X0 && nx <= v.X1 && ny >= v.Y0 && ny <= v.Y1 && nz >= v.Z0 && nz <= v.Z1;
     }
 
-    static void CountKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, ArrayView1D<int, Stride1D.Dense> count, int n)
+    static void CountKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, ArrayView1D<int, Stride1D.Dense> mask,
+        ArrayView1D<int, Stride1D.Dense> count, int n)
     {
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        if (SelectedRow(v, packed, i)) Atomic.Add(ref count[0], 1);
+        if (SelectedRow(v, packed, mask, i)) Atomic.Add(ref count[0], 1);
     }
 
-    static void ApplyKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, int keepInside, int n)
+    static void ApplyKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, ArrayView1D<int, Stride1D.Dense> mask,
+        int keepInside, int n)
     {
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        bool inside = SelectedRow(v, packed, i);
+        bool inside = SelectedRow(v, packed, mask, i);
         if (inside != (keepInside != 0)) packed[o + SplatFormat.OffOpacity] = 0f;
     }
 
@@ -150,12 +176,13 @@ public sealed class SplatEditor : IDisposable
         packed[i * SplatFormat.Floats + SplatFormat.OffOpacity] = saved[i];
     }
 
-    static void MoveKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, float dx, float dy, float dz, int n)
+    static void MoveKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, Volume v, ArrayView1D<int, Stride1D.Dense> mask,
+        float dx, float dy, float dz, int n)
     {
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        if (!SelectedRow(v, packed, i)) return;
+        if (!SelectedRow(v, packed, mask, i)) return;
         packed[o] += dx; packed[o + 1] += dy; packed[o + 2] += dz;
     }
 
@@ -180,11 +207,12 @@ public sealed class SplatEditor : IDisposable
     }
 
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>? _zeroFrom;
-    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int>? _count;
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>? _count;
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int>? _combine;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>? _sizeHist;
-    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, int, int>? _apply;
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int, int>? _apply;
     Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>? _save, _restore, _savePos, _restorePos;
-    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, float, float, float, int>? _move;
+    Action<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, float, float, float, int>? _move;
 
     /// <summary>One undo step: what it restores (the opacity column, or positions) and the saved values.</summary>
     readonly record struct Snapshot(bool Positions, MemoryBuffer1D<float, Stride1D.Dense> Values)
@@ -204,15 +232,60 @@ public sealed class SplatEditor : IDisposable
 
     void Load(Accelerator a)
     {
-        _count ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int>(CountKernel);
+        _count ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(CountKernel);
+        _combine ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int>(CombineKernel);
+        _dummyMask ??= a.Allocate1D<int>(1);
         _sizeHist ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SizeHistogramKernel);
-        _apply ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, int, int>(ApplyKernel);
+        _apply ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, int, int>(ApplyKernel);
         _save ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(SaveOpacityKernel);
         _restore ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(RestoreOpacityKernel);
         _zeroFrom ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>(ZeroFromKernel);
         _savePos ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(SavePositionsKernel);
         _restorePos ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int>(RestorePositionsKernel);
-        _move ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, float, float, float, int>(MoveKernel);
+        _move ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, Volume, ArrayView1D<int, Stride1D.Dense>, float, float, float, int>(MoveKernel);
+    }
+
+    MemoryBuffer1D<int, Stride1D.Dense>? _mask, _dummyMask;
+    int _maskN;
+
+    /// <summary>The per-splat selection mask (1 = selected) for <see cref="Volume.Masked"/> selections, or null. The
+    /// renderer binds it to tint the selection.</summary>
+    public MemoryBuffer1D<int, Stride1D.Dense>? Mask => _mask;
+
+    /// <summary>The mask for a <see cref="Volume.UseMask"/> selection, else a one-int stand-in no kernel reads.</summary>
+    public ArrayView1D<int, Stride1D.Dense> MaskViewFor(Accelerator a, Volume v)
+    {
+        Load(a);
+        return v.UseMask != 0 && _mask != null ? _mask.View : _dummyMask!.View;
+    }
+
+    /// <summary>
+    /// Combine <paramref name="region"/> (a box, rows, or a filtered region - not itself a mask selection) into the
+    /// selection mask: replace it, add to it, or subtract from it. A mask of another length (a new scene, a paste) starts
+    /// empty. Deleted splats are never set.
+    /// </summary>
+    public async Task CombineAsync(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, Volume region, Combine op)
+    {
+        if (n <= 0) return;
+        if (region.UseMask != 0) throw new ArgumentException("combine a box or rows into the mask, not the mask itself", nameof(region));
+        Load(a);
+        if (_mask == null || _maskN != n)
+        {
+            _mask?.Dispose();
+            _mask = a.Allocate1D<int>(n);
+            _mask.MemSetToZero();
+            _maskN = n;
+        }
+        _combine!(n, packed.View, region, _dummyMask!.View, _mask.View, (int)op, n);
+        await a.SynchronizeAsync();
+    }
+
+    /// <summary>Forget the mask (a new scene).</summary>
+    public void ClearMask()
+    {
+        _mask?.Dispose();
+        _mask = null;
+        _maskN = 0;
     }
 
     /// <summary>Visible splats inside the volume.</summary>
@@ -222,7 +295,7 @@ public sealed class SplatEditor : IDisposable
         Load(a);
         using var count = a.Allocate1D<int>(1);
         count.MemSetToZero();
-        _count!(n, packed.View, v, count.View, n);
+        _count!(n, packed.View, v, MaskViewFor(a, v), count.View, n);
         await a.SynchronizeAsync();
         // CPU transfer: one int, the selected count for the UI.
         var c = await count.CopyToHostAsync<int>(0, 1);
@@ -284,7 +357,7 @@ public sealed class SplatEditor : IDisposable
         if (n <= 0) return;
         Load(a);
         PushSnapshot(a, packed, n, positions: false);
-        _apply!(n, packed.View, v, mode == Mode.KeepInside ? 1 : 0, n);
+        _apply!(n, packed.View, v, MaskViewFor(a, v), mode == Mode.KeepInside ? 1 : 0, n);
         await a.SynchronizeAsync();
     }
 
@@ -297,7 +370,7 @@ public sealed class SplatEditor : IDisposable
         if (n <= 0) return;
         Load(a);
         if (pushUndo) PushSnapshot(a, packed, n, positions: true);
-        _move!(n, packed.View, v, offset.X, offset.Y, offset.Z, n);
+        _move!(n, packed.View, v, MaskViewFor(a, v), offset.X, offset.Y, offset.Z, n);
         await a.SynchronizeAsync();
     }
 
@@ -352,5 +425,11 @@ public sealed class SplatEditor : IDisposable
         _undoSplats = -1;
     }
 
-    public void Dispose() => ClearUndo();
+    public void Dispose()
+    {
+        ClearUndo();
+        ClearMask();
+        _dummyMask?.Dispose();
+        _dummyMask = null;
+    }
 }

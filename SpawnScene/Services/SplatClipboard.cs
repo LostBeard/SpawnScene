@@ -61,7 +61,7 @@ public sealed class SplatClipboard : IDisposable
         if (packed == null || n <= 0) return null;
         int k = await editor.CountAsync(a, packed, n, v);
         if (k <= 0) return null;
-        using var indices = await SplatRows.SelectIndicesAsync(a, packed, n, v, k);
+        using var indices = await SplatRows.SelectIndicesAsync(a, packed, n, v, k, editor);
         var clipPacked = SplatRows.GatherRows(a, packed, indices, k, SplatFormat.Floats);
         MemoryBuffer1D<float, Stride1D.Dense>[]? clipSh = null;
         if (renderer.ShDegree > 0 && renderer.ShRestBuffers is { } parts)

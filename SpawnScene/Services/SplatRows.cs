@@ -15,12 +15,12 @@ public static class SplatRows
     // ── Kernels ─────────────────────────────────────────────────────────────────────────────────────────────
 
     static void SelectKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, SplatEditor.Volume v,
-        ArrayView1D<int, Stride1D.Dense> indices, ArrayView1D<int, Stride1D.Dense> count, int n)
+        ArrayView1D<int, Stride1D.Dense> mask, ArrayView1D<int, Stride1D.Dense> indices, ArrayView1D<int, Stride1D.Dense> count, int n)
     {
         if (i >= n) return;
         int o = i * SplatFormat.Floats;
         if (packed[o + SplatFormat.OffOpacity] <= 0f) return;
-        if (!SplatEditor.SelectedRow(v, packed, i)) return;
+        if (!SplatEditor.SelectedRow(v, packed, mask, i)) return;
         int slot = Atomic.Add(ref count[0], 1);
         indices[slot] = i;
     }
@@ -130,7 +130,7 @@ public static class SplatRows
         if (n > 0) _convert!(n, packed.View, n, toShDc ? 1 : 0);
     }
 
-    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>? _select;
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>? _select;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int>? _gather;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int, int, float, float, float, int>? _append;
     static Accelerator? _loadedFor;
@@ -140,21 +140,25 @@ public static class SplatRows
         if (!ReferenceEquals(_loadedFor, a)) { _select = null; _gather = null; _append = null; _convert = null; _rotate = null; _loadedFor = a; }
         _rotate ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, float, float, float, float>(RotateKernel);
         _convert ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>(ConvertColoursKernel);
-        _select ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SelectKernel);
+        _select ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SelectKernel);
         _gather ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int>(GatherKernel);
         _append ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int, int, float, float, float, int>(AppendKernel);
     }
 
     /// <summary>The indices of the visible splats inside the volume (any order), on the GPU, with their count
-    /// (<paramref name="count"/> is the CountAsync result: the buffer is sized by it).</summary>
+    /// (<paramref name="count"/> is the CountAsync result: the buffer is sized by it). A mask selection
+    /// (<see cref="SplatEditor.Volume.UseMask"/>) reads the mask of <paramref name="editor"/>.</summary>
     public static async Task<MemoryBuffer1D<int, Stride1D.Dense>> SelectIndicesAsync(Accelerator a,
-        MemoryBuffer1D<float, Stride1D.Dense> packed, int n, SplatEditor.Volume v, int count)
+        MemoryBuffer1D<float, Stride1D.Dense> packed, int n, SplatEditor.Volume v, int count, SplatEditor? editor = null)
     {
+        if (v.UseMask != 0 && editor == null) throw new ArgumentException("a mask selection needs its editor", nameof(editor));
         Load(a);
         var indices = a.Allocate1D<int>(Math.Max(1, count));
         using var counter = a.Allocate1D<int>(1);
         counter.MemSetToZero();
-        _select!(n, packed.View, v, indices.View, counter.View, n);
+        using var noMask = a.Allocate1D<int>(1);
+        var mask = editor != null ? editor.MaskViewFor(a, v) : noMask.View;
+        _select!(n, packed.View, v, mask, indices.View, counter.View, n);
         await a.SynchronizeAsync();
         return indices;
     }

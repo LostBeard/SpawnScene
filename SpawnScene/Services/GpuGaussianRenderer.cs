@@ -800,6 +800,9 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
     // ── Selection highlight (Edit tools) ─────────────────────────────────────────────────────────────────────
     GPUBuffer? _selBuf;
+    /// <summary>The editor's selection mask bound at pack binding 8 while a mask selection is shown, else null.</summary>
+    GPUBuffer? _selMask;
+    GPUBuffer? _selMaskCached;
     readonly float[] _selData = new float[32];   // mat4 (16) + lo (4) + hi (4) + rows (4, as i32 bits) + filt (4)
 
     GPUBuffer EnsureSelectionBuffer()
@@ -828,9 +831,10 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// Tint the splats a selection takes (null = none) - drawn by the pack pass, so the scene data is untouched. Takes
     /// effect at once: the display vertices are repacked and the sorted paths sort again.
     /// </summary>
-    public void SetSelectionHighlight(SplatEditor.Volume? selection)
+    public void SetSelectionHighlight(SplatEditor.Volume? selection, GPUBuffer? mask = null)
     {
         System.Array.Clear(_selData);
+        _selMask = selection is { UseMask: not 0 } ? mask : null;
         if (selection is { } v)
         {
             // Row-major: WGSL reads column-major, so m * p in the shader is p * M here.
@@ -840,6 +844,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
             _selData[20] = v.X1; _selData[21] = v.Y1; _selData[22] = v.Z1;
             _selData[24] = BitConverter.Int32BitsToSingle(v.RowFrom);
             _selData[25] = BitConverter.Int32BitsToSingle(v.RowTo);
+            _selData[26] = BitConverter.Int32BitsToSingle(v.UseMask != 0 && mask != null ? 1 : 0);
             _selData[28] = v.OpacityBelow; _selData[29] = v.SizeAbove; _selData[30] = v.Invert != 0 ? 1f : 0f;
         }
         if (_device == null) return;
@@ -2403,12 +2408,13 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
         // Create or reuse pack bind group (invalidate only when GPU buffer refs change)
         if (_packBindGroup == null || _srcDataCached != srcDataBuffer || _srcIdxCached != srcIdxBuffer
-            || !ReferenceEquals(_shRestCached, shBinding))
+            || !ReferenceEquals(_shRestCached, shBinding) || !ReferenceEquals(_selMaskCached, _selMask))
         {
             _packBindGroup?.Dispose();
             _srcDataCached = srcDataBuffer;
             _srcIdxCached = srcIdxBuffer;
             _shRestCached = shBinding;
+            _selMaskCached = _selMask;
 
             using var layout = _packPipeline.GetBindGroupLayout(0);
             _packBindGroup = _device.CreateBindGroup(new GPUBindGroupDescriptor
@@ -2424,6 +2430,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                     new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _shRest?[1] ?? _shDummy } },
                     new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _shRest?[2] ?? _shDummy } },
                     new() { Binding = 7, Resource = new GPUBufferBinding { Buffer = EnsureSelectionBuffer() } },
+                    new() { Binding = 8, Resource = new GPUBufferBinding { Buffer = _selMask ?? _shDummy } },
                 }
             });
         }
@@ -3147,10 +3154,12 @@ struct Selection {
     m    : mat4x4<f32>,   // row-major copy of the System.Numerics matrix: m * p == p * M
     lo   : vec4<f32>,     // x0, y0, z0, enabled
     hi   : vec4<f32>,     // x1, y1, z1, -
-    rows : vec4<i32>,     // rowFrom, rowTo (a row range when rowTo > rowFrom), -, -
+    rows : vec4<i32>,     // rowFrom, rowTo (a row range when rowTo > rowFrom), 1 = the region is sel_mask, -
     filt : vec4<f32>,     // opacity below (0 = off), largest axis above (0 = off), invert (1 = on), -
 }
 @group(0) @binding(7) var<uniform> sel : Selection;
+// SplatEditor's per-splat selection mask (add / subtract selections), read when sel.rows.z == 1; a stand-in otherwise.
+@group(0) @binding(8) var<storage, read> sel_mask : array<i32>;
 
 // SplatEditor.Selected: the filters, then the row range or region, inverted when asked.
 fn is_selected(i : u32, o : u32) -> bool {
@@ -3158,7 +3167,9 @@ fn is_selected(i : u32, o : u32) -> bool {
     if (sel.filt.x > 0.0 && src[o + 9u] >= sel.filt.x) { return false; }
     if (sel.filt.y > 0.0 && max(src[o + 6u], max(src[o + 7u], src[o + 8u])) <= sel.filt.y) { return false; }
     var region = false;
-    if (sel.rows.y > sel.rows.x) {
+    if (sel.rows.z == 1) {
+        region = sel_mask[i] != 0;
+    } else if (sel.rows.y > sel.rows.x) {
         region = i32(i) >= sel.rows.x && i32(i) < sel.rows.y;
     } else {
         let c = sel.m * vec4<f32>(src[o], src[o + 1u], src[o + 2u], 1.0);

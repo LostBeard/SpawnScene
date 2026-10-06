@@ -59,6 +59,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   };
   const mouse = (type, x, y) => send('Input.dispatchMouseEvent', { type, x, y, button: 'left', buttons: type === 'mouseReleased' ? 0 : 1, clickCount: 1 });
   const click = async (x, y) => { await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y }); await sleep(60); await mouse('mousePressed', x, y); await sleep(80); await mouse('mouseReleased', x, y); await sleep(300); };
+  // A key held through a gesture (KeyboardEvent.code, e.g. 'ShiftLeft'), as the page's keyboard state sees it.
+  const keyDown = (code, key, vk) => send('Input.dispatchKeyEvent', { type: 'rawKeyDown', code, key, windowsVirtualKeyCode: vk });
+  const keyUp = (code, key, vk) => send('Input.dispatchKeyEvent', { type: 'keyUp', code, key, windowsVirtualKeyCode: vk });
   const drag = async (x0, y0, x1, y1) => {
     await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: x0, y: y0 }); await sleep(60);
     await mouse('mousePressed', x0, y0);
@@ -119,7 +122,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await click(253, 264); await sleep(10000);          // Open (first scene card)
       await shot('e0_scene');
       await click(1288, 28); await sleep(600);            // Edit (a project scene's viewer: no Depth button)
-      await click(79, 349); await sleep(60000);           // Export file (Studio.Edit toolbar, row 7 left)
+      await click(79, 391); await sleep(60000);           // Export file (Studio.Edit toolbar, row 8 left)
       console.log('downloads: ' + fs.readdirSync(dir).join(', '));
       return;
     }
@@ -132,10 +135,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await click(1288, 28); await sleep(600);            // Edit
       await click(79, 97);                                // Select
       await drag(300, 150, 700, 800);     // right of the toolbar (a drag that starts on it is a toolbar click)
-      await click(79, 265); await sleep(2500);            // Copy
-      await click(79, 307); await sleep(4000);            // Paste
+      await click(79, 307); await sleep(2500);            // Copy
+      await click(79, 349); await sleep(4000);            // Paste
       await shot('t2_pasted');
-      await click(193, 307); await sleep(10000);          // Save as new scene
+      await click(193, 349); await sleep(10000);          // Save as new scene
       await click(80, 28); await sleep(3000);             // back to the project
       await shot('t3_project');
       await click(795, 264); await sleep(8000);           // Open the second card (the edited copy)
@@ -144,15 +147,36 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     }
     // Top bar: Edit sits left of AR (canvas 1600 wide, Send to Headset hidden on loopback). Toolbar: left edge,
     // buttons 42 px apart from y 97: Select, Delete, Keep only, Copy, Cut, Paste, Undo, Clear selection, Save.
-    // Toolbar (Studio.Edit BuildEditToolbar): two columns centred at x 79 / 193, rows 42 px apart from y 97; the two
-    // filter sliders under the move buttons, their tracks 224 px wide from x 24.
+    // Toolbar (Studio.Edit BuildEditToolbar): two columns centred at x 79 / 193, rows 42 px apart from y 97 - row 2 is
+    // the New / Add / Subtract strip (three buttons centred at x 60 / 136 / 212); the two filter sliders under the move
+    // buttons, their tracks 224 px wide from x 24.
     const B = {
-      select: [79, 97], undo: [193, 97], del: [79, 139], keep: [193, 139], all: [79, 181], invert: [193, 181],
-      clear: [79, 223], insert: [193, 223], copy: [79, 265], cut: [193, 265], paste: [79, 307], save: [193, 307],
-      exportFile: [79, 349], exportStreaming: [193, 349],
+      select: [79, 97], undo: [193, 97], modeNew: [60, 139], modeAdd: [136, 139], modeSubtract: [212, 139],
+      del: [79, 181], keep: [193, 181], all: [79, 223], invert: [193, 223], clear: [79, 265], insert: [193, 265],
+      copy: [79, 307], cut: [193, 307], paste: [79, 349], save: [193, 349], exportFile: [79, 391], exportStreaming: [193, 391],
+      moveUp: [79, 519],
     };
-    const Y = { faintSlider: 592, largeSlider: 638 };
+    const Y = { faintSlider: 634, largeSlider: 680 };
     const sliderX = f => 24 + f * 224;
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'mask') {
+      // SPAWNSCENE_EDIT_FLOW=mask (after importing the Bicycle sample): Select the front wheel; Shift-drag adds the rear
+      // wheel; the Subtract button, then a drag takes the rear hub back out; Delete, Undo. Counts print as [Edit].
+      await click(1288, 28); await sleep(800);                       // Edit
+      await click(...B.select); await sleep(500);
+      await drag(505, 390, 720, 645);                                 // front wheel
+      await sleep(1500); await shot('m0_front');
+      await keyDown('ShiftLeft', 'Shift', 16);
+      await drag(830, 390, 1105, 655);                                // + rear wheel
+      await keyUp('ShiftLeft', 'Shift', 16);
+      await sleep(1500); await shot('m1_both');
+      await click(...B.modeSubtract); await sleep(400);
+      await drag(915, 470, 1010, 565);                                // - rear hub
+      await sleep(1500); await shot('m2_minus_hub');
+      await click(...B.modeNew); await sleep(400);
+      await click(...B.del); await sleep(2000); await shot('m3_deleted');
+      await click(...B.undo); await sleep(2000); await shot('m4_undone');
+      return;
+    }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'filter') {
       // SPAWNSCENE_EDIT_FLOW=filter (after an import): the selection filters on the whole scene - fainter than 0.2,
       // Delete, Undo; Select all + Invert (nothing); the largest 3% of the splats, Delete, Undo. Counts print as [Edit].
@@ -202,8 +226,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       await click(...B.paste); await sleep(2500);
       await shot('c1_pasted');
       // Move the pasted copy (selected after the paste): Up twice (the move grid's left column, second row).
-      await click(79, 477); await sleep(1200);
-      await click(79, 477); await sleep(1500);
+      await click(...B.moveUp); await sleep(1200);
+      await click(...B.moveUp); await sleep(1500);
       await shot('c1b_moved_up');
       await click(...B.undo); await sleep(1500);
       await shot('c2_undone');

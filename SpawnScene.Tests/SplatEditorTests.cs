@@ -149,6 +149,52 @@ public class SplatEditorTests
     }
 
     [Test]
+    public async Task MaskSelection_ReplaceAddSubtract_FiltersOnTop_DrivesTheEdits()
+    {
+        using var context = Context.Create(b => b.CPU());
+        using var accel = context.CreateCPUAccelerator(0);
+        const int F = SplatFormat.Floats, n = 10;
+        // Ten splats at x = 0..9; odd ones faint (0.05), even ones opaque (0.9).
+        var data = new float[n * F];
+        for (int i = 0; i < n; i++)
+        {
+            data[i * F] = i;
+            data[i * F + SplatFormat.OffOpacity] = i % 2 == 1 ? 0.05f : 0.9f;
+            data[i * F + 6] = data[i * F + 7] = data[i * F + 8] = 0.01f;
+        }
+        using var packed = accel.Allocate1D(data);
+        var editor = new SplatEditor();
+        SplatEditor.Volume Box(float from, float to) =>
+            SplatEditor.Volume.Box(Matrix4x4.CreateScale((to - from) / 2f, 1, 1) * Matrix4x4.CreateTranslation((from + to) / 2f, 0, 0));
+        var mask = SplatEditor.Volume.Masked();
+
+        await editor.CombineAsync(accel, packed, n, Box(-0.5f, 2.5f), SplatEditor.Combine.Replace);     // 0 1 2
+        Assert.That(await editor.CountAsync(accel, packed, n, mask), Is.EqualTo(3));
+        await editor.CombineAsync(accel, packed, n, Box(5.5f, 8.5f), SplatEditor.Combine.Add);          // + 6 7 8
+        Assert.That(await editor.CountAsync(accel, packed, n, mask), Is.EqualTo(6));
+        await editor.CombineAsync(accel, packed, n, Box(1.5f, 6.5f), SplatEditor.Combine.Subtract);     // - 2 6
+        Assert.That(await editor.CountAsync(accel, packed, n, mask), Is.EqualTo(4), "0 1 7 8");
+
+        var faint = mask; faint.OpacityBelow = 0.1f;
+        Assert.That(await editor.CountAsync(accel, packed, n, faint), Is.EqualTo(2), "the faint of 0 1 7 8: 1 7");
+        var outside = mask; outside.Invert = 1;
+        Assert.That(await editor.CountAsync(accel, packed, n, outside), Is.EqualTo(6), "2 3 4 5 6 9");
+        Assert.That(mask.MovedBy(new Vector3(5, 0, 0)).UseMask, Is.EqualTo(1), "a mask follows its splats");
+
+        // The rows the clipboard would copy, then Delete through the mask.
+        using (var idx = await SplatRows.SelectIndicesAsync(accel, packed, n, mask, 4, editor))
+            Assert.That(idx.GetAsArray1D().OrderBy(i => i), Is.EqualTo(new[] { 0, 1, 7, 8 }));
+        await editor.ApplyAsync(accel, packed, n, mask, SplatEditor.Mode.DeleteInside);
+        float[] op = packed.GetAsArray1D().Where((_, k) => k % F == SplatFormat.OffOpacity).ToArray();
+        Assert.That(op.Select((o, i) => o == 0f ? i : -1).Where(i => i >= 0), Is.EqualTo(new[] { 0, 1, 7, 8 }));
+
+        // A new scene size starts an empty mask: replacing into it does not inherit the old bits.
+        await editor.CombineAsync(accel, packed, n - 1, Box(2.5f, 3.5f), SplatEditor.Combine.Add);
+        Assert.That(await editor.CountAsync(accel, packed, n - 1, mask), Is.EqualTo(1), "only 3");
+        editor.Dispose();
+    }
+
+    [Test]
     public async Task MoveRows_ThenDelete_UndoesInOrder()
     {
         using var context = Context.Create(b => b.CPU());

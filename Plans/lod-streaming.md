@@ -97,5 +97,10 @@ In code, CPU-tested; browser checks pending where noted:
   sorted (TruckFull 2.4M pool: ~960K keys, not 2.4M; 59 dB vs before). XR: the cut measures at the eye's pixel
   density (emulated Quest: 1.13M drawn, 144/147 chunks, vs ~795K through the wide head camera), and an XR session on
   an LOD scene without &lodbudget gets a device budget (600K Quest browser, 1.5M tethered; emulator check pending).
-- **Next:** a hosted massive scene (GitHub Pages serves Range); a multi-room scene end to end (partitioned training ->
-  Export streaming -> open); merged SH for internal nodes; Quest on-device check of the budget.
+- **Multi-room end to end (10-06 02:55):** DrJohnsonFull (263 photos) 30K at a 6 GB budget -> 2,838,151 splats (66 min)
+  -> Export streaming: 3,035,408 nodes, 186 chunks, 180 MB in 26.5 s -> streamed over HTTP Range: 44 KB header +
+  1 MB chunk 0, on screen in 0.9 s; the home view (one room) needs 85 of 186 chunks (the one-object Truck needed 138
+  of 147); a 1M-slot pool (a third of the tree) holds 62 chunks and draws the room at 36.5 dB vs the unconstrained.
+  Merged nodes carry SH now (a6e6c31).
+- **Next:** a hosted massive scene (GitHub Pages serves Range); Quest on-device check of the budget; scenes larger
+  than one GPU (train per block, export per block, one tree).

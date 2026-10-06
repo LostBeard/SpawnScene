@@ -143,6 +143,38 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
 - `CompressionEnabled = false`
 - `TrimmerRootAssembly` entries for ILGPU, ILGPU.Algorithms, SpawnDev.ILGPU
 
+### Training defaults worth knowing
+
+- Densification uses AbsGS's signal (sum of per-pixel |dL/dmean2D|, bar 8e-4) since 2026-10-06; `&absgrad=0` restores
+  the reference signed sum (2e-4). Bicycle 7K held out +0.43 dB / SSIM +0.038 with fewer splats; Truck equal with 57%
+  fewer. TrainerGate's `absgrad` case guards it.
+- Every per-splat / per-pixel WGSL pass dispatches through `SplatTrainerGpu.DispatchLinear` (wraps past 65535
+  workgroups; the shader rebuilds the flat index from `num_workgroups`). An X-only dispatch dies past 4,194,240 items.
+- `&gpumem=N` sets a run's training budget (a fresh harness profile is otherwise Auto = 4 GB, cap ~3.3M splats).
+
+### Massive scenes: LOD tree, streaming, partitioned training (Plans/lod-streaming.md)
+
+- **LOD tree** (`LodTree` CPU oracle, `GpuLodTree` GPU build, `LodMerge`): Tiny-LoD grid merges, monotone metric so the
+  parallel cut is exact; `GpuSplatSorter` draws only the cut (compacted, prefix-sorted, drawn indirect), steered to a
+  splat budget (`&lodbudget`, floored at the scene's tau). XR measures the cut at the eye's focal and gets a device
+  budget (600K Quest browser / 1.5M tethered).
+- **`.spawnscene` v3** (`LodChunkFile`): the tree breadth-first (`LodLayout`/`GpuLodLayout`, leaves = LOD size 0),
+  16K-node run-aligned chunks gzipped one by one, each with its parent chunks (`Needs`). Written by `LodStreamWriter`
+  one block at a time under a top (Export streaming = one block).
+- **Streaming** (`GpuLodPager`, `&lodpool=N`): a fixed pool of pages; the paged cut stands a node in for missing
+  children and asks for their chunk (priority = stand-in px); loads closed under `Needs`, evicts only unused pages
+  (never one loaded since the previous readback). Sources: a File by slices (Open scene file), memory, or HTTP Range.
+- **Partitioned training** (`&blocks=CxR`, Studio.Partition): coarse model + blocks with outside frozen; a result past
+  one run's splat cap (or `&streamed=1`) is never merged - it is saved as a streamed project scene
+  (`ProjectScene.Format = lod`, `scenes/{id}.spawnscene`) and always opened streamed.
+- Tests: LodLayoutTests / LodPagerSimTests / GpuLodLayoutTests (CPU accelerator); `LodLayoutRealSceneTests` is Explicit.
+
+### Disk hygiene (TJ, 2026-10-05)
+
+One publish folder per purpose (`_pub_tuvok_est` 8104, `_pub_tuvok_gate` 8105), overwritten; every harness run deletes
+its `spawnscene-harness-<port>` profile; an export lives in one place (`_pub_tuvok_est/wwwroot/samples`); screenshots
+only for numbers being reported.
+
 ### Deployment
 
 GitHub Actions workflow (`.github/workflows/deploy-to-github-pages.yml`, manual trigger) publishes to `gh-pages` branch. It rewrites the base tag in `index.html` to `/SpawnScene/` and copies `index.html` to `404.html` for SPA routing.

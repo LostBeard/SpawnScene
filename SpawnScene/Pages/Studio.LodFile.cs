@@ -85,8 +85,11 @@ public partial class Studio
         return true;
     }
 
-    /// <summary>Open a v3 tree streamed from <paramref name="source"/> (<see cref="OpenLodStreamAsync(ArrayBuffer, LodChunkFile.Header3, long)"/>).</summary>
-    async Task OpenLodStreamAsync(LodChunkFile.Header3 h, GpuLodPager.ChunkBytes source, string from)
+    /// <summary>
+    /// Open a v3 tree streamed from <paramref name="source"/> through a pool of <paramref name="poolNodes"/> slots (0 =
+    /// <see cref="LodPoolOption"/>).
+    /// </summary>
+    async Task OpenLodStreamAsync(LodChunkFile.Header3 h, GpuLodPager.ChunkBytes source, string from, int poolNodes = 0)
     {
         var a = _gpuService.WebGPUAccelerator;
         var t0 = DateTime.UtcNow;
@@ -94,7 +97,8 @@ public partial class Studio
         _gpuRenderer.UseRgbColours();
         _gpuRenderer.ColoursAreShDc = h.ColoursAreShDc;
         _gpuRenderer.LodBudget = LodBudgetOption;
-        _lodPager = await GpuLodPager.CreateAsync(a, _gpuRenderer, h, source, LodPoolOption, LodTauOption > 0f ? LodTauOption : 1.5f);
+        _lodPager = await GpuLodPager.CreateAsync(a, _gpuRenderer, h, source, poolNodes > 0 ? poolNodes : LodPoolOption,
+            LodTauOption > 0f ? LodTauOption : 1.5f);
         Console.WriteLine($"[Import] '{h.Name}' (v3, streamed {from}): {h.LeafCount:N0} splats, {h.NodeCount:N0} LOD nodes in " +
             $"{h.Chunks.Length} chunks, chunk 0 on screen in {(DateTime.UtcNow - t0).TotalSeconds:F1}s");
         ShowLodScene(h);

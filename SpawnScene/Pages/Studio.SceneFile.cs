@@ -194,6 +194,19 @@ public partial class Studio
             using var response = await window.Fetch(importUrl);
             if (!response.Ok) { Console.WriteLine($"[Import] FAIL: HTTP {response.Status}"); return; }
             using var bytes = await response.ArrayBuffer();
+            await ImportSceneBytesAsync(bytes, query);
+        }
+        catch (Exception ex) { Console.WriteLine($"[Import] FAIL: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// Open a .spawnscene from its bytes (a fetched URL, or a file picked in the browser - Studio.OpenScene): v1/v2 are
+    /// saved as a scene of a new project and opened; v3 (an LOD tree) is opened as it is.
+    /// </summary>
+    async Task ImportSceneBytesAsync(ArrayBuffer bytes, Dictionary<string, string> query)
+    {
+        try
+        {
             using var first = new Uint8Array(bytes, 0, 12);
             var firstBytes = first.ReadBytes();
             int version = SceneFile.Version(firstBytes);

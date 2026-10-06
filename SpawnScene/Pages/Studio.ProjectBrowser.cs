@@ -44,6 +44,12 @@ public partial class Studio
             NormalColor = PrimaryAction, HoverColor = PrimaryActionHover,
             OnClick = OnNewProjectClicked,
         });
+        bx -= 138;
+        shell.AddChild(new UIButton
+        {
+            X = bx, Y = 25, Width = 130, Height = 32, Text = "Open scene file", FontSize = FontSize.Caption,
+            OnClick = OnOpenSceneFileClicked,
+        });
         bx -= 108;
         shell.AddChild(new UIButton
         {

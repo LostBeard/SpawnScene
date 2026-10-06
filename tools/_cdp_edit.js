@@ -80,6 +80,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     await send('Page.navigate', { url: `${APP}/studio?${process.env.SPAWNSCENE_EDIT_QUERY || 'autotest=generate-room&render=stochastic'}` });
     // SPAWNSCENE_EDIT_MINUTES: how long SPAWNSCENE_EDIT_QUERY may run (a 30K project training is well past an hour).
     const deadline = Date.now() + Number(process.env.SPAWNSCENE_EDIT_MINUTES || 60) * 60 * 1000;
+    // SPAWNSCENE_EDIT_PICK="<css selector>|<file path>": after SPAWNSCENE_EDIT_PICK_DELAY ms (default 15000), put the
+    // file in that <input type=file> as a user's pick would (CDP DOM.setFileInputFiles fires its change event).
+    if (process.env.SPAWNSCENE_EDIT_PICK) {
+      const [selector, file] = process.env.SPAWNSCENE_EDIT_PICK.split('|');
+      await sleep(Number(process.env.SPAWNSCENE_EDIT_PICK_DELAY || 15000));
+      const doc = await send('DOM.getDocument', { depth: -1 });
+      const q = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector });
+      await send('DOM.setFileInputFiles', { nodeId: q.result.nodeId, files: [require('path').resolve(file)] });
+      console.log(`picked ${file} into ${selector}`);
+    }
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);

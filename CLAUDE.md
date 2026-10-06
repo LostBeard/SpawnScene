@@ -148,6 +148,9 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
 - Densification uses AbsGS's signal (sum of per-pixel |dL/dmean2D|, bar 8e-4) since 2026-10-06; `&absgrad=0` restores
   the reference signed sum (2e-4). Bicycle 7K held out +0.43 dB / SSIM +0.038 with fewer splats; Truck equal with 57%
   fewer. TrainerGate's `absgrad` case guards it.
+- Versus the reference (gsplat, same photos held out, llffhold=8, COLMAP poses), TruckFull 30K: ours 24.95 dB / SSIM
+  0.887 with 0.89M splats in 25 min, gsplat 25.13 / 0.877 with 3.79M (c49, 2026-10-06). `&mcmc=1` (gsplat MCMCStrategy)
+  exists but lost its 7K A/B, so it is opt-in.
 - Every per-splat / per-pixel WGSL pass dispatches through `SplatTrainerGpu.DispatchLinear` (wraps past 65535
   workgroups; the shader rebuilds the flat index from `num_workgroups`). An X-only dispatch dies past 4,194,240 items.
 - `&gpumem=N` sets a run's training budget (a fresh harness profile is otherwise Auto = 4 GB, cap ~3.3M splats).

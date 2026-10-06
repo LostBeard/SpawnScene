@@ -41,7 +41,9 @@ const get = u => new Promise((res, rej) =>
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       if ((process.env.SPAWNSCENE_XR_READY ? new RegExp(process.env.SPAWNSCENE_XR_READY) : /\[Autotest\] PASS/).test(t)) passed = true;
       if (/\[Autotest\] XR hook ready/.test(t)) hook = true;
-      if (/error|warn/.test(m.params.type) || /\[Autotest\]|\[XR|\[Edit\]|GPU ERROR|\[Studio\] (Entering|Failed|XR|immersive)/.test(t)) console.log('CON ' + t.slice(0, 300));
+      // SPAWNSCENE_XR_PRINT: more console lines to report (e.g. '\[LOD\]').
+      const more = process.env.SPAWNSCENE_XR_PRINT ? new RegExp(process.env.SPAWNSCENE_XR_PRINT) : null;
+      if (/error|warn/.test(m.params.type) || /\[Autotest\]|\[XR|\[Edit\]|GPU ERROR|\[Studio\] (Entering|Failed|XR|immersive)/.test(t) || (more && more.test(t))) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });

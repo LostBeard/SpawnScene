@@ -126,6 +126,13 @@ GPU holds. Phase D keeps every step per block:
 5. **Memory:** the export holds one block at a time (its rows, SH, tree) plus B block nodes. Writing streams chunk by
    chunk to a Blob list (as now). The pager is unchanged.
 
+**Status (10-06 07:00): in code and browser-checked end to end.** LodLayout.Forest (oracle, tested), LodStreamWriter
+(a block at a time under a top; Export streaming is its one-block case: TruckFull 53.7 dB vs the earlier export),
+partitioned runs over 2x a run's splat cap (or &streamed=1) saved as a streamed project scene (ProjectScene.Format
+lod, scenes/{id}.spawnscene) and opened streamed. c40: TruckFull 2x2 7K &streamed=1 -> 4 blocks -> 1,619,434 splats,
+2,094,712 nodes, 131 chunks, 119 MB; opened streamed (chunk 0 in 0.6 s), reopened from the project (0.1 s).
+Memory stays bounded: a block trains with the half-cap coarse model plus its own growth; viewing is the pool.
+
 Gates: a 2x2 block export of TruckFull equal (cut for cut) to the one-tree export where both apply; a scene of 4
 blocks each at a full run's budget (bigger than one GPU's) exported and streamed with memory at the pool size;
 LodLayout/LodPagerSim tests on a forest-with-top layout (exactly one drawn node per leaf path, streaming == full cut).

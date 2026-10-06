@@ -51,6 +51,10 @@ public sealed class GpuLodPager : IDisposable
     bool _pumping, _poolFullLogged, _disposed;
 
     public int ResidentChunks { get; private set; }
+
+    /// <summary>Still bringing chunks in (loading, queued, or a load in the last 1.5 s - the cut may ask for more).</summary>
+    public bool Busy => _pumping || _queue.Count > 0 || Environment.TickCount64 - _lastLoadTick < 1500;
+    long _lastLoadTick;
     public int ChunkCount => _h.Chunks.Length;
     public int Loads { get; private set; }
     public int Evictions { get; private set; }
@@ -276,6 +280,7 @@ public sealed class GpuLodPager : IDisposable
         _lastWanted[c] = Environment.TickCount64;
         ResidentChunks++;
         Loads++;
+        _lastLoadTick = Environment.TickCount64;
         _r.RequestResort();
     }
 

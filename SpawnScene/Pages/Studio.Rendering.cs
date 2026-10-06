@@ -119,6 +119,8 @@ public partial class Studio
 
             if (_pendingThumbnailSceneId != null)
             {
+                // A streamed scene: wait for the view's chunks (at most ~20 s), or the card shows chunk 0's coarse copy.
+                if (_lodPager is { Busy: true } && _thumbnailHoldFrames++ < 1200) _thumbnailDelayFrames = Math.Max(_thumbnailDelayFrames, 10);
                 _thumbnailDelayFrames--;
                 if (_thumbnailDelayFrames <= 0)
                 {
@@ -126,6 +128,7 @@ public partial class Studio
                     var projId = _pendingThumbnailProjectId;
                     _pendingThumbnailSceneId = null;
                     _pendingThumbnailProjectId = null;
+                    _thumbnailHoldFrames = 0;
                     CaptureSceneThumbnail(projId!, sceneId);
                 }
             }

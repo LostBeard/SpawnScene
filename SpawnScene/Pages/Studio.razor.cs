@@ -87,6 +87,7 @@ public partial class Studio : IAsyncDisposable
     private string? _pendingThumbnailSceneId;
     private string? _pendingThumbnailProjectId;
     private int _thumbnailDelayFrames;
+    private int _thumbnailHoldFrames;
 
     // GPU resources for UI overlay
     private GPUDevice? _device;

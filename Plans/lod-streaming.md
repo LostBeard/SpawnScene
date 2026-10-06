@@ -83,7 +83,13 @@ In code, CPU-tested; browser checks pending where noted:
 - **File** (.spawnscene v3, LodChunkFile): per chunk a SceneCodec frame + raw parent / first child / sphere / LOD
   size, gzipped alone; header lists each chunk's byte range and Needs. Export + full open checked in the browser:
   TruckFull 30K 1.9M splats -> 2.4M nodes, 141 MB, all leaves vs the flat scene 52.5 dB at photo 1's camera
-  (before the 16K / first-child changes - re-check pending).
-- **Pager** (GpuLodPager, &lodpool=N): fixed pool of pages, chunk 0 pinned, LRU eviction of chunks nothing resident
-  needs; chunks from memory or by HTTP Range (header first, chunks on demand; tools/_spa_server.js serves Range).
-  Browser test pending.
+  (re-checked after the 16K / first-child changes: 52.56 dB).
+- **Pager** (GpuLodPager, &lodpool=N): fixed pool of pages, chunk 0 pinned; loads the cut's wants biggest stand-in
+  first, evicts a page nothing resident needs whose loss shows a stand-in under 2/3 of the incoming one's (never
+  before two cut readbacks since its load); chunks from memory or by HTTP Range (header first, chunks on demand;
+  tools/_spa_server.js serves Range). LodPagerSimTests run its kernels and rules on the CPU accelerator.
+- **Browser (20:15):** v3 export 147 chunks / 142 MB in 19 s; full open, all leaves vs flat 52.56 dB; streamed at
+  photo 1, tau 1.5 vs the full open: pool 3M 83.0 dB (138 chunks in 2.5 s), pool 600K 20.5 dB with the near truck
+  refined first, 300K 18.1 dB; HTTP Range: 34 KB header + 855 KB chunk 0, on screen in 0.9 s, 72.8 dB settled.
+- **Next:** the gh-pages host serves Range (GitHub Pages does) - a hosted massive scene; budgets per device (Quest);
+  sort only the cut (the radix sort still runs over every pool slot); a UI entry for v3 export / open.

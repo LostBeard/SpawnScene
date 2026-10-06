@@ -215,6 +215,42 @@ public class ProjectService
     }
 
     /// <summary>
+    /// Save a STREAMED scene: its .spawnscene v3 file (scenes/{id}.spawnscene), written from a Blob (the browser may keep
+    /// it on disk; it never passes through .NET). Marks the scene <see cref="ProjectScene.FormatLod"/>.
+    /// </summary>
+    public async Task SaveStreamedSceneAsync(string projectId, ProjectScene scene, Blob file)
+    {
+        var project = (await ListProjectsAsync()).FirstOrDefault(p => p.Id == projectId);
+        if (project == null) return;
+        using var root = await GetRootDirAsync();
+        using var projDir = await GetProjectDirAsync(root, projectId);
+        using var scenesDir = await projDir.GetDirectoryHandle("scenes", create: true);
+        using var fileHandle = await scenesDir.GetFileHandle($"{scene.Id}.spawnscene", create: true);
+        using var writable = await fileHandle.CreateWritable();
+        await writable.Write(file);
+        await writable.Close();
+        scene.Format = ProjectScene.FormatLod;
+        scene.SizeBytes = file.Size;
+        project.Scenes.Add(scene);
+        project.ModifiedAt = DateTime.UtcNow;
+        await SaveIndexAsync();
+    }
+
+    /// <summary>A streamed scene's .spawnscene v3 as a File (read by slices while it streams), or null. Caller disposes.</summary>
+    public async Task<SpawnDev.SpawnJS.JSObjects.File?> GetStreamedSceneFileAsync(string projectId, string sceneId)
+    {
+        try
+        {
+            using var root = await GetRootDirAsync();
+            using var projDir = await GetProjectDirAsync(root, projectId);
+            using var scenesDir = await projDir.GetDirectoryHandle("scenes");
+            using var fileHandle = await scenesDir.GetFileHandle($"{sceneId}.spawnscene");
+            return await fileHandle.GetFile();
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
     /// Save a trained scene's SH rest parts next to its packed data (scenes/{id}.sh{p}.bin, one per
     /// SphericalHarmonics part), JS memory straight to OPFS. Call after
     /// <see cref="SaveSceneAsync(string, ProjectScene, Uint8Array)"/>; adds to the scene's size and records the layout.
@@ -410,7 +446,8 @@ public class ProjectService
             var root = await GetRootDirAsync();
             var projDir = await GetProjectDirAsync(root, projectId);
             using var scenesDir = await projDir.GetDirectoryHandle("scenes");
-            await scenesDir.RemoveEntry($"{sceneId}.bin");
+            try { await scenesDir.RemoveEntry($"{sceneId}.bin"); } catch { /* a streamed scene has none */ }
+            try { await scenesDir.RemoveEntry($"{sceneId}.spawnscene"); } catch { /* only a streamed scene has one */ }
             try { await scenesDir.RemoveEntry($"{sceneId}.sh.bin"); } catch { /* untrained scenes have none */ }
             for (int part = 0; part < SphericalHarmonics.Parts; part++)
                 try { await scenesDir.RemoveEntry($"{sceneId}.sh{part}.bin"); } catch { /* legacy or untrained */ }

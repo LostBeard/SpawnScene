@@ -209,6 +209,8 @@ public partial class Studio : IAsyncDisposable
             if (bp.Length == 2 && int.TryParse(bp[0], out var bc) && int.TryParse(bp[1], out var br) && bc >= 1 && br >= 1)
                 TrainingBlocks = (Math.Min(bc, 8), Math.Min(br, 8));
         }
+        // &streamed=1: a partitioned run is saved as a streamed scene (Studio.Partition) even when it would fit merged.
+        if (query.TryGetValue("streamed", out var stq)) StreamedPartitionOption = stq is "1" or "true";
         // &gpumem=N: this run's training GPU memory budget in GB (the Settings choice; not saved - a fresh harness
         // profile would otherwise always train at Auto).
         if (query.TryGetValue("gpumem", out var gmq) && int.TryParse(gmq, out var gmi) && GpuMemoryBudget.ChoicesGB.Contains(gmi))

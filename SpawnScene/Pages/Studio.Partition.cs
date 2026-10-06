@@ -31,6 +31,18 @@ public partial class Studio
     /// stage (each block trains from the seed, the first version). URL: &amp;coarse=0.5.</summary>
     public static float PartitionCoarseFraction { get; set; } = 0.5f;
 
+    /// <summary>
+    /// &amp;streamed=1: save a partitioned run as a STREAMED scene even when its blocks would fit one GPU merged. Without it
+    /// a run streams only when its blocks hold more than <see cref="StreamAboveRunCaps"/> times one run's splat cap.
+    /// </summary>
+    public static bool StreamedPartitionOption { get; set; }
+
+    /// <summary>Merged, a partitioned scene over this many single-run splat caps is past what one GPU views whole.</summary>
+    public const int StreamAboveRunCaps = 2;
+
+    /// <summary>Set when a partitioned run saved itself as a streamed scene, so the caller does not save the view too.</summary>
+    bool _partitionSavedStreamed;
+
     /// <summary>Diagnosis (&amp;frozendiag=1): the first densify step that drops frozen context reads both sides back and
     /// logs which splats went and why.</summary>
     public static bool DiagnoseFrozenDensify { get; set; }
@@ -206,6 +218,17 @@ public partial class Studio
         }
 
         if (parked.Count == 0) { Console.WriteLine("[Partition] FAIL: no block trained"); return 0; }
+        long total = parked.Sum(p => (long)p.Count);
+        int runCap = GpuMemoryBudget.Derive(GpuMemoryGB, DeviceBindingLimitBytes, maxSplats).MaxSplats;
+        if (StreamedPartitionOption || total > (long)StreamAboveRunCaps * runCap)
+        {
+            // Too big for one GPU whole (or asked): never merge - the blocks go block by block into a streamed scene.
+            Console.WriteLine($"[Partition] {total:N0} splats in {parked.Count} blocks " +
+                (StreamedPartitionOption ? "(&streamed=1)" : $"(over {StreamAboveRunCaps} x a run's {runCap:N0})") + ": saving a streamed scene");
+            await SaveStreamedPartitionAsync(project, parked, shDegree, iterations);
+            await _projectService.ClearWorkFilesAsync(project.Id);
+            return ranIters;
+        }
         await MergeParkedBlocksAsync(project.Id, parked, shDegree);
         await _projectService.ClearWorkFilesAsync(project.Id);
 
@@ -259,6 +282,62 @@ public partial class Studio
             parts = sh.Length;
         }
         return (k, parts);
+    }
+
+    /// <summary>
+    /// The parked blocks as one STREAMED scene (Plans/lod-streaming.md phase D): each block read back, built into its
+    /// own LOD subtree and written (LodStreamWriter) - only one block on the GPU at a time - then the file is saved in
+    /// the project (ProjectScene.FormatLod) and opened streamed.
+    /// </summary>
+    async Task SaveStreamedPartitionAsync(Project project, List<(int Block, int Count, int ShParts)> parked, int shDegree, int iterations)
+    {
+        var a = _gpuService.WebGPUAccelerator;
+        var t0 = DateTime.UtcNow;
+        var blocks = parked.Where(p => p.Count > 0).ToList();
+        bool withSh = shDegree > 0 && blocks.All(p => p.ShParts == SphericalHarmonics.Parts);
+        var home = CurrentHomeView();
+        var writer = new LodStreamWriter(this, blocks.Count, withSh);
+        foreach (var (block, count, _) in blocks)
+        {
+            var owned = new List<IDisposable>();
+            try
+            {
+                MemoryBuffer1D<float, Stride1D.Dense> rows;
+                using (var bytes = await _projectService.ReadWorkFileAsync(project.Id, $"block{block}.packed.bin")
+                    ?? throw new InvalidOperationException($"block {block}'s parked rows are missing"))
+                    rows = _gpuRenderer.IlgpuFromArrayBuffer(a, bytes);
+                owned.Add(rows);
+                MemoryBuffer1D<float, Stride1D.Dense>[]? sh = null;
+                if (withSh)
+                {
+                    sh = new MemoryBuffer1D<float, Stride1D.Dense>[SphericalHarmonics.Parts];
+                    for (int p = 0; p < sh.Length; p++)
+                    {
+                        using var bytes = await _projectService.ReadWorkFileAsync(project.Id, $"block{block}.sh{p}.bin")
+                            ?? throw new InvalidOperationException($"block {block}'s SH part {p} is missing");
+                        sh[p] = _gpuRenderer.IlgpuFromArrayBuffer(a, bytes);
+                        owned.Add(sh[p]);
+                    }
+                }
+                await writer.AddBlockAsync(rows, count, sh);
+                Console.WriteLine($"[Partition] block {block}: {count:N0} splats into the streamed scene ({writer.Nodes:N0} nodes so far)");
+            }
+            finally { foreach (var d in owned) d.Dispose(); }
+        }
+        using var file = await writer.FinishAsync(project.Name, shDegree, true, iterations, home);
+        var scene = new ProjectScene
+        {
+            SplatCount = writer.Leaves, FloatsPerSplat = SplatFormat.Floats, ColoursAreShDc = true,
+            ShDegree = withSh ? shDegree : 0, TrainedIterations = iterations, HomeView = home,
+        };
+        await _projectService.SaveStreamedSceneAsync(project.Id, scene, file);
+        Console.WriteLine($"[Partition] streamed scene {scene.Id}: {writer.Leaves:N0} splats in {blocks.Count} blocks, {writer.Nodes:N0} nodes, " +
+            $"{writer.ChunkCount} chunks, {file.Size / (1024 * 1024)} MB, written in {(DateTime.UtcNow - t0).TotalSeconds:F1}s");
+        _partitionSavedStreamed = true;
+        _projects = await _projectService.ListProjectsAsync();
+        var saved = _projects.First(p => p.Id == project.Id);
+        _activeProject = saved;
+        await LoadProjectSceneAsync(saved.Scenes.First(s => s.Id == scene.Id));
     }
 
     /// <summary>

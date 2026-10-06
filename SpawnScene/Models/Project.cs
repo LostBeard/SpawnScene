@@ -57,6 +57,15 @@ public class ProjectScene
     /// keeps no training cameras, and the single-photo default (origin, looking +Z) means nothing for an SfM
     /// reconstruction - a reopened Truck started inside the truck.</summary>
     public float[]? HomeView { get; set; }
+
+    /// <summary>
+    /// How the scene is stored: null = packed rows (scenes/{id}.bin, SH beside it), opened whole; <see cref="FormatLod"/>
+    /// = its LOD tree as a .spawnscene v3 (scenes/{id}.spawnscene), opened STREAMED - a scene larger than one GPU holds
+    /// (a partitioned run, Studio.Partition) is kept and viewed only this way.
+    /// </summary>
+    public string? Format { get; set; }
+
+    public const string FormatLod = "lod";
     /// <summary>
     /// How the SH bands are stored: SphericalHarmonics.Parts files (scenes/{id}.sh{p}.bin, PartFloatsPerSplat floats a
     /// splat each), or 0 for a scene saved before the split (one row-major scenes/{id}.sh.bin, 45 floats a splat).

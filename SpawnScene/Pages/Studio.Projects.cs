@@ -754,7 +754,9 @@ public partial class Studio
                 else if (trainIters > 0)
                     Console.WriteLine("[Studio] not training: the pose recovery produced no usable camera poses");
 
-                await SaveViewedSceneToProjectAsync(trainedIters);
+                // A partitioned run that saved itself as a streamed scene (Studio.Partition) is saved already.
+                if (_partitionSavedStreamed) _partitionSavedStreamed = false;
+                else await SaveViewedSceneToProjectAsync(trainedIters);
 
                 // Schedule thumbnail
                 var lastScene = _activeProject.Scenes.LastOrDefault();
@@ -1023,6 +1025,16 @@ public partial class Studio
     {
         if (_activeProject == null) return;
         _lodPager?.Dispose(); _lodPager = null;   // a streamed v3 file was open
+        if (scene.Format == ProjectScene.FormatLod)
+        {
+            // A streamed scene (a partitioned run larger than one GPU): open its file streamed, by slices.
+            var file = await _projectService.GetStreamedSceneFileAsync(_activeProject.Id, scene.Id);
+            if (file == null) { _statusMessage = "Error: scene data not found in storage"; BuildProjectDetailUI(); return; }
+            await OpenSceneBlobAsync(file, $"{scene.Id}.spawnscene");
+            _viewedProjectScene = scene;
+            Console.WriteLine($"[Studio] Opened streamed scene {scene.Id}: {scene.SplatCount:N0} splats");
+            return;
+        }
 
         _statusMessage = $"Loading {scene.SplatCount:N0} splats from storage...";
         BuildProjectDetailUI();

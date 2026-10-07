@@ -260,6 +260,45 @@ public partial class Studio
         await Task.Delay(50); // the compositor presents the finished frame
     }
 
+    /// <summary>
+    /// Disocclusion views of a single-photo scene (its camera at the origin facing +Z): the photo's own view, then the
+    /// camera moved sideways, up and in by fractions of the scene's robust depth while it keeps looking at the scene's
+    /// centre. Sorted render over magenta; one "[Holes] VIEW name READY" line per view for the harness to capture.
+    /// </summary>
+    private async Task RunHoleViewsAsync()
+    {
+        var packed = _gpuRenderer.PackedSplatBuffer;
+        if (packed == null) return;
+        _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
+        _gpuRenderer.BackgroundColor = (1.0, 0.0, 1.0);
+        // The photo's own surface (its first rows) sets the rig, so every fill variant is measured from the same cameras.
+        int surface = DepthToGaussianKernel.LastSurfaceCount > 0 ? Math.Min(DepthToGaussianKernel.LastSurfaceCount, _gpuRenderer.SplatCount) : _gpuRenderer.SplatCount;
+        var box = await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, surface);
+        if (box is not { } b) return;
+        float depth = (b.MinZ + b.MaxZ) / 2f;
+        var target = new Vector3((b.MinX + b.MaxX) / 2f, (b.MinY + b.MaxY) / 2f, depth);
+        Console.WriteLine($"[Holes] scene depth {depth:G4} (robust z {b.MinZ:G4}..{b.MaxZ:G4})");
+        (string Name, Vector3 Offset)[] views =
+        {
+            ("home", Vector3.Zero),
+            ("xpos10", new Vector3(0.10f * depth, 0, 0)),
+            ("xneg20", new Vector3(-0.20f * depth, 0, 0)),
+            ("ypos15", new Vector3(0, 0.15f * depth, 0)),
+            ("dolly30", new Vector3(0, 0, 0.30f * depth)),
+            ("orbit30", new Vector3(0.30f * depth, 0.05f * depth, 0.05f * depth)),
+        };
+        foreach (var (name, offset) in views)
+        {
+            var dir = Vector3.Normalize(target - offset);
+            _cameraController?.SetPose(offset, name == "home" ? Vector3.UnitZ : dir, Vector3.UnitY, exact: true);
+            await WaitForFrameAtPoseAsync(offset, name);
+            await Task.Delay(1500);
+            Console.WriteLine($"[Holes] VIEW {name} READY");
+            await Task.Delay(2500);
+        }
+        Console.WriteLine("[Holes] DONE");
+    }
+
     private async Task ParkOnGroundTruthPoseAsync(string viewName, CameraParams gt)
     {
         var cam = _sceneManager.Camera;

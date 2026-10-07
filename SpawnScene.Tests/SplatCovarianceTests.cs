@@ -319,4 +319,35 @@ public class SplatCovarianceTests
         Assert.That(minorSigma, Is.EqualTo(MathF.Sqrt(SplatCovariance.EwaFilterPx2)).Within(0.02f),
             "EWA floor should dominate a sub-pixel splat");
     }
+
+    static Vector3 Axis(SplatCovariance.Quat q, Vector3 local) =>
+        Vector3.Transform(local, new Quaternion(q.X, q.Y, q.Z, q.W));
+
+    [Test]
+    public void SurfaceDisk_HeadOn_IsTheFootprintDisk_FacingTheCamera()
+    {
+        var d = SplatCovariance.SurfaceDiskFromNeighbors(0f, 0f, 2f, 0.01f, 0f, 2f, 0f, 0.01f, 2f);
+        Assert.That(d.Su, Is.EqualTo(0.01f).Within(1e-5f));
+        Assert.That(d.Sv, Is.EqualTo(0.01f).Within(1e-5f));
+        var n = Axis(d.Q, Vector3.UnitZ);
+        Assert.That(n.Z, Is.EqualTo(-1f).Within(1e-4f), "normal toward the camera at the origin");
+    }
+
+    [Test]
+    public void SurfaceDisk_OnARecedingFloor_ReachesTheNextRow_AlongTheSurface()
+    {
+        // A floor below the camera: the +y neighbour (one row down the image) is 0.05 farther and 0.01 lower.
+        var d = SplatCovariance.SurfaceDiskFromNeighbors(0f, -1f, 2f, 0.01f, -1f, 2f, 0f, -1.01f, 2.05f);
+        float rowStep = MathF.Sqrt(0.01f * 0.01f + 0.05f * 0.05f);
+        Assert.That(MathF.Max(d.Su, d.Sv), Is.EqualTo(rowStep).Within(1e-4f), "the long axis spans the row step");
+        Assert.That(MathF.Min(d.Su, d.Sv), Is.EqualTo(0.01f).Within(1e-4f), "across, the column step");
+        var n = Axis(d.Q, Vector3.UnitZ);
+        var expected = Vector3.Normalize(Vector3.Cross(new Vector3(0.01f, 0, 0), new Vector3(0, -0.01f, 0.05f)));
+        if (Vector3.Dot(expected, new Vector3(0, -1, 2)) > 0) expected = -expected;
+        Assert.That(Vector3.Dot(n, expected), Is.EqualTo(1f).Within(1e-4f), "z axis = the surface normal, camera side");
+        var u = Axis(d.Q, Vector3.UnitX); var v = Axis(d.Q, Vector3.UnitY);
+        var longAxis = d.Su > d.Sv ? u : v;
+        Assert.That(MathF.Abs(Vector3.Dot(longAxis, Vector3.Normalize(new Vector3(0, -0.01f, 0.05f)))), Is.EqualTo(1f).Within(1e-3f),
+            "the long axis runs down the floor");
+    }
 }

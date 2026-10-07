@@ -189,10 +189,19 @@ public class DepthToGaussianKernel
         float rPosX = -((imgX - cx) * dny / fx);
         float rPosY = -((nY - cy) * dny / fy);
 
-        var quat = SplatCovariance.NormalQuatFromNeighbors(
+        // The cell this sample covers, oriented and sized from its neighbours (SurfaceDiskFromNeighbors); the edge
+        // shrink above applies to it as it did to the footprint disk. Grazing cells are capped at MaxCellStretch
+        // footprints, so a near-silhouette sample cannot become a sheet.
+        var disk = SplatCovariance.SurfaceDiskFromNeighbors(
             posX, posY, posZ,
             qPosX, qPosY, dnx,
             rPosX, rPosY, dny);
+        var quat = disk.Q;
+        float shrink = splatScale / (pixelScale > 1e-6f ? pixelScale : 1e-6f);
+        float cap = MaxCellStretch * pixelScale;
+        float su = MathF.Min(disk.Su, cap) * shrink, sv = MathF.Min(disk.Sv, cap) * shrink;
+        if (!(su > 1e-6f)) su = splatScale;
+        if (!(sv > 1e-6f)) sv = splatScale;
 
         int slot = Atomic.Add(ref counter[0], 1);
         int outOff = slot * SplatFormat.Floats;
@@ -203,9 +212,9 @@ public class DepthToGaussianKernel
         outPacked[outOff + 3] = r;
         outPacked[outOff + 4] = g;
         outPacked[outOff + 5] = b;
-        outPacked[outOff + 6] = splatScale;
-        outPacked[outOff + 7] = splatScale;
-        outPacked[outOff + 8] = splatScale * SurfaceFlatten;
+        outPacked[outOff + 6] = su;
+        outPacked[outOff + 7] = sv;
+        outPacked[outOff + 8] = MathF.Min(su, sv) * SurfaceFlatten;
         outPacked[outOff + 9] = alpha;
         outPacked[outOff + 10] = quat.X;
         outPacked[outOff + 11] = quat.Y;
@@ -220,6 +229,9 @@ public class DepthToGaussianKernel
     /// DN-Splatter initialisation ratio.
     /// </summary>
     private const float SurfaceFlatten = 0.15f;
+
+    /// <summary>Longest a depth-grid cell's splat may grow along a receding surface, in pixel footprints.</summary>
+    private const float MaxCellStretch = 8f;
 
     /// <summary>
     /// Splats within this many pixels of the frame edge are dropped outright. Edge geometry is
@@ -1082,9 +1094,11 @@ public class DepthToGaussianKernel
         using var counterBuf = accelerator.Allocate1D<int>(1);
         counterBuf.CopyFromCPU(new int[] { 0 });
 
-        // Output buffer: worst case all pixels are valid (over-allocated, compacted on GPU).
-        // Ownership transfers to caller → GpuSplatSorter.
-        var outPackedBuf = accelerator.Allocate1D<float>(numPoints * SplatFormat.Floats);
+        // Output buffer: worst case all pixels are valid (over-allocated, compacted on GPU), twice over when the hidden
+        // background layer (OcclusionFill) may add one more splat per cell. Ownership transfers to caller.
+        int margin = OcclusionFillEnabled ? (int)MathF.Round(BorderFillReach * Math.Max(sampledW, sampledH)) : 0;
+        int capacity = OcclusionFillEnabled ? numPoints + OcclusionFill.ExtraCapacity(sampledW, sampledH, margin, BorderFillStride) : numPoints;
+        var outPackedBuf = accelerator.Allocate1D<float>((long)capacity * SplatFormat.Floats);
 
         if (depth.RawDepthGpu == null)
             throw new InvalidOperationException("DepthResult.RawDepthGpu is null — GPU path requires GPU-resident depth.");
@@ -1096,15 +1110,60 @@ public class DepthToGaussianKernel
             counterBuf.View,
             splatParams);
 
-        // Readback valid splat count only (4 bytes)
-        int[] counterResult = await counterBuf.CopyToHostAsync<int>(0, 1);
-        int validCount = Math.Clamp(counterResult[0], 0, numPoints);
+        int surfaceCount = -1;
+        var scratch = new List<MemoryBuffer1D<float, Stride1D.Dense>>();
+        try
+        {
+            if (OcclusionFillEnabled)
+            {
+                // CPU transfer: one int, to report the surface / background split.
+                surfaceCount = (await counterBuf.CopyToHostAsync<int>(0, 1))[0];
+                OcclusionFill.Append(accelerator, depth.RawDepthGpu.View, rgbaView, outPackedBuf.View, counterBuf.View,
+                    new OcclusionFill.Params
+                    {
+                        Width = w, Height = h, Subsample = subsample, GridW = sampledW, GridH = sampledH,
+                        Radius = Math.Max(4, (int)MathF.Round(OcclusionFillReach * Math.Max(sampledW, sampledH))),
+                        Margin = margin, BorderStride = BorderFillStride,
+                        Capacity = capacity,
+                        FocalX = fx, FocalY = fy, CenterX = cx, CenterY = cy, DepthScale = splatParams.DepthScaleCorrection,
+                        Tau = 0.08f, BackgroundBand = 0.92f, SizeFactor = 1.5f, Opacity = 0.95f,
+                    }, scratch);
+            }
 
-        Console.WriteLine($"[DepthGPU] Compacted: {validCount:N0} valid / {numPoints:N0} candidate splats " +
-            $"(subsample={subsample}, edgeSharpness={edgeSharpness:F2})");
+            // Readback valid splat count only (4 bytes)
+            int[] counterResult = await counterBuf.CopyToHostAsync<int>(0, 1);
+            int validCount = Math.Clamp(counterResult[0], 0, capacity);
 
-        return (outPackedBuf, validCount);
+            LastSurfaceCount = surfaceCount >= 0 ? surfaceCount : validCount;
+            Console.WriteLine($"[DepthGPU] Compacted: {validCount:N0} valid / {numPoints:N0} candidate splats " +
+                $"(subsample={subsample}, edgeSharpness={edgeSharpness:F2})" +
+                (surfaceCount >= 0 ? $"; {surfaceCount:N0} surface + {validCount - surfaceCount:N0} hidden background + border (OcclusionFill)" : ""));
+            return (outPackedBuf, validCount);
+        }
+        finally
+        {
+            foreach (var b in scratch) b.Dispose();
+        }
+
     }
+
+    /// <summary>
+    /// Single-photo scenes get a hidden background layer behind their depth edges (<see cref="OcclusionFill"/>), so a
+    /// moved camera sees background instead of holes. <c>&amp;occfill=0</c> turns it off.
+    /// </summary>
+    public static bool OcclusionFillEnabled { get; set; } = true;
+
+    /// <summary>The last single-photo scene's surface splats - its first rows; the hidden layers follow them.</summary>
+    public static int LastSurfaceCount { get; private set; }
+
+    /// <summary>How far (a fraction of the grid's longer side) a cell looks for a farther surface to fill behind it.</summary>
+    public static float OcclusionFillReach { get; set; } = 0.15f;
+
+    /// <summary>How far past the photo's frame its edges are continued, a fraction of the grid's longer side (0 = not at all).</summary>
+    public static float BorderFillReach { get; set; } = 0.35f;
+
+    /// <summary>Past the frame, one splat per this many grid cells each way (OcclusionFill.Params.BorderStride).</summary>
+    public static int BorderFillStride { get; set; } = 3;
 }
 
 /// <summary>Releases an image's device copy when disposed (for a copy decoded for one call).</summary>

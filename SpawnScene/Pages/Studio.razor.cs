@@ -212,6 +212,8 @@ public partial class Studio : IAsyncDisposable
         }
         // &absgrad=0: densify on the reference signed sum at its 2e-4 bar instead of AbsGS (the default, 8e-4).
         // &densifygrad sets the bar either way.
+        // &occfill=0: no hidden background layer behind a single photo's depth edges (DepthToGaussianKernel.OcclusionFillEnabled).
+        if (query.TryGetValue("occfill", out var ofq)) DepthToGaussianKernel.OcclusionFillEnabled = ofq is not ("0" or "false");
         // &mcmc=1: MCMC density (Studio.Training McmcOption) instead of clone/split/prune.
         if (query.TryGetValue("mcmc", out var mcq)) McmcOption = mcq is "1" or "true";
         if (query.TryGetValue("absgrad", out var agq))
@@ -664,6 +666,9 @@ public partial class Studio : IAsyncDisposable
                     $"velocity {_gpuRenderer.SmoothedCameraVelocity:E2}, frames {_gpuRenderer.FramesSubmitted}");
             }
             Console.WriteLine($"[Autotest] PASS — scene with {_sceneManager.ActiveScene?.Count ?? 0} splats");
+            // &holeviews=1 (harness): the single-photo scene from cameras moved off the photo's, over a magenta clear
+            // colour, so every hole the move opens is countable in a screenshot (tools/_cdp_edit.js SHOT_ON).
+            if (query.ContainsKey("holeviews")) await RunHoleViewsAsync();
             // &xrhook=1: expose window.__spawnsceneEnterXR(mode) so a harness can enter WebXR (tools/_cdp_xr.js). It must be
             // called from a user gesture (CDP Runtime.evaluate userGesture), which requestSession requires.
             if (query.ContainsKey("xrhook"))

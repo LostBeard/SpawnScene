@@ -290,6 +290,58 @@ public static class SplatCovariance
     /// toward the camera. Returns the view direction when the triangle is degenerate, which
     /// yields the camera-facing disk the renderer drew before orientation existed.
     /// </summary>
+    /// <summary>A splat lying on a sampled surface: its orientation (z = normal) and its two in-plane 1-sigma scales.</summary>
+    public struct SurfaceDisk
+    {
+        public Quat Q;
+        public float Su, Sv;
+    }
+
+    /// <summary>
+    /// The Gaussian that fills one cell of a depth grid: P and its +x / +y neighbours Q, R span the cell, and the in-plane
+    /// covariance is t1 t1^T + t2 t2^T (t1 = Q - P, t2 = R - P) - head-on that is the old pixel-footprint disk, and on a
+    /// surface receding from the camera (a floor, a seat) it reaches the next row, where the footprint disk left a
+    /// stripe of nothing between rows as soon as the camera moved (MEASURED 2026-10-06, the Room sample's sofa and rug).
+    /// The normal faces the camera at the origin.
+    /// </summary>
+    public static SurfaceDisk SurfaceDiskFromNeighbors(
+        float px, float py, float pz,
+        float qx, float qy, float qz,
+        float rx, float ry, float rz)
+    {
+        float ax = qx - px, ay = qy - py, az = qz - pz;
+        float bx = rx - px, by = ry - py, bz = rz - pz;
+        float nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+        float nl = MathF.Sqrt(nx * nx + ny * ny + nz * nz);
+        float al = MathF.Sqrt(ax * ax + ay * ay + az * az);
+        if (!(nl > 1e-20f) || !(al > 1e-20f))
+        {
+            float s = MathF.Max(al, MathF.Sqrt(bx * bx + by * by + bz * bz));
+            return new SurfaceDisk { Q = QuatFromNormal(-px, -py, -pz), Su = s, Sv = s };
+        }
+        nx /= nl; ny /= nl; nz /= nl;
+        if (nx * px + ny * py + nz * pz > 0f) { nx = -nx; ny = -ny; nz = -nz; }
+
+        // In-plane basis e1 = t1 / |t1|, e2 = n x e1; t1 = (al, 0), t2 = (b1, b2) in it.
+        float e1x = ax / al, e1y = ay / al, e1z = az / al;
+        float e2x = ny * e1z - nz * e1y, e2y = nz * e1x - nx * e1z, e2z = nx * e1y - ny * e1x;
+        float b1 = bx * e1x + by * e1y + bz * e1z;
+        float b2 = bx * e2x + by * e2y + bz * e2z;
+
+        // Eigen of [[al^2 + b1^2, b1 b2], [b1 b2, b2^2]].
+        float m00 = al * al + b1 * b1, m01 = b1 * b2, m11 = b2 * b2;
+        float phi = 0.5f * MathF.Atan2(2f * m01, m00 - m11);
+        float c = MathF.Cos(phi), sn = MathF.Sin(phi);
+        float l0 = c * c * m00 + 2f * c * sn * m01 + sn * sn * m11;
+        float l1 = sn * sn * m00 - 2f * c * sn * m01 + c * c * m11;
+
+        // Principal axes u (along phi), v = n x u; columns (u, v, n) of the rotation.
+        float ux = c * e1x + sn * e2x, uy = c * e1y + sn * e2y, uz = c * e1z + sn * e2z;
+        float vx = ny * uz - nz * uy, vy = nz * ux - nx * uz, vz = nx * uy - ny * ux;
+        var q = QuatFromMatrix(ux, vx, nx, uy, vy, ny, uz, vz, nz);
+        return new SurfaceDisk { Q = q, Su = MathF.Sqrt(MathF.Max(l0, 0f)), Sv = MathF.Sqrt(MathF.Max(l1, 0f)) };
+    }
+
     public static Quat NormalQuatFromNeighbors(
         float px, float py, float pz,
         float qx, float qy, float qz,

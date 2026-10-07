@@ -40,15 +40,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       if ((process.env.SPAWNSCENE_EDIT_WAIT ? new RegExp(process.env.SPAWNSCENE_EDIT_WAIT) : /\[Autotest\] PASS/).test(t)) passed = true;
       if (process.env.SPAWNSCENE_EDIT_PRINT && new RegExp(process.env.SPAWNSCENE_EDIT_PRINT).test(t)) console.log('CON ' + t.slice(0, 400));
+      // SPAWNSCENE_EDIT_SHOT_ON="regex with (name)": a screenshot each time the app logs a matching line (e.g. the
+      // single-photo hole views: '\\[Holes\\] VIEW (\\w+) READY').
+      const so = process.env.SPAWNSCENE_EDIT_SHOT_ON && t.match(new RegExp(process.env.SPAWNSCENE_EDIT_SHOT_ON));
+      if (so && shotRef.fn) shotRef.fn(so[1] || 'on');
       else if (/error/.test(m.params.type) || /\[Autotest\]|\[Edit\]|\[Import\]|\[Dataset\] (FAIL|DONE)|\[Studio\] (scene saved|Loaded|scene .*SH)|GPU ERROR/.test(t)) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });
+  const shotRef = { fn: null };
   const shot = async name => {
     const png = await send('Page.captureScreenshot', { format: 'png' });
     fs.writeFileSync(`${prefix}_${name}.png`, Buffer.from(png.result.data, 'base64'));
     console.log(`captured ${prefix}_${name}.png`);
   };
+  shotRef.fn = shot;
   const touch = (type, pts) => send('Input.dispatchTouchEvent', { type, touchPoints: pts.map(([x, y], i) => ({ x, y, id: i })) });
   // A gesture as a sequence of finger sets, one frame apart.
   const gesture = async frames => {

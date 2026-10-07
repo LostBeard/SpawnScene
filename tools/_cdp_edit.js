@@ -102,6 +102,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     while (!passed && Date.now() < deadline) await sleep(500);
     if (!passed) throw new Error('the Room sample never passed');
     await sleep(1500);
+    if (process.env.SPAWNSCENE_EDIT_FLOW === 'project') {   // after a generate: back to its project page, captured
+      await sleep(Number(process.env.SPAWNSCENE_EDIT_SHOT_DELAY || 3000)); await shot('viewer');
+      await click(80, 28); await sleep(3000); await shot('project');
+      return;
+    }
     if (process.env.SPAWNSCENE_EDIT_FLOW === 'none') {   // just run SPAWNSCENE_EDIT_QUERY to its WAIT line
       // ...and, with SPAWNSCENE_EDIT_DOWNLOADS, until no download is still in flight (.crdownload) - a 400 MB scene
       // export outlives the WAIT line by many seconds, and closing the tab cancels it.

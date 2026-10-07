@@ -1,144 +1,140 @@
 # SpawnScene
 
-> Create interactive 3D Gaussian Splat scenes from a single photo — entirely in your browser.
+> Photos and video in, explorable 3D Gaussian Splat scenes out - reconstructed, trained, edited and viewed entirely in your browser.
 
-**SpawnScene** is a fully client-side Gaussian Splatting application built with Blazor WebAssembly. It uses monocular depth estimation (DistillAnyDepth / DepthAnything V2) to generate 3D scenes from a single photograph, with the entire pipeline running on the GPU via WebGPU and SpawnDev.ILGPU.
+**Try it: [spawnscene.com](https://spawnscene.com)**
 
-## ✨ What It Does
+**SpawnScene** is a fully client-side Gaussian Splatting studio built with Blazor WebAssembly. Feature matching,
+structure from motion, bundle adjustment, Gaussian splat training, depth estimation and rendering all run on your GPU
+through WebGPU, using [SpawnDev.ILGPU](https://github.com/LostBeard/SpawnDev.ILGPU) and
+[SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML). There is no server: nothing you load leaves your
+machine.
 
-- **🔮 Depth Estimation** — DistillAnyDepth (default) and DepthAnything V2 via ONNX Runtime Web on the WebGPU execution provider
-- **⚡ GPU Gaussian Generation** — ILGPU compute kernel unprojects depth + color into 14M+ packed Gaussian splats
-- **🎲 Stochastic Rasterization** — Sort-free rendering via Monte Carlo estimation (StochasticSplats, ICCV 2025). Eliminates the radix sort bottleneck entirely, maintaining 45-60 FPS with 14M+ splats
-- **🔄 Temporal Accumulation** — Multi-SPP with velocity-adaptive EMA blending for progressive convergence
-- **👁 Real-Time Viewer** — WebGPU splat renderer with EWA anti-aliasing and CAS post-processing sharpening
-- **📦 PLY / SPLAT Loading** — Load pre-built scenes from `.ply` or `.splat` files
-- **🔒 Fully Client-Side** — No server, no uploads. All GPU compute runs in your browser.
+## Screenshots
 
+**Trained from photos** - Mip-NeRF 360 *Bicycle* and Tanks and Temples *Truck*, reconstructed and trained in the browser:
 
-### Screenshots
-[![Generate Splat](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/splat-generate-2.jpg)](https://https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/splat-generate-2.jpg)  
-[![Garden Original](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/samples/garden_hd.png)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/samples/garden_hd.png)  
-[![Garden Splat 1](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-1.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-1.jpg)  
-[![Garden Splat 2](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-2.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/garden-splat-2.jpg)  
+[![Trained Bicycle](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/trained-bicycle.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/trained-bicycle.jpg)
+[![Trained Truck](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/trained-truck.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/trained-truck.jpg)
 
+**One photo** - the Room sample as a scene, then the camera orbited away from where the photo was taken:
 
+[![Single photo](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/single-photo-room.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/single-photo-room.jpg)
+[![Single photo, camera moved](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/single-photo-room-orbit.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/single-photo-room-orbit.jpg)
 
+**Streaming a multi-room scene** - Deep Blending *DrJohnson* as a level-of-detail tree, loading only the chunks the view needs:
 
-## 🚀 Pipeline
+[![Streaming DrJohnson](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/streaming-drjohnson.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/streaming-drjohnson.jpg)
 
-```
-Single photo
-  → GPU (one-time upload)
-  → ILGPU PreprocessKernel        RGBA → NCHW float[1,3,518,518]
-  → ONNX WebGPU inference         DistillAnyDepth Small (default)
-  → ILGPU ResizeKernel            518×518 → original resolution
-  → ILGPU MinMaxReduce            2 floats to CPU (UI metadata only)
-  → ILGPU UnprojectAndPackKernel  depth + RGBA → 10 floats/splat
-  → WebGPU pack compute           Float32 → Float16/UNorm8 (once at upload)
-  → Per frame (stochastic mode):
-      → WebGPU stochastic render  billboard quads + stochastic discard + depth test
-      → WebGPU accumulate blend   temporal EMA into persistent texture
-      → WebGPU CAS display        sharpening → canvas
-```
+**Editing** - an add / subtract selection (both wheels, minus the rear hub) ready to delete, move or copy:
 
-## 🛠️ Tech Stack
+[![Editor](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/editor-selection.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/editor-selection.jpg)
+
+**Projects** - each project keeps its photos and scenes in browser storage, with quality presets for reconstruction:
+
+[![Project page](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/project-page.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/project-page.jpg)
+
+## Features
+
+### From many photos or a video
+
+- **Learned feature matching** - RaCo-ALIKED keypoints with LightGlue+ matching, on the GPU.
+- **Structure from motion on the GPU** - five-point relative poses, rotation averaging, global positioning and GPU
+  bundle adjustment place the cameras; no COLMAP needed. A video is split into frames first.
+- **Gaussian splat training in the browser** - a WebGPU trainer with SSIM + L1 loss, spherical harmonics up to degree 3,
+  and AbsGS density control. On Tanks and Temples *Truck* (30K iterations, every 8th photo held out) it scores
+  24.95 dB PSNR / 0.887 SSIM with 0.89M splats in 25 minutes, against the gsplat reference's 25.13 / 0.877 with 3.79M.
+- **Quality presets** for photo resolution, keypoints, iterations and scene size, sized to your GPU's memory.
+
+### From a single photo
+
+- **Depth Anything V3** depth, with the camera's focal length from EXIF or estimated by the model.
+- **Super-resolution** (ESPCN x3) for small photos before they become splats - finer colour and geometry.
+- **No holes when you move**: every splat spans its surface cell, a hidden background layer fills in behind each depth
+  edge, and the photo continues softly past its frame.
+- **Scene depth slider** to correct a depth estimate that came out too deep or too flat, without changing the photo's
+  own view.
+
+### Big scenes
+
+- **Level-of-detail rendering** - a splat tree drawn to a budget, so huge scenes stay smooth.
+- **Streaming `.spawnscene` files** - chunked, gzipped LOD trees that open immediately and stream the rest from a file
+  or over HTTP range requests, under a fixed GPU memory pool.
+- **Partitioned training** - a scene larger than one training run is trained in blocks and saved as a streamed scene.
+
+### Editing
+
+- Select by rectangle or **brush**; **add** (Shift), **subtract** (Ctrl), invert, or select everything.
+- **Filters**: only the faint splats (haze, floaters), or the largest N% (blobs).
+- Delete, keep only, move, copy / cut / paste, insert another scene, undo.
+- Save as a new scene, or export a `.spawnscene` file (flat or streaming).
+
+### Viewing
+
+- WebGPU renderer with sorted and stochastic (sort-free) modes, EWA anti-aliasing and contrast-adaptive sharpening.
+- **WebXR**: view scenes in VR or AR (Quest browser and tethered headsets), with a device-sized splat budget and
+  in-headset box selection.
+- The whole interface is drawn with WebGPU ([SpawnDev.GameUI](https://github.com/LostBeard/SpawnDev.GameUI)), so it
+  works the same in a headset.
+
+## Tech stack
 
 | Component | Technology |
 |---|---|
-| App framework | .NET WebAssembly (.NET 10) |
+| App | .NET 10 Blazor WebAssembly (AOT), C# 13 |
 | JS interop | [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) |
 | GPU compute | [SpawnDev.ILGPU](https://github.com/LostBeard/SpawnDev.ILGPU) (WebGPU backend) |
-| Depth estimation | [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML) |
-| Depth models | DistillAnyDepth Small (default), DepthAnything V2 Small |
-| Rendering | Native WebGPU (WGSL shaders) |
-| Language | C# 13 |
+| Machine learning | [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML) - Depth Anything V3, RaCo-ALIKED, LightGlue+, ESPCN |
+| User interface | [SpawnDev.GameUI](https://github.com/LostBeard/SpawnDev.GameUI) (WebGPU) |
+| Rendering and training | Native WebGPU, WGSL shaders |
+| Storage | Origin Private File System (projects, photos, scenes) |
 
-## 📋 Requirements
+## Requirements
 
-- **WebGPU-capable browser**: Chrome 113+, Edge 113+, or Safari 18+
-- No installation required — runs entirely client-side
+- A **WebGPU** browser: Chrome or Edge 113+, or Safari 18+. Training large scenes wants a discrete GPU.
+- Nothing to install.
 
-## 📁 Project Structure
+## Getting started
 
-```
-SpawnScene/
-├── Models/
-│   ├── Gaussian3D.cs              # 3D Gaussian splat struct
-│   ├── GaussianScene.cs           # Scene container (CPU or GPU-resident)
-│   ├── CameraParams.cs            # Camera intrinsics/extrinsics + view matrix
-│   ├── DepthResult.cs             # GPU-resident depth map + metadata
-│   └── Project.cs                 # Project, ProjectSettings, ProjectSource, ProjectScene
-├── Services/
-│   ├── GpuShareService.cs         # WebGPU device sharing (monkey-patches navigator.gpu)
-│   ├── GpuService.cs              # ILGPU WebGPU accelerator lifecycle
-│   ├── DepthEstimationService.cs  # ONNX depth inference + GPU pre/post-processing
-│   ├── DepthToGaussianKernel.cs   # ILGPU kernel: depth → packed Gaussian buffer
-│   ├── GpuSplatSorter.cs          # ILGPU radix sort + velocity tracking
-│   ├── GpuGaussianRenderer.cs     # WebGPU renderer (stochastic + sorted + CAS)
-│   ├── GpuDepthColorizer.cs       # GPU Turbo colormap for depth preview
-│   ├── RenderService.cs           # Render loop + scene upload coordination
-│   ├── SceneManager.cs            # Active scene + camera state
-│   ├── CameraController.cs        # FPS-style camera (WASD + mouse look)
-│   └── ProjectService.cs          # OPFS-backed project CRUD + storage
-├── UI/                            # WebGPU UI framework (VR-ready, no HTML elements)
-│   ├── FontAtlas.cs               # Runtime bitmap font atlas generation
-│   ├── UIRenderer.cs              # Batched quad renderer (single draw call overlay)
-│   ├── UIShaders.cs               # WGSL vertex/fragment for UI quads
-│   ├── InputManager.cs            # Unified input (mouse, keyboard, gamepad)
-│   ├── UIElement.cs               # Base element with hit testing
-│   └── Elements/
-│       ├── UILabel.cs             # Text rendering
-│       ├── UIButton.cs            # Clickable button with states
-│       ├── UIPanel.cs             # Container with background
-│       └── UISlider.cs            # Horizontal drag slider
-├── Pages/
-│   ├── Home.razor                 # Landing page (Razor HTML)
-│   ├── Studio.razor               # Unified tool: projects + generation + viewer (WebGPU UI)
-│   ├── DepthSplat.razor           # Legacy: standalone depth estimation UI
-│   └── Viewer.razor               # Legacy: standalone 3D viewer
-└── Formats/
-    ├── PlyParser.cs               # PLY file parser
-    └── SplatParser.cs             # SPLAT file parser
-```
+### Run locally
 
-## 🏃 Getting Started
+Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0).
 
-### Prerequisites
-- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
-- A WebGPU-capable browser (Chrome 113+ recommended)
-
-### Run Locally
 ```bash
 cd SpawnScene
 dotnet run
 ```
 
-Navigate to `https://localhost:5001` (or the URL shown in the terminal).
+Then open the URL shown in the terminal. A Release publish compiles AOT by default (`-p:SpawnSceneAot=false` for a
+quick interpreted build).
 
-### Usage
-1. **Depth Splat** — Load a depth model (DistillAnyDepth or DepthAnything V2), upload a photo, estimate depth, generate Gaussians
-2. **View in Splat Viewer** — Navigate to the 3D viewer to explore the generated scene
-3. **Viewer** — Can also load `.ply` or `.splat` files directly
+### Use it
 
-## 🗺️ Roadmap
+1. **Create a project** and add photos or a video.
+2. **Generate a scene**: one photo builds a scene from depth; several photos are matched, posed and trained.
+3. **Explore** with the mouse and WASD, open **Edit** to clean the scene up, or enter **VR / AR**.
+4. **Export** a `.spawnscene` file, or **Open scene file** to view one.
 
-- ✅ ~~Sort-free stochastic rasterization~~ — eliminates radix sort bottleneck for 14M+ splat scenes
-- 🔲 Full zero-copy depth pipeline — keep ONNX output on GPU (blocked by [ORT bug #26107](https://github.com/microsoft/onnxruntime/issues/26107))
-- 🔲 Multi-image scenes — merge depth splat clouds from multiple photos
-- 🔲 Live camera input — real-time scene generation from device camera
-- 🔲 WebXR / VR headset viewing
-- 🔲 Scene export (PLY / SPLAT)
-- 🔲 Improved Gaussian quality — learned opacity, covariance, spherical harmonics
-- 🔲 Peer-to-peer cooperative scanning via WebRTC
-- 🔲 Video input support
+## Project layout
 
-## 📜 License
+```
+SpawnScene/
+├── Pages/      Studio.*.cs - the studio, split by area (projects, training, editing, LOD, XR, ...)
+├── Services/   GPU services - trainer, renderer, SfM, matching, depth, LOD tree and pager, editor kernels
+├── Models/     projects, cameras, scenes
+└── wwwroot/    samples, datasets for the built-in tests, screenshots
+SpawnScene.Tests/   NUnit tests (CPU accelerator)
+tools/              browser test harnesses (Chrome DevTools Protocol)
+Plans/              design notes (e.g. lod-streaming.md)
+```
 
-MIT License — see [LICENSE](LICENSE) for details.
+## License
+
+MIT License - see [LICENSE](LICENSE.txt) for details.
 
 Models downloaded at run time carry their own licences (RaCo, ALIKED BSD-3-Clause, LightGlue): see
 [THIRD-PARTY-NOTICES](SpawnScene/wwwroot/licenses/THIRD-PARTY-NOTICES.md).
 
-## 👤 Author
+## Author
 
 **Todd Tanner** ([@LostBeard](https://github.com/LostBeard))

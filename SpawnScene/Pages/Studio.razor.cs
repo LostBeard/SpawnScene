@@ -675,7 +675,8 @@ public partial class Studio : IAsyncDisposable
             if (query.TryGetValue("scenedepth", out var sdq) && float.TryParse(sdq, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out var sdk))
                 await SetSceneDepthAsync(sdk);
-            if (query.ContainsKey("holeviews")) await RunHoleViewsAsync();
+            // &holebg=0: keep the normal background (screenshots) instead of the measurement magenta.
+            if (query.ContainsKey("holeviews")) await RunHoleViewsAsync(magenta: !(query.TryGetValue("holebg", out var hbq) && hbq == "0"));
             // &xrhook=1: expose window.__spawnsceneEnterXR(mode) so a harness can enter WebXR (tools/_cdp_xr.js). It must be
             // called from a user gesture (CDP Runtime.evaluate userGesture), which requestSession requires.
             if (query.ContainsKey("xrhook"))

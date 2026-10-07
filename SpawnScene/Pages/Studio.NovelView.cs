@@ -265,12 +265,12 @@ public partial class Studio
     /// camera moved sideways, up and in by fractions of the scene's robust depth while it keeps looking at the scene's
     /// centre. Sorted render over magenta; one "[Holes] VIEW name READY" line per view for the harness to capture.
     /// </summary>
-    private async Task RunHoleViewsAsync()
+    private async Task RunHoleViewsAsync(bool magenta = true)
     {
         var packed = _gpuRenderer.PackedSplatBuffer;
         if (packed == null) return;
         _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
-        _gpuRenderer.BackgroundColor = (1.0, 0.0, 1.0);
+        if (magenta) _gpuRenderer.BackgroundColor = (1.0, 0.0, 1.0);
         // The photo's own surface (its first rows) sets the rig, so every fill variant is measured from the same cameras.
         int surface = DepthToGaussianKernel.LastSurfaceCount > 0 ? Math.Min(DepthToGaussianKernel.LastSurfaceCount, _gpuRenderer.SplatCount) : _gpuRenderer.SplatCount;
         var box = await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, surface);

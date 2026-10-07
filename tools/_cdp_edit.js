@@ -35,7 +35,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     // Downloads: say what Chrome does with them (a 737 MB export reported DONE and never landed).
     if (m.method === 'Page.downloadWillBegin') console.log('DL begin ' + m.params.suggestedFilename);
     if (m.method === 'Page.downloadProgress' && m.params.state !== 'inProgress') console.log('DL ' + m.params.state + ' ' + (m.params.receivedBytes || 0) + ' bytes');
-    if (m.method === 'Runtime.exceptionThrown') console.log('EXC ' + JSON.stringify(m.params.exceptionDetails).slice(0, 300));
+    // The exception's own description first: the details JSON is mostly a wasm stack of $funcNNN, and a 300-char slice of it
+    // never reached the message (a gate hang on 2026-10-07 showed only "Uncaught (in promise)").
+    if (m.method === 'Runtime.exceptionThrown') {
+      const d = m.params.exceptionDetails;
+      console.log('EXC ' + ((d.exception && (d.exception.description || d.exception.value)) || d.text || '').toString().slice(0, 1500));
+    }
     if (m.method === 'Runtime.consoleAPICalled') {
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       if ((process.env.SPAWNSCENE_EDIT_WAIT ? new RegExp(process.env.SPAWNSCENE_EDIT_WAIT) : /\[Autotest\] PASS/).test(t)) passed = true;

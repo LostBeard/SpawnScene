@@ -224,6 +224,19 @@ public partial class Studio : IAsyncDisposable
             AbsGradOption = agq is not ("0" or "false");
             if (!query.ContainsKey("densifygrad")) SplatDensityControl.GradientThreshold = AbsGradOption ? 8e-4f : 2e-4f;
         }
+        // &mipfilter=F: the Mip-Splatting 3D filter as a per-splat scale floor while training (0.2 = the paper's; 0 = off).
+        // Global (was dataset-only), so the user path can be measured with it too.
+        if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mfv))
+            SplatTrainerGpu.MipFilter = Math.Max(0f, mfv);
+        // &carve=S / &carvemargin=M: remove splats with share S of their weight in front of the photos' surfaces after
+        // training (Studio.Training FloaterCensusAsync); the census itself is always reported.
+        if (query.TryGetValue("carve", out var cvq) && float.TryParse(cvq,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cvv))
+            CarveFloaterShare = Math.Clamp(cvv, 0f, 1f);
+        if (query.TryGetValue("carvemargin", out var carveMarginQ) && float.TryParse(carveMarginQ,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cmv))
+            CarveFrontMargin = Math.Clamp(cmv, 0f, 0.9f);
         // &streamed=1: a partitioned run is saved as a streamed scene (Studio.Partition) even when it would fit merged.
         if (query.TryGetValue("streamed", out var stq)) StreamedPartitionOption = stq is "1" or "true";
         // &gpumem=N: this run's training GPU memory budget in GB (the Settings choice; not saved - a fresh harness
@@ -496,10 +509,6 @@ public partial class Studio : IAsyncDisposable
                     && float.TryParse(poseLrParts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var plt))
                 { PoseLrRotation = plr; PoseLrTranslation = plt; }
             }
-            // &mipfilter=F: the Mip-Splatting 3D filter as a per-splat scale floor while training (0.2 = the paper's; 0 = off).
-            if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
-                    System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mfv))
-                SplatTrainerGpu.MipFilter = Math.Max(0f, mfv);
             // &render=sorted|stochastic: draw scenes with that renderer, in any autotest mode (A/B the viewer itself).
             if (query.TryGetValue("render", out var rmq))
             {

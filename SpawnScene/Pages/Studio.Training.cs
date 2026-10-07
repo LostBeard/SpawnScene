@@ -912,6 +912,8 @@ public partial class Studio
                 Console.WriteLine($"[Train] held-out poses refined against the frozen scene: {refined} views x {PoseTestIterations} steps");
             }
 
+            await FloaterCensusAsync(packed, n, views, targets, box, w, h);
+
             var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box, logPerView: true);
             WarnOnEvalOverflow(fitted, views.Count);
             await ReportHeldOutCrossMatchAsync(_trainer, packed, n, views, targets, box);
@@ -950,6 +952,45 @@ public partial class Studio
         {
             Console.WriteLine($"[Train] FAIL: {ex}");
             return false;
+        }
+    }
+
+    /// <summary>&amp;carve=S: after training, remove (opacity 0) every splat with at least share S of its blending weight in
+    /// front of the photos' surfaces (SplatTrainerGpu.Floaters). 0 = census only.</summary>
+    public static float CarveFloaterShare { get; set; }
+    /// <summary>&amp;carvemargin=M: in front = closer than (1 - M) x the photo's surface depth at that pixel.</summary>
+    public static float CarveFrontMargin { get; set; } = 0.1f;
+
+    /// <summary>
+    /// The floater census over every supervised view, reported always; with <see cref="CarveFloaterShare"/> the floaters
+    /// are removed and the supervised views scored before and after, so the carve's cost on the photos is on record.
+    /// </summary>
+    private async Task FloaterCensusAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
+        MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box, int w, int h)
+    {
+        var t0 = DateTime.UtcNow;
+        _trainer!.ResetFloaterCensus(n);
+        foreach (var v in views)
+        {
+            if (!v.UsedForSupervision) continue;
+            var cam = v.Camera.ScaledTo(w, h);
+            var (near, far) = SplatBounds.DepthRangeFor(box, cam);
+            await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, CarveFrontMargin);
+        }
+        bool carve = CarveFloaterShare > 0f;
+        // An isolated opaque splat reads ~0.5 (its soft rim lies in front of whatever is behind it - the trainer gate's
+        // analytic box), so the report's floater line uses 0.9 when no carve share was asked for.
+        float share = carve ? CarveFloaterShare : 0.9f;
+        EvalScores? before = carve ? await EvaluateAsync(_trainer, packed, n, views, targets, box) : null;
+        var report = await _trainer.ClassifyFloatersAsync(packed, n, share, minWeight: 1f, carve);
+        Console.WriteLine($"[Floaters] census at {CarveFrontMargin:P0} in front, floater = front share >= {share:P0} " +
+            $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s): {report}");
+        if (before is { } b)
+        {
+            var after = await EvaluateAsync(_trainer, packed, n, views, targets, box);
+            Console.WriteLine($"[Floaters] CARVED {report.Floaters:N0} splats: supervised PSNR {b.SupPsnr:F3} -> {after.SupPsnr:F3} dB, " +
+                $"SSIM {b.SupSsim:F4} -> {after.SupSsim:F4}; held out {b.HeldPsnr:F3} -> {after.HeldPsnr:F3} dB, " +
+                $"SSIM {b.HeldSsim:F4} -> {after.HeldSsim:F4}");
         }
     }
 

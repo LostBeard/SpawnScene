@@ -458,6 +458,8 @@ public partial class Studio
             }
         }
 
+        await CaptureWanderViewsAsync(scene);
+
         var moves = new (string Name, Vector3 Offset, float Yaw)[]
         {
             ("left",  -right * span, 0f),

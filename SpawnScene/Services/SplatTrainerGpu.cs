@@ -24,7 +24,7 @@ namespace SpawnScene.Services;
 /// renderer already uses. Readback goes through ILGPU's <c>CopyToHostAsync</c> rather than
 /// hand-rolled staging buffers.
 /// </summary>
-public sealed class SplatTrainerGpu : IDisposable
+public sealed partial class SplatTrainerGpu : IDisposable
 {
     readonly GpuService _gpu;
 
@@ -2420,6 +2420,7 @@ public sealed class SplatTrainerGpu : IDisposable
     public void Dispose()
     {
         DisposeBuffers();
+        DisposeFloaterCensus();
         // Per VIEW, not per splat: they live through every resize. In DisposeBuffers (which every densify resize runs)
         // they were freed after the first densify, and camera refinement silently stepped no camera (c19, 2026-10-04).
         _posePartials?.Dispose(); _posePartials = null;

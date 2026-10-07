@@ -488,6 +488,148 @@ fn raster_forward(
 ";
 
     /// <summary>
+    /// Floater census, one workgroup per tile, over the keys and ranges the forward pass of the SAME view just built.
+    /// Per pixel, first the SURFACE depth: the depth of the splat at which transmittance falls through 0.5 (the median
+    /// of the blending weights along the ray); then every splat's blending weight w = alpha * T there, summed per splat
+    /// (atomic, fixed point) as TOTAL, and as FRONT when the splat sits in front of that surface by more than
+    /// cfg.x of its depth. A splat on a surface is never in front of what the photos saw at its own pixels; a floater
+    /// in free space is in front of it in every photo that looks through it - that is how the photos could see past it,
+    /// and why it stays faint enough to cost them nothing while it hangs in the air from anywhere else.
+    /// Pixels that never turn opaque have no surface and add only to TOTAL.
+    /// </summary>
+    public const string FloaterCensus = Common + @"
+@group(0) @binding(2) var<storage, read> ranges : array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read> values : array<u32>;
+@group(0) @binding(4) var<storage, read_write> census : array<atomic<u32>>;   // 2 per splat: total, front
+@group(0) @binding(5) var<uniform> cfg : vec4<f32>;                          // x front margin, y fixed-point scale
+@group(0) @binding(11) var<storage, read> splat_colour : array<f32>;
+fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(splat_colour[i * 3u], splat_colour[i * 3u + 1u], splat_colour[i * 3u + 2u]);
+}
+
+var<workgroup> sh_centre : array<vec2<f32>, 256>;
+var<workgroup> sh_conic  : array<vec3<f32>, 256>;
+var<workgroup> sh_opacity: array<f32, 256>;
+var<workgroup> sh_depth  : array<f32, 256>;
+var<workgroup> sh_index  : array<u32, 256>;
+
+@compute @workgroup_size(16, 16, 1)
+fn floater_census(
+    @builtin(workgroup_id) wg : vec3<u32>,
+    @builtin(local_invocation_index) li : u32
+) {
+    let tile = wg.y * u.tiles.x + wg.x;
+    let px = wg.x * TILE + (li % TILE);
+    let py = wg.y * TILE + (li / TILE);
+    let inside = px < u32(u.viewport.x) && py < u32(u.viewport.y);
+    let pixel = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
+    let range = ranges[tile];
+
+    // Two walks of the same front-to-back list with the forward pass's own rules (MIN_ALPHA, MAX_ALPHA, MIN_T stop):
+    // walk 0 finds the surface depth, walk 1 credits the weights against it. The loop bounds are uniform across the
+    // workgroup (as raster_forward's), so every barrier stays in uniform control flow.
+    var surface = 3.0e38;
+    for (var walk = 0u; walk < 2u; walk = walk + 1u) {
+        var t = 1.0;
+        var done = !inside;
+        var base = range.x;
+        loop {
+            if (base >= range.y) { break; }
+            let batch = min(256u, range.y - base);
+            if (li < batch) {
+                let idx = values[base + li];
+                let p = project(idx);
+                sh_centre[li] = p.centre;
+                sh_conic[li] = p.conic;
+                sh_opacity[li] = select(0.0, p.opacity, p.valid);
+                sh_depth[li] = p.depth;
+                sh_index[li] = idx;
+            }
+            workgroupBarrier();
+            if (!done) {
+                for (var k = 0u; k < batch; k = k + 1u) {
+                    let g = splat_weight(sh_conic[k], sh_centre[k], pixel);
+                    if (g <= 0.0) { continue; }
+                    let alpha = min(MAX_ALPHA, sh_opacity[k] * g);
+                    if (alpha < MIN_ALPHA) { continue; }
+                    let test_t = t * (1.0 - alpha);
+                    if (test_t < MIN_T) { done = true; break; }
+                    if (walk == 0u) {
+                        if (test_t < 0.5) { surface = sh_depth[k]; done = true; break; }
+                    } else {
+                        let q = u32(alpha * t * cfg.y + 0.5);
+                        if (q > 0u) {
+                            let s = sh_index[k] * 2u;
+                            atomicAdd(&census[s], q);
+                            if (sh_depth[k] < surface * (1.0 - cfg.x)) { atomicAdd(&census[s + 1u], q); }
+                        }
+                    }
+                    t = test_t;
+                }
+            }
+            workgroupBarrier();
+            base = base + batch;
+        }
+    }
+}
+";
+
+    /// <summary>
+    /// Fold one view's fixed-point census into the run's float totals and clear it for the next view. Per view the
+    /// fixed-point sum is bounded by the pixel count times the scale (1024 x 680 px x 1024 &lt; 2^30), so it cannot
+    /// wrap; across ~200 views it could, which is why it is folded every view.
+    /// </summary>
+    public const string FloaterFold = @"
+@group(0) @binding(0) var<storage, read_write> census : array<u32>;   // 2 per splat, fixed point, cleared here
+@group(0) @binding(1) var<storage, read_write> totals : array<f32>;   // 2 per splat: total, front
+@group(0) @binding(2) var<uniform> dims : vec4<f32>;                  // x splat count, y fixed-point scale
+
+@compute @workgroup_size(256)
+fn floater_fold(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
+    if (i >= u32(dims.x)) { return; }
+    let s = i * 2u;
+    totals[s] = totals[s] + f32(census[s]) / dims.y;
+    totals[s + 1u] = totals[s + 1u] + f32(census[s + 1u]) / dims.y;
+    census[s] = 0u;
+    census[s + 1u] = 0u;
+}
+";
+
+    /// <summary>
+    /// Classify each splat from the run's census: FLOATER when it was seen (total weight at least cfg.y) and at least
+    /// cfg.x of its weight sat in front of the photos' surfaces. Writes opacity 0 into the packed row when cfg.z = 1
+    /// (the carve: the save keeps only splats with opacity), and always fills a histogram the host prints:
+    /// hist[0..9] seen splats by front fraction (tenths), hist[10..19] the same weighted by total weight (x 10),
+    /// hist[20] unseen splats, hist[21] floaters, hist[22] floaters' total weight (x 10).
+    /// </summary>
+    public const string FloaterClassify = @"
+@group(0) @binding(0) var<storage, read_write> splats : array<f32>;   // 14 per splat
+@group(0) @binding(1) var<storage, read>       totals : array<f32>;   // 2 per splat
+@group(0) @binding(2) var<storage, read_write> hist   : array<atomic<u32>>;
+@group(0) @binding(3) var<uniform>             cfg    : vec4<f32>;    // x front fraction, y min weight, z carve, w count
+
+@compute @workgroup_size(256)
+fn floater_classify(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 256u;
+    if (i >= u32(cfg.w)) { return; }
+    let total = totals[i * 2u];
+    let front = totals[i * 2u + 1u];
+    if (total < cfg.y) { atomicAdd(&hist[20], 1u); return; }
+    let f = clamp(front / total, 0.0, 1.0);
+    let b = min(u32(f * 10.0), 9u);
+    let wq = u32(min(total * 10.0, 1.0e8));   // all weights sum to <= pixels x views (~1.4e8): x10 fits u32
+    atomicAdd(&hist[b], 1u);
+    atomicAdd(&hist[10u + b], wq);
+    if (f >= cfg.x) {
+        atomicAdd(&hist[21], 1u);
+        atomicAdd(&hist[22], wq);
+        if (cfg.z > 0.5) { splats[i * 14u + 9u] = 0.0; }
+    }
+}
+";
+
+    /// <summary>
     /// Pass 5: backward for COLOUR and OPACITY, one workgroup per tile.
     ///
     /// The whole shape of this kernel is dictated by WebGPU having no f32 atomics, so a

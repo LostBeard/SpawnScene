@@ -324,6 +324,9 @@ public partial class Studio
             // -- MCMC: relocation at 100K vs the host formula, the noise pass vs its replica, the regularisers' signs --
             if (!await McmcGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
+            // -- Floater census: front shares on a scene with a known answer, the carve, and its red check --
+            if (!await FloaterCensusGateAsync(cam)) return;
+
             // -- Past 65535 workgroups: a per-splat pass over more than 4,194,240 splats reaches every one --
             if (!await LinearDispatchGateAsync(trainer)) return;
 

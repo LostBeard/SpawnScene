@@ -89,13 +89,19 @@ public partial class Studio
             Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-project_page_settings");
             await Task.Delay(2500);
             if (pageOnly) { Console.WriteLine("[Dataset] DONE"); return; }
-            // Deterministic captures: sorted mode, full resolution (as the dataset harness renders).
-            _gpuRenderer.RenderMode = SplatRenderMode.Sorted;
-            _gpuRenderer.AdaptiveResMode = AdaptiveResMode.ForceFull;
-
             // -- Generate, exactly as the button does --
+            // No render-mode setup here: this used to force sorted / full resolution first "for deterministic captures",
+            // which hid that the Generate button left the viewer in the stochastic renderer (TJ saw the freshly trained
+            // scene full of floaters that a reopen did not show, 2026-10-07). The viewer state Generate leaves is checked.
             t0 = DateTime.UtcNow;
             await GenerateMultiViewScene();
+            if (_gpuRenderer.RenderMode != SplatRenderMode.Sorted || _gpuRenderer.AdaptiveResMode != AdaptiveResMode.ForceFull)
+            {
+                Console.WriteLine($"[Dataset] FAIL: after Generate the viewer shows {_gpuRenderer.RenderMode} at " +
+                    $"{_gpuRenderer.AdaptiveResMode} resolution; reopening a scene shows Sorted at ForceFull");
+                return;
+            }
+            Console.WriteLine($"[Dataset] viewer after Generate: {_gpuRenderer.RenderMode}, {_gpuRenderer.AdaptiveResMode}");
             var liveScene = _sceneManager.ActiveScene;
             var saved = _activeProject?.Scenes.LastOrDefault();
             if (saved == null || liveScene == null)
@@ -139,6 +145,8 @@ public partial class Studio
 
             await LoadProjectSceneAsync(saved);
             await CaptureProjectViewAsync("reloaded", seat);
+            // Off the photo path, where TJ found the floaters every capture above missed (Studio.Wander).
+            await CaptureWanderViewsAsync(liveScene);
 
             // SH storage: new saves are SphericalHarmonics.Parts files, and a scene saved before the split (one
             // row-major file) must load to the SAME part buffers, bit for bit, through the GPU split.

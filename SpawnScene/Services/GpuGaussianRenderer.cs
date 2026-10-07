@@ -652,8 +652,9 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         set => _sharpeningStrength = Math.Clamp(value, 0f, 1f);
     }
 
-    /// <summary>Controls adaptive resolution behavior.</summary>
-    public AdaptiveResMode AdaptiveResMode { get; set; } = AdaptiveResMode.Auto;
+    /// <summary>Controls adaptive resolution behavior. Full by default for the same reason as <see cref="RenderMode"/>: the
+    /// paths that show a scene all set ForceFull, except the ones that forgot (Generate).</summary>
+    public AdaptiveResMode AdaptiveResMode { get; set; } = AdaptiveResMode.ForceFull;
 
     // ── Background ──
     // Was hardcoded at seven sites, two of which are attachment objects CACHED at texture
@@ -715,7 +716,14 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     public bool XRTransparent { get; set; }
 
     /// <summary>Controls whether to use sorted alpha blending or stochastic rasterization.</summary>
-    private SplatRenderMode _renderMode = SplatRenderMode.Stochastic;
+    /// <remarks>
+    /// SORTED by default, here, so no path can forget it. It was Stochastic, and only the paths that remembered to switch
+    /// (reopening a project scene, the harness) ever showed sorted: the Generate button never did, so a freshly trained
+    /// scene was shown at 1-2 samples a pixel, half resolution and a 0.15 alpha floor while moving - faint splats boosted
+    /// into visible floaters - and "looked far better" once reopened (TJ, 2026-10-07, Bicycle). Stochastic stays a
+    /// Settings choice.
+    /// </remarks>
+    private SplatRenderMode _renderMode = SplatRenderMode.Sorted;
     public SplatRenderMode RenderMode
     {
         get => _renderMode;

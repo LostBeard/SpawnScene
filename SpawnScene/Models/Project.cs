@@ -209,6 +209,6 @@ public class ProjectSettings
     public SuperResolutionMode SuperResolution { get; set; } = SuperResolutionMode.Auto;
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
-    public SplatRenderMode RenderMode { get; set; } = SplatRenderMode.Stochastic;
+    public SplatRenderMode RenderMode { get; set; } = SplatRenderMode.Sorted;
     public float SharpeningStrength { get; set; } = 0.5f;
 }

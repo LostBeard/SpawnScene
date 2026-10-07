@@ -294,7 +294,7 @@ public partial class Studio
         bool isStochastic = _gpuRenderer.RenderMode == SplatRenderMode.Stochastic;
         _settingsPanel.AddChild(new UIButton
         {
-            X = 14, Y = 112,
+            X = 142, Y = 112,
             Width = 120, Height = 30,
             Text = "Stochastic",
             FontSize = FontSize.Caption,
@@ -307,7 +307,7 @@ public partial class Studio
         });
         _settingsPanel.AddChild(new UIButton
         {
-            X = 142, Y = 112,
+            X = 14, Y = 112,
             Width = 120, Height = 30,
             Text = "Sorted",
             FontSize = FontSize.Caption,

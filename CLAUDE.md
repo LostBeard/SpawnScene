@@ -53,8 +53,11 @@ Anti-patterns to avoid:
 
 The renderer supports two modes, switchable via `GpuGaussianRenderer.RenderMode`:
 
-- **Stochastic** (default) — Sort-free stochastic rasterization with temporal accumulation. No per-frame radix sort. ~45-60 FPS.
-- **Sorted** — Traditional sorted alpha blending (cull → radix sort → pack → render). Legacy mode for A/B comparison.
+- **Sorted** (default since 2026-10-07) - sorted alpha blending (cull, radix sort, pack, render), at full resolution
+  (`AdaptiveResMode.ForceFull`). The defaults live in the renderer so no path can forget them: the Generate button used to
+  leave a fresh scene in Stochastic, and TJ saw floaters there that a reopen (sorted) did not show.
+- **Stochastic** - sort-free stochastic rasterization with temporal accumulation, a Settings choice. 1-2 samples a pixel
+  and a 0.15 alpha floor while moving: faint splats become visible floaters.
 
 ### GPU Pipeline (data flow)
 

@@ -467,10 +467,16 @@ body {
     line-height: 1.6;
 }
 
+/* Blazor's FocusOnNavigate focuses the page's h1 (for screen readers); it must not draw a box around the title. */
+h1:focus {
+    outline: none;
+}
+
 /* --- Feature Grid --- */
+/* Two columns in the 900px container (four cards make a 2x2, not 3 + 1), one on narrow screens. */
 .feature-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
     gap: var(--space-lg);
     margin-top: var(--space-2xl);
     max-width: 900px;
@@ -784,6 +790,7 @@ body {
 
 .pipeline-step {
     flex: 1;
+    min-width: 0; /* share the row: without it each step grew to its text and the row overflowed the page */
     display: flex;
     align-items: center;
     gap: var(--space-sm);
@@ -840,9 +847,7 @@ body {
 .step-desc {
     font-size: var(--font-size-xs);
     color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    line-height: 1.4; /* wraps: a truncated "how it works" says nothing */
 }
 
 .step-arrow {

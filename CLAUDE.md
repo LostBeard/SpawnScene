@@ -155,6 +155,17 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   workgroups; the shader rebuilds the flat index from `num_workgroups`). An X-only dispatch dies past 4,194,240 items.
 - `&gpumem=N` sets a run's training budget (a fresh harness profile is otherwise Auto = 4 GB, cap ~3.3M splats).
 
+### Single photo: what a moved camera sees (2026-10-06)
+
+- Focal length from EXIF, else DAv3's camera estimate (the old 1.2x-the-long-side guess made rooms 1.5-2x too deep).
+- Each depth-grid splat spans its cell (`SplatCovariance.SurfaceDiskFromNeighbors`), so receding surfaces stay solid.
+- `OcclusionFill` adds two hidden layers on the GPU: background behind every depth edge (max/min depth filters + a
+  far-priority push-pull pyramid) and the photo continued 35% past its frame. `&occfill=0` turns it off. Room sample,
+  empty share of a view moved 10-30% of the scene depth: 15-39% before, 0-3% after (13.7% on a 30% orbit).
+- The viewer's Settings panel has **Scene depth** for photo scenes (`SplatRows.Relief`): splats slide along their own
+  pixel rays, so the photo's view is unchanged and only the depth scales. `&scenedepth=k` sets it in a harness run.
+- Measure with `autotest=generate-room&holeviews=1` and `SPAWNSCENE_EDIT_SHOT_ON='\[Holes\] VIEW (\w+) READY'`.
+
 ### Massive scenes: LOD tree, streaming, partitioned training (Plans/lod-streaming.md)
 
 - **LOD tree** (`LodTree` CPU oracle, `GpuLodTree` GPU build, `LodMerge`): Tiny-LoD grid merges, monotone metric so the

@@ -59,4 +59,37 @@ public class SplatRowsTests
         accel.Synchronize();
         Assert.That(grown.GetAsArray1D(), Is.EqualTo(new float[] { 1, 2, 3, 4, 5, 6 }));
     }
+
+    [Test]
+    public void Relief_KeepsEveryPixel_ScalesDepthAboutTheCentre_AndComposes()
+    {
+        using var context = Context.Create(b => b.CPU());
+        using var accel = context.CreateCPUAccelerator(0);
+        const int F = SplatFormat.Floats;
+        // Three splats on different rays at depths 1, 2, 3; scene-depth centre 2.
+        var data = new float[3 * F];
+        for (int i = 0; i < 3; i++)
+        {
+            float z = i + 1;
+            data[i * F] = 0.3f * z; data[i * F + 1] = -0.2f * z; data[i * F + 2] = z;
+            data[i * F + 6] = data[i * F + 7] = 0.01f * z; data[i * F + 8] = 0.002f * z;
+        }
+        using var packed = accel.Allocate1D(data);
+        SplatRows.Relief(accel, packed, 3, 2f, 0.5f);
+        accel.Synchronize();
+        var a = packed.GetAsArray1D();
+        for (int i = 0; i < 3; i++)
+        {
+            float z = a[i * F + 2], want = 2f + (i + 1 - 2f) * 0.5f;
+            Assert.That(z, Is.EqualTo(want).Within(1e-5f), $"depth {i}");
+            Assert.That(a[i * F] / z, Is.EqualTo(0.3f).Within(1e-5f), "same pixel x");
+            Assert.That(a[i * F + 1] / z, Is.EqualTo(-0.2f).Within(1e-5f), "same pixel y");
+            Assert.That(a[i * F + 6] / z, Is.EqualTo(0.01f).Within(1e-6f), "the footprint follows the depth");
+        }
+        SplatRows.Relief(accel, packed, 3, 2f, 3f);   // 0.5 then 3 = 1.5 overall
+        accel.Synchronize();
+        a = packed.GetAsArray1D();
+        Assert.That(a[2], Is.EqualTo(2f + (1f - 2f) * 1.5f).Within(1e-5f), "composes: x0.5 then x3 is x1.5");
+        Assert.That(a[2 * F + 2], Is.EqualTo(2f + (3f - 2f) * 1.5f).Within(1e-5f));
+    }
 }

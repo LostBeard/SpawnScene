@@ -24,8 +24,11 @@ jobs:
       run: dotnet workload install wasm-tools        
 
     # publishes Blazor project to the publish-folder
+    # WasmDedup=false: AOT compiles generic instantiations per assembly, in parallel, instead of one single-threaded
+    # aot-instances module (measured on the same ILGPU stack: 65-80 min -> ~5 min, no runtime difference, ~53% larger
+    # dotnet.native.wasm - still far under GitHub Pages' 100 MB file limit).
     - name: Publish .NET Core Project
-      run: dotnet publish ./SpawnScene/ --nologo -c:Release --output publish
+      run: dotnet publish ./SpawnScene/ --nologo -c:Release --output publish -p:WasmDedup=false
       
     # copy index.html to 404.html to serve the same file when a file is not found
     - name: copy index.html to 404.html

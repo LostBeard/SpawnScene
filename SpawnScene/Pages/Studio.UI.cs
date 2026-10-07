@@ -262,7 +262,7 @@ public partial class Studio
         _settingsPanel = _uiRoot.AddChild(new UIPanel
         {
             X = _canvasWidth - 292, Y = 52,
-            Width = 280, Height = 270,
+            Width = 280, Height = IsPhotoScene ? 336 : 270,
         });
 
         _settingsPanel.AddChild(new UILabel
@@ -344,6 +344,56 @@ public partial class Studio
         });
         AddToggleChip(_settingsPanel, 14, 230, 80, _xrCasEnabled ? "On" : "Off", _xrCasEnabled,
             () => { _xrCasEnabled = !_xrCasEnabled; BuildSettingsPanel(); });
+
+        // A single-photo scene's depth is an estimate (focal length and depth model both): too deep or too flat is
+        // corrected here, live, without changing the photo's own view (SplatRows.Relief). Save as new to keep it.
+        if (IsPhotoScene)
+            _settingsPanel.AddChild(new UISlider
+            {
+                X = 14, Y = 270, Width = 250, Height = 40,
+                Label = "Scene depth",
+                MinValue = 0.3f, MaxValue = 2f, Value = _sceneDepth,
+                OnChanged = v => _ = SetSceneDepthAsync(v),
+            });
+    }
+
+    /// <summary>The viewer shows a single-photo scene: its camera at the origin, depth along +Z.</summary>
+    bool IsPhotoScene => _sceneManager.ActiveScene?.SourceName == "depth-splat";
+
+    /// <summary>The scene-depth factor applied so far (1 = as generated) and the depth it scales about.</summary>
+    float _sceneDepth = 1f, _sceneDepthCentre;
+    float _sceneDepthWanted = 1f;
+    bool _sceneDepthRunning;
+
+    /// <summary>Apply the scene-depth slider: the change since the last value, about the scene's robust centre depth.</summary>
+    async Task SetSceneDepthAsync(float k)
+    {
+        _sceneDepthWanted = k;
+        if (_sceneDepthRunning) return;   // the running pass picks up the latest value when it finishes
+        _sceneDepthRunning = true;
+        try
+        {
+            var packed = _gpuRenderer.PackedSplatBuffer;
+            var accel = _gpuService.WebGPUAccelerator;
+            if (packed == null) return;
+            if (_sceneDepthCentre <= 0f)
+            {
+                // CPU transfer: the robust bounds (6 ints + two small histograms).
+                var box = await SplatBounds.ComputeRobustAsync(accel, packed, _gpuRenderer.SplatCount);
+                if (box is not { } b) return;
+                _sceneDepthCentre = b.CentreZ;
+            }
+            while (MathF.Abs(_sceneDepthWanted - _sceneDepth) > 1e-4f)
+            {
+                float target = _sceneDepthWanted;
+                SplatRows.Relief(accel, packed, _gpuRenderer.SplatCount, _sceneDepthCentre, target / _sceneDepth);
+                await accel.SynchronizeAsync();
+                _sceneDepth = target;
+                _gpuRenderer.SplatsEdited(_sceneManager.Camera.Position);
+            }
+            Console.WriteLine($"[Viewer] scene depth x{_sceneDepth:F2} about {_sceneDepthCentre:G4}");
+        }
+        finally { _sceneDepthRunning = false; }
     }
 
     private static void AddToggleChip(UIPanel parent, float x, float y, float w, string text, bool on, Action click)

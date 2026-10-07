@@ -668,6 +668,10 @@ public partial class Studio : IAsyncDisposable
             Console.WriteLine($"[Autotest] PASS — scene with {_sceneManager.ActiveScene?.Count ?? 0} splats");
             // &holeviews=1 (harness): the single-photo scene from cameras moved off the photo's, over a magenta clear
             // colour, so every hole the move opens is countable in a screenshot (tools/_cdp_edit.js SHOT_ON).
+            // &scenedepth=k (harness): the viewer's Scene depth slider, set before the hole views.
+            if (query.TryGetValue("scenedepth", out var sdq) && float.TryParse(sdq, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var sdk))
+                await SetSceneDepthAsync(sdk);
             if (query.ContainsKey("holeviews")) await RunHoleViewsAsync();
             // &xrhook=1: expose window.__spawnsceneEnterXR(mode) so a harness can enter WebXR (tools/_cdp_xr.js). It must be
             // called from a user gesture (CDP Runtime.evaluate userGesture), which requestSession requires.

@@ -97,9 +97,36 @@ public static class SplatRows
     }
 
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, float, float, float, float>? _rotate;
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int, float, float>? _relief;
 
     /// <summary>Rotate <paramref name="n"/> packed splats about the origin by unit quaternion <paramref name="r"/>
     /// (positions and orientations), in place on the GPU.</summary>
+    /// <summary>
+    /// Scene depth for a single-photo scene (camera at the origin, +Z forward): every splat slides along its own pixel's
+    /// ray so that depth differences around <paramref name="centreDepth"/> scale by <paramref name="k"/> - the photo's
+    /// own view is unchanged, only how deep the scene is. Splat sizes follow the depth (a pixel's footprint grows with
+    /// it). Two calls compose: k1 then k2 about the same centre is k1 * k2. Depth never drops below 5% of the centre.
+    /// </summary>
+    public static void Relief(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, float centreDepth, float k)
+    {
+        Load(a);
+        if (n > 0) _relief!(n, packed.View, n, centreDepth, k);
+    }
+
+    static void ReliefKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> packed, int n, float centre, float k)
+    {
+        if (i >= n) return;
+        long o = (long)i.X * SplatFormat.Floats;
+        float z = packed[o + 2];
+        if (!(z > 1e-6f)) return;
+        float nz = centre + (z - centre) * k;
+        float floor = 0.05f * centre;
+        if (nz < floor) nz = floor;
+        float r = nz / z;
+        packed[o] *= r; packed[o + 1] *= r; packed[o + 2] = nz;
+        packed[o + 6] *= r; packed[o + 7] *= r; packed[o + 8] *= r;
+    }
+
     public static void Rotate(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> packed, int n, System.Numerics.Quaternion r)
     {
         Load(a);
@@ -137,8 +164,9 @@ public static class SplatRows
 
     static void Load(Accelerator a)
     {
-        if (!ReferenceEquals(_loadedFor, a)) { _select = null; _gather = null; _append = null; _convert = null; _rotate = null; _loadedFor = a; }
+        if (!ReferenceEquals(_loadedFor, a)) { _select = null; _gather = null; _append = null; _convert = null; _rotate = null; _relief = null; _loadedFor = a; }
         _rotate ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, float, float, float, float>(RotateKernel);
+        _relief ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, float, float>(ReliefKernel);
         _convert ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int, int>(ConvertColoursKernel);
         _select ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, SplatEditor.Volume, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(SelectKernel);
         _gather ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, int, int>(GatherKernel);

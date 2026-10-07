@@ -638,6 +638,55 @@ fn floater_classify(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num
 ";
 
     /// <summary>
+    /// Diagnostic: which splats paint ONE pixel, front to back - the forward pass's own walk (MIN_ALPHA, MAX_ALPHA, MIN_T)
+    /// for the pixel cfg.xy, recording up to 16 contributors with blending weight at least cfg.z as (splat index bits,
+    /// weight, alpha, depth). out[0] = count. One thread: a handful of pixels a run, never a training path.
+    /// </summary>
+    public const string PickPixel = Common + @"
+@group(0) @binding(2) var<storage, read> ranges : array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read> values : array<u32>;
+@group(0) @binding(4) var<storage, read_write> picked : array<f32>;   // 1 + 16 x 4
+@group(0) @binding(5) var<uniform> cfg : vec4<f32>;                  // x, y pixel; z min weight
+@group(0) @binding(11) var<storage, read> splat_colour : array<f32>;
+fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(splat_colour[i * 3u], splat_colour[i * 3u + 1u], splat_colour[i * 3u + 2u]);
+}
+
+@compute @workgroup_size(1)
+fn pick_pixel() {
+    let px = u32(cfg.x);
+    let py = u32(cfg.y);
+    let tile = (py / TILE) * u.tiles.x + (px / TILE);
+    let pixel = vec2<f32>(f32(px) + 0.5, f32(py) + 0.5);
+    let range = ranges[tile];
+    var t = 1.0;
+    var count = 0u;
+    for (var k = range.x; k < range.y; k = k + 1u) {
+        let idx = values[k];
+        let p = project(idx);
+        if (!p.valid) { continue; }
+        let g = splat_weight(p.conic, p.centre, pixel);
+        if (g <= 0.0) { continue; }
+        let alpha = min(MAX_ALPHA, p.opacity * g);
+        if (alpha < MIN_ALPHA) { continue; }
+        let test_t = t * (1.0 - alpha);
+        if (test_t < MIN_T) { break; }
+        let w = alpha * t;
+        if (w >= cfg.z && count < 16u) {
+            let o = 1u + count * 4u;
+            picked[o] = bitcast<f32>(idx);
+            picked[o + 1u] = w;
+            picked[o + 2u] = alpha;
+            picked[o + 3u] = p.depth;
+            count = count + 1u;
+        }
+        t = test_t;
+    }
+    picked[0] = f32(count);
+}
+";
+
+    /// <summary>
     /// Pass 5: backward for COLOUR and OPACITY, one workgroup per tile.
     ///
     /// The whole shape of this kernel is dictated by WebGPU having no f32 atomics, so a
@@ -1348,6 +1397,10 @@ fn sample_stride(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
 @group(0) @binding(3) var<storage, read>       screen_radius : array<f32>; // this view, from emit_keys (0 = not emitted)
 @group(0) @binding(4) var<storage, read_write> max_radius : array<f32>;   // running max over the window
 @group(0) @binding(5) var<storage, read>       densify_abs : array<u32>;  // f32 bits, 2 per splat: sum |dPx|, |dPy|
+// Pixel-GS depth scaling (Zhang et al. 2024): this view's camera centre (xyz) + 1 / (gamma * radius) (w), forward (xyz)
+// + enabled (w). Off (w = 0) unless SplatTrainerGpu.PixelGsDepthGamma > 0.
+@group(0) @binding(6) var<uniform>             depth_cfg  : array<vec4<f32>, 2>;
+@group(0) @binding(7) var<storage, read>       splat_rows : array<f32>;   // 14 per splat (positions only read)
 
 const GRADS_PER_SPLAT : u32 = 9u;
 
@@ -1382,7 +1435,19 @@ fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
     let gx = px * 0.5 * f32(dims.y);
     let gy = py * 0.5 * f32(dims.z);
 
-    accum[i * 2u] = accum[i * 2u] + sqrt(gx * gx + gy * gy);
+    // Pixel-GS: a splat close to the camera covers many pixels and collects a large screen-space gradient from them, so
+    // it keeps cloning into the near-camera haze that shows as floaters from any other pose. Scale this view's term by
+    // clip((depth / (gamma * radius))^2, 0, 1) - densification only, the optimiser's gradient is untouched.
+    var f = 1.0;
+    if (depth_cfg[1].w > 0.5) {
+        let o = i * 14u;
+        let rel = vec3<f32>(splat_rows[o], splat_rows[o + 1u], splat_rows[o + 2u]) - depth_cfg[0].xyz;
+        let z = dot(rel, depth_cfg[1].xyz);
+        let r = z * depth_cfg[0].w;
+        f = clamp(r * r, 0.0, 1.0);
+    }
+
+    accum[i * 2u] = accum[i * 2u] + f * sqrt(gx * gx + gy * gy);
     accum[i * 2u + 1u] = accum[i * 2u + 1u] + 1.0;
 }
 ";

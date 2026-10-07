@@ -1411,17 +1411,53 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// Same timing constraint as <see cref="ReadGradientStatsAsync"/>: the accumulator is cleared
     /// mid-step, so this must run after TrainStepAsync returns and before the next one begins.
     /// </summary>
-    public void AccumulateDensifyStats(int splatCount)
+    public void AccumulateDensifyStats(int splatCount, MemoryBuffer1D<float, Stride1D.Dense>? splats = null, CameraParams? cam = null)
     {
         WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height,
             (DensifyDenominatorFrustum ? 1u : 0u) | (AbsGrad ? 2u : 0u));
+        // Pixel-GS depth scaling needs this step's camera and the splat positions; without them (the gates) it is off.
+        bool depthScale = PixelGsDepthGamma > 0f && PixelGsRadius > 0f && splats != null && cam != null;
+        _densifyDepthCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 32,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        if (depthScale)
+        {
+            var fwd = System.Numerics.Vector3.Normalize(cam!.Forward);
+            WriteVec4(_densifyDepthCfgBuf, cam.Position.X, cam.Position.Y, cam.Position.Z, 1f / (PixelGsDepthGamma * PixelGsRadius));
+            WriteVec4(_densifyDepthCfgBuf, fwd.X, fwd.Y, fwd.Z, 1f, 16);
+        }
+        else WriteVec4(_densifyDepthCfgBuf, 0f, 0f, 0f, 0f, 16);
         DispatchLinear(_densifyAccum!, splatCount, groupSize: 256, entries: new[]
         {
             Buf(0, _gradFixed!.GetGPUBuffer()!), Buf(1, _densifyStats!.GetGPUBuffer()!),
             Buf(2, _dimsBuf!), Buf(3, _screenRadius!.GetGPUBuffer()!), Buf(4, _maxRadius!.GetGPUBuffer()!),
-            Buf(5, _densifyAbs!.GetGPUBuffer()!),
+            Buf(5, _densifyAbs!.GetGPUBuffer()!), Buf(6, _densifyDepthCfgBuf),
+            // Never read when off, but the binding must exist - and NOT be a buffer this dispatch also writes: binding
+            // _densifyStats here failed every default run's first step ("writable usage and another usage in the same
+            // synchronization scope", f0 2026-10-07). A dedicated 16-byte buffer.
+            Buf(7, depthScale ? splats!.GetGPUBuffer()! : DummyStorage()),
         });
     }
+
+    GPUBuffer? _densifyDepthCfgBuf;
+    GPUBuffer? _dummyStorage;
+    GPUBuffer DummyStorage() => _dummyStorage ??= _device!.CreateBuffer(new GPUBufferDescriptor
+    {
+        Size = 16,
+        Usage = GPUBufferUsage.Storage,
+    });
+
+    /// <summary>
+    /// Pixel-GS (Zhang et al., ECCV 2024) depth scaling of the densification signal: each view's term times
+    /// clip((depth / (gamma x radius))^2, 0, 1), gamma 0.37 in the paper, radius = 1.1 x the cameras' extent
+    /// (<see cref="PixelGsRadius"/>). Suppresses the near-camera growth that becomes floaters off the photo path. 0 = off.
+    /// </summary>
+    public static float PixelGsDepthGamma { get; set; }
+
+    /// <summary>The run's camera radius for <see cref="PixelGsDepthGamma"/> (TrainingSchedule.CamerasExtent).</summary>
+    public float PixelGsRadius { get; set; }
 
     /// <summary>
     /// Densify on AbsGS's signal (gsplat absgrad): per view the sum over a splat's pixels of |dL/dmean2D|, the
@@ -2427,6 +2463,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _poseGrads?.Dispose(); _poseGrads = null;
         _radixSort?.Dispose(); _radixSort = null;
         _uniformBuf?.Destroy(); _uniformBuf?.Dispose();
+        _densifyDepthCfgBuf?.Destroy(); _densifyDepthCfgBuf = null;
+        _dummyStorage?.Destroy(); _dummyStorage = null;
         _capsBuf?.Destroy(); _capsBuf?.Dispose();
         _geomCfgBuf?.Destroy(); _geomCfgBuf?.Dispose();
         _targetBytes?.Destroy(); _targetBytes?.Dispose();

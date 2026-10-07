@@ -1,5 +1,7 @@
 using System.Numerics;
 using SpawnScene.Models;
+using SpawnScene.Services;
+using SpawnDev.ILGPU;
 
 namespace SpawnScene.Pages;
 
@@ -109,6 +111,57 @@ public partial class Studio
                 $"size {view.Width} {view.Height}");
             Console.WriteLine($"[Dataset] READY-FOR-CAPTURE view-{tag} - {view.Width}x{view.Height} turns=0");
             await Task.Delay(1800);
+            if (WanderPicks.TryGetValue(tag, out var pts)) await PickWanderPixelsAsync(tag, view, pts, cams);
+        }
+    }
+
+    /// <summary>&amp;pick=view@x,y;view@x,y: wander pixels to explain (which splats paint them). Diagnostic.</summary>
+    internal static Dictionary<string, List<(int X, int Y)>> WanderPicks { get; } = new();
+
+    internal static void ParseWanderPicks(string q)
+    {
+        foreach (var item in q.Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var at = item.Split('@');
+            var xy = at.Length == 2 ? at[1].Split(',') : Array.Empty<string>();
+            if (xy.Length != 2 || !int.TryParse(xy[0], out int x) || !int.TryParse(xy[1], out int y)) continue;
+            if (!WanderPicks.TryGetValue(at[0], out var l)) WanderPicks[at[0]] = l = new();
+            l.Add((x, y));
+        }
+    }
+
+    /// <summary>
+    /// Print the splats that paint each picked pixel of a wander view, with what decides whether they are floaters:
+    /// opacity, scales, distance to the nearest photo camera (and how that compares with the trainer's 0.2 near plane),
+    /// and the census (share of weight in front of the photos' surfaces, total weight over the photos). CPU transfer: a
+    /// row and two census floats per picked splat - a diagnostic, a few dozen splats a run.
+    /// </summary>
+    private async Task PickWanderPixelsAsync(string tag, CameraParams view, List<(int X, int Y)> pts, IReadOnlyList<CameraParams> cams)
+    {
+        var packed = _gpuRenderer.PackedSplatBuffer;
+        int n = _gpuRenderer.SplatCount;
+        if (_trainer == null || packed == null || n <= 0) { Console.WriteLine($"[Pick] {tag}: no trainer/scene"); return; }
+        var aabb = await SplatBounds.ComputeAsync(_gpuService.WebGPUAccelerator, packed, n);
+        if (aabb == null) return;
+        var (near, far) = SplatBounds.DepthRangeFor(aabb.Value, view);
+        var I = System.Globalization.CultureInfo.InvariantCulture;
+        foreach (var (x, y) in pts)
+        {
+            var hits = await _trainer.PickPixelAsync(packed, n, view, near, far, x, y);
+            Console.WriteLine($"[Pick] {tag} ({x},{y}): {hits.Length} splats with weight >= 0.02");
+            foreach (var h in hits)
+            {
+                var row = await packed.CopyToHostAsync<float>((long)h.Index * SplatFormat.Floats, SplatFormat.Floats);
+                var (total, front) = await _trainer.ReadFloaterTotalsOfAsync(h.Index);
+                var pos = new Vector3(row[0], row[1], row[2]);
+                float nearest = cams.Min(c => Vector3.Distance(c.Position, pos));
+                float inFrontOfNearest = cams.Min(c => { float d = Vector3.Dot(pos - c.Position, Vector3.Normalize(c.Forward)); return d > 0 ? d : float.MaxValue; });
+                Console.WriteLine(string.Format(I,
+                    "[Pick]   #{0} w {1:F3} a {2:F3} depth {3:F3} | opacity {4:F3} scale {5:G3},{6:G3},{7:G3} pos ({8:F3},{9:F3},{10:F3}) " +
+                    "nearest cam {11:F3} min cam-depth {12:F3} | census total {13:F2} px front {14:P0}",
+                    h.Index, h.Weight, h.Alpha, h.Depth, row[9], row[6], row[7], row[8], pos.X, pos.Y, pos.Z,
+                    nearest, inFrontOfNearest, total, total > 0 ? front / total : float.NaN));
+            }
         }
     }
 

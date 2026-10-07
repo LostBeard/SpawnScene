@@ -239,6 +239,12 @@ public partial class Studio : IAsyncDisposable
             CarveFrontMargin = Math.Clamp(cmv, 0f, 0.9f);
         if (query.TryGetValue("carveevery", out var ceq) && int.TryParse(ceq, out var cei)) CarveEveryIters = Math.Max(0, cei);
         if (query.TryGetValue("carveunseen", out var cuq)) CarveUnseen = cuq is "1" or "true";
+        // &pick=view@x,y;...: explain wander pixels - the splats painting them, with their census (Studio.Wander).
+        if (query.TryGetValue("pick", out var pickQ)) ParseWanderPicks(pickQ);
+        // &pixelgs=G: Pixel-GS depth scaling of the densification gradient (G = gamma, 0.37 in the paper; 0 = off).
+        if (query.TryGetValue("pixelgs", out var pgq) && float.TryParse(pgq,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var pgv))
+            SplatTrainerGpu.PixelGsDepthGamma = Math.Max(0f, pgv);
         // &streamed=1: a partitioned run is saved as a streamed scene (Studio.Partition) even when it would fit merged.
         if (query.TryGetValue("streamed", out var stq)) StreamedPartitionOption = stq is "1" or "true";
         // &gpumem=N: this run's training GPU memory budget in GB (the Settings choice; not saved - a fresh harness
@@ -277,6 +283,13 @@ public partial class Studio : IAsyncDisposable
         if (mode == "textlab")
         {
             await RunTextLabAsync();
+            return;
+        }
+
+        if (mode == "aotprobe")
+        {
+            if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
+            await RunAotProbeAsync(query.TryGetValue("probe", out var prq) && int.TryParse(prq, out var pri) ? pri : 0);
             return;
         }
 

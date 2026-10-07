@@ -441,6 +441,9 @@ public partial class Studio
             if (rigViews.Count == 0) rigViews = views.ToList();
             float rigRadius = TrainingSchedule.CamerasExtent(rigViews.Select(v => v.Camera.Position).ToList());
             if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
+            _trainer.PixelGsRadius = rigRadius;   // Pixel-GS's radius is exactly this: 1.1 x the cameras' extent
+            if (SplatTrainerGpu.PixelGsDepthGamma > 0f)
+                Console.WriteLine($"[Train] Pixel-GS depth scaling: gamma {SplatTrainerGpu.PixelGsDepthGamma}, radius {rigRadius:F3}");
 
             SplatTrainerGpu.GeometryStep? geo = null;
             float positionLrInit = 0f;
@@ -732,7 +735,7 @@ public partial class Studio
                         }
                     }
                 }
-                if (DensifyEveryIters > 0 && !McmcOption) _trainer.AccumulateDensifyStats(n);   // MCMC samples by opacity
+                if (DensifyEveryIters > 0 && !McmcOption) _trainer.AccumulateDensifyStats(n, packed, cam);   // MCMC samples by opacity
 
                 // Density control on an ITERATION schedule, like the reference: every 100
                 // iterations from 500 until half way, then the model is left to settle.

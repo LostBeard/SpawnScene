@@ -121,11 +121,56 @@ public sealed partial class SplatTrainerGpu
     public Task<float[]> ReadFloaterTotalsAsync(int splatCount) =>
         _floaterTotals!.CopyToHostAsync<float>(0, (long)splatCount * 2);
 
+    GPUComputePipeline? _pickPixel;
+    MemoryBuffer1D<float, Stride1D.Dense>? _pickOut;
+
+    /// <summary>One splat painting a picked pixel: its index, blending weight there, alpha, camera depth.</summary>
+    public readonly record struct PickedSplat(int Index, float Weight, float Alpha, float Depth);
+
+    /// <summary>
+    /// Diagnostic: the splats that paint pixel (<paramref name="x"/>, <paramref name="y"/>) of <paramref name="cam"/>, front to
+    /// back, with blending weight at least <paramref name="minWeight"/> (at most 16). CPU transfer: 65 floats.
+    /// </summary>
+    public async Task<PickedSplat[]> PickPixelAsync(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
+        CameraParams cam, float depthNear, float depthFar, int x, int y, float minWeight = 0.02f)
+    {
+        _pickPixel ??= MakePipeline(SplatTrainerShaders.PickPixel, "pick_pixel");
+        _pickOut ??= _gpu.WebGPUAccelerator.Allocate1D<float>(1 + 16 * 4);
+        _floaterCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false);
+        WriteVec4(_floaterCfgBuf, x, y, minWeight, 0f);
+        Dispatch(_pickPixel, 1, 1, new[]
+        {
+            Buf(0, _uniformBuf!), Buf(1, splatBuf.GetGPUBuffer()!), Buf(2, _ranges!.GetGPUBuffer()!),
+            Buf(3, _values!.GetGPUBuffer()!), Buf(4, _pickOut.GetGPUBuffer()!), Buf(5, _floaterCfgBuf),
+            Buf(11, _splatColour!.GetGPUBuffer()!),
+        });
+        var f = await _pickOut.CopyToHostAsync<float>(0, 1 + 16 * 4);
+        int count = (int)f[0];
+        var r = new PickedSplat[Math.Min(count, 16)];
+        for (int k = 0; k < r.Length; k++)
+            r[k] = new PickedSplat(BitConverter.SingleToInt32Bits(f[1 + k * 4]), f[2 + k * 4], f[3 + k * 4], f[4 + k * 4]);
+        return r;
+    }
+
+    /// <summary>Census totals (total, front) of a few splats. CPU transfer: 2 floats each.</summary>
+    public async Task<(float Total, float Front)> ReadFloaterTotalsOfAsync(int index)
+    {
+        if (_floaterTotals == null) return (float.NaN, float.NaN);
+        var t = await _floaterTotals.CopyToHostAsync<float>((long)index * 2, 2);
+        return (t[0], t[1]);
+    }
+
     void DisposeFloaterCensus()
     {
         _floaterFixed?.Dispose(); _floaterFixed = null;
         _floaterTotals?.Dispose(); _floaterTotals = null;
         _floaterHist?.Dispose(); _floaterHist = null;
         _floaterCfgBuf?.Destroy(); _floaterCfgBuf = null;
+        _pickOut?.Dispose(); _pickOut = null;
     }
 }

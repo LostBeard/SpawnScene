@@ -212,6 +212,9 @@ public partial class Studio : IAsyncDisposable
         }
         // &absgrad=0: densify on the reference signed sum at its 2e-4 bar instead of AbsGS (the default, 8e-4).
         // &densifygrad sets the bar either way.
+        // &superres=off|auto|on: override the project's super-resolution setting (Studio.SuperRes).
+        if (query.TryGetValue("superres", out var superResQ))
+            SuperResOverride = superResQ switch { "off" or "0" => SuperResolutionMode.Off, "on" or "1" => SuperResolutionMode.On, _ => SuperResolutionMode.Auto };
         // &occfill=0: no hidden background layer behind a single photo's depth edges (DepthToGaussianKernel.OcclusionFillEnabled).
         if (query.TryGetValue("occfill", out var ofq)) DepthToGaussianKernel.OcclusionFillEnabled = ofq is not ("0" or "false");
         // &mcmc=1: MCMC density (Studio.Training McmcOption) instead of clone/split/prune.

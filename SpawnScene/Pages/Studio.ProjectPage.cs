@@ -475,6 +475,11 @@ public partial class Studio
             Array.FindIndex(presets, p => p.Item1 == s.QualityPreset),
             i => { s.QualityPreset = presets[i].Item1; s.Subsample = presets[i].Item2; s.EdgeSharpness = presets[i].Item3; },
             "Splat density from the depth map: High makes one splat per pixel.");
+        y = AddChoiceRow(parent, x, y, w, "Super-resolution",
+            new (string, int)[] { ("Off", (int)SuperResolutionMode.Off), ("Auto", (int)SuperResolutionMode.Auto), ("x3", (int)SuperResolutionMode.On) },
+            (int)s.SuperResolution, v => s.SuperResolution = (SuperResolutionMode)v,
+            $"Triples a photo's resolution before it becomes splats (ESPCN, on the GPU): finer colour detail and splats, " +
+            $"more splats (about 9x). Auto does it for photos under {SuperResAutoBelowPx} px.");
         var models = DepthEstimationService.AvailableModels.ToList();
         y = AddChoiceRow(parent, x, y, w, "Depth model",
             models.Select((m, i) => (m.Name, i)).ToArray(),

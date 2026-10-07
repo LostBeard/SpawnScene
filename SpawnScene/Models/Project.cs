@@ -169,6 +169,8 @@ public static class ReconstructionPresets
 }
 
 /// <summary>Per-project generation and render settings.</summary>
+public enum SuperResolutionMode { Off, Auto, On }
+
 public class ProjectSettings
 {
     public string DepthModel { get; set; } = "depth-anything-v3-small";
@@ -199,8 +201,12 @@ public class ProjectSettings
     /// "Custom" once any of them was changed by hand.
     /// </summary>
     public string ReconstructionPreset { get; set; } = "Standard";
-    // Parked for a future NATIVE super-resolution pass (ORT SR retired 2026-07-01). See SuperResolutionService.cs.
+    /// <summary>Was the parked flag of the retired ORT super-resolution; superseded by <see cref="SuperResolution"/>.</summary>
     public bool UseSuperResolution { get; set; }
+
+    /// <summary>Super-resolution of a single photo before it becomes splats (Studio.SuperRes): Auto = photos under 800 px.</summary>
+    [JsonConverter(typeof(JsonStringEnumConverter))]
+    public SuperResolutionMode SuperResolution { get; set; } = SuperResolutionMode.Auto;
 
     [JsonConverter(typeof(JsonStringEnumConverter))]
     public SplatRenderMode RenderMode { get; set; } = SplatRenderMode.Stochastic;

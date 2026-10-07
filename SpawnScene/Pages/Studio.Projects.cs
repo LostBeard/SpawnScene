@@ -178,6 +178,22 @@ public partial class Studio
             var rgbaGpuBuf = _gpuService.WebGPUAccelerator.Allocate1D<int>(w * h);
             SpawnDev.ILGPU.ML.Preprocessing.MediaInterop.UploadToDevice(dataArray, rgbaGpuBuf);
 
+            // Super-resolution (Studio.SuperRes): a small photo tripled before anything reads it, so the camera estimate,
+            // depth and the splat grid all see the larger image.
+            bool upscaled = false;
+            var srMode = SuperResOverride ?? _activeProject.Settings.SuperResolution;
+            if (ShouldSuperResolve(srMode, w, h))
+            {
+                _statusMessage = "Super-resolution (x3)...";
+                BuildProjectDetailUI();
+                if (await SuperResolveAsync(rgbaGpuBuf, w, h) is { } up)
+                {
+                    rgbaGpuBuf.Dispose();
+                    (rgbaGpuBuf, w, h) = up;
+                    upscaled = true;
+                }
+            }
+
             // Build camera params from EXIF (or fall back to heuristic)
             var camera = CameraParams.CreateFromExif(w, h, exifFocal);
             var focalSource = exifFocal?.FocalLength35mm is > 0 ? "EXIF 35mm"
@@ -200,10 +216,7 @@ public partial class Studio
             // Gaussian path below: UploadToDevice keeps RGBA on GPU for unprojection.
             _statusMessage = "Estimating depth...";
             BuildProjectDetailUI();
-            var depthResult = await _depthService.EstimateDepthFromJsRgbaAsync(dataArray, w, h);
-            if (depthResult == null) { _statusMessage = "Error: depth estimation failed"; BuildProjectDetailUI(); return; }
-
-            // Gaussian path: the RGBA uploaded above (JS TypedArray → GPU directly, no .NET heap).
+            // Gaussian path: the RGBA uploaded above (JS TypedArray → GPU directly, no .NET heap), upscaled if SR ran.
             using var gpuImage = new GpuImage
             {
                 PackedRgba = rgbaGpuBuf,
@@ -211,6 +224,10 @@ public partial class Studio
                 Height = h,
                 FileName = source.FileName,
             };
+            var depthResult = upscaled
+                ? await _depthService.EstimateDepthAsync(gpuImage)
+                : await _depthService.EstimateDepthFromJsRgbaAsync(dataArray, w, h);
+            if (depthResult == null) { _statusMessage = "Error: depth estimation failed"; BuildProjectDetailUI(); return; }
 
             // Capture depth map for visualization (before Gaussian kernel consumes the buffer)
             await CaptureDepthMapAsync(depthResult);

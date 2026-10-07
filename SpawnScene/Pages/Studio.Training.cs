@@ -961,21 +961,30 @@ public partial class Studio
         }
     }
 
-    /// <summary>&amp;carve=S: after training, remove (opacity 0) every splat with at least share S of its blending weight in
-    /// front of the photos' surfaces (SplatTrainerGpu.Floaters). 0 = census only.</summary>
-    public static float CarveFloaterShare { get; set; }
+    /// <summary>
+    /// &amp;carve=S: remove (opacity 0) every splat with at least share S of its blending weight in front of the photos'
+    /// surfaces (SplatTrainerGpu.Floaters); 0 = census only. DEFAULT 0.9 with <see cref="CarveEveryIters"/> 1000 and
+    /// <see cref="CarveUnseen"/> since 2026-10-07 (TJ: Bicycle "floaters EVERYWHERE" once the camera moves).
+    /// MEASURED Bicycle360, COLMAP poses, 7K, 1024 px, llffhold=8, held out: no carve (e1) 25.01 dB / SSIM 0.7630 with
+    /// 3.8% of all blending weight in front of the surfaces; end-only carve (e2) 24.85 / 0.7613; carve during training
+    /// (e3) 24.97 / 0.7643 with 0.1% left in front, and off the photo path the sky drips and haze gone, trees intact.
+    /// Share 0.8 (e4) 24.955 / 0.7634, no visible gain. An isolated opaque splat reads ~0.5 (its soft rim lies in front of
+    /// what is behind it), so the share stays well above that.
+    /// </summary>
+    public static float CarveFloaterShare { get; set; } = 0.9f;
     /// <summary>&amp;carvemargin=M: in front = closer than (1 - M) x the photo's surface depth at that pixel.</summary>
     public static float CarveFrontMargin { get; set; } = 0.1f;
     /// <summary>&amp;carveevery=N: also carve floaters every N iterations while densifying (0 = only at the end).</summary>
-    public static int CarveEveryIters { get; set; }
+    public static int CarveEveryIters { get; set; } = 1000;
     /// <summary>&amp;carveunseen=1: the end-of-training carve also removes splats with under 1 px of weight in every photo.</summary>
-    public static bool CarveUnseen { get; set; }
+    public static bool CarveUnseen { get; set; } = true;
 
     /// <summary>One in-training carve: census over the supervised views, floaters' opacity to 0 (the densify step that
     /// follows prunes them).</summary>
     private async Task CarveDuringTrainingAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
         IReadOnlyList<TrainingView> views, IReadOnlyList<int> supervised, SplatBounds.Aabb box, int w, int h, int iter)
     {
+        if (_trainer!.TrainableVolume != null) return;   // frozen context: see FloaterCensusAsync
         var t0 = DateTime.UtcNow;
         _trainer!.ResetFloaterCensus(n);
         foreach (int vi in supervised)
@@ -996,6 +1005,8 @@ public partial class Studio
     private async Task FloaterCensusAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
         MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box, int w, int h)
     {
+        // A partitioned block's frozen context must come out exactly as it went in (as the unconstrained prune skips it).
+        if (_trainer!.TrainableVolume != null) { Console.WriteLine("[Floaters] skipped: partitioned block (frozen context)"); return; }
         var t0 = DateTime.UtcNow;
         _trainer!.ResetFloaterCensus(n);
         foreach (var v in views)
@@ -1009,7 +1020,9 @@ public partial class Studio
         // An isolated opaque splat reads ~0.5 (its soft rim lies in front of whatever is behind it - the trainer gate's
         // analytic box), so the report's floater line uses 0.9 when no carve share was asked for.
         float share = carve ? CarveFloaterShare : 0.9f;
-        EvalScores? before = carve ? await EvaluateAsync(_trainer, packed, n, views, targets, box) : null;
+        // The before/after scores are a measurement: only a run with held-out photos (&llffhold) pays the extra pass.
+        bool measuring = views.Any(v => !v.UsedForSupervision);
+        EvalScores? before = carve && measuring ? await EvaluateAsync(_trainer, packed, n, views, targets, box) : null;
         var report = await _trainer.ClassifyFloatersAsync(packed, n, share, minWeight: 1f, carve, carve && CarveUnseen);
         Console.WriteLine($"[Floaters] census at {CarveFrontMargin:P0} in front, floater = front share >= {share:P0} " +
             $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s): {report}");

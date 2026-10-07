@@ -237,6 +237,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("carvemargin", out var carveMarginQ) && float.TryParse(carveMarginQ,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cmv))
             CarveFrontMargin = Math.Clamp(cmv, 0f, 0.9f);
+        if (query.TryGetValue("carveevery", out var ceq) && int.TryParse(ceq, out var cei)) CarveEveryIters = Math.Max(0, cei);
+        if (query.TryGetValue("carveunseen", out var cuq)) CarveUnseen = cuq is "1" or "true";
         // &streamed=1: a partitioned run is saved as a streamed scene (Studio.Partition) even when it would fit merged.
         if (query.TryGetValue("streamed", out var stq)) StreamedPartitionOption = stq is "1" or "true";
         // &gpumem=N: this run's training GPU memory budget in GB (the Settings choice; not saved - a fresh harness

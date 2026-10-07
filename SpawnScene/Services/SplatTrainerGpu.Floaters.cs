@@ -95,17 +95,18 @@ public sealed partial class SplatTrainerGpu
     /// <summary>
     /// Classify every splat from the census (front share at least <paramref name="frontShare"/> of a total weight at
     /// least <paramref name="minWeight"/> pixels = floater) and, with <paramref name="carve"/>, set the floaters'
-    /// opacity to 0 in <paramref name="splatBuf"/>. Returns the histogram (CPU transfer: 23 words).
+    /// opacity to 0 in <paramref name="splatBuf"/> (with <paramref name="carveUnseen"/> also every splat under
+    /// <paramref name="minWeight"/>). Returns the histogram (CPU transfer: 23 words).
     /// </summary>
     public async Task<FloaterReport> ClassifyFloatersAsync(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
-        float frontShare, float minWeight, bool carve)
+        float frontShare, float minWeight, bool carve, bool carveUnseen = false)
     {
         var accel = _gpu.WebGPUAccelerator;
         _floaterHist!.MemSetToZero();
         accel.FlushPendingCommands();
         // The cfg uniform is rewritten by the next queue.WriteBuffer only after this dispatch is submitted, and WebGPU
         // orders writeBuffer against submissions, so one buffer serves every pass.
-        WriteVec4(_floaterCfgBuf!, frontShare, minWeight, carve ? 1f : 0f, splatCount);
+        WriteVec4(_floaterCfgBuf!, frontShare, minWeight, (carve ? 1f : 0f) + (carveUnseen ? 2f : 0f), splatCount);
         DispatchLinear(_floaterClassify!, splatCount, groupSize: 256, entries: new[]
         {
             Buf(0, splatBuf.GetGPUBuffer()!), Buf(1, _floaterTotals!.GetGPUBuffer()!),

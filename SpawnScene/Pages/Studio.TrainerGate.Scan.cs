@@ -17,6 +17,11 @@ public partial class Studio
     async Task<bool> ScanGateAsync()
     {
         var accel = _gpuService.WebGPUAccelerator;
+        // AOTSTEP markers: on the AOT build this gate died with "RuntimeError: function signature mismatch" (2026-10-07,
+        // also on live spawnscene.com) while the interpreted build passes. The last marker names the call.
+        bool trace = true;
+        void Step(string s) { if (trace) Console.WriteLine($"[TrainerGate] AOTSTEP {s}"); }
+        Step("create scan");
         var scan = accel.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Exclusive);
         var rng = new Random(77);
         bool ok = true;
@@ -24,18 +29,28 @@ public partial class Studio
         {
             foreach (bool shareTemp in new[] { true, false })
             {
+                Step($"inputs n={n}");
                 var inputs = Enumerable.Range(0, 3).Select(k => Enumerable.Range(0, n)
                     .Select(_ => k == 0 ? (rng.NextDouble() < 0.02 ? 1 : 0) : (rng.NextDouble() < 0.97 ? 1 : 0)).ToArray()).ToArray();
+                Step("temp size");
                 long tempLen = Math.Max(1L, accel.ComputeScanTempStorageSize<int>(n));
+                Step("alloc shared");
                 using var shared = accel.Allocate1D<int>(tempLen);
                 for (int k = 0; k < 3; k++)
                 {
+                    Step("alloc src from array");
                     using var src = accel.Allocate1D(inputs[k]);
+                    Step("alloc dst/own");
                     using var dst = accel.Allocate1D<int>(n);
                     using var own = shareTemp ? null : accel.Allocate1D<int>(tempLen);
+                    Step("scan");
                     scan(accel.DefaultStream, src.View, dst.View, (own ?? shared).View);
+                    Step("sync");
                     await accel.SynchronizeAsync();
+                    Step("readback");
                     var got = await dst.CopyToHostAsync<int>(0, n);
+                    Step("compare");
+                    trace = false;
                     int run = 0, bad = -1, badCount = 0;
                     for (int i = 0; i < n; i++)
                     {

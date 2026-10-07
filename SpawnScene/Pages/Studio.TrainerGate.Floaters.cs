@@ -48,6 +48,10 @@ public partial class Studio
             0.12f * halfW(boxDepth), 0.12f * halfW(boxDepth), 0.99f);
         Add(cam.Position + fwd * floaterDepth - up * (0.3f * halfW(floaterDepth) * cam.Height / cam.Width),
             0.12f * halfW(floaterDepth), 0.12f * halfW(floaterDepth), 0.12f * halfW(floaterDepth), 0.15f);
+        // Hidden behind the wall: under a pixel of weight in the photo, so "unseen" - kept by the floater carve, removed
+        // by the unseen carve.
+        int hidden = wallCount + 2;
+        Add(cam.Position + fwd * 10f, 0.01f * halfW(10f), 0.01f * halfW(10f), 0.01f * halfW(10f), 0.9f);
         int n = rows.Count / SplatFormat.Floats;
         var packed = rows.ToArray();
 
@@ -93,6 +97,30 @@ public partial class Studio
         if (report.Floaters != 1 || floaterOpacity != 0f || changed != 0)
         {
             Console.WriteLine("[TrainerGate] FAIL: floater carve");
+            return false;
+        }
+
+        // The unseen carve: from the same census, the hidden splat goes too, and still nothing else but the floater.
+        buf.CopyFromCPU(packed);
+        await accel.SynchronizeAsync();
+        var both = await trainer.ClassifyFloatersAsync(buf, n, frontShare: 0.9f, minWeight: 1f, carve: true, carveUnseen: true);
+        var after2 = await buf.CopyToHostAsync<float>(0, packed.Length);
+        // Expected removals from the census itself: the floater and every splat under 1 px of weight - the hidden one and
+        // the wall tiles the grid runs past the frame corners (MEASURED: 2 of them).
+        int op = SplatFormat.OffOpacity, F = SplatFormat.Floats, changed2 = 0;
+        var totals = await trainer.ReadFloaterTotalsAsync(n);
+        var expectZero = new HashSet<int> { floater };
+        for (int i = 0; i < n; i++) if (totals[2 * i] < 1f) expectZero.Add(i);
+        for (int i = 0; i < packed.Length; i++)
+        {
+            bool expected = i % F == op && expectZero.Contains(i / F);
+            if (expected ? after2[i] != 0f : after2[i] != packed[i]) changed2++;
+        }
+        Console.WriteLine($"[TrainerGate] unseen carve: {both.Unseen} unseen, hidden opacity {after2[hidden * F + op]}, " +
+            $"floater opacity {after2[floater * F + op]}, {changed2} floats not as the census says");
+        if (!expectZero.Contains(hidden) || both.Unseen != expectZero.Count - 1 || changed2 != 0)
+        {
+            Console.WriteLine("[TrainerGate] FAIL: unseen carve");
             return false;
         }
 

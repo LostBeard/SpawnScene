@@ -598,8 +598,9 @@ fn floater_fold(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wor
 
     /// <summary>
     /// Classify each splat from the run's census: FLOATER when it was seen (total weight at least cfg.y) and at least
-    /// cfg.x of its weight sat in front of the photos' surfaces. Writes opacity 0 into the packed row when cfg.z = 1
-    /// (the carve: the save keeps only splats with opacity), and always fills a histogram the host prints:
+    /// cfg.x of its weight sat in front of the photos' surfaces. Writes opacity 0 into the packed row per the
+    /// cfg.z mask (1 floaters, 2 unseen; the save keeps only splats with opacity, and a densify step right after prunes
+    /// them), and always fills a histogram the host prints:
     /// hist[0..9] seen splats by front fraction (tenths), hist[10..19] the same weighted by total weight (x 10),
     /// hist[20] unseen splats, hist[21] floaters, hist[22] floaters' total weight (x 10).
     /// </summary>
@@ -615,7 +616,14 @@ fn floater_classify(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num
     if (i >= u32(cfg.w)) { return; }
     let total = totals[i * 2u];
     let front = totals[i * 2u + 1u];
-    if (total < cfg.y) { atomicAdd(&hist[20], 1u); return; }
+    // cfg.z is a mask: 1 carves floaters, 2 carves the unseen (under cfg.y pixels of weight in every photo - nothing
+    // vouches for them, and they can still show from a pose no photo was taken from).
+    let mode = u32(cfg.z + 0.5);
+    if (total < cfg.y) {
+        atomicAdd(&hist[20], 1u);
+        if ((mode & 2u) != 0u) { splats[i * 14u + 9u] = 0.0; }
+        return;
+    }
     let f = clamp(front / total, 0.0, 1.0);
     let b = min(u32(f * 10.0), 9u);
     let wq = u32(min(total * 10.0, 1.0e8));   // all weights sum to <= pixels x views (~1.4e8): x10 fits u32
@@ -624,7 +632,7 @@ fn floater_classify(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num
     if (f >= cfg.x) {
         atomicAdd(&hist[21], 1u);
         atomicAdd(&hist[22], wq);
-        if (cfg.z > 0.5) { splats[i * 14u + 9u] = 0.0; }
+        if ((mode & 1u) != 0u) { splats[i * 14u + 9u] = 0.0; }
     }
 }
 ";

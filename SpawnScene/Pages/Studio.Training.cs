@@ -754,6 +754,12 @@ public partial class Studio
                     bool resetOpacity = !McmcOption && OpacityResetEveryIters > 0 && stillGrowing
                         && (g + 1) % OpacityResetEveryIters == 0
                         && (scheduleTotal - (g + 1)) >= OpacityResetEveryIters;
+                    // In-training carve (&carveevery=N): census the photos and zero the floaters' opacity right before a
+                    // densify step, whose faint-prune then removes them and leaves the scene time to re-fit the gap. Never
+                    // on a reset iteration (every opacity is about to become faint).
+                    if (densifying && !resetOpacity && CarveEveryIters > 0 && CarveFloaterShare > 0f
+                        && (g + 1) % CarveEveryIters == 0)
+                        await CarveDuringTrainingAsync(packed, n, views, supervised, box, w, h, g + 1);
                     if (densifying || resetOpacity)
                     {
                         // Do NOT RecalibrateGradientScales here from fixed-point stats.
@@ -960,6 +966,28 @@ public partial class Studio
     public static float CarveFloaterShare { get; set; }
     /// <summary>&amp;carvemargin=M: in front = closer than (1 - M) x the photo's surface depth at that pixel.</summary>
     public static float CarveFrontMargin { get; set; } = 0.1f;
+    /// <summary>&amp;carveevery=N: also carve floaters every N iterations while densifying (0 = only at the end).</summary>
+    public static int CarveEveryIters { get; set; }
+    /// <summary>&amp;carveunseen=1: the end-of-training carve also removes splats with under 1 px of weight in every photo.</summary>
+    public static bool CarveUnseen { get; set; }
+
+    /// <summary>One in-training carve: census over the supervised views, floaters' opacity to 0 (the densify step that
+    /// follows prunes them).</summary>
+    private async Task CarveDuringTrainingAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
+        IReadOnlyList<TrainingView> views, IReadOnlyList<int> supervised, SplatBounds.Aabb box, int w, int h, int iter)
+    {
+        var t0 = DateTime.UtcNow;
+        _trainer!.ResetFloaterCensus(n);
+        foreach (int vi in supervised)
+        {
+            var cam = views[vi].Camera.ScaledTo(w, h);
+            var (near, far) = SplatBounds.DepthRangeFor(box, cam);
+            await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, CarveFrontMargin);
+        }
+        var r = await _trainer.ClassifyFloatersAsync(packed, n, CarveFloaterShare, minWeight: 1f, carve: true);
+        Console.WriteLine($"[Floaters] iter {iter}: carved {r.Floaters:N0} of {n:N0} " +
+            $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s, {r.FloaterWeight / Math.Max(1e-9, r.WeightByFront.Sum()):P2} of the weight)");
+    }
 
     /// <summary>
     /// The floater census over every supervised view, reported always; with <see cref="CarveFloaterShare"/> the floaters
@@ -982,13 +1010,13 @@ public partial class Studio
         // analytic box), so the report's floater line uses 0.9 when no carve share was asked for.
         float share = carve ? CarveFloaterShare : 0.9f;
         EvalScores? before = carve ? await EvaluateAsync(_trainer, packed, n, views, targets, box) : null;
-        var report = await _trainer.ClassifyFloatersAsync(packed, n, share, minWeight: 1f, carve);
+        var report = await _trainer.ClassifyFloatersAsync(packed, n, share, minWeight: 1f, carve, carve && CarveUnseen);
         Console.WriteLine($"[Floaters] census at {CarveFrontMargin:P0} in front, floater = front share >= {share:P0} " +
             $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s): {report}");
         if (before is { } b)
         {
             var after = await EvaluateAsync(_trainer, packed, n, views, targets, box);
-            Console.WriteLine($"[Floaters] CARVED {report.Floaters:N0} splats: supervised PSNR {b.SupPsnr:F3} -> {after.SupPsnr:F3} dB, " +
+            Console.WriteLine($"[Floaters] CARVED {report.Floaters:N0} floaters{(CarveUnseen ? $" + {report.Unseen:N0} unseen" : "")}: supervised PSNR {b.SupPsnr:F3} -> {after.SupPsnr:F3} dB, " +
                 $"SSIM {b.SupSsim:F4} -> {after.SupSsim:F4}; held out {b.HeldPsnr:F3} -> {after.HeldPsnr:F3} dB, " +
                 $"SSIM {b.HeldSsim:F4} -> {after.HeldSsim:F4}");
         }

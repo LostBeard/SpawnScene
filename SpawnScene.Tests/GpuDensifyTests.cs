@@ -263,4 +263,25 @@ public class GpuDensifyTests
         Assert.That(adam.Take(n), Is.EqualTo(Enumerable.Range(0, n)));
         Assert.That(feat.Take(n), Is.EqualTo(Enumerable.Range(0, n)));
     }
+
+    /// <summary>
+    /// PruneOnly (the compaction after the end-of-training floater carve): exactly the faint splats go, in order, and
+    /// nothing is cloned, split or size-pruned - even after an opacity reset with busy and bloated splats in the set.
+    /// </summary>
+    [Test]
+    public async Task PruneOnly_DropsExactlyTheFaintAndGrowsNothing()
+    {
+        const int n = 1500;
+        var (packed, stats, radius, _, _) = Scene(n, 11);
+        for (int i = 0; i < n; i += 7) packed[i * F + 9] = 0f;   // carved: opacity exactly 0
+        var expect = Enumerable.Range(0, n).Where(i => packed[i * F + 9] >= SplatDensityControl.MinOpacity).ToArray();
+        var (g, adam, feat, r) = await RunGpu(packed, stats, radius, n,
+            new GpuDensify.Options(Extent, AfterFirstOpacityReset: true, int.MaxValue, ResetOpacity: false, Seed: 1, PruneOnly: true));
+        Assert.That(r.Cloned + r.Split + r.PrunedBig, Is.Zero, "a compaction must not grow or size-prune");
+        Assert.That(r.Count, Is.EqualTo(expect.Length));
+        Assert.That(adam.Take(r.Count), Is.EqualTo(expect), "survivors keep their order and optimizer rows");
+        Assert.That(feat.Take(r.Count), Is.EqualTo(expect));
+        for (int k = 0; k < expect.Length; k++)
+            Assert.That(g.Skip(k * F).Take(F), Is.EqualTo(packed.Skip(expect[k] * F).Take(F)), $"survivor {k} unchanged");
+    }
 }

@@ -32,7 +32,7 @@ public class OcclusionFillTests
         using var accel = context.CreateCPUAccelerator(0);
         using var d = accel.Allocate1D(depth);
         using var c = accel.Allocate1D(rgba);
-        int capacity = OcclusionFill.ExtraCapacity(W, H, margin, 1);
+        int capacity = (int)OcclusionFill.ExtraCapacity(W, H, margin, 1);   // a 64x64 test grid: far from int range
         using var outPacked = accel.Allocate1D<float>((long)capacity * F);
         using var counter = accel.Allocate1D<int>(1);
         counter.MemSetToZero();

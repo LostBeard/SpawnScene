@@ -561,7 +561,10 @@ fn floater_census(
                         if (q > 0u) {
                             let s = sh_index[k] * 2u;
                             atomicAdd(&census[s], q);
-                            if (sh_depth[k] < surface * (1.0 - cfg.x)) { atomicAdd(&census[s + 1u], q); }
+                            // No surface (the pixel never turned opaque): nothing is in front of anything. 🔴 Without the
+                            // first test the 3e38 sentinel made EVERY splat on such a pixel 'in front' - a still-thin
+                            // wall read as a floater and was carved (TJ's Bathroom: 'TONS of holes', 2026-10-07).
+                            if (surface < 1.0e38 && sh_depth[k] < surface * (1.0 - cfg.x)) { atomicAdd(&census[s + 1u], q); }
                         }
                     }
                     t = test_t;

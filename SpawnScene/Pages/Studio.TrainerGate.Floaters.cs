@@ -12,7 +12,8 @@ namespace SpawnScene.Pages;
 /// opaque box in front of part of it, and one faint splat hanging in front of the wall. The wall is the surface
 /// everywhere it is seen (front share 0), the faint splat is in front of it at every pixel it touches (share 1), the box
 /// is the surface at its core and in front only at its soft rim (share 0.4995, analytic). The carve must remove the
-/// faint splat and nothing else. Red check, in the same run: at a 0.8 margin (in front = closer than a fifth of the
+/// faint splat and nothing else. A thin splat alone in a hole in the wall (no pixel of it turns opaque, so there is no
+/// surface there) must read 0 - and survive the carve. Red check, in the same run: at a 0.8 margin (in front = closer than a fifth of the
 /// surface depth) the faint splat at a third of it no longer counts, so the same assertion must FAIL.
 /// </summary>
 public partial class Studio
@@ -36,13 +37,21 @@ public partial class Studio
         const float wallDepth = 6f, boxDepth = 3f, floaterDepth = 2f;
         float ww = halfW(wallDepth), wh = ww * cam.Height / cam.Width;
         const int gx = 16, gy = 12;
+        // A HOLE in the wall (tiles 11-15 x 0-5, lower right of the frame, clear of the floater), filled only by one
+        // thin splat: pixels that never turn opaque have no surface, so nothing on them is "in front" of anything. A
+        // tile's sigma is a whole tile and its tail reaches 3 tiles, so the thin splat sits 3 tiles inside every wall
+        // edge - a 3x3 hole was filled by the neighbours' tails, turned opaque, and could not fail (MEASURED, gate g3:
+        // 0.0000 on the broken shader).
+        static bool InHole(int i, int j) => i >= 11 && j <= 5;
+        int wallCount = 0;
         for (int j = 0; j < gy; j++)
             for (int i = 0; i < gx; i++)
             {
+                if (InHole(i, j)) continue;
                 float x = -ww * 1.2f + 2.4f * ww * (i + 0.5f) / gx, y = -wh * 1.2f + 2.4f * wh * (j + 0.5f) / gy;
                 Add(cam.Position + fwd * wallDepth + right * x + up * y, 2.4f * ww / gx, 2.4f * wh / gy, 0.01f, 0.99f);
+                wallCount++;
             }
-        int wallCount = gx * gy;
         int box = wallCount, floater = wallCount + 1;
         Add(cam.Position + fwd * boxDepth + up * (0.35f * halfW(boxDepth) * cam.Height / cam.Width), 0.12f * halfW(boxDepth),
             0.12f * halfW(boxDepth), 0.12f * halfW(boxDepth), 0.99f);
@@ -52,6 +61,14 @@ public partial class Studio
         // by the unseen carve.
         int hidden = wallCount + 2;
         Add(cam.Position + fwd * 10f, 0.01f * halfW(10f), 0.01f * halfW(10f), 0.01f * halfW(10f), 0.9f);
+        // The thin splat in the hole: a surface still filling in (opacity 0.3, the photo sees through it). Its pixels never
+        // reach transmittance 0.5, so it must read front share 0. 🔴 It read 1.0 until 2026-10-07: those pixels kept the
+        // 3e38 "no surface" depth and every splat on them counted as in front of it - the carve then deleted every
+        // still-thin wall of TJ's Bathroom (h1 vs &carve=0: supervised 29.65 vs 33.47 dB, single photos down 13 dB).
+        int thin = wallCount + 3;
+        float tileW = 2.4f * ww / gx, tileH = 2.4f * wh / gy;
+        Add(cam.Position + fwd * wallDepth + right * (-ww * 1.2f + tileW * 13.5f) + up * (-wh * 1.2f + tileH * 2.5f),
+            0.5f * tileW, 0.5f * tileH, 0.01f, 0.3f);
         int n = rows.Count / SplatFormat.Floats;
         var packed = rows.ToArray();
 
@@ -81,9 +98,10 @@ public partial class Studio
         // alpha 0.99 that rim (r^2 > 2 ln 1.98 sigma^2, out to the 3-sigma cutoff) carries (e^-0.683 - e^-4.5) / (1 - e^-4.5)
         // = 0.4995 of its weight (MEASURED 0.5073: pixel sampling). So an isolated opaque splat reads ~0.5 by construction,
         // and a carve must sit well above that.
-        bool ok = wallSeen > wallCount / 2 && wallMax < 0.01f && s[floater] > 0.99f && MathF.Abs(s[box] - 0.4995f) < 0.05f;
+        bool ok = wallSeen > wallCount / 2 && wallMax < 0.01f && s[floater] > 0.99f && MathF.Abs(s[box] - 0.4995f) < 0.05f
+            && s[thin] >= 0f && s[thin] < 0.01f;
         Console.WriteLine($"[TrainerGate] floater census at 10%: wall {wallSeen}/{wallCount} seen, max front share {wallMax:F4}; " +
-            $"box {s[box]:F4}; faint floater {s[floater]:F4}");
+            $"box {s[box]:F4}; faint floater {s[floater]:F4}; thin splat with no surface behind it {s[thin]:F4}");
         if (!ok) { Console.WriteLine("[TrainerGate] FAIL: floater census shares"); return false; }
 
         // The carve: the faint splat's opacity to 0, every other row untouched.

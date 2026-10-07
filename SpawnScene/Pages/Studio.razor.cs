@@ -239,6 +239,9 @@ public partial class Studio : IAsyncDisposable
             CarveFrontMargin = Math.Clamp(cmv, 0f, 0.9f);
         if (query.TryGetValue("carveevery", out var ceq) && int.TryParse(ceq, out var cei)) CarveEveryIters = Math.Max(0, cei);
         if (query.TryGetValue("carveunseen", out var cuq)) CarveUnseen = cuq is "1" or "true";
+        if (query.TryGetValue("carveunseenpx", out var cupq) && float.TryParse(cupq,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cupv))
+            CarveUnseenMinWeight = Math.Max(0f, cupv);
         // &pick=view@x,y;...: explain wander pixels - the splats painting them, with their census (Studio.Wander).
         if (query.TryGetValue("pick", out var pickQ)) ParseWanderPicks(pickQ);
         // &pixelgs=G: Pixel-GS depth scaling of the densification gradient (G = gamma, 0.37 in the paper; 0 = off).

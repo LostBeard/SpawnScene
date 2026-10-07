@@ -72,7 +72,8 @@ public sealed class GpuDensify : IDisposable
         uint Seed,
         bool NoOp = false,
         SplatEditor.Volume? Trainable = null,
-        SplatEditor.Volume? GrowOnlyInside = null);
+        SplatEditor.Volume? GrowOnlyInside = null,
+        bool PruneOnly = false);
 
     /// <summary>
     /// The grown set. <see cref="Packed"/>, <see cref="AdamSources"/> and <see cref="FeatureSources"/> are owned
@@ -99,6 +100,7 @@ public sealed class GpuDensify : IDisposable
         public int AfterReset, NoOp;
         public int HasTrainable;            // 1: splats outside the trainable volume are frozen context - kept as they are
         public int HasGrowVolume;           // 1: only splats inside the grow volume are cloned or split
+        public int PruneOnly;               // 1: drop the faint (opacity under MinOpacity) and nothing else - a compaction
     }
 
     public struct SelectParams
@@ -149,6 +151,7 @@ public sealed class GpuDensify : IDisposable
             NoOp = o.NoOp ? 1 : 0,
             HasTrainable = o.Trainable.HasValue ? 1 : 0,
             HasGrowVolume = o.GrowOnlyInside.HasValue ? 1 : 0,
+            PruneOnly = o.PruneOnly ? 1 : 0,
         };
         // The trainable volume is its own kernel parameter, as SplatEditor's kernels take it (nested in the params
         // struct it is the only such layout in the app); an unused one is the identity, never read (HasTrainable 0).
@@ -261,10 +264,10 @@ public sealed class GpuDensify : IDisposable
         {
             // Same order as the host: prune first, a splat being removed is never densified.
             if (opacity < p.MinOpacity) a = PruneFaint;
-            else if (p.AfterReset != 0 && (maxScale > p.MaxWorldSize || maxRadius[i] > p.MaxScreenRadiusPx)) a = PruneBig;
+            else if (p.PruneOnly == 0 && p.AfterReset != 0 && (maxScale > p.MaxWorldSize || maxRadius[i] > p.MaxScreenRadiusPx)) a = PruneBig;
             // A partitioned block grows only in the cell it keeps: a clone in its overlap margin is trained and then
             // dropped at the merge - 330K of a 500K block budget went there (TruckFull 2x2, 2026-10-05).
-            else if (avg >= p.GradientThreshold
+            else if (p.PruneOnly == 0 && avg >= p.GradientThreshold
                 && (p.HasGrowVolume == 0 || SplatEditor.Inside(grow, packed[o], packed[o + 1], packed[o + 2])))
             {
                 a = maxScale > p.SizeSplit ? SplitCandidate : CloneCandidate;

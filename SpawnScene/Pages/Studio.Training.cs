@@ -926,7 +926,13 @@ public partial class Studio
                 Console.WriteLine($"[Train] held-out poses refined against the frozen scene: {refined} views x {PoseTestIterations} steps");
             }
 
-            await FloaterCensusAsync(packed, n, views, targets, box, w, h);
+            if (await FloaterCensusAsync(packed, n, views, targets, box, w, h))
+            {
+                // The end carve only zeroes opacity. Nothing densifies after it, so without this the scene was SAVED with
+                // them: Bathroom 7K kept 113,942 of 705,744 splats (16%) at opacity 0 - file size and draw cost for nothing.
+                var compacted = await DensifyAsync(packed, n, rigRadius, densify: false, resetOpacity: false, pruneOnly: true);
+                if (compacted != null) (packed, n) = compacted.Value;
+            }
 
             var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box, logPerView: true);
             WarnOnEvalOverflow(fitted, views.Count);
@@ -986,6 +992,8 @@ public partial class Studio
     public static int CarveEveryIters { get; set; } = 1000;
     /// <summary>&amp;carveunseen=1: the end-of-training carve also removes splats with under 1 px of weight in every photo.</summary>
     public static bool CarveUnseen { get; set; } = true;
+    /// <summary>&amp;carveunseenpx=W: "unseen" = under W pixels of blending weight summed over every photo (default 1).</summary>
+    public static float CarveUnseenMinWeight { get; set; } = 1f;
 
     /// <summary>One in-training carve: census over the supervised views, floaters' opacity to 0 (the densify step that
     /// follows prunes them).</summary>
@@ -1010,11 +1018,12 @@ public partial class Studio
     /// The floater census over every supervised view, reported always; with <see cref="CarveFloaterShare"/> the floaters
     /// are removed and the supervised views scored before and after, so the carve's cost on the photos is on record.
     /// </summary>
-    private async Task FloaterCensusAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
+    /// <returns>True when splats were carved (opacity 0), so the caller compacts them away.</returns>
+    private async Task<bool> FloaterCensusAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
         MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box, int w, int h)
     {
         // A partitioned block's frozen context must come out exactly as it went in (as the unconstrained prune skips it).
-        if (_trainer!.TrainableVolume != null) { Console.WriteLine("[Floaters] skipped: partitioned block (frozen context)"); return; }
+        if (_trainer!.TrainableVolume != null) { Console.WriteLine("[Floaters] skipped: partitioned block (frozen context)"); return false; }
         var t0 = DateTime.UtcNow;
         _trainer!.ResetFloaterCensus(n);
         foreach (var v in views)
@@ -1031,7 +1040,7 @@ public partial class Studio
         // The before/after scores are a measurement: only a run with held-out photos (&llffhold) pays the extra pass.
         bool measuring = views.Any(v => !v.UsedForSupervision);
         EvalScores? before = carve && measuring ? await EvaluateAsync(_trainer, packed, n, views, targets, box) : null;
-        var report = await _trainer.ClassifyFloatersAsync(packed, n, share, minWeight: 1f, carve, carve && CarveUnseen);
+        var report = await _trainer.ClassifyFloatersAsync(packed, n, share, minWeight: CarveUnseenMinWeight, carve, carve && CarveUnseen);
         Console.WriteLine($"[Floaters] census at {CarveFrontMargin:P0} in front, floater = front share >= {share:P0} " +
             $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s): {report}");
         if (before is { } b)
@@ -1041,6 +1050,7 @@ public partial class Studio
                 $"SSIM {b.SupSsim:F4} -> {after.SupSsim:F4}; held out {b.HeldPsnr:F3} -> {after.HeldPsnr:F3} dB, " +
                 $"SSIM {b.HeldSsim:F4} -> {after.HeldSsim:F4}");
         }
+        return carve && (report.Floaters > 0 || (CarveUnseen && report.Unseen > 0));
     }
 
     /// <summary>
@@ -1189,7 +1199,7 @@ public partial class Studio
         MemoryBuffer1D<float, Stride1D.Dense> packed, int n, float sceneExtent,
         bool densify, bool resetOpacity,
         (IReadOnlyList<TrainingView> views, MemoryBuffer1D<uint, Stride1D.Dense> targets,
-         SplatBounds.Aabb box, IReadOnlyList<int> supervised)? probe = null)
+         SplatBounds.Aabb box, IReadOnlyList<int> supervised)? probe = null, bool pruneOnly = false)
     {
         // On the device (GpuDensify): the host path read the whole scene back every densify, unpacked,
         // rebuilt and repacked it - four copies in the wasm heap - and threw OutOfMemoryException at ~2.0M
@@ -1198,8 +1208,8 @@ public partial class Studio
         _gpuDensify ??= new GpuDensify(_gpuService.WebGPUAccelerator);
         var r = await _gpuDensify.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
             new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity,
-                Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify, Trainable: _trainer.TrainableVolume,
-                GrowOnlyInside: _trainer.GrowOnlyInside));
+                Seed: (uint)(1234 + n), NoOp: !pruneOnly && (DensifyNoOp || !densify), Trainable: _trainer.TrainableVolume,
+                GrowOnlyInside: _trainer.GrowOnlyInside, PruneOnly: pruneOnly));
 
         // Always report, including - especially including - when the answer is "nothing".
         Console.WriteLine(

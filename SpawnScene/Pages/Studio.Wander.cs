@@ -93,11 +93,35 @@ public partial class Studio
             poses.Add(($"mid-{q}", (c + next) * 0.5f));                   // between two photos
         }
 
+        // Standing among the cameras and turning around: eight headings in the horizontal plane from the rig centroid.
+        // This is what a user does inside a ROOM capture (TJ's Bathroom, 2026-10-07: "TONS of holes"), and the subject
+        // poses above never look away from the subject. Each heading also logs how many photos look that way.
+        var rigCentre = Vector3.Zero;
+        foreach (var c in cams) rigCentre += c.Position;
+        rigCentre /= cams.Count;
+        var flat0 = Vector3.Normalize(cams[0].Forward) - up * Vector3.Dot(Vector3.Normalize(cams[0].Forward), up);
+        if (flat0.LengthSquared() < 1e-6f) flat0 = Vector3.Cross(up, Vector3.UnitX);
+        flat0 = Vector3.Normalize(flat0);
+        var panDirs = new Dictionary<string, Vector3>();
+        for (int k = 0; k < 8; k++)
+        {
+            var dir = Vector3.Transform(flat0, Quaternion.CreateFromAxisAngle(up, k * MathF.PI / 4f));
+            panDirs[$"pan-{k}"] = dir;
+            int facing = cams.Count(c => Vector3.Dot(Vector3.Normalize(c.Forward), dir) > MathF.Cos(MathF.PI / 6f));
+            Console.WriteLine($"[Wander] pan-{k}: heading {k * 45} deg from photo 1's, {facing}/{cams.Count} photos look within 30 deg of it");
+            poses.Add(($"pan-{k}", rigCentre));
+        }
+        // And from outside it, looking back at the rig: the whole reconstruction's shape and its coverage at once.
+        float reachOut = MathF.Max(Vector3.Distance(subject, cams[0].Position), 1e-3f);
+        poses.Add(("over-0", rigCentre + up * (2.5f * reachOut) - flat0 * (1.5f * reachOut)));
+        poses.Add(("over-1", rigCentre - flat0 * (3f * reachOut) + up * reachOut));
+
         static string F(params float[] v) => string.Join(" ",
             v.Select(x => x.ToString("R", System.Globalization.CultureInfo.InvariantCulture)));
         foreach (var (name, pos) in poses)
         {
-            var fwd = Vector3.Normalize(subject - pos);
+            var fwd = panDirs.TryGetValue(name, out var pd) ? pd
+                : Vector3.Normalize((name.StartsWith("over-") ? rigCentre : subject) - pos);
             var right = Vector3.Cross(fwd, up);
             if (right.LengthSquared() < 1e-8f) continue;   // looking straight along up: no roll-free frame
             var camUp = Vector3.Normalize(Vector3.Cross(Vector3.Normalize(right), fwd));

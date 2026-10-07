@@ -158,6 +158,9 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   splat's share of blending weight in front of the photos' surfaces; >= 0.9 is removed every 1000 iterations while
   densifying and at the end, plus splats under 1 px of weight in every photo. Bicycle 7K held out 25.01 -> 24.97 dB,
   SSIM 0.7630 -> 0.7643, sky drips and near-grass haze gone off the photo path; TruckFull 7K 23.74 -> 23.94 dB.
+- **Splat size cap 0.1 x rig radius** (was 0.05, a leftover from i32 fixed-point gradients): far background at the cap
+  shattered into tiny depth-drifting splats = dark specks in the sky off-path. Bicycle 7K held out 24.98 -> 25.07 dB,
+  TruckFull 23.94 -> 24.10; no cap at all is worse on Truck (23.85) and brings sky drips back on Bicycle.
 - Judge quality OFF the photo path too: Studio.Wander's views (in/up/low/out/mid) in the project and dataset
   autotests, `tools/compose_wander.py <Dataset> <TAG>[,<TAG2>] [gsplat dir]`. Every held-out view sits beside a photo.
 - Every per-splat / per-pixel WGSL pass dispatches through `SplatTrainerGpu.DispatchLinear` (wraps past 65535

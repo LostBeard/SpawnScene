@@ -155,12 +155,25 @@ public partial class Studio
                 var (total, front) = await _trainer.ReadFloaterTotalsOfAsync(h.Index);
                 var pos = new Vector3(row[0], row[1], row[2]);
                 float nearest = cams.Min(c => Vector3.Distance(c.Position, pos));
-                float inFrontOfNearest = cams.Min(c => { float d = Vector3.Dot(pos - c.Position, Vector3.Normalize(c.Forward)); return d > 0 ? d : float.MaxValue; });
+                // How many photos had this splat IN FRAME (centre projects inside the image, past the 0.2 near plane),
+                // and how deep inside the nearest frame edge it sat at best (fraction of the half-size: 0 = on the edge).
+                int inFrame = 0; float bestInside = -1f;
+                foreach (var c in cams)
+                {
+                    var f = Vector3.Normalize(c.Forward); var u = Vector3.Normalize(c.Up); var r = Vector3.Cross(f, u);
+                    var rel = pos - c.Position; float z = Vector3.Dot(rel, f);
+                    if (z <= 0.2f) continue;
+                    float px = c.FocalX * Vector3.Dot(rel, r) / z + c.CenterX, py = c.CenterY - c.FocalY * Vector3.Dot(rel, u) / z;
+                    if (px < 0 || py < 0 || px >= c.Width || py >= c.Height) continue;
+                    inFrame++;
+                    float inside = MathF.Min(MathF.Min(px, c.Width - px) / (0.5f * c.Width), MathF.Min(py, c.Height - py) / (0.5f * c.Height));
+                    bestInside = MathF.Max(bestInside, inside);
+                }
                 Console.WriteLine(string.Format(I,
                     "[Pick]   #{0} w {1:F3} a {2:F3} depth {3:F3} | opacity {4:F3} scale {5:G3},{6:G3},{7:G3} pos ({8:F3},{9:F3},{10:F3}) " +
-                    "nearest cam {11:F3} min cam-depth {12:F3} | census total {13:F2} px front {14:P0}",
+                    "nearest cam {11:F3} in frame of {12} photos, best {13:P0} inside the edge | census total {14:F2} px front {15:P0}",
                     h.Index, h.Weight, h.Alpha, h.Depth, row[9], row[6], row[7], row[8], pos.X, pos.Y, pos.Z,
-                    nearest, inFrontOfNearest, total, total > 0 ? front / total : float.NaN));
+                    nearest, inFrame, bestInside, total, total > 0 ? front / total : float.NaN));
             }
         }
     }

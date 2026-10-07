@@ -37,12 +37,18 @@ public partial class Studio
     /// a renderable scene behind for the measurement that follows).
     /// </summary>
     /// <summary>
-    /// Splat size ceiling as a fraction of the camera-rig radius. Kerbl's prune bar is
-    /// 0.1*extent but only after opacity reset; before that Adam alone bounds growth. 0.1 let
-    /// Truck Gaussians cover hundreds of tiles and wrap the conic i32 sum (MEASURED). 0.05
-    /// matches densify's split bar (PercentDense=0.01 is the split trigger, not the ceiling).
+    /// Splat size ceiling as a fraction of the camera-rig radius: 0.1, Kerbl's own prune bar (2026-10-07).
+    /// <para>
+    /// It was 0.05 because 0.1 "let Truck Gaussians cover hundreds of tiles and wrap the conic i32 sum" - the gradient
+    /// accumulator has been exact f32 since (SplatTrainerGpu, no fixed point), so that reason is gone. At 0.05 every
+    /// far-background splat sat AT the cap (Bicycle, &amp;pick: tree lines 26-49 units out, scales 0.249), the
+    /// background was shattered into tiny splats free to drift in depth, and they showed as dark specks in the sky from
+    /// a lowered pose. MEASURED, 7K, llffhold=8, carve on, held out: Bicycle 0.05 24.98 dB / SSIM 0.7644 (supervised
+    /// 23.07), 0.1 25.07 / 0.7663 (23.69), off (10) 25.11 / 0.7678 but drips and blobs back in the sky off the photo
+    /// path; TruckFull 0.05 23.94 / 0.8579, 0.1 24.10 / 0.8598, off 23.85 / 0.8567. 0.1 wins on both.
+    /// </para>
     /// </summary>
-    public static float MaxScaleFraction { get; set; } = 0.05f;
+    public static float MaxScaleFraction { get; set; } = 0.1f;
 
     GpuDensify? _gpuDensify;
     GpuMcmc? _gpuMcmc;
@@ -454,8 +460,7 @@ public partial class Studio
                 // Ceiling must use the SAME extent densify uses (rig radius), not the AABB
                 // diagonal. Truck's SfM cloud has far outliers (aabb diag ~397) so
                 // 0.1*diag = 39.7 let Adam grow house-sized blobs; densify's prune bar is
-                // 0.1*rigRadius. MaxScaleFraction 0.05 (~0.27 on Truck) is tighter so a splat
-                // cannot cover hundreds of tiles and wrap the conic i32 sum before opacity reset.
+                // 0.1*rigRadius - and MaxScaleFraction is that same 0.1 (see its doc for why not 0.05).
                 geo = new SplatTrainerGpu.GeometryStep(
                     PositionLr: positionLrInit,
                     LogScaleLr: 0.005f,

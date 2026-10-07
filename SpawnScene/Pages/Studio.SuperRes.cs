@@ -55,11 +55,10 @@ public partial class Studio
             using (up)
             {
                 var flat = a.Allocate1D<int>((long)uw * uh);
-                // Copied from the destination side: SpawnDev.ILGPU's WebGPU buffer handles device-to-device in CopyFrom,
-                // while its CopyTo assumes a host destination and throws ("Synchronous GPU to CPU copies are not
-                // supported", 2026-10-07).
+                // A device-to-device copy out of the 2D result's flat view (SpawnDev.ILGPU 5.3.4+: before it, CopyTo threw on
+                // WebGPU and Wasm for a device target - found here, 2026-10-07).
                 ArrayView1D<int, Stride1D.Dense> src = up.View.BaseView.SubView(0, (long)uw * uh);
-                flat.View.CopyFrom(src);
+                src.CopyTo(flat.View);
                 await a.SynchronizeAsync();
                 Console.WriteLine($"[SuperRes] {w}x{h} -> {uw}x{uh} (ESPCN x3) in {(DateTime.UtcNow - t0).TotalMilliseconds:F0} ms");
                 return (flat, uw, uh);

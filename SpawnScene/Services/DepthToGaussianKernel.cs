@@ -1097,7 +1097,23 @@ public class DepthToGaussianKernel
         // Output buffer: worst case all pixels are valid (over-allocated, compacted on GPU), twice over when the hidden
         // background layer (OcclusionFill) may add one more splat per cell. Ownership transfers to caller.
         int margin = OcclusionFillEnabled ? (int)MathF.Round(BorderFillReach * Math.Max(sampledW, sampledH)) : 0;
-        int capacity = OcclusionFillEnabled ? numPoints + OcclusionFill.ExtraCapacity(sampledW, sampledH, margin, BorderFillStride) : numPoints;
+        // Fill density follows a fixed grid, not the photo (the Room sample's 320-cell grid keeps strides 1 and 3).
+        int gridLong = Math.Max(sampledW, sampledH);
+        int behindStride = Math.Max(1, (int)MathF.Round(gridLong / 640f));
+        int borderStride = Math.Max(BorderFillStride, (int)MathF.Round(gridLong / 320f));
+        // The output is ONE storage binding: it must fit the device's limit (2 GB here). The fill's worst case on a 5K
+        // photo at one splat a pixel made it 2,153,410,896 bytes - an invalid buffer and an EMPTY scene (TJ, 2026-10-07).
+        // Over the limit, the fill gives way (the surface layer alone is what the scene was before the fill).
+        long maxSplats = GpuMemoryBudget.ReadMaxStorageBindingBytes(accelerator.NativeAccelerator.NativeDevice) / (SplatFormat.Floats * sizeof(float));
+        bool fill = OcclusionFillEnabled;
+        long want = numPoints + (fill ? OcclusionFill.ExtraCapacity(sampledW, sampledH, margin, borderStride, behindStride) : 0);
+        if (fill && want > maxSplats)
+        {
+            Console.WriteLine($"[DepthGPU] hidden layers skipped: {want:N0} splats would pass the device's {maxSplats:N0}-splat buffer limit");
+            fill = false;
+            want = numPoints;
+        }
+        int capacity = (int)Math.Min(want, maxSplats);
         var outPackedBuf = accelerator.Allocate1D<float>((long)capacity * SplatFormat.Floats);
 
         if (depth.RawDepthGpu == null)
@@ -1114,7 +1130,7 @@ public class DepthToGaussianKernel
         var scratch = new List<MemoryBuffer1D<float, Stride1D.Dense>>();
         try
         {
-            if (OcclusionFillEnabled)
+            if (fill)
             {
                 // CPU transfer: one int, to report the surface / background split.
                 surfaceCount = (await counterBuf.CopyToHostAsync<int>(0, 1))[0];
@@ -1123,7 +1139,7 @@ public class DepthToGaussianKernel
                     {
                         Width = w, Height = h, Subsample = subsample, GridW = sampledW, GridH = sampledH,
                         Radius = Math.Max(4, (int)MathF.Round(OcclusionFillReach * Math.Max(sampledW, sampledH))),
-                        Margin = margin, BorderStride = BorderFillStride,
+                        Margin = margin, BorderStride = borderStride, BehindStride = behindStride,
                         Capacity = capacity,
                         FocalX = fx, FocalY = fy, CenterX = cx, CenterY = cy, DepthScale = splatParams.DepthScaleCorrection,
                         Tau = 0.08f, BackgroundBand = 0.92f, SizeFactor = 1.5f, Opacity = 0.95f,

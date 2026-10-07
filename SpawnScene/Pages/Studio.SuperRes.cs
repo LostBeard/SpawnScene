@@ -27,12 +27,24 @@ public partial class Studio
     /// <summary>&amp;superres=off|auto|on overrides the project's setting (harness A/B).</summary>
     public static SpawnScene.Models.SuperResolutionMode? SuperResOverride { get; set; }
 
-    bool ShouldSuperResolve(SpawnScene.Models.SuperResolutionMode mode, int w, int h) => mode switch
+    /// <summary>
+    /// Longest edge super-resolution may produce. Without a cap, x3 on TJ's 5K living room photo (4999 x 2944) made a
+    /// 14997 x 8832 image - past WebGPU's 8192 texture limit, and depth estimation failed (2026-10-07). A photo that big
+    /// already has more detail than the depth model and the splat grid use; x3 is for small photos.
+    /// </summary>
+    public const int SuperResMaxOutputPx = 3072;
+
+    bool ShouldSuperResolve(SpawnScene.Models.SuperResolutionMode mode, int w, int h)
     {
-        SpawnScene.Models.SuperResolutionMode.On => true,
-        SpawnScene.Models.SuperResolutionMode.Auto => Math.Max(w, h) < SuperResAutoBelowPx,
-        _ => false,
-    };
+        if (mode == SpawnScene.Models.SuperResolutionMode.Off) return false;
+        if (Math.Max(w, h) * 3 > SuperResMaxOutputPx)
+        {
+            if (mode == SpawnScene.Models.SuperResolutionMode.On)
+                Console.WriteLine($"[SuperRes] skipped: {w}x{h} x3 would pass {SuperResMaxOutputPx} px (the photo is already large)");
+            return false;
+        }
+        return mode == SpawnScene.Models.SuperResolutionMode.On || Math.Max(w, h) < SuperResAutoBelowPx;
+    }
 
     /// <summary>
     /// Upscale a GPU-resident packed RGBA photo x3 (the caller disposes <paramref name="rgba"/>; the result is a new buffer

@@ -479,7 +479,8 @@ public partial class Studio
             new (string, int)[] { ("Off", (int)SuperResolutionMode.Off), ("Auto", (int)SuperResolutionMode.Auto), ("x3", (int)SuperResolutionMode.On) },
             (int)s.SuperResolution, v => s.SuperResolution = (SuperResolutionMode)v,
             $"Triples a photo's resolution before it becomes splats (ESPCN, on the GPU): finer colour detail and splats, " +
-            $"more splats (about 9x). Auto does it for photos under {SuperResAutoBelowPx} px.");
+            $"more splats (about 9x). Auto does it for photos under {SuperResAutoBelowPx} px; x3 for any photo up to " +
+            $"{SuperResMaxOutputPx / 3} px (larger ones already have the detail).");
         var models = DepthEstimationService.AvailableModels.ToList();
         y = AddChoiceRow(parent, x, y, w, "Depth model",
             models.Select((m, i) => (m.Name, i)).ToArray(),

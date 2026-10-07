@@ -35,6 +35,9 @@ public static class OcclusionFill
         /// <summary>Past the frame, one splat per this many cells each way (that many times bigger): the continuation is a
         /// blur of the edges anyway, and at full density the margin cost more splats than the photo.</summary>
         public int BorderStride;
+        /// <summary>Behind edges, one splat per this many cells each way (that many times bigger): the fill is a soft
+        /// average, so its density follows a fixed grid, not the photo's - a 5K photo made 5.4M fill splats at 1.</summary>
+        public int BehindStride;
     }
 
     public struct LevelParams
@@ -84,9 +87,14 @@ public static class OcclusionFill
     }
 
     /// <summary>Splats <see cref="Append"/> may add at most, beyond the surface layer: one per cell behind edges, one per margin cell.</summary>
-    public static int ExtraCapacity(int gridW, int gridH, int margin, int borderStride)
-        => gridW * gridH + 2 * (((gridW + 2 * margin) * (gridH + 2 * margin) - gridW * gridH) / Math.Max(1, borderStride * borderStride)
-           + 4 * (gridW + gridH + 4 * margin));   // two border layers; stride rows / columns that straddle the frame edge
+    public static long ExtraCapacity(int gridW, int gridH, int margin, int borderStride, int behindStride = 1)
+    {
+        long behind = ((long)(gridW + behindStride - 1) / behindStride) * ((gridH + behindStride - 1) / behindStride);
+        long padded = (long)(gridW + 2 * margin) * (gridH + 2 * margin) - (long)gridW * gridH;
+        // two border layers; stride rows / columns that straddle the frame edge
+        long border = 2 * (padded / Math.Max(1, borderStride * borderStride) + 4L * (gridW + gridH + 4 * margin));
+        return behind + border;
+    }
 
     /// <summary>
     /// Append both hidden layers to <paramref name="outPacked"/> after the <paramref name="counter"/> splats already there,
@@ -328,6 +336,8 @@ public static class OcclusionFill
         if (i >= p.GridW * p.GridH) return;
         int gx = i % p.GridW, gy = i / p.GridW;
         float d = DepthAt(depth, p, gx, gy);
+        int bs = p.BehindStride < 1 ? 1 : p.BehindStride;
+        if (gx % bs != 0 || gy % bs != 0) return;
         if (d <= 0f || bgMax[i] <= d * (1f + p.Tau)) return;   // no farther surface within reach: nothing hidden here
         long o = (long)((gy + p.Margin) * (p.GridW + 2 * p.Margin) + gx + p.Margin) * Ch;
         if (l0[o + 4] <= 0f) return;
@@ -335,7 +345,8 @@ public static class OcclusionFill
         if (fd <= d * (1f + p.Tau)) return;                    // the background here is not behind this cell
         int slot = Atomic.Add(ref counter[0], 1);
         if (slot >= p.Capacity) return;
-        WriteSplat(outPacked, slot, p, gx * p.Subsample, gy * p.Subsample, fd, l0[o], l0[o + 1], l0[o + 2]);
+        var q = p; q.SizeFactor = p.SizeFactor * bs;
+        WriteSplat(outPacked, slot, q, gx * p.Subsample, gy * p.Subsample, fd, l0[o], l0[o + 1], l0[o + 2]);
     }
 
     /// <summary>Layer 0: the continuation of every edge (<paramref name="l0"/>); layer 1: the background continuation

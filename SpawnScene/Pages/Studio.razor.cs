@@ -627,9 +627,14 @@ public partial class Studio : IAsyncDisposable
             _activeProject = project;
             OnOpenProject(project);
 
-            await LoadSampleImage("Room", "samples/room.png");
+            // &sample=<file in samples/> (harness): another sample photo instead of the Room.
+            string sampleFile = query.TryGetValue("sample", out var smq) && !string.IsNullOrWhiteSpace(smq) ? smq : "room.png";
+            await LoadSampleImage(Path.GetFileNameWithoutExtension(sampleFile), "samples/" + sampleFile);
             if (_activeProject.Sources.Count == 0)
                 throw new InvalidOperationException("Room sample did not load");
+            // &subsample=1 (harness): the High preset's one splat a pixel.
+            if (query.TryGetValue("subsample", out var ssq) && int.TryParse(ssq, out var ssv) && ssv > 0)
+                _activeProject.Settings.Subsample = ssv;
 
             // Drive the same path as the Generate Scene button (single-image).
             var generateDone = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

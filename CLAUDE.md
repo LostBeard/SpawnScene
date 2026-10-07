@@ -154,6 +154,12 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
 - Versus the reference (gsplat, same photos held out, llffhold=8, COLMAP poses), TruckFull 30K: ours 24.95 dB / SSIM
   0.887 with 0.89M splats in 25 min, gsplat 25.13 / 0.877 with 3.79M (c49, 2026-10-06). `&mcmc=1` (gsplat MCMCStrategy)
   exists but lost its 7K A/B, so it is opt-in.
+- **Floater carve** (default since 2026-10-07, `&carve=0` off): a GPU census (SplatTrainerGpu.Floaters) measures each
+  splat's share of blending weight in front of the photos' surfaces; >= 0.9 is removed every 1000 iterations while
+  densifying and at the end, plus splats under 1 px of weight in every photo. Bicycle 7K held out 25.01 -> 24.97 dB,
+  SSIM 0.7630 -> 0.7643, sky drips and near-grass haze gone off the photo path; TruckFull 7K 23.74 -> 23.94 dB.
+- Judge quality OFF the photo path too: Studio.Wander's views (in/up/low/out/mid) in the project and dataset
+  autotests, `tools/compose_wander.py <Dataset> <TAG>[,<TAG2>] [gsplat dir]`. Every held-out view sits beside a photo.
 - Every per-splat / per-pixel WGSL pass dispatches through `SplatTrainerGpu.DispatchLinear` (wraps past 65535
   workgroups; the shader rebuilds the flat index from `num_workgroups`). An X-only dispatch dies past 4,194,240 items.
 - `&gpumem=N` sets a run's training budget (a fresh harness profile is otherwise Auto = 4 GB, cap ~3.3M splats).

@@ -35,6 +35,26 @@ was deleting the thin walls of exactly the captures that need them (TJ's "TONS o
 the Generate default (now sorted, full resolution). AOT trainer crash (ILGPU 5.3.5). End-carve splats left in the
 file (compacted).
 
+## PARITY FIRST (TJ, 2026-10-08)
+
+"We need to match or beat [the other generators and viewers] in quality and speed in every area possible ... comparing
+our results with their results with every dataset ... until we are where we need to be." Correctness before features
+(the unseen fill waits). Every row: held-out PSNR / SSIM (+ LPIPS when available), training time, splat count, AND
+off-path views (Wander) side by side; SpawnScene both on given poses (COLMAP) and on its own SfM. Losses reported plainly.
+
+| Datasets (local) | Tools to compare |
+|---|---|
+| Mip-NeRF 360: Bicycle, Garden, Stump, Room, Counter, Kitchen, Bonsai | gsplat (CUDA, the reference quality bar), the reference 3DGS |
+| Tanks & Temples: Truck, Train; Deep Blending: DrJohnson, Playroom | Brush (the other in-browser trainer) |
+| Phone / Commons: Bathroom, Hamamni Baths, Korno, pine cone | nerfstudio splatfacto (if it installs) |
+| Video: TruckVideo (the video source path has no test yet) | Viewers: Spark, PlayCanvas, GaussianSplats3D (done 10-08) |
+
+1. **Hamamni Baths (live, TJ: blobs + missing walls):** depth for only 19 of 57 placed views - most DAv3 chunks rejected
+   (anchors ~1% of the rig apart). b33eb0a keeps rejected chunks' depths; hb1 measuring. Next: anchors chosen for spread.
+2. Rebuild the gsplat environment (ref-gsplat-reference-trainer-windows) and run the matrix at 7K and 30K.
+3. Brush on the same scenes and split.
+4. A video end-to-end test (TruckVideo).
+
 ## Next, in order
 
 Each item: measured on Bathroom (phone room), Bicycle (outdoor 360) and TruckFull (object) - held-out photos AND the

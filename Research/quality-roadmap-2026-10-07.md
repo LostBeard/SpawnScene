@@ -76,10 +76,18 @@ reference's train_test_exp protocol, every run):**
 | j0 Bicycle | depthinit=4 | 25.14 / 0.7666 | 25.135 | 25.416 |
 | j1 Bicycle | depthinit=4 exposure=gains | 24.99 / 0.7683 | 24.959 | **25.575** |
 | j2 Bathroom | depthinit=4 | 16.88 / 0.7958 | 17.097 | 18.877 |
-| j3 Bathroom | depthinit=4 exposure=gains | pending | | |
+| j3 Bathroom | depthinit=4 exposure=gains | **18.57 / 0.8439** | **19.418** | **24.316** |
 
 Bicycle's photos vary in exposure too (fitted gains 0.91-1.13), so the mean-exposure score penalised the run that
 modelled it: under the fair score gains-only WINS Bicycle (+0.16 dB, SSIM +0.0017).
+On the phone room gains-only wins by +1.7 dB held out and +5.4 dB under the fair score: without it each photo's
+exposure is baked into the scene (fitted gains 0.89-1.30 for the same four photos).
+
+**PROPOSAL for TJ (not applied): make `depthinit=4` + `exposure=gains` the defaults.** Evidence: Bathroom (phone room)
++1.3 dB from depth init (g0 -> g1) and +1.7 dB / +5.4 fair from gains (j2 -> j3); Bicycle depth init neutral (b0r 25.17
+vs b1 25.16), gains +0.16 fair (j0 -> j1); Truck gains neutral (h2 24.00 vs k2 24.07); off-path Wander views equal or
+better in every pair looked at. Cost: depth fusion 2.6 s on Bicycle and ~15% more splats. The full affine
+(`exposure=1`) stays an option; it loses on fixed-exposure captures (offsets do not fold).
 
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 

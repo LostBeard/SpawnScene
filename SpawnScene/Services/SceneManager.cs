@@ -54,6 +54,18 @@ public class SceneManager
     }
 
     /// <summary>
+    /// The viewer's focal for a viewport: its own lens, or for a single-photo scene the lens at which the photo's field
+    /// of view just covers the viewport (no wider, or its blurred continuation shows around it at home).
+    /// </summary>
+    public float ViewerFocalFor(int width, int height)
+    {
+        float f = CameraParams.ViewerFocal(height);
+        if (_activeScene?.SourceName == "depth-splat" && _activeScene.PhotoHalfTan is { } t && t.X > 0f && t.Y > 0f)
+            f = MathF.Max(f, MathF.Max(width / (2f * t.X), height / (2f * t.Y)));
+        return f;
+    }
+
+    /// <summary>
     /// Position the camera to see the entire scene.
     /// </summary>
     public void FitCameraToScene(GaussianScene scene)
@@ -63,7 +75,7 @@ public class SceneManager
         // 2. Set focal length for current viewport
         if (_camera.Width > 0)
         {
-            _camera.FocalX = CameraParams.ViewerFocal(_camera.Height);
+            _camera.FocalX = ViewerFocalFor(_camera.Width, _camera.Height);
             _camera.FocalY = _camera.FocalX;
         }
 
@@ -119,7 +131,7 @@ public class SceneManager
         _camera.CenterX = width / 2.0f;
         _camera.CenterY = height / 2.0f;
         // The same lens at any window size (the focal length was left at whatever the last fit set).
-        _camera.FocalX = _camera.FocalY = CameraParams.ViewerFocal(height);
+        _camera.FocalX = _camera.FocalY = ViewerFocalFor(width, height);
         OnCameraChanged?.Invoke();
     }
 }

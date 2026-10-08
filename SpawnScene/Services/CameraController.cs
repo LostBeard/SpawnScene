@@ -55,6 +55,9 @@ public class CameraController : IDisposable
         if (scene == null || scene.Count == 0) return;
 
         var camera = _sceneManager.Camera;
+        // The lens for this scene (a single photo's own field of view, else the viewer's).
+        if (camera.Width > 0 && camera.Height > 0)
+            camera.FocalX = camera.FocalY = _sceneManager.ViewerFocalFor(camera.Width, camera.Height);
 
         // 2. FOV from camera intrinsics
         float fovY = 2f * MathF.Atan(camera.Height / (2f * camera.FocalY));

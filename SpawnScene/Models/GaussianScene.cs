@@ -51,6 +51,13 @@ public class GaussianScene
     public string? SourceName { get; set; }
 
     /// <summary>
+    /// A single-photo scene: tan of the photo's half field of view (x, y). The viewer at home takes a lens just narrow
+    /// enough for the photo to cover the screen (SceneManager.ViewerFocalFor); with its own fixed lens a long-lens photo
+    /// (a 45 mm-equivalent garden path) sat small in the middle of its blurred continuation.
+    /// </summary>
+    public System.Numerics.Vector2? PhotoHalfTan { get; set; }
+
+    /// <summary>
     /// Compute scene bounds from the Gaussians and update Center/Extent.
     /// </summary>
     public void ComputeBounds()

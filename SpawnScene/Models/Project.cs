@@ -61,6 +61,9 @@ public class ProjectScene
     /// reconstruction - a reopened Truck started inside the truck.</summary>
     public float[]? HomeView { get; set; }
 
+    /// <summary>A single-photo scene's tan of half field of view (x, y) - the viewer's lens at home (GaussianScene.PhotoHalfTan).</summary>
+    public float[]? PhotoHalfTan { get; set; }
+
     /// <summary>
     /// How the scene is stored: null = packed rows (scenes/{id}.bin, SH beside it), opened whole; <see cref="FormatLod"/>
     /// = its LOD tree as a .spawnscene v3 (scenes/{id}.spawnscene), opened STREAMED - a scene larger than one GPU holds

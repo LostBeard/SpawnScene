@@ -248,10 +248,12 @@ public partial class Studio
             _gpuRenderer.UseRgbColours();
             await _gpuRenderer.UploadSceneFromGpuBuffer(packedBuf, splatCount);
 
+            var photoHalfTan = new System.Numerics.Vector2(0.5f * w / camera.FocalX, 0.5f * h / camera.FocalY);
             var scene = new GaussianScene
             {
                 GpuSplatCount = splatCount,
                 SourceName = "depth-splat", // signals FitCameraToScene to use depth-splat positioning
+                PhotoHalfTan = photoHalfTan,   // the viewer's lens at home: the photo's own field of view
             };
             // Mark as GPU-loaded BEFORE setting ActiveScene (prevents redundant CPU upload)
             _renderService.SetActiveSceneGpuLoaded(scene);
@@ -272,6 +274,7 @@ public partial class Studio
                     SplatCount = splatCount,
                     FloatsPerSplat = SplatFormat.Floats,
                     QualityPreset = _activeProject.Settings.QualityPreset,
+                    PhotoHalfTan = new[] { photoHalfTan.X, photoHalfTan.Y },
                 };
                 await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
                 _viewedProjectScene = projectScene;
@@ -1120,6 +1123,7 @@ public partial class Studio
             {
                 GpuSplatCount = scene.SplatCount,
                 SourceName = "depth-splat",
+                PhotoHalfTan = scene.PhotoHalfTan is { Length: 2 } pt ? new System.Numerics.Vector2(pt[0], pt[1]) : null,
             };
             // As the generation paths show a scene: sorted alpha at full resolution. A reopened scene fell back to the
             // stochastic renderer - 2 samples a pixel while moving, so every saved scene looked grainy and broken until

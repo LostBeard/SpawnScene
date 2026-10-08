@@ -295,3 +295,6 @@ and the scene is scored and shown over black. Rooms do not pay it because their 
 a zero-mean background ([-0.5, 0.5]: same variance, so transparency costs the same; expected composite = the render
 over black) - u0 Bicycle, u1 Bathroom (holes over magenta), t2 Truck.
 
+Truck (benchmark protocol, COLMAP poses, 7K): t0 black 23.97 / 0.8594, fair 24.197; t1 `&randombg=1` 23.96 / 0.8588,
+fair 24.189 - neutral.
+

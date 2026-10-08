@@ -61,6 +61,10 @@ struct TrainUniforms {
     depth_far  : f32,
     splat_count: u32,
     sh_degree  : u32,   // active SH degree 0..3 (Kerbl: +1 every 1000 iters)
+    // Colour composited BEHIND the render: out = sum(T a c) + T_final * background. Zero except on training steps
+    // with SplatTrainerGpu.RandomBackground (the reference's --random_background): over black, a half-transparent
+    // wall matched the photos as well as a solid one, and from any other angle the black showed through as holes.
+    background : vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u : TrainUniforms;
@@ -483,9 +487,9 @@ fn raster_forward(
 
     if (inside) {
         let o = py * u32(u.viewport.x) + px;
-        out_colour[o * 3u + 0u] = acc.x;
-        out_colour[o * 3u + 1u] = acc.y;
-        out_colour[o * 3u + 2u] = acc.z;
+        out_colour[o * 3u + 0u] = acc.x + t * u.background.x;
+        out_colour[o * 3u + 1u] = acc.y + t * u.background.y;
+        out_colour[o * 3u + 2u] = acc.z + t * u.background.z;
         out_final_t[o] = t;
 //DEPTH:         depth_io[o] = acc_inv;
         // Exclusive bound into this tile's list, matching SplatRasterizer.Forward.OrderEnd.
@@ -918,12 +922,14 @@ fn raster_backward(
     let range = ranges[tile];
 
     var t = 1.0;
+    var t_final = 1.0;
     var my_end = range.x;
     var dL = vec3<f32>(0.0);
 //DEPTH:     var dLd = 0.0;
     if (inside) {
         let o = py * u32(u.viewport.x) + px;
         t = final_t[o];
+        t_final = t;
         // Clamp end_idx into this tile's key span. A stale/overflow-corrupted end past
         // range.y walked off the tile list; an end below range.x made reach never true
         // (STAGE PROBE: forward+loss live, max|gradPerKey|==0 on a subset of Truck views).
@@ -1012,6 +1018,9 @@ fn raster_backward(
                 (p.colour.x - rec.x) * t * dL.x +
                 (p.colour.y - rec.y) * t * dL.y +
                 (p.colour.z - rec.z) * t * dL.z;
+            // The background behind the pixel is scaled by T_final = prod(1 - alpha_j): its share falls as this alpha
+            // rises (the reference backward.cu's bg_dot_dpixel term). Exactly zero when background is zero.
+            dL_dalpha = dL_dalpha - t_final / max(1.0 - alpha, 1e-4) * dot(u.background.xyz, dL);
 //DEPTH:             dL_dalpha = dL_dalpha + (sb_invz[s] - rec_inv) * t * dLd;
 //DEPTH:             contrib_d = w * dLd;
 

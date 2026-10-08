@@ -333,6 +333,9 @@ public partial class Studio
             // -- Depth supervision: the rendered inverse depth, its gradient against finite differences, and it trains --
             if (!await DepthSupervisionGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
+            // -- Random background (&randombg): the composited background's gradient against finite differences --
+            if (!await BackgroundGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
             // -- Past 65535 workgroups: a per-splat pass over more than 4,194,240 splats reaches every one --
             if (!await LinearDispatchGateAsync(trainer)) return;
 

@@ -246,6 +246,10 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mfv))
             SplatTrainerGpu.MipFilter = Math.Max(0f, mfv);
+        // &randombg=1: train each step over a random background colour (the reference's --random_background), so surfaces
+        // the photos saw must be opaque to match them (SplatTrainerGpu.RandomBackground).
+        if (query.TryGetValue("randombg", out var rbgq))
+            SplatTrainerGpu.RandomBackground = rbgq is "1" or "true";
         // &carve=S / &carvemargin=M: remove splats with share S of their weight in front of the photos' surfaces after
         // training (Studio.Training FloaterCensusAsync); the census itself is always reported.
         if (query.TryGetValue("carve", out var cvq) && float.TryParse(cvq,
@@ -307,6 +311,14 @@ public partial class Studio : IAsyncDisposable
         // &xrclear=1: XR eye views clear to magenta (an empty view vs a broken copy).
         if (query.TryGetValue("xrclear", out var xrClearQ))
             GpuGaussianRenderer.XRDebugClear = xrClearQ is "1" or "true";
+        // &bg=r,g,b (harness, 0..1, every autotest mode): the viewer's clear colour. A bright one shows where splats do
+        // not cover a pixel (the scene is trained over black, so a hole and a dark surface look the same on the default).
+        if (query.TryGetValue("bg", out var bgq))
+        {
+            var bgv = bgq.Split(',').Select(t => double.Parse(t, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            if (bgv.Length == 3) _gpuRenderer.BackgroundColor = (bgv[0], bgv[1], bgv[2]);
+            Console.WriteLine($"[Autotest] viewer background {_gpuRenderer.BackgroundColor}");
+        }
         // &resize=native|letterbox - A/B the depth preprocessing on one build.
         if (query.TryGetValue("resize", out var resize))
         {

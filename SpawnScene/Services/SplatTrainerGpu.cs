@@ -429,7 +429,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
 
     public SplatTrainerGpu(GpuService gpu) => _gpu = gpu;
 
-    const int UniformFloats = 28;   // 112 bytes: 4 vec4 + 3 vec2 + 2 u32 + 2 f32 + u32 + pad
+    const int UniformFloats = 32;   // 128 bytes: 4 vec4 + 3 vec2 + 2 u32 + 2 f32 + u32 + pad + background vec4
 
     public void Initialize()
     {
@@ -1962,6 +1962,19 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// watchdog and lose the device, so the host yields between iterations rather than queueing
     /// a whole training run.
     /// </summary>
+    /// <summary>
+    /// Train each step over a random background colour (the reference 3DGS's --random_background), so a surface only
+    /// matches the photos by being opaque. Over black, half-transparent walls scored as well as solid ones and showed
+    /// the black through from every other angle (Bathroom 2026-10-08: up to 33% of an off-path view).
+    /// </summary>
+    public static bool RandomBackground { get; set; }
+    /// <summary>The loss's D-SSIM share (the reference's 0.2; L1 gets the rest). Gates set 0 for a pure L1 loss.</summary>
+    public float DssimWeight { get; set; } = ImageQuality.LambdaDssim;
+    /// <summary>Gate hook: every training step composites over this colour (a repeatable step for finite differences).</summary>
+    public Vector3? FixedBackground { get; set; }
+    Vector3 _stepBackground;
+    readonly Random _backgroundRng = new(1234);
+
     public async Task<float> TrainStepAsync(
         MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
         CameraParams cam, float depthNear, float depthFar,
@@ -1980,9 +1993,15 @@ public sealed partial class SplatTrainerGpu : IDisposable
         // flush submits this clear ahead of the loss pass.
         if (_lossStepsPending == 0) _lossSum!.MemSetToZero();
 
-        // Forward also refreshes the tile binning for this view.
+        // Forward also refreshes the tile binning for this view. A random background (RandomBackground) is written into
+        // the uniforms with the camera and read again by this step's backward; every other forward (held-out scoring,
+        // census, dumps) composites over black.
         bool depthOn = PrepareDepthStep(splatCount);
-        await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false, depth: depthOn);
+        if (FixedBackground is { } fixedBg) _stepBackground = fixedBg;
+        else if (RandomBackground)
+            _stepBackground = new Vector3(_backgroundRng.NextSingle(), _backgroundRng.NextSingle(), _backgroundRng.NextSingle());
+        try { await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false, depth: depthOn); }
+        finally { _stepBackground = Vector3.Zero; }
         if (LastKeyCount == 0)
         {
             // Clear before returning: the view-support census and densify accum read these
@@ -1998,7 +2017,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         int pixels = _width * _height;
 
         // ── Loss and dL/d(pixel): 0.8 L1 + 0.2 D-SSIM, matching the reference ──
-        WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaL1, ImageQuality.LambdaDssim, 0f, 0f);
+        WriteVec4(_lossWeightsBuf!, 1f - DssimWeight, DssimWeight, 0f, 0f);
         // A 2D grid of 64-pixel workgroups: one dimension caps at 65,535 (4.2 MP), and the photos' own size is above it.
         int lossGroups = (pixels + 63) / 64;
         int lossGroupsX = Math.Min(lossGroups, 32768), lossGroupsY = (lossGroups + lossGroupsX - 1) / lossGroupsX;
@@ -2038,7 +2057,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
             });
 
             WriteU32x4(_ssimDimsBuf!, (uint)SsimWindowsX, (uint)SsimWindowsY, (uint)_width, 0);
-            WriteVec4(_lossWeightsBuf!, ImageQuality.LambdaDssim / ssimPasses, 0f, 0f, 0f);
+            WriteVec4(_lossWeightsBuf!, DssimWeight / ssimPasses, 0f, 0f, 0f);
             int winThreads = SsimWindowsX * SsimWindowsY;
             DispatchLinear(_ssimWinGradPipe!, winThreads, groupSize: 256, entries: new[]
             {
@@ -2418,6 +2437,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         f[25] = depthFar;
         f[26] = BitConverter.Int32BitsToSingle(splatCount);
         f[27] = BitConverter.Int32BitsToSingle(Math.Clamp(ActiveShDegree, 0, SphericalHarmonics.MaxDegree));
+        f[28] = _stepBackground.X; f[29] = _stepBackground.Y; f[30] = _stepBackground.Z;
 
         Buffer.BlockCopy(f, 0, _uniformBytes!, 0, _uniformBytes!.Length);
         _queue!.WriteBuffer(_uniformBuf!, 0, _uniformBytes);

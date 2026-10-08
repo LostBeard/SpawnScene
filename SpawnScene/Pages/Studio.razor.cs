@@ -202,6 +202,7 @@ public partial class Studio : IAsyncDisposable
         // ?depthinit=4 (multi-photo seeds from DAv3 depth), ?exposure=1 (per-photo exposure), ?depthmodel=<id>.
         if (query.TryGetValue("edgesnap", out var uEs)) DepthToGaussianKernel.EdgeSnapEnabled = uEs is "1" or "true";
         if (query.TryGetValue("inpaint", out var uIp)) DepthToGaussianKernel.InpaintHiddenLayer = uIp is "1" or "true";
+        if (query.TryGetValue("inpaintmodel", out var uIm) && uIm is "lama" or "migan") HiddenLayerInpaint.Model = uIm;
         if (query.TryGetValue("depthloss", out var depthLossQ) && float.TryParse(depthLossQ, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var depthLossV) && depthLossV > 0f)
         {

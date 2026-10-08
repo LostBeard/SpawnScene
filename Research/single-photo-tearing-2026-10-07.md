@@ -161,6 +161,22 @@ and 3; reach 1 is the cleanest. The default stays 1. With tiles at full resoluti
 "more context control" are closed; the remaining lever for the hidden layer is a better inpainter (LaMa, Apache-2.0, 200 MB)
 or painting depth too (3D-photo inpainting's layered depth).
 
+## Measured: LaMa vs MI-GAN for the hidden layer (2026-10-08)
+
+`tools/inpaint_compare.py` (CPU onnxruntime, the same 512 crops and holes, `img/migan-vs-lama-kitchen-2026-10-08.jpg`):
+three kitchen objects removed - the high chair, a pendant lamp, the cereal boxes. **LaMa (big-lama, Apache-2.0,
+Carve/LaMa-ONNX lama_fp32.onnx, 208 MB) is clearly better at "what is behind it"**: it continues the cabinet and floor
+where MI-GAN paints another chair, and the cabinet face where MI-GAN leaves the lamp's pole as a dark streak. Both
+struggle with the cereal boxes (LaMa continues the backsplash tiles but keeps a blue smear). MI-GAN is 0.6 s, LaMa 1.6 s on
+CPU; 30 MB vs 208 MB.
+
+LaMa did not run on SpawnDev.ILGPU.ML: two library bugs, both fixed in the ML repo (a4a5c011) - N-D broadcasting in
+compile-time constant folding (LaMa's DFT matrices [64,1] * [33] folded to [64,1]) and ConvTranspose output_padding
+(64 -> 127 -> 253 -> 505). After the fixes LaMa on OpenCL matches onnxruntime to 0.003 (0..255). SpawnScene has
+`&inpaintmodel=lama` wired (HiddenLayerInpaint; served through the hub's /hf, cached), but it needs an ML package
+with those fixes: SpawnScene is on ML 5.3.2 from nuget.org, so until a release (TJ's go) the option logs the compile
+failure and keeps the blur.
+
 ## Order
 
 1. ~~MaxCellStretch A/B~~ (no effect).

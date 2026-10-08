@@ -46,6 +46,22 @@ build); the USER path (add a video to a project -> Generate) has never run; `&vi
 nowhere (always 120 frames); TruckVideo is a slideshow of the Truck photos (no blur / rolling shutter). Three small
 changes enable a user-path test (see the audit). Queued after parity (TJ).
 
+### Hamamni ablation (2026-10-08; 7K, llffhold=8, same 7 held-out photos; one SpawnScene default off per run)
+
+| Run | off | held out PSNR / SSIM | fair |
+|---|---|---|---|
+| hb2 | - (baseline) | 19.18 / 0.703 | 21.62 |
+| a1 | depthinit | 18.20 / 0.675 | 20.36 |
+| a2 | projectrefine | 19.31 / 0.711 | 22.01 |
+| a3 | absgrad | 19.54 / 0.712 | 22.16 |
+| a4 | carve | 19.36 / 0.707 | 21.93 |
+| a5 | randombg | 18.13 / 0.698 | 20.83 |
+| a6 | exposure | 19.22 / 0.691 | 19.13 |
+| gsplat | (its default, our cameras) | 21.41 / 0.732 | - |
+
+No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
+by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.
+
 ## Open gaps (biggest first)
 1. Hamamni Baths: -2.2 dB held out against gsplat ON THE SAME CAMERAS (trainer, not capture). Ablating our defaults.
 2. No fair 7K reference on any scene yet; only Truck 30K is like for like (-0.18 dB PSNR, +0.010 SSIM, 4.3x fewer splats).

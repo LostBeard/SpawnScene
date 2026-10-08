@@ -322,3 +322,10 @@ sky cannot be opaque. Next: v0/v1 at half width (`&randombgamp=0.5`).
 Half the push keeps most of the room fix and costs Bicycle -0.08 dB held out / -0.04 fair. Truck t3: 24.03 / 0.8599,
 fair 24.247 (t0 black 23.97 / 0.8594 / 24.197) - neutral. **Proposed default (TJ's call): `&randombg=2&randombgamp=0.5`.**
 
+### DEFAULT (TJ, 2026-10-08): verified by a no-flag run, deployed
+
+w0 (Bathroom, no training flags, captured over magenta): log "random background each step, zero-mean [-0.5, 0.5] x
+0.5"; held out 19.00 / 0.8501, fair 24.82; see-through 5.2% (22/34 views <= 1%). TrainerGate PASS with the default on.
+Deploy run 37812486889 (master @ 0a70f3f). Live check: `autotest=samples&name=hamamni-baths&generate=7000` on
+spawnscene.com (photos through the hub).
+

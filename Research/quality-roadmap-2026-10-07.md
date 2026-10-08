@@ -260,3 +260,24 @@ held out. Recorded 10-08; repeated as n0-n3 on the 10-08 defaults with the fair 
   a coverage problem, not the carve's.
 - **Decision: defaults stay (carve on, unseen bar 1 px).** PLANS item 1 closed.
 
+## The black off the photo path is HOLES - random training background fixes most of it (2026-10-08)
+
+Bathroom, 10-08 defaults, 7K, llffhold=8, captured over MAGENTA (`&bg=1,0,1`, harness):
+- p0 (black training background, as shipped): the dark smears at the headings few photos face turn magenta - they are
+  pixels the splats do not cover, the black background showing through. Even well-photographed surfaces are partly
+  see-through: 0.1-34% magenta per Wander view, mean 12.0% over 34 views.
+- Why: training composites over black, so a half-transparent wall matches the photos as well as a solid one.
+- q0 (`&randombg=1`: each training step composites over a random colour, the reference's --random_background; gate:
+  pure-L1 control and the background term vs finite differences both cos 1.000, mutant cos -0.39):
+  mean 4.1% magenta; 27 of 34 views at <= 1% (shelves, curtain, mirror, towel, walls solid). What remains (the "-3"
+  views and pan-2, 11-31%) faces where hardly any photo looked - real coverage gaps.
+
+| Run | training background | held out PSNR / SSIM | fair | magenta (holes), mean of 34 views |
+|---|---|---|---|---|
+| n0 | black | 18.69 / 0.8458 | 24.75 | - |
+| p0 | black (same settings as n0: run-to-run noise ~0.25 dB, 0.4 fair) | 18.45 / 0.8439 | 24.37 | 12.0% |
+| q0 | random | **18.83 / 0.8496** | **25.17** | **4.1%** |
+
+Side by side: `_shots/dataset/Bathroom__tuvok-p0_tuvok-q0_pan__wander.png`. Bicycle (r0 vs m0) and Truck (t0/t1)
+running before proposing it as a default (TJ's call).
+

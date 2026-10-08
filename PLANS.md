@@ -44,7 +44,10 @@ held-out number and looks worse off-path does not ship.
 1. **Re-baseline the carve on the census fix** (k1 Bicycle, k2 Truck, h6-h9 Bathroom, running). Decide the unseen bar
    (1 px costs Bathroom 0.77 dB supervised; try 0.05) and whether the in-training carve earns its keep on rooms
    (Bathroom: supervised 37.4 dB without it, 33.5 with; held-out equal).
-2. **Per-photo exposure** (done, opt-in `&exposure=1`, gate-verified): A/B on Bathroom; default-on if rooms gain and
+0. **MEASURED 10-07 late:** Bathroom `&depthinit=4 &exposure=1` held out 15.58 -> 18.27 dB, SSIM 0.709 -> 0.836 (g4) -
+   make both the defaults once Bicycle (b0/b1, e1) and Truck (e2) show no loss. Single photo: `&edgesnap=1` +
+   `&inpaint=1` (MI-GAN) make the hidden layers plausible - TJ to judge on the live site (URL flags work there).
+2. **Per-photo exposure** (done, opt-in `&exposure=1`, gate-verified; mean exposure folded into the scene): A/B on Bathroom; default-on if rooms gain and
    benchmarks do not lose. Then the held-out exposure fit for fair scoring (the reference fits the left half).
 3. **Depth from DAv3 in training** (we compute it for posing and throw it away):
    a. Dense init: each photo's DAv3 depth aligned (scale/shift) to the SfM points it sees, back-projected on a grid,

@@ -25,6 +25,20 @@ our status. MEASURED rows are ours; the rest are the authors' claims until we me
 | Floater census counted every splat on a not-yet-opaque pixel as "in front" (3e38 sentinel) | The carve deleted still-thin walls: Bathroom "TONS of holes"; supervised 29.65 vs 33.47 dB with &carve=0, one photo -13 dB. Gate case added (red 0.9960 -> 0.0000). Re-measure of Bicycle / Truck on the fix: k1/k2. |
 | End carve left its splats in the file at opacity 0 | Compacted (Bathroom 707K -> 557K splats, 158 -> 125 MB) |
 
+## MEASURED 2026-10-07 late: Bathroom (TJ's 35 phone photos, user path, 7K, llffhold=8, fixed SfM 33/35)
+
+| Run | Options | Held out PSNR | SSIM |
+|---|---|---|---|
+| g0 | defaults | 15.58 | 0.709 |
+| g1 | &depthinit=4 | 16.91 | 0.795 |
+| g2 | &depthinit=4 (repeat; edge snap had no colours) | 16.97 | 0.798 |
+| g3 | &exposure=1 (mean folded) | 17.43 | 0.759 |
+| g4 | &depthinit=4 &exposure=1 | **18.27** | **0.836** |
+
+g1/g2 put the run-to-run noise at ~0.06 dB. Off the photo path (`img/bathroom-g0-vs-g4-depthinit-exposure-2026-10-07.jpg`,
+turning around at the rig centre): window, shower corner, curtain and caddy, mirror crisp, walls one colour. Both are
+candidates for defaults pending Bicycle (b0/b1, e1) and Truck (e2).
+
 ## The candidates
 
 ### 1. Photometric: exposure and colour per photo - HIGH for phone captures

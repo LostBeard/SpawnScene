@@ -39,6 +39,11 @@ g1/g2 put the run-to-run noise at ~0.06 dB. Off the photo path (`img/bathroom-g0
 turning around at the rig centre): window, shower corner, curtain and caddy, mirror crisp, walls one colour. Both are
 candidates for defaults pending Bicycle (b0/b1, e1) and Truck (e2).
 
+Bicycle360 through the user path (own SfM, 194 photos, llffhold=8, 7K): **b1 `&depthinit=4` held out 25.16 dB / SSIM
+0.7661**, 2.46M splats, 1.17M fusion seeds from 193 views in 2.6 s, 192/194 cameras placed. For scale, k1 (same 7K, COLMAP
+poses, no depth init) was 25.06 / 0.7662 - no loss on a large outdoor capture. b0 (the baseline) was INVALID: a dropped
+fetch of DAv3's weights sent generate down the legacy 2D path (0 training views); fixed in b623d5c, rerun as b0r.
+
 ## The candidates
 
 ### 1. Photometric: exposure and colour per photo - HIGH for phone captures

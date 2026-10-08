@@ -669,7 +669,16 @@ public partial class Studio : IAsyncDisposable
 
             // &sample=<file in samples/> (harness): another sample photo instead of the Room.
             string sampleFile = query.TryGetValue("sample", out var smq) && !string.IsNullOrWhiteSpace(smq) ? smq : "room.png";
-            await LoadSampleImage(Path.GetFileNameWithoutExtension(sampleFile), "samples/" + sampleFile);
+            // &sampleurl=<catalog folder> (harness): a catalog single photo, through the catalog's base (the hub).
+            if (query.TryGetValue("sampleurl", out var suq) && !string.IsNullOrWhiteSpace(suq))
+            {
+                await EnsureSampleCatalogAsync();
+                var entry = _sampleCatalog?.Samples.FirstOrDefault(sm => sm.Folder == suq && !sm.IsSet)
+                    ?? throw new InvalidOperationException($"no single-photo sample '{suq}' in samples/catalog.json");
+                await LoadSampleImage(suq, _sampleCatalog!.Base.TrimEnd('/') + "/" + entry.Folder + "/" + entry.Images[0]);
+            }
+            else
+                await LoadSampleImage(Path.GetFileNameWithoutExtension(sampleFile), "samples/" + sampleFile);
             if (_activeProject.Sources.Count == 0)
                 throw new InvalidOperationException("Room sample did not load");
             // &subsample=1 (harness): the High preset's one splat a pixel.

@@ -1258,13 +1258,16 @@ public partial class Studio
     }
 
     SampleCatalog? _sampleCatalog;
-    bool _sampleCatalogLoading;
+    Task? _sampleCatalogTask;
 
-    /// <summary>Fetch samples/catalog.json once; the project page rebuilds when it lands. A failure leaves no list.</summary>
-    private async Task EnsureSampleCatalogAsync()
+    /// <summary>
+    /// Fetch samples/catalog.json once; the project page rebuilds when it lands. A failure leaves no list. Every caller
+    /// awaits the SAME load (the page's build starts it un-awaited; a caller that then awaited a second call got null).
+    /// </summary>
+    private Task EnsureSampleCatalogAsync() => _sampleCatalogTask ??= LoadSampleCatalogAsync();
+
+    private async Task LoadSampleCatalogAsync()
     {
-        if (_sampleCatalog != null || _sampleCatalogLoading) return;
-        _sampleCatalogLoading = true;
         try
         {
             _sampleCatalog = await System.Net.Http.Json.HttpClientJsonExtensions.GetFromJsonAsync<SampleCatalog>(

@@ -94,6 +94,12 @@ better in every pair looked at. Cost: depth fusion 2.6 s on Bicycle and ~15% mor
 Neutral on held-out photos, as expected, and the Wander "in" views (half way to the subject, ~2x) look the same - not
 close enough for the filter's case (needles when zooming far past the photos). Stays opt-in; a fair test needs a
 close-up view set (4-8x) or a render at another resolution, which the Wander set does not have yet.
+**m0/m1 (fresh build, Bicycle, proposed defaults +/- `mipfilter=0.2`):** m0 24.97 / 0.7683, fair 25.572 (reproduces
+j1's 25.575 - same-config noise ~0.003); m1 25.02 / 0.7684, fair 25.638: +0.07 dB, at the level of the different-run
+spread seen before (g1/g2 0.06). The new close-{q} Wander views (85% toward the rig's subject point) did not test
+magnification: on Bicycle they end up beside the bike looking past it at the hedges, at normal distance, and look the
+same in both runs. A real close-up set must aim at a surface point and stop at a fixed fraction of the photos' distance
+to IT. Verdict: mipfilter is harmless and possibly slightly positive; not enough to make it a default yet.
 
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 

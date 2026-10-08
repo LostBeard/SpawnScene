@@ -152,6 +152,15 @@ coherence (Fisher) guard was tried first: it traded the indoor gains away with t
 everywhere (never iterate it). MoGe-2 + snap is the best indoor pair measured (kitchen 0.19%, living room 0.11%) - its
 edges sit closer to the colour edges.
 
+## Measured: inpainting mask reach (kitchen, 2026-10-08)
+
+`&inpaintreach=1/2/3` (the behind-edge mask widened to 2-3 fill radii into the near side, so MI-GAN sees less of the
+foreground's interior as context): moved views orbit30 / xneg20 / dolly30 in `img/inpaint-reach-kitchen-2026-10-08.jpg`.
+Wider is WORSE: a dark stripe down the fridge's edge (xneg20) and a blurred ghost of the high chair (orbit30) at reach 2
+and 3; reach 1 is the cleanest. The default stays 1. With tiles at full resolution (also worse, earlier) both ways of
+"more context control" are closed; the remaining lever for the hidden layer is a better inpainter (LaMa, Apache-2.0, 200 MB)
+or painting depth too (3D-photo inpainting's layered depth).
+
 ## Order
 
 1. ~~MaxCellStretch A/B~~ (no effect).

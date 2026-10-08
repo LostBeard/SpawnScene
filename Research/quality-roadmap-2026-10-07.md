@@ -70,6 +70,12 @@ dL/d(position) along the view axis vs central finite differences of the step's l
 150 position-only steps halve the depth error (0.155 -> 0.084). Red check: the new -g/z^2 term with its sign flipped
 fails the gate (3/5 within 25%). A/B queued: d0 = g4's options, d1 = + `&depthloss=1`.
 
+**Measured (Bathroom, 7K, same AOT build):** d0 `&depthinit=4&exposure=1` held out 18.23 / 0.840 (= g4, 18.27 / 0.836,
+reproduced); d1 + `&depthloss=1` 18.20 / 0.8375, 0.89M splats vs 0.76M. Off the photo path (Wander) the two are alike, d1
+a little fuller in the up views and with one black gap in pan-2 where d0 has grey smear. Neutral at 7K with depth init
+already seeding the walls: it stays opt-in. Open: the 1500-iteration smoke run reached 18.65 / 0.836 - a short schedule
+with depth may match the 7K one; a d2 at 1500/3000 without depth would say whether that is the loss or just fewer steps.
+
 ## The candidates
 
 ### 1. Photometric: exposure and colour per photo - HIGH for phone captures

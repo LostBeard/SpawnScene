@@ -61,6 +61,12 @@ public class ProjectScene
     /// reconstruction - a reopened Truck started inside the truck.</summary>
     public float[]? HomeView { get; set; }
 
+    /// <summary>A multi-photo scene: photos the pipeline placed, of how many (0 = not recorded).</summary>
+    public int PhotosPlaced { get; set; }
+    public int PhotosTotal { get; set; }
+    /// <summary>The photos it could not place (file names) - shown on the scene card so a user knows which to retake.</summary>
+    public string[]? PhotosNotPlaced { get; set; }
+
     /// <summary>A single-photo scene's tan of half field of view (x, y) - the viewer's lens at home (GaussianScene.PhotoHalfTan).</summary>
     public float[]? PhotoHalfTan { get; set; }
 

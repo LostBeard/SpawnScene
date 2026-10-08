@@ -313,10 +313,12 @@ public partial class Studio
         const float gap = 10, captionH = 0;
         int cols = Math.Max(2, (int)((w + gap) / (148 + gap)));
         float tile = (w - gap * (cols - 1)) / cols;
+        HashSet<string>? notPlaced = null;
         for (int i = 0; i < sources.Count; i++)
         {
             var src = sources[i];
             float tx = x + (i % cols) * (tile + gap), ty = y + (i / cols) * (tile + captionH + gap);
+            notPlaced ??= (_activeProject.Scenes.LastOrDefault(sc => sc.PhotosTotal >= 2)?.PhotosNotPlaced ?? Array.Empty<string>()).ToHashSet();
             string key = SourceThumbKey(_activeProject.Id, src.FileName);
             bool selected = _selectedSources.Contains(src.FileName);
             if (selected)
@@ -329,6 +331,16 @@ public partial class Studio
             var image = parent.AddChild(new UIImage { X = tx, Y = ty, Width = tile, Height = tile, TextureView = view });
             _thumbTiles[key] = image;
             if (view == null) LoadThumbnailAsync(_activeProject.Id, src.FileName);
+            // The latest generate could not place this photo (no camera found for it): say so on the tile.
+            if (notPlaced.Contains(src.FileName))
+            {
+                parent.AddChild(new UIPanel
+                {
+                    X = tx, Y = ty + tile - 22, Width = tile, Height = 22,
+                    BackgroundColor = Color.FromArgb(200, 120, 60, 20), BorderWidth = 0, CornerRadius = 0,
+                });
+                parent.AddChild(new UILabel { X = tx + 6, Y = ty + tile - 19, Text = "not placed", FontSize = FontSize.Caption, Color = Color.White });
+            }
 
             // A transparent button over the tile: the hover highlight, and a click toggles the selection.
             string fileName = src.FileName;
@@ -395,6 +407,19 @@ public partial class Studio
                 FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
             });
             card.AddChild(new UILabel { X = lx, Y = 58, Text = $"{scene.CreatedAt:g}", FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted });
+            if (scene.PhotosTotal >= 2)
+            {
+                // Which photos made it in - a user who knows which ones were left out can retake them (PLANS: capture feedback).
+                var missing = scene.PhotosNotPlaced ?? Array.Empty<string>();
+                string text = missing.Length == 0
+                    ? $"All {scene.PhotosTotal} photos placed"
+                    : $"{scene.PhotosPlaced} of {scene.PhotosTotal} photos placed (see Photos)";
+                card.AddChild(new UILabel
+                {
+                    X = lx, Y = 76, Text = text, FontSize = FontSize.Caption,
+                    Color = missing.Length == 0 ? UITheme.Current.TextMuted : Color.FromArgb(255, 230, 180, 90),
+                });
+            }
             var sceneRef = scene;
             card.AddChild(new UIButton
             {

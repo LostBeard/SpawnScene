@@ -368,6 +368,7 @@ public partial class Studio
         }
 
         int held = 0, posed = 0, unposed = 0;
+        var notPlaced = new List<string>();
         // The trainer shares ONE viewport (LoadTargetAsync refuses a photo whose aspect differs, and that fails the whole
         // run). SfM places a photo held sideways (MultiViewGenerationService: transposed intrinsics) - TJ's Bathroom has
         // one landscape among 34 portraits - so a photo shaped the other way from the majority takes one quarter turn:
@@ -379,7 +380,7 @@ public partial class Studio
         for (int i = 0; i < images.Count && i < poses.Length; i++)
         {
             var cam = poses[i];
-            if (cam == null) { unposed++; continue; }
+            if (cam == null) { unposed++; notPlaced.Add(images[i].FileName); continue; }
 
             string name = fromProjectStore ? images[i].FileName : images[i].SourceUrl;
             if (string.IsNullOrEmpty(name)) { unposed++; continue; }
@@ -413,6 +414,9 @@ public partial class Studio
             });
             scene.TrainingCameras.Add(cam);
         }
+
+        for (int i = poses.Length; i < images.Count; i++) notPlaced.Add(images[i].FileName);
+        _lastPlacement = (posed, images.Count, notPlaced.ToArray());
 
         var turnCounts = scene.TrainingViews
             .GroupBy(v => v.QuarterTurns)
@@ -1031,6 +1035,14 @@ public partial class Studio
                 EditedFrom = editedFrom,
                 HomeView = CurrentHomeView(),
             };
+            // A generate (not an edit) of a multi-photo scene: which photos made it in.
+            if (editedFrom == null && _lastPlacement is { } lp && lp.Total >= 2)
+            {
+                projectScene.PhotosPlaced = lp.Placed;
+                projectScene.PhotosTotal = lp.Total;
+                projectScene.PhotosNotPlaced = lp.NotPlaced;
+                _lastPlacement = null;
+            }
             await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
             _viewedProjectScene = projectScene;
             if (shRest != null)
@@ -1263,6 +1275,9 @@ public partial class Studio
 
     /// <summary>&amp;depthmodel=id (harness): the single-photo depth model for this tab, over the project's setting.</summary>
     public static string? DepthModelOverride { get; set; }
+
+    /// <summary>The last RecordTrainingViews: photos placed, of how many, and the names of those that were not.</summary>
+    (int Placed, int Total, string[] NotPlaced)? _lastPlacement;
 
     SampleCatalog? _sampleCatalog;
     Task? _sampleCatalogTask;

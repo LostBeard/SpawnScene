@@ -115,6 +115,9 @@ public sealed class TrainingView
     /// <summary>True when this view also seeded geometry (vs supervision only).</summary>
     public bool UsedForInit { get; init; }
 
+    /// <summary>The photo's index in the generate's image list (its depth map in MultiViewGenerationService.LastDepthTargets); -1 unknown.</summary>
+    public int ImageIndex { get; init; } = -1;
+
     /// <summary>
     /// Counter-clockwise quarter turns already applied to <see cref="Camera"/>, which the
     /// target image must be given too.

@@ -44,6 +44,22 @@ Bicycle360 through the user path (own SfM, 194 photos, llffhold=8, 7K): **b1 `&d
 poses, no depth init) was 25.06 / 0.7662 - no loss on a large outdoor capture. b0 (the baseline) was INVALID: a dropped
 fetch of DAv3's weights sent generate down the legacy 2D path (0 training views); fixed in b623d5c, rerun as b0r.
 
+Bathroom c0 (`&depthinit=4`, seeds now COLOURED from the device decode) held out 16.64 / 0.792, c1 (+ `&edgesnap=1` on the
+fusion depth) 16.57 / 0.7915, vs grey-seeded g1/g2 16.91-16.97 / 0.795-0.798; the Wander views of g2 and c0 are
+indistinguishable. Seed colour is neutral (training repaints it within the first cycle); the edge snap does nothing for
+the multi-photo seeds (agreement between two views already rejects ramp samples).
+
+### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
+
+L1 between the rendered inverse depth sum(w/z) and each photo's DAv3 depth scaled by DepthFusionInit (kept per view,
+resampled to <= 384 px; Bicycle 193 views ~75 MB), weight X -> X/100 over training as the reference does. Inverse depth
+blends as a fourth channel in the depth-supervised builds of the raster / scatter / geometry passes (`//DEPTH:` lines,
+SplatTrainerShaders.DepthVariant): the default pipelines are byte-identical (TrainerShaderValidationTests runs naga on
+all 44 shader builds). TrainerGate depth stage: rendered inverse depth inside the scene's 1/z range; analytic
+dL/d(position) along the view axis vs central finite differences of the step's loss, 5 splats within 3%, cos 1.000;
+150 position-only steps halve the depth error (0.155 -> 0.084). Red check: the new -g/z^2 term with its sign flipped
+fails the gate (3/5 within 25%). A/B queued: d0 = g4's options, d1 = + `&depthloss=1`.
+
 ## The candidates
 
 ### 1. Photometric: exposure and colour per photo - HIGH for phone captures

@@ -173,7 +173,10 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   (DepthFusionInit, DepthFusionInitTests). Bathroom both: held out 15.58 -> 18.27 dB, SSIM 0.709 -> 0.836 (g4).
   `edgesnap=1` single-photo depth edges snapped to colour (DepthEdgeSnap, DepthEdgeSnapTests); `inpaint=1` MI-GAN paints
   the hidden behind-edge and past-the-frame layers (HiddenLayerInpaint, LostBeard/spawnscene-models via the hub;
-  autotest=inpaint-parity = onnxruntime to 3 decimals); `depthmodel=depth-anything-v3-base`. Harness-only:
+  autotest=inpaint-parity = onnxruntime to 3 decimals); `depthmodel=depth-anything-v3-base`;
+  `depthloss=X` (with depthinit) depth supervision - L1 on the rendered inverse depth against each photo's scaled DAv3
+  depth, X -> X/100 (SplatTrainerGpu.Depth; the `//DEPTH:` shader lines build the supervised pipelines, the defaults stay
+  byte-identical; TrainerGate depth stage = finite differences). Edge snap's slope guard `snapmid` (0.3). Harness-only:
   `&carveunseenpx=W`, `&inpaintreach=X`, `&cellstretch=X`. Research/single-photo-tearing-2026-10-07.md, PLANS.md.
 - **Capture feedback:** ProjectScene.PhotosPlaced/Total/NotPlaced; the scene card counts them, the Photos tab badges
   the photos SfM could not place. A photo held sideways enters SfM with transposed intrinsics and trains with one

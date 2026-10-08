@@ -50,6 +50,42 @@ public static class DepthFusionInit
     public sealed record Report(int Views, int ScaledViews, long Candidates, int Emitted, string Scales);
 
     /// <summary>
+    /// The views' depth maps kept for training's depth supervision (SplatTrainerGpu.Depth): each scaled view's map (edge
+    /// snapped when the fusion snapped) resampled to at most <c>longSide</c> pixels on its long side, all in one buffer.
+    /// <see cref="Views"/> maps an image index to its map's offset (floats), size and scale to scene units.
+    /// </summary>
+    public sealed class DepthTargets : IDisposable
+    {
+        public required MemoryBuffer1D<float, Stride1D.Dense> Maps { get; init; }
+        public required Dictionary<int, (long Offset, int Width, int Height, float Scale)> Views { get; init; }
+        public long Bytes => Maps.Length * 4L;
+        public void Dispose() => Maps.Dispose();
+    }
+
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ResampleParams>? _resample;
+
+    public struct ResampleParams
+    {
+        public int SrcOffset, SrcW, SrcH, DstOffset, DstW, DstH;
+    }
+
+    /// <summary>Area average of the positive source samples under one target pixel (0 when none is positive).</summary>
+    static void ResampleKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> src, ArrayView1D<float, Stride1D.Dense> dst, ResampleParams p)
+    {
+        int x = i % p.DstW, y = i / p.DstW;
+        int x0 = x * p.SrcW / p.DstW, x1 = XMath.Max(x0 + 1, (x + 1) * p.SrcW / p.DstW);
+        int y0 = y * p.SrcH / p.DstH, y1 = XMath.Max(y0 + 1, (y + 1) * p.SrcH / p.DstH);
+        float sum = 0f; int n = 0;
+        for (int sy = y0; sy < y1; sy++)
+            for (int sx = x0; sx < x1; sx++)
+            {
+                float d = src[p.SrcOffset + sy * p.SrcW + sx];
+                if (d > 0f && d < 1e20f) { sum += d; n++; }
+            }
+        dst[p.DstOffset + i] = n > 0 ? sum / n : 0f;
+    }
+
+    /// <summary>
     /// Fuse <paramref name="views"/> (indices into <paramref name="cameras"/> / <paramref name="depths"/>) into packed splats.
     /// Returns the GPU buffer (caller owns) and its splat count, or null when fewer than two views could be scaled.
     /// </summary>
@@ -57,11 +93,12 @@ public static class DepthFusionInit
         Accelerator a, IReadOnlyList<CameraParams?> cameras, IReadOnlyList<DepthMap?> depths, IReadOnlyList<int> views,
         IReadOnlyList<Vector3> sparsePoints, IReadOnlyList<byte[]?>? rgba, int stride, float relTol, float maxScale,
         bool snapEdges = false,
-        Func<int, Task<(ArrayView1D<int, Stride1D.Dense> Rgba, Action Release)?>>? deviceRgba = null)
+        Func<int, Task<(ArrayView1D<int, Stride1D.Dense> Rgba, Action Release)?>>? deviceRgba = null,
+        Action<DepthTargets>? keepTargets = null, int targetLongSide = 384)
     {
         // Per accelerator: a kernel cached from another (disposed) accelerator runs against freed state - MEASURED, the
         // second of two unit tests on fresh CPU accelerators failed only when run after the first.
-        if (!ReferenceEquals(_loadedFor, a)) { _fuse = null; _gather = null; _loadedFor = a; }
+        if (!ReferenceEquals(_loadedFor, a)) { _fuse = null; _gather = null; _resample = null; _loadedFor = a; }
         _fuse ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<int, Stride1D.Dense>, Params>(FuseKernel);
@@ -196,6 +233,36 @@ public static class DepthFusionInit
         }
         // CPU transfer: the emitted count.
         int emitted = Math.Min((await counter.CopyToHostAsync<int>(0, 1))[0], capacity);
+
+        if (keepTargets != null)
+        {
+            _resample ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+                ResampleParams>(ResampleKernel);
+            var map = new Dictionary<int, (long, int, int, float)>();
+            var plan = new List<(int K, int W, int H, long Offset)>();
+            long tTotal = 0;
+            for (int k = 0; k < used.Count; k++)
+            {
+                if (scales[k] <= 0f) continue;
+                var d = depths[used[k]]!.Value;
+                float f = MathF.Min(1f, (float)targetLongSide / Math.Max(d.Width, d.Height));
+                int tw = Math.Max(1, (int)MathF.Round(d.Width * f)), th = Math.Max(1, (int)MathF.Round(d.Height * f));
+                plan.Add((k, tw, th, tTotal));
+                tTotal += (long)tw * th;
+            }
+            var maps = a.Allocate1D<float>(Math.Max(1, tTotal));
+            foreach (var (k, tw, th, off) in plan)
+            {
+                var d = depths[used[k]]!.Value;
+                _resample(tw * th, allDepth.View, maps.View, new ResampleParams
+                {
+                    SrcOffset = offsets[k], SrcW = d.Width, SrcH = d.Height, DstOffset = (int)off, DstW = tw, DstH = th,
+                });
+                map[used[k]] = (off, tw, th, scales[k]);
+            }
+            await a.SynchronizeAsync();
+            keepTargets(new DepthTargets { Maps = maps, Views = map });
+        }
         return (outPacked, emitted, new Report(used.Count, scaled, candidates, emitted,
             (snapEdges ? $"(edges snapped in {snappedViews} views) " : "") + scaleText));
     }

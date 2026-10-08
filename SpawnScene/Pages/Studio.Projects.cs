@@ -408,6 +408,7 @@ public partial class Studio
                 ImageName = name,
                 FromProjectStore = fromProjectStore,
                 UsedForInit = true,
+                ImageIndex = i,
                 QuarterTurns = turns,
                 UsedForSupervision = supervise,
                 SourceLongestSide = Math.Max(images[i].SourceWidth, images[i].SourceHeight),
@@ -901,6 +902,7 @@ public partial class Studio
                 MaxDensifiedSplats, MaxTargetStackBytes, HeldOutEveryCycles, _unloadDepthBeforeTraining) = saved;
             RefinePoses = savedRefine;
             SplatTrainerGpu.MaxTotalKeys = savedMaxKeys;
+            _multiViewService.ReleaseDepthTargets();   // &depthloss: the generate's depth maps, done with
             _trainingActive = false;
             if (_state == StudioState.SceneViewer) BuildViewerHudUI();
         }

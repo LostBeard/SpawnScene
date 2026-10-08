@@ -44,6 +44,10 @@ held-out number and looks worse off-path does not ship.
 1. **Re-baseline the carve on the census fix** (k1 Bicycle, k2 Truck, h6-h9 Bathroom, running). Decide the unseen bar
    (1 px costs Bathroom 0.77 dB supervised; try 0.05) and whether the in-training carve earns its keep on rooms
    (Bathroom: supervised 37.4 dB without it, 33.5 with; held-out equal).
+0. **Single-photo tearing, measured 10-08:** MoGe-2 ViT-S/B (MIT) do not have fewer flying pixels than DAv3 Small (tie
+   indoors, worse on foliage) - a bigger model is not the fix. The edge snap is, with its slope guard (bimodal depth
+   window, `&snapmid`): kitchen 0.39 -> 0.25% flying pixels, castle 0.59 -> 0.32, garden no longer terraced.
+   Research/single-photo-tearing-2026-10-07.md.
 0. **MEASURED 10-07 late:** Bathroom `&depthinit=4 &exposure=1` held out 15.58 -> 18.27 dB, SSIM 0.709 -> 0.836 (g4) -
    make both the defaults once Bicycle (b0/b1, e1) and Truck (e2) show no loss. Single photo: `&edgesnap=1` +
    `&inpaint=1` (MI-GAN) make the hidden layers plausible - TJ to judge on the live site (URL flags work there).
@@ -53,6 +57,7 @@ held-out number and looks worse off-path does not ship.
    a. Dense init: each photo's DAv3 depth aligned (scale/shift) to the SfM points it sees, back-projected on a grid,
       voxel-thinned - seeds on every surface a photo saw, not only where features matched.
    b. Inverse-depth L1 against the aligned depth, weight 1.0 -> 0.01 over training (the reference's `-d`). Indoor first.
+      **Built 2026-10-08** (`&depthloss=1` with `&depthinit`; gate-verified against finite differences). A/B d0/d1 queued.
 4. **Capture feedback:** after SfM, show which photos were dropped and why, and a coverage ring (headings with photos,
    as the pan views log). Fix the landscape-photo skip in the multi-view depth pass.
 5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) default-on if the in/out wander views

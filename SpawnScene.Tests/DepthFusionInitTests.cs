@@ -114,4 +114,38 @@ public class DepthFusionInitTests
         // samples landing on the corrupted third lose their only agreement.
         Assert.That(n, Is.EqualTo(expected));
     }
+
+    /// <summary>
+    /// The depth maps kept for training's depth supervision: every scaled view, resampled to the long-side budget, and
+    /// map x scale = the scene's depth (the plane at 5) everywhere. View 1 is in raw units of 0.5, so its scale is 2.
+    /// </summary>
+    [Test]
+    public async Task KeptTargetsAreResampledAndScaledToTheScene()
+    {
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var a = context.CreateCPUAccelerator(0);
+        using var d0 = Depth(a, 1f);
+        using var d1 = Depth(a, 0.5f);
+        var cams = new CameraParams?[] { Cam(0f), Cam(0.5f) };
+        var depths = new DepthFusionInit.DepthMap?[] { new(d0, W, H), new(d1, W, H) };
+        DepthFusionInit.DepthTargets? kept = null;
+        var r = await DepthFusionInit.FuseAsync(a, cams, depths, new[] { 0, 1 }, PlanePoints(), null, 4, 0.03f, 1f,
+            keepTargets: t => kept = t, targetLongSide: 16);
+        Assert.That(r, Is.Not.Null);
+        r!.Value.Packed.Dispose();
+        Assert.That(kept, Is.Not.Null, "keepTargets was not called");
+        using (kept)
+        {
+            Assert.That(kept!.Views.Keys, Is.EquivalentTo(new[] { 0, 1 }));
+            var maps = kept.Maps.GetAsArray1D();
+            foreach (var (view, t) in kept.Views)
+            {
+                Assert.That(t.Width, Is.EqualTo(16));
+                Assert.That(t.Height, Is.EqualTo(12));
+                for (long k = 0; k < (long)t.Width * t.Height; k++)
+                    Assert.That(maps[t.Offset + k] * t.Scale, Is.EqualTo(PlaneZ).Within(1e-3f), $"view {view} sample {k}");
+            }
+            Assert.That(kept.Views[1].Scale, Is.EqualTo(0.5f).Within(1e-4f), "raw unit 0.5 = depth 10 in the map: scale 0.5");
+        }
+    }
 }

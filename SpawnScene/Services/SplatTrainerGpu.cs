@@ -280,6 +280,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _gradKeyC = accel.Allocate1D<float>((long)capacity * 3);
         Console.WriteLine($"[Trainer] key buffers grown {_keyCapacity:N0} -> {capacity:N0} for a frame that needed {needed:N0}");
         _keyCapacity = capacity;
+        EnsureDepthIo();   // its per-key region follows the key capacity
         KeyGrowths++;
         return true;
     }
@@ -807,7 +808,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// </summary>
     public async Task<float[]> RenderForwardAsync(
         MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
-        CameraParams cam, float depthNear, float depthFar, bool readback = true)
+        CameraParams cam, float depthNear, float depthFar, bool readback = true, bool depth = false)
     {
         if (_device == null || _emitKeys == null) throw new InvalidOperationException("not initialized");
 
@@ -879,7 +880,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         // (TruckFull: ~100 of 219 per window), so a view busier than the window's peak lands here. Growing used to be
         // impossible, which is why capacity kept a floor of 8 keys a splat (~350 B/splat, 26% of training memory).
         if (keyCount > _keyCapacity && GrowKeysOnOverflow && TryGrowKeys(keyCount))
-            return await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback);
+            return await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback, depth);
         LastOverflowed = keyCount > _keyCapacity;
         LastKeyCount = Math.Min(keyCount, _keyCapacity);
         if (LastOverflowed)
@@ -931,23 +932,23 @@ public sealed partial class SplatTrainerGpu : IDisposable
         using (var enc = _device.CreateCommandEncoder())
         {
             using var pass = enc.BeginComputePass();
-            pass.SetPipeline(_rasterForward!);
-            using var layout = _rasterForward!.GetBindGroupLayout(0);
-            using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor
+            // The depth-supervised build also writes the rendered inverse depth (SplatTrainerGpu.Depth).
+            var forward = depth ? _rasterForwardDepth! : _rasterForward!;
+            pass.SetPipeline(forward);
+            using var layout = forward.GetBindGroupLayout(0);
+            var entries = new List<GPUBindGroupEntry>
             {
-                Layout = layout,
-                Entries = new GPUBindGroupEntry[]
-                {
-                    new() { Binding = 0, Resource = new GPUBufferBinding { Buffer = _uniformBuf! } },
-                    new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = splatGpu } },
-                    new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = _ranges!.GetGPUBuffer()! } },
-                    new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = _values!.GetGPUBuffer()! } },
-                    new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = _outColour!.GetGPUBuffer()! } },
-                    new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _outFinalT!.GetGPUBuffer()! } },
-                    new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _outEnd!.GetGPUBuffer()! } },
-                    new() { Binding = 11, Resource = new GPUBufferBinding { Buffer = _splatColour!.GetGPUBuffer()! } },
-                },
-            });
+                new() { Binding = 0, Resource = new GPUBufferBinding { Buffer = _uniformBuf! } },
+                new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = splatGpu } },
+                new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = _ranges!.GetGPUBuffer()! } },
+                new() { Binding = 3, Resource = new GPUBufferBinding { Buffer = _values!.GetGPUBuffer()! } },
+                new() { Binding = 4, Resource = new GPUBufferBinding { Buffer = _outColour!.GetGPUBuffer()! } },
+                new() { Binding = 5, Resource = new GPUBufferBinding { Buffer = _outFinalT!.GetGPUBuffer()! } },
+                new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _outEnd!.GetGPUBuffer()! } },
+                new() { Binding = 11, Resource = new GPUBufferBinding { Buffer = _splatColour!.GetGPUBuffer()! } },
+            };
+            if (depth) entries.Add(new() { Binding = 15, Resource = new GPUBufferBinding { Buffer = _depthIo!.GetGPUBuffer()! } });
+            using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor { Layout = layout, Entries = entries.ToArray() });
             pass.SetBindGroup(0, bg);
             pass.DispatchWorkgroups((uint)_tilesX, (uint)_tilesY, 1);
             pass.End();
@@ -1973,7 +1974,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         if (_lossStepsPending == 0) _lossSum!.MemSetToZero();
 
         // Forward also refreshes the tile binning for this view.
-        await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false);
+        bool depthOn = PrepareDepthStep(splatCount);
+        await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false, depth: depthOn);
         if (LastKeyCount == 0)
         {
             // Clear before returning: the view-support census and densify accum read these
@@ -2055,6 +2057,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         if (SsimPerChannel && HasSsimWindows) WriteSsimCfg();
         // dL/d(exposed) -> dL/d(raw render) for the backward below, and one Adam step on the exposure.
         if (exposed) DispatchExposureBackward(exposureSlot, lossGroupsX, lossGroupsY, lossGroups);
+        // Depth supervision: dL/d(rendered inverse depth) for the backward below (SplatTrainerGpu.Depth).
+        if (depthOn) DispatchInvDepthLoss(pixels, lossGroupsX, lossGroupsY, lossGroups);
 
         await PhaseAsync("loss+ssim");
         // ── Backward: one workgroup per tile, no atomics for signed grads ──
@@ -2063,7 +2067,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _densifyAbs!.MemSetToZero();
         accel.FlushPendingCommands();
         // grad_per_key is written for every key this frame, so stale values cannot leak in.
-        Dispatch(_rasterBackward!, _tilesX, _tilesY, new[]
+        var backwardEntries = new List<GPUBindGroupEntry>
         {
             Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _ranges!.GetGPUBuffer()!),
             Buf(3, _values!.GetGPUBuffer()!), Buf(4, _outFinalT!.GetGPUBuffer()!),
@@ -2072,22 +2076,40 @@ public sealed partial class SplatTrainerGpu : IDisposable
             Buf(9, _gradKeyC!.GetGPUBuffer()!),
             Buf(10, _densifyAbs!.GetGPUBuffer()!),
             Buf(11, _splatColour!.GetGPUBuffer()!),
-        });
+        };
+        if (depthOn) backwardEntries.Add(Buf(15, _depthIo!.GetGPUBuffer()!));
+        Dispatch(depthOn ? _rasterBackwardDepth! : _rasterBackward!, _tilesX, _tilesY, backwardEntries.ToArray());
 
         await PhaseAsync("backward");
         // Cleared here, not at the top of the step: the census and densify accum read the
         // completed step's totals after TrainStepAsync returns.
         _gradFixed!.MemSetToZero();
+        if (depthOn) _gradInvz!.MemSetToZero();
         accel.FlushPendingCommands();
 
         // ── Scatter per-key gradients into per-splat totals (f32 CAS add) ──
-        WriteU32(_countBuf!, (uint)LastKeyCount);
-        DispatchLinear(_scatterGrad!, LastKeyCount, new[]
+        if (depthOn)
         {
-            Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
-            Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
-            Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
-        });
+            // counts.y = where the per-key dL/d(1/z) start in depth_io.
+            WriteU32x4(_countBuf!, (uint)LastKeyCount, (uint)(2L * pixels), 0u, 0u);
+            DispatchLinear(_scatterGradDepth!, LastKeyCount, new[]
+            {
+                Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
+                Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
+                Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
+                Buf(6, _depthIo!.GetGPUBuffer()!), Buf(7, _gradInvz!.GetGPUBuffer()!),
+            });
+        }
+        else
+        {
+            WriteU32(_countBuf!, (uint)LastKeyCount);
+            DispatchLinear(_scatterGrad!, LastKeyCount, new[]
+            {
+                Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
+                Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
+                Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
+            });
+        }
 
         await PhaseAsync("scatter");
         if (TrainableVolume is { } trainable) FreezeOutside(splatGpu, splatCount, trainable);
@@ -2140,13 +2162,15 @@ public sealed partial class SplatTrainerGpu : IDisposable
                 geo.PositionLr, geo.LogScaleLr, geo.RotationLr, _adamStepCount,
                 splatCount, geo.MaxScale, geo.MinScale, DenseGeometryAdam ? 1f : 0f);
             WriteVec4(_geomCfgBuf!, McmcScaleReg / (3f * Math.Max(1, splatCount)), 0f, 0f, 0f, offset: 32);
-            DispatchLinear(_adamGeometry!, splatCount, new[]
+            var geometryEntries = new List<GPUBindGroupEntry>
             {
                 Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _gradFixed!.GetGPUBuffer()!),
                 Buf(3, _logScale!.GetGPUBuffer()!), Buf(4, _adamM!.GetGPUBuffer()!),
                 Buf(5, _adamV!.GetGPUBuffer()!), Buf(6, _geomCfgBuf!),
                 Buf(7, _geomOut!.GetGPUBuffer()!), Buf(8, _scaleFloor!.GetGPUBuffer()!),
-            });
+            };
+            if (depthOn) geometryEntries.Add(Buf(9, _gradInvz!.GetGPUBuffer()!));
+            DispatchLinear(depthOn ? _adamGeometryDepth! : _adamGeometry!, splatCount, geometryEntries.ToArray());
             // This view's camera-pose gradient, from the splat position gradients just written (poseSlot >= 0).
             if (poseSlot >= 0) DispatchPoseGrad(splatGpu, splatCount, cam.Position, poseSlot);
             // MCMC exploration, after the step as gsplat does it (step_post_backward follows optimizer.step()).
@@ -2466,6 +2490,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         // Per VIEW, not per splat: they live through every resize. In DisposeBuffers (which every densify resize runs)
         // they were freed after the first densify, and camera refinement silently stepped no camera (c19, 2026-10-04).
         DisposeExposure();
+        DisposeDepth();
         _posePartials?.Dispose(); _posePartials = null;
         _poseGrads?.Dispose(); _poseGrads = null;
         _radixSort?.Dispose(); _radixSort = null;

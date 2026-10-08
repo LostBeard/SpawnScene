@@ -1183,11 +1183,22 @@ public class MultiViewGenerationService
         return result;
     }
 
+    /// <summary>Keep the photos' scaled depth maps after a generate (Studio's &amp;depthloss: training supervises with them).</summary>
+    public static bool KeepDepthTargets { get; set; }
+
+    /// <summary>The last generate's depth maps for training (DepthFusionInit.DepthTargets; this service owns them until
+    /// <see cref="ReleaseDepthTargets"/>).</summary>
+    public DepthFusionInit.DepthTargets? LastDepthTargets { get; private set; }
+
+    /// <summary>Free the kept depth maps (training is done with them, or a new generate starts).</summary>
+    public void ReleaseDepthTargets() { LastDepthTargets?.Dispose(); LastDepthTargets = null; }
+
     async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
         GenerateCoreAsync(IReadOnlyList<ImportedImage> images, int subsample = 2, float edgeSharpness = 0.3f)
     {
         if (images.Count < 2)
             throw new ArgumentException("Multi-view generation requires at least 2 images.");
+        ReleaseDepthTargets();
 
         // Ensure depth model is loaded before checking model type
         if (!_depthService.IsReady)
@@ -1772,7 +1783,10 @@ public class MultiViewGenerationService
                         bool made = await GpuImageOps.EnsureOnDeviceAsync(_gpu.Accelerator!, im);
                         if (im.GpuRgba == null) return null;
                         return (im.GpuRgba.View, () => { if (made) im.DisposeGpu(); });
-                    });
+                    },
+                    keepTargets: KeepDepthTargets ? t => { LastDepthTargets?.Dispose(); LastDepthTargets = t; } : null);
+                if (LastDepthTargets is { } kept)
+                    Console.WriteLine($"[MultiView] depth targets kept for training: {kept.Views.Count} views, {kept.Bytes / 1048576.0:F0} MB");
                 if (fused is { } f)
                 {
                     Console.WriteLine($"[MultiView] depth fusion init: {f.Count:N0} seeds from {f.Report.Candidates:N0} samples of " +

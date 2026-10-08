@@ -77,6 +77,7 @@
     <Compile Include="..\SpawnScene\Services\SplatDensityControl.cs" Link="Linked\SplatDensityControl.cs" />
     <Compile Include="..\SpawnScene\Services\SplatRasterizer.cs" Link="Linked\SplatRasterizer.cs" />
     <Compile Include="..\SpawnScene\Services\SphericalHarmonics.cs" Link="Linked\SphericalHarmonics.cs" />
+    <Compile Include="..\SpawnScene\Services\SplatTrainerShaders.cs" Link="Linked\SplatTrainerShaders.cs" />
     <Compile Include="..\SpawnScene\Services\SplatOptimizer.cs" Link="Linked\SplatOptimizer.cs" />
     <Compile Include="..\SpawnScene\Services\SplatTileRasterizer.cs" Link="Linked\SplatTileRasterizer.cs" />
     <Compile Include="..\SpawnScene\Services\MvsGeometricFusion.cs" Link="Linked\MvsGeometricFusion.cs" />

@@ -330,6 +330,9 @@ public partial class Studio
             // -- Per-photo exposure: a known colour transform of the scene's own render is recovered --
             if (!await ExposureGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
 
+            // -- Depth supervision: the rendered inverse depth, its gradient against finite differences, and it trains --
+            if (!await DepthSupervisionGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
             // -- Past 65535 workgroups: a per-splat pass over more than 4,194,240 splats reaches every one --
             if (!await LinearDispatchGateAsync(trainer)) return;
 

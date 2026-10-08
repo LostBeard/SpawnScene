@@ -103,6 +103,14 @@ public partial class Studio
     /// </summary>
     public static bool ExposureOption { get; set; }
 
+    /// <summary>
+    /// <c>&amp;depthloss=X</c>: depth supervision (SplatTrainerGpu.Depth, the reference's <c>-d</c>) - an L1 between the rendered
+    /// inverse depth and each photo's DAv3 depth scaled to the SfM points (DepthFusionInit), weight X decaying to X/100
+    /// over training (the reference: 1.0 -> 0.01). Needs the generate's depth maps (MultiViewGenerationService
+    /// .KeepDepthTargets, set with it); views SfM turned a quarter go without (their map is the other way round). 0 = off.
+    /// </summary>
+    public static float DepthLossOption { get; set; }
+
     /// <summary>gsplat MCMCStrategy.refine_stop_iter: relocation and growth stop here (noise and the regularisers do not).</summary>
     public static int McmcUntilIter { get; set; } = 25_000;
 
@@ -515,6 +523,12 @@ public partial class Studio
             Console.WriteLine(
                 $"[Train] supervising on {supervised.Count} views, " +
                 $"{views.Count - supervised.Count} held out");
+            var depthTargets = DepthLossOption > 0f ? _multiViewService.LastDepthTargets : null;
+            if (DepthLossOption > 0f)
+                Console.WriteLine(depthTargets == null
+                    ? "[Train] depth supervision: the generate kept no depth maps - off"
+                    : $"[Train] depth supervision: {supervised.Count(i => views[i].QuarterTurns == 0 && depthTargets.Views.ContainsKey(views[i].ImageIndex))} " +
+                      $"of {supervised.Count} supervised views have a depth map; weight {DepthLossOption:G3} -> {DepthLossOption * 0.01f:G3}");
             // The Mip 3D-filter floor is measured against the photos the scene is fitted to, at the training size.
             _trainer.SetMipCameras(supervised.Select(i => views[i].Camera.ScaledTo(w, h)).ToList());
             // Camera refinement: per-view Adam state, and the step sizes in this capture's units.
@@ -665,6 +679,15 @@ public partial class Studio
                 var (near, far) = SplatBounds.DepthRangeFor(box, cam);
 
                 _trainer.SetTargetFrom(targets, vi);
+                if (depthTargets != null)
+                {
+                    if (views[vi].QuarterTurns == 0 && depthTargets.Views.TryGetValue(views[vi].ImageIndex, out var dt))
+                    {
+                        _trainer.SetDepthTarget(depthTargets.Maps, dt.Offset, dt.Width, dt.Height, dt.Scale);
+                        _trainer.DepthLossWeight = TrainingSchedule.ExponentialLr(DepthLossOption, DepthLossOption * 0.01f, it, iterations);
+                    }
+                    else _trainer.SetDepthTarget(null);
+                }
                 // The loss is read only where it is used: every census step (per-view loss), each cycle's
                 // end (the cycle mean), and the last step. In between it sums on the GPU, so those steps
                 // cost no CPU-GPU round trip; NaN = not read this step.
@@ -896,6 +919,9 @@ public partial class Studio
                 if (it % 4 == 3) await Task.Delay(1);
             }
             double total = (DateTime.UtcNow - start).TotalSeconds;
+            // Depth supervision is a training loss only: held-out refinement and scoring below run without it.
+            _trainer.SetDepthTarget(null);
+            _trainer.DepthLossWeight = 0f;
             onProgress?.Invoke(new TrainProgress(itersDone, iterations, n, total));
             // Fewer iterations than one cycle (one pass over the supervised views: TruckFull 200 iters < 219 views) never
             // closes a cycle, and this printed "NaN -> NaN" as if training had diverged. Report the partial cycle instead.

@@ -405,6 +405,8 @@ fn tile_ranges(
 @group(0) @binding(6) var<storage, read_write> out_end : array<u32>;      // 1 per pixel
 // The display RGB emit_keys stored for this view (Common's project() calls this).
 @group(0) @binding(11) var<storage, read> splat_colour : array<f32>;
+// Depth supervision (DepthVariant): the rendered inverse depth sum(w_i / z_i) into depth_io[0, pixels).
+//DEPTH: @group(0) @binding(15) var<storage, read_write> depth_io : array<f32>;
 fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
     return vec3<f32>(splat_colour[i * 3u], splat_colour[i * 3u + 1u], splat_colour[i * 3u + 2u]);
 }
@@ -415,6 +417,7 @@ var<workgroup> sh_centre : array<vec2<f32>, 256>;
 var<workgroup> sh_conic  : array<vec3<f32>, 256>;
 var<workgroup> sh_colour : array<vec3<f32>, 256>;
 var<workgroup> sh_opacity: array<f32, 256>;
+//DEPTH: var<workgroup> sh_invz : array<f32, 256>;
 
 @compute @workgroup_size(16, 16, 1)
 fn raster_forward(
@@ -430,6 +433,7 @@ fn raster_forward(
     let range = ranges[tile];
     var t = 1.0;
     var acc = vec3<f32>(0.0);
+//DEPTH:     var acc_inv = 0.0;
     var consumed = 0u;
     var done = !inside;
 
@@ -445,6 +449,7 @@ fn raster_forward(
             sh_conic[li] = p.conic;
             sh_colour[li] = p.colour;
             sh_opacity[li] = select(0.0, p.opacity, p.valid);
+//DEPTH:             sh_invz[li] = select(0.0, 1.0 / max(p.depth, 1e-6), p.valid);
         }
         workgroupBarrier();
 
@@ -463,6 +468,7 @@ fn raster_forward(
                 if (test_t < MIN_T) { done = true; break; }
                 consumed = consumed + 1u;
                 acc = acc + sh_colour[k] * alpha * t;
+//DEPTH:                 acc_inv = acc_inv + sh_invz[k] * alpha * t;
                 t = test_t;
             }
         }
@@ -481,6 +487,7 @@ fn raster_forward(
         out_colour[o * 3u + 1u] = acc.y;
         out_colour[o * 3u + 2u] = acc.z;
         out_final_t[o] = t;
+//DEPTH:         depth_io[o] = acc_inv;
         // Exclusive bound into this tile's list, matching SplatRasterizer.Forward.OrderEnd.
         out_end[o] = range.x + consumed;
     }
@@ -859,6 +866,9 @@ fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
 // SplatTrainerGpu.AbsGrad is on. f32 bit patterns in u32 atomics, added by compare-exchange (WGSL has
 // no float atomics); a splat's tiles are few, so the loop rarely spins.
 @group(0) @binding(10) var<storage, read_write> densify_abs : array<atomic<u32>>; // 2 per splat: sum |dPx|,|dPy|
+// Depth supervision (DepthVariant): reads dL/d(inverse depth) at depth_io[pixels + o], writes each key's dL/d(1/z) at
+// depth_io[2 pixels + key]. Inverse depth blends exactly like a colour channel, so dL/d(alpha) gains the same term.
+//DEPTH: @group(0) @binding(15) var<storage, read_write> depth_io : array<f32>;
 
 fn densify_abs_add(i : u32, v : f32) {
     var old = atomicLoad(&densify_abs[i]);
@@ -876,6 +886,7 @@ var<workgroup> redA : array<vec4<f32>, 256>;   // dR, dG, dB, dOpacity
 var<workgroup> redB : array<vec4<f32>, 256>;   // dCentreX, dCentreY, dConicA, dConicB
 var<workgroup> redC : array<f32, 256>;         // dConicC
 var<workgroup> redAbs : array<vec2<f32>, 256>; // |dCentreX|, |dCentreY| per pixel
+//DEPTH: var<workgroup> redD : array<f32, 256>;   // dL/d(1/z) per pixel
 
 // One batch of splats projected ONCE for the whole tile, as the forward does. Every thread used to
 // call project() for every key - covariance, conic and SH colour 256 times over for one splat.
@@ -885,6 +896,7 @@ var<workgroup> sb_centre : array<vec2<f32>, 64>;
 var<workgroup> sb_conic  : array<vec3<f32>, 64>;
 var<workgroup> sb_colour : array<vec3<f32>, 64>;
 var<workgroup> sb_opacity: array<f32, 64>;   // 0 for an invalid projection: alpha 0 never hits
+//DEPTH: var<workgroup> sb_invz : array<f32, 64>;
 // The furthest key any pixel of this tile reached (max end_idx). Keys behind it touch no pixel.
 var<workgroup> tile_end_atomic : atomic<u32>;
 var<workgroup> tile_end_plain : u32;
@@ -905,6 +917,7 @@ fn raster_backward(
     var t = 1.0;
     var my_end = range.x;
     var dL = vec3<f32>(0.0);
+//DEPTH:     var dLd = 0.0;
     if (inside) {
         let o = py * u32(u.viewport.x) + px;
         t = final_t[o];
@@ -916,10 +929,12 @@ fn raster_backward(
         // clamp. Dead views stay in the supervised set (Studio.Training) rather than dropping.
         my_end = min(max(end_idx[o], range.x), range.y);
         dL = vec3<f32>(dL_dpix[o * 3u + 0u], dL_dpix[o * 3u + 1u], dL_dpix[o * 3u + 2u]);
+//DEPTH:         dLd = depth_io[u32(u.viewport.x) * u32(u.viewport.y) + o];
     }
 
     // Colour accumulated by everything BEHIND the splat currently being processed.
     var rec = vec3<f32>(0.0);
+//DEPTH:     var rec_inv = 0.0;
 
     // Keys at or past every pixel's end were never applied by the forward: their gradients are
     // exactly zero. Write the zeros and start the walk at the furthest end instead of range.y.
@@ -933,6 +948,7 @@ fn raster_backward(
         grad_a[z * 3u + 0u] = 0.0; grad_a[z * 3u + 1u] = 0.0; grad_a[z * 3u + 2u] = 0.0;
         grad_b[z * 3u + 0u] = 0.0; grad_b[z * 3u + 1u] = 0.0; grad_b[z * 3u + 2u] = 0.0;
         grad_c[z * 3u + 0u] = 0.0; grad_c[z * 3u + 1u] = 0.0; grad_c[z * 3u + 2u] = 0.0;
+//DEPTH:         depth_io[2u * u32(u.viewport.x) * u32(u.viewport.y) + z] = 0.0;
     }
 
     // Back to front, in lockstep, a batch at a time. tile_end and range.x are uniform, so every
@@ -948,6 +964,7 @@ fn raster_backward(
             sb_conic[li] = q.conic;
             sb_colour[li] = q.colour;
             sb_opacity[li] = select(0.0, q.opacity, q.valid);
+//DEPTH:             sb_invz[li] = select(0.0, 1.0 / max(q.depth, 1e-6), q.valid);
         }
         workgroupBarrier();
 
@@ -961,6 +978,7 @@ fn raster_backward(
         var geom = vec4<f32>(0.0);
         var geom_cc = 0.0;
         var abs_c = vec2<f32>(0.0);
+//DEPTH:         var contrib_d = 0.0;
 
         // Gates as BOOL LOCALS, then ONE branch. Nested `if (a) { if (b) { if (c) } }` on this
         // WebGPU path has dropped every thread with zero GPU errors before
@@ -987,10 +1005,12 @@ fn raster_backward(
 
             contrib = vec4<f32>(w * dL.x, w * dL.y, w * dL.z, 0.0);
 
-            let dL_dalpha =
+            var dL_dalpha =
                 (p.colour.x - rec.x) * t * dL.x +
                 (p.colour.y - rec.y) * t * dL.y +
                 (p.colour.z - rec.z) * t * dL.z;
+//DEPTH:             dL_dalpha = dL_dalpha + (sb_invz[s] - rec_inv) * t * dLd;
+//DEPTH:             contrib_d = w * dLd;
 
             // A CLAMPED alpha is constant in opacity, so its derivative is zero.
             // Dropping this guard produces a phantom gradient that drives opacity
@@ -1018,6 +1038,7 @@ fn raster_backward(
             abs_c = vec2<f32>(abs(dCx), abs(dCy));
 
             rec = alpha * p.colour + (1.0 - alpha) * rec;
+//DEPTH:             rec_inv = alpha * sb_invz[s] + (1.0 - alpha) * rec_inv;
         }
 
         // Reduce this contribution across the tile's 256 pixels.
@@ -1025,6 +1046,7 @@ fn raster_backward(
         redB[li] = geom;
         redC[li] = geom_cc;
         redAbs[li] = abs_c;
+//DEPTH:         redD[li] = contrib_d;
         workgroupBarrier();
         var stride = 128u;
         loop {
@@ -1037,6 +1059,7 @@ fn raster_backward(
                 // fixed-point bar (Truck 7K: 828 splits, 0 clones); with the reference's NDC scaling
                 // and gsplat's 8e-4 absgrad bar the sum is the published criterion.
                 redAbs[li] = redAbs[li] + redAbs[li + stride];
+//DEPTH:                 redD[li] = redD[li] + redD[li + stride];
             }
             workgroupBarrier();
             stride = stride >> 1u;
@@ -1053,6 +1076,7 @@ fn raster_backward(
             grad_c[b3 + 0u] = redB[0].z;
             grad_c[b3 + 1u] = redB[0].w;
             grad_c[b3 + 2u] = redC[0];
+//DEPTH:             depth_io[2u * u32(u.viewport.x) * u32(u.viewport.y) + k] = redD[0];
 
             // This tile's sum of per-pixel |dCentre| into the splat's per-view total.
             let splat = values[k];
@@ -1088,7 +1112,18 @@ fn raster_backward(
 @group(0) @binding(2) var<storage, read>       grad_c     : array<f32>;   // dConic a, b, c
 @group(0) @binding(3) var<storage, read>       values     : array<u32>;
 @group(0) @binding(4) var<storage, read_write> grad_fixed : array<atomic<u32>>; // f32 bits, 9 per splat
-@group(0) @binding(5) var<uniform>             counts     : vec4<u32>;   // x = key count
+@group(0) @binding(5) var<uniform>             counts     : vec4<u32>;   // x = key count, y = 2 x pixels (DepthVariant)
+// Depth supervision (DepthVariant): each key's dL/d(1/z) (depth_io[counts.y + key]) summed per splat.
+//DEPTH: @group(0) @binding(6) var<storage, read> depth_io : array<f32>;
+//DEPTH: @group(0) @binding(7) var<storage, read_write> grad_invz : array<atomic<u32>>;
+//DEPTH: fn atomic_add_invz(idx : u32, v : f32) {
+//DEPTH:     var old = atomicLoad(&grad_invz[idx]);
+//DEPTH:     loop {
+//DEPTH:         let r = atomicCompareExchangeWeak(&grad_invz[idx], old, bitcast<u32>(bitcast<f32>(old) + v));
+//DEPTH:         if (r.exchanged) { break; }
+//DEPTH:         old = r.old_value;
+//DEPTH:     }
+//DEPTH: }
 
 const GRADS_PER_SPLAT : u32 = 9u;
 // abs(v) <= FINITE_MAX is false for NaN (unordered) and for +-Inf.
@@ -1137,6 +1172,8 @@ fn scatter_gradients(
         let vc = grad_c[b3 + c];
         if (vc != 0.0 && abs(vc) <= FINITE_MAX) { atomic_add_f32(out + 6u + c, vc); }
     }
+//DEPTH:     let vd = depth_io[counts.y + k];
+//DEPTH:     if (vd != 0.0 && abs(vd) <= FINITE_MAX) { atomic_add_invz(splat, vd); }
 }
 ";
 
@@ -1220,6 +1257,74 @@ fn loss_reduce(@builtin(local_invocation_index) lid : u32) {
     if (lid == 0u) { loss_sum[0] = loss_sum[0] + weights.x * red[0] / f32(dims.x * 3u); }
 }
 ";
+
+    /// <summary>
+    /// Depth supervision (the reference 3DGS's <c>-d</c>): L1 between the rendered inverse depth sum(w_i / z_i) and the
+    /// photo's monocular depth, scaled to the scene by DepthFusionInit (median ratio to the SfM points), as inverse depth.
+    /// The map covers the whole photo at the depth model's resolution and is sampled bilinearly at the training pixel's
+    /// normalised position. dL/d(inverse depth) = lambda sign(diff) / pixels into depth_io[pixels + p]; a pixel whose four
+    /// map samples are not all positive gets 0. Per-workgroup |diff| sums into loss_partial for <see cref="LossReduce"/>.
+    /// </summary>
+    public const string InvDepthL1 = @"
+struct DepthCfg {
+    f : vec4<f32>,   // x = lambda, y = depth scale, z = map width, w = map height
+    n : vec4<u32>,   // x = viewport width, y = viewport height, z = map offset (floats) in depth_maps
+};
+@group(0) @binding(0) var<storage, read_write> depth_io     : array<f32>;
+@group(0) @binding(1) var<storage, read>       depth_maps   : array<f32>;
+@group(0) @binding(2) var<storage, read_write> loss_partial : array<f32>;
+@group(0) @binding(3) var<uniform>             dims         : vec4<u32>;   // x = pixels, y = workgroups per grid row, z = workgroups
+@group(0) @binding(4) var<uniform>             cfg          : DepthCfg;
+
+var<workgroup> wg_sum : array<f32, 64>;
+
+fn map_at(x : i32, y : i32) -> f32 {
+    let mw = i32(cfg.f.z);
+    let mh = i32(cfg.f.w);
+    return depth_maps[cfg.n.z + u32(clamp(y, 0, mh - 1) * mw + clamp(x, 0, mw - 1))];
+}
+
+@compute @workgroup_size(64)
+fn inv_depth_l1(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_index) lid : u32) {
+    let group = wid.y * dims.y + wid.x;
+    let p = group * 64u + lid;
+    let pixels = dims.x;
+    var total = 0.0;
+    if (p < pixels) {
+        let px = p % cfg.n.x;
+        let py = p / cfg.n.x;
+        let fx = (f32(px) + 0.5) * cfg.f.z / f32(cfg.n.x) - 0.5;
+        let fy = (f32(py) + 0.5) * cfg.f.w / f32(cfg.n.y) - 0.5;
+        let x0 = i32(floor(fx));
+        let y0 = i32(floor(fy));
+        let ax = fx - f32(x0);
+        let ay = fy - f32(y0);
+        let d00 = map_at(x0, y0);
+        let d10 = map_at(x0 + 1, y0);
+        let d01 = map_at(x0, y0 + 1);
+        let d11 = map_at(x0 + 1, y0 + 1);
+        var g = 0.0;
+        if (min(min(d00, d10), min(d01, d11)) > 0.0) {
+            let d = mix(mix(d00, d10, ax), mix(d01, d11, ax), ay) * cfg.f.y;
+            let diff = depth_io[p] - 1.0 / d;
+            total = abs(diff);
+            g = cfg.f.x * sign(diff) / f32(pixels);
+        }
+        depth_io[pixels + p] = g;
+    }
+    wg_sum[lid] = total;
+    workgroupBarrier();
+    for (var s = 32u; s > 0u; s = s >> 1u) {
+        if (lid < s) { wg_sum[lid] = wg_sum[lid] + wg_sum[lid + s]; }
+        workgroupBarrier();
+    }
+    if (lid == 0u && group < dims.z) { loss_partial[group] = wg_sum[0]; }
+}
+";
+
+    /// <summary>The depth-supervised build of a raster / scatter / geometry shader: its <c>//DEPTH: </c> lines switched
+    /// on. Without them the default pipelines are exactly what they were (no extra binding, no extra work).</summary>
+    public static string DepthVariant(string wgsl) => wgsl.Replace("//DEPTH: ", "");
 
     /// <summary>
     /// Pass 8: Adam on colour and opacity.
@@ -2330,6 +2435,8 @@ struct GeomCfg {
 // Per-splat minimum scale (world units) - the Mip-Splatting 3D filter as a floor: no axis thinner than the finest
 // detail any training camera resolves at this splat (MipScaleFloor). 0 = no floor.
 @group(0) @binding(8) var<storage, read>       scale_floor : array<f32>;
+// Depth supervision (DepthVariant): dL/d(1/z) per splat (f32 bits); 1/z = 1/tz, so it reaches tz as -g / tz^2.
+//DEPTH: @group(0) @binding(9) var<storage, read>       grad_invz : array<u32>;
 
 const BETA1 : f32 = 0.9;
 const BETA2 : f32 = 0.999;
@@ -2399,13 +2506,15 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
     // dL/d(conic.y); conic.y = +cov_b/det in pixel axes (project()), the formulas below are for -cov_b/det: negate.
     let up_cb = -bitcast<f32>(grad_fixed[gb + 7u]);
     let up_cc = bitcast<f32>(grad_fixed[gb + 8u]);
+    var up_invz = 0.0;
+//DEPTH:     up_invz = bitcast<f32>(grad_invz[i]);
 
     // A splat this view never touched has no gradient. By default it takes no step: stale momentum would
     // drag geometry that nothing is currently constraining. The reference's default optimiser is torch
     // Adam, which steps EVERY parameter every iteration (m and v decay, the parameter keeps moving by
     // m_hat / sqrt(v_hat)); g.limit.w = 1 does that, so the two can be measured against each other.
     let o = i * FLOATS_PER_SPLAT;
-    if (up_cx == 0.0 && up_cy == 0.0 && up_ca == 0.0 && up_cb == 0.0 && up_cc == 0.0) {
+    if (up_cx == 0.0 && up_cy == 0.0 && up_ca == 0.0 && up_cb == 0.0 && up_cc == 0.0 && up_invz == 0.0) {
         if (g.limit.w == 0.0) { return; }
         dense_zero_step(i, o);
         return;
@@ -2544,6 +2653,7 @@ fn adam_geometry(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
          + gj02 * (select(2.0, 1.0, clamp_x) * u.focal.x * txc * invz2 * invz)
          + gj11 * (-u.focal.y * invz2)
          + gj12 * (select(2.0, 1.0, clamp_y) * u.focal.y * tyc * invz2 * invz);
+    gt.z = gt.z - up_invz * invz2;   // the rendered inverse depth's own path (0 unless DepthVariant)
 
     let gpos = u.cam_right.xyz * gt.x + u.cam_up.xyz * gt.y + u.cam_fwd.xyz * gt.z;
 

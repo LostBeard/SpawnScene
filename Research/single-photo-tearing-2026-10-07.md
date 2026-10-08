@@ -170,6 +170,12 @@ where MI-GAN paints another chair, and the cabinet face where MI-GAN leaves the 
 struggle with the cereal boxes (LaMa continues the backsplash tiles but keeps a blue smear). MI-GAN is 0.6 s, LaMa 1.6 s on
 CPU; 30 MB vs 208 MB.
 
+On natural texture (garden, `img/migan-vs-lama-garden-2026-10-08.jpg`) it is MIXED: MI-GAN paints sharp, plausible palm
+leaves, hedge and branches where LaMa leaves a blurry green mush; but on the path MI-GAN invents an object (a bicycle-like
+shape) where LaMa continues the grass and the path's edge. LaMa keeps structure and blurs fine texture; MI-GAN is sharp
+and hallucinates. MI-GAN stays the default (30 MB, foliage-heavy single photos look better); LaMa is the option for rooms
+and objects in front of walls, once the ML release carries its fixes.
+
 LaMa did not run on SpawnDev.ILGPU.ML: two library bugs, both fixed in the ML repo (a4a5c011) - N-D broadcasting in
 compile-time constant folding (LaMa's DFT matrices [64,1] * [33] folded to [64,1]) and ConvTranspose output_padding
 (64 -> 127 -> 253 -> 505). After the fixes LaMa on OpenCL matches onnxruntime to 0.003 (0..255). SpawnScene has

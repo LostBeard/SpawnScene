@@ -197,6 +197,14 @@ public partial class Studio : IAsyncDisposable
             .Where(p => p.Length == 2)
             .ToDictionary(p => Uri.UnescapeDataString(p[0]), p => Uri.UnescapeDataString(p[1]),
                 StringComparer.OrdinalIgnoreCase);
+        // Experimental options a USER can try on any Studio URL (TJ, to compare on the live site; defaults unchanged):
+        // ?edgesnap=1 (single-photo depth edges snapped to colour), ?inpaint=1 (MI-GAN paints the hidden layers),
+        // ?depthinit=4 (multi-photo seeds from DAv3 depth), ?exposure=1 (per-photo exposure), ?depthmodel=<id>.
+        if (query.TryGetValue("edgesnap", out var uEs)) DepthToGaussianKernel.EdgeSnapEnabled = uEs is "1" or "true";
+        if (query.TryGetValue("inpaint", out var uIp)) DepthToGaussianKernel.InpaintHiddenLayer = uIp is "1" or "true";
+        if (query.TryGetValue("depthinit", out var uDi) && int.TryParse(uDi, out var uDiv)) _multiViewService.DepthFusionInitStride = Math.Max(0, uDiv);
+        if (query.TryGetValue("exposure", out var uEx)) ExposureOption = uEx is "1" or "true";
+        if (query.TryGetValue("depthmodel", out var uDm) && !string.IsNullOrWhiteSpace(uDm)) DepthModelOverride = uDm;
         if (!query.TryGetValue("autotest", out var mode))
             return;
 

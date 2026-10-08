@@ -464,7 +464,10 @@ public class MultiViewGenerationService
         bad.UnionWith(unplaced);
 
         var dropped = new HashSet<int>();   // cameras not in the final solution (unplaced, failed verification, outside the core)
-        bool oneCamera = cams.Select(c => (c.Width, c.Height)).Distinct().Count() == 1;
+        // One camera = one sensor, either way up: the shared focal is fx = fy = f with each camera's own principal point
+        // (GpuBundleAdjuster), so a photo held sideways shares it. By exact size, TJ's one landscape Bathroom photo would
+        // have switched the whole solve to fixed per-view focals.
+        bool oneCamera = cams.Select(c => (Math.Max(c.Width, c.Height), Math.Min(c.Width, c.Height))).Distinct().Count() == 1;
         var focals = cams.Select(c => 0.5f * (c.FocalX + c.FocalY)).OrderBy(f => f).ToList();
         if (DiagnosticGroundTruthPoseInit is { } gtP && gtP.Count == cameras.Length)
         {
@@ -1684,14 +1687,31 @@ public class MultiViewGenerationService
             {
                 if (poses.Cameras[i] != null) continue;
                 int t = posed.FirstOrDefault(p => images[p].Width == images[i].Width && images[p].Height == images[i].Height, -1);
+                // A photo turned the other way (TJ's Bathroom: one landscape among 34 portraits) has no same-size partner
+                // and the joint depth pass skips it, so it never entered SfM at all. The same camera held sideways has the
+                // same focal in pixels: borrow a posed view of the TRANSPOSED size with its intrinsics transposed.
+                bool transposed = false;
+                if (t < 0)
+                {
+                    t = posed.FirstOrDefault(p => images[p].Width == images[i].Height && images[p].Height == images[i].Width, -1);
+                    transposed = t >= 0;
+                }
                 if (t < 0) continue;
                 var tc = poses.Cameras[t]!;
-                poses.Cameras[i] = new CameraParams
-                {
-                    Width = tc.Width, Height = tc.Height, FocalX = tc.FocalX, FocalY = tc.FocalY,
-                    CenterX = tc.CenterX, CenterY = tc.CenterY, Near = tc.Near, Far = tc.Far,
-                    Position = tc.Position, Forward = tc.Forward, Up = tc.Up,
-                };
+                poses.Cameras[i] = transposed
+                    ? new CameraParams
+                    {
+                        Width = tc.Height, Height = tc.Width, FocalX = tc.FocalY, FocalY = tc.FocalX,
+                        CenterX = tc.CenterY, CenterY = tc.CenterX, Near = tc.Near, Far = tc.Far,
+                        Position = tc.Position, Forward = tc.Forward, Up = tc.Up,
+                    }
+                    : new CameraParams
+                    {
+                        Width = tc.Width, Height = tc.Height, FocalX = tc.FocalX, FocalY = tc.FocalY,
+                        CenterX = tc.CenterX, CenterY = tc.CenterY, Near = tc.Near, Far = tc.Far,
+                        Position = tc.Position, Forward = tc.Forward, Up = tc.Up,
+                    };
+                if (transposed) Console.WriteLine($"[MultiView] view {i} ({images[i].Width}x{images[i].Height}) enters SfM with view {t}'s intrinsics transposed");
                 placeholders.Add(i);
                 sfmViews.Add(i);
             }

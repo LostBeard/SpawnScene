@@ -307,11 +307,26 @@ public class MultiViewGenerationService
             double focal = GlobalSfmFocalOverride ?? shared[shared.Count / 2];
             // View-graph focal calibration from the verified pairs' F (one camera: every view the same size and centre).
             // DAv3's focal was 22% off on DrJohnson (812 vs COLMAP 1035): the calibrated one, measured, is ~1%.
-            bool oneIntrinsics = cams.Select(c => (c.Width, c.Height, c.CenterX, c.CenterY)).Distinct().Count() == 1;
+            // A photo held sideways (TJ's Bathroom: one landscape among 34 portraits) has the same focal but another
+            // principal point, and the calibration assumes one: calibrate from the pairs between cameras of the MAJORITY
+            // intrinsics (the same sensor - the result applies to all). It used to need every camera identical, so that
+            // one photo skipped the calibration, SfM ran on DAv3's 959 instead of the measured 794, and placed 19 of 35
+            // cameras instead of 32 (f0, 2026-10-07).
+            var intrinsicsGroups = cams.Select((c, k) => (Key: (c.Width, c.Height, c.CenterX, c.CenterY), k))
+                .GroupBy(t => t.Key).OrderByDescending(g => g.Count()).ToList();
+            var major = intrinsicsGroups[0];
+            bool oneIntrinsics = major.Count() >= Math.Max(2, (int)(0.8 * cams.Count));
             if (GlobalSfmFocalOverride == null && oneIntrinsics)
             {
-                var fs = ransac.Where(r => r != null).Select(r => r!.F).ToList();
-                var cal = GlobalSfmInit.CalibrateFocal(fs, cams[0].CenterX, cams[0].CenterY, focal);
+                var inMajor = major.Select(t => t.k).ToHashSet();
+                var fs = new List<double[]>();
+                for (int c = 0; c < candidates.Count; c++)
+                {
+                    if (ransac[c] is not { } rc) continue;
+                    var pc = candidates[c];
+                    if (inMajor.Contains(baIndex[pc.ImageIndexA]) && inMajor.Contains(baIndex[pc.ImageIndexB])) fs.Add(rc.F);
+                }
+                var cal = GlobalSfmInit.CalibrateFocal(fs, major.Key.Item3, major.Key.Item4, focal);
                 Console.WriteLine(cal is { } c0
                     ? $"[BA] focal calibration: {c0.Focal:F1} from {c0.Supporting} of {c0.Pairs} verified pairs (DAv3 median {focal:F1})"
                     : $"[BA] focal calibration: no estimate from {fs.Count} verified pairs - DAv3 median {focal:F1} kept");

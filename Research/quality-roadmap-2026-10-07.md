@@ -329,3 +329,12 @@ w0 (Bathroom, no training flags, captured over magenta): log "random background 
 Deploy run 37812486889 (master @ 0a70f3f). Live check: `autotest=samples&name=hamamni-baths&generate=7000` on
 spawnscene.com (photos through the hub).
 
+### Live check on spawnscene.com (live0, 13:13-13:24, deploy 0a70f3f)
+
+`autotest=samples&name=hamamni-baths&generate=7000&bg=1,0,1` against https://spawnscene.com: 59/59 photos through the hub
+(2.0 s), 57 placed (2 named on the Photos tab: "nothing in it matched the other photos"), log "random background each
+step, zero-mean [-0.5, 0.5] x 0.5", 7,000 iterations in 527 s, 1.37M splats, supervised 23.74 dB / 0.812.
+See-through (strong magenta): 27/34 Wander views at 0%; pan-1..5 21/14/55/69/61% where 1, 2, 1, 0 and 0 of 57 photos
+face - nothing was photographed there. Faint pink tints remain on covered surfaces (in-0) and pan-0 (9/57 photos) still
+shows patches: the strong-magenta measure undercounts partial transparency. Coverage (PLANS 6) is the next limit.
+

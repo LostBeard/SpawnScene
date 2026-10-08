@@ -558,7 +558,7 @@ public partial class Studio
                     (ExposureGainsOnlyOption ? "per-channel gains" : "affine colour transforms") + ", lr 0.01 -> 0.001");
             }
             if (SplatTrainerGpu.RandomBackground)
-                Console.WriteLine("[Train] random background each step (scored and shown over black)");
+                Console.WriteLine($"[Train] random background each step, {(SplatTrainerGpu.ZeroMeanBackground ? "zero-mean [-0.5, 0.5]" : "[0, 1]")} (scored and shown over black)");
             if (SplatTrainerGpu.MipFilter > 0)
                 Console.WriteLine($"[Train] Mip 3D filter {SplatTrainerGpu.MipFilter}: scale floor = filter x depth / focal over {supervised.Count} cameras");
 

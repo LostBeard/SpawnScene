@@ -281,3 +281,17 @@ Bathroom, 10-08 defaults, 7K, llffhold=8, captured over MAGENTA (`&bg=1,0,1`, ha
 Side by side: `_shots/dataset/Bathroom__tuvok-p0_tuvok-q0_pan__wander.png`. Bicycle (r0 vs m0) and Truck (t0/t1)
 running before proposing it as a default (TJ's call).
 
+### Bicycle with the [0, 1] random background: a LOSS (r0, 2026-10-08)
+
+| Run | held out PSNR / SSIM | fair |
+|---|---|---|
+| m0 (black, today's defaults) | 24.97 / 0.7683 | 25.572 |
+| r0 (`&randombg=1`, [0, 1]) | 24.60 / 0.7519 | 25.302 |
+
+-0.37 dB held out, SSIM -0.016, fair -0.27 (Bicycle's protocol noise is ~0.003 fair). Off-path views look alike; r0 is a
+shade darker and its exposure gains are ~2% higher on every photo. Why: a [0, 1] background has mean 0.5, so wherever
+transmittance stays above 0 (sky, thin foliage edges) training darkens the colours by T x 0.5 to match on average -
+and the scene is scored and shown over black. Rooms do not pay it because their walls go opaque. Next: `&randombg=2`,
+a zero-mean background ([-0.5, 0.5]: same variance, so transparency costs the same; expected composite = the render
+over black) - u0 Bicycle, u1 Bathroom (holes over magenta), t2 Truck.
+

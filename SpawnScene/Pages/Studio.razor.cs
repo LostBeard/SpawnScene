@@ -249,7 +249,11 @@ public partial class Studio : IAsyncDisposable
         // &randombg=1: train each step over a random background colour (the reference's --random_background), so surfaces
         // the photos saw must be opaque to match them (SplatTrainerGpu.RandomBackground).
         if (query.TryGetValue("randombg", out var rbgq))
-            SplatTrainerGpu.RandomBackground = rbgq is "1" or "true";
+        {
+            // &randombg=2: the zero-mean background ([-0.5, 0.5] per channel).
+            SplatTrainerGpu.RandomBackground = rbgq is "1" or "2" or "true";
+            SplatTrainerGpu.ZeroMeanBackground = rbgq == "2";
+        }
         // &carve=S / &carvemargin=M: remove splats with share S of their weight in front of the photos' surfaces after
         // training (Studio.Training FloaterCensusAsync); the census itself is always reported.
         if (query.TryGetValue("carve", out var cvq) && float.TryParse(cvq,

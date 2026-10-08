@@ -1968,6 +1968,14 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// the black through from every other angle (Bathroom 2026-10-08: up to 33% of an off-path view).
     /// </summary>
     public static bool RandomBackground { get; set; }
+    /// <summary>
+    /// With <see cref="RandomBackground"/>: draw each channel from [-0.5, 0.5] instead of [0, 1]. Same variance (so
+    /// transparency costs the same), but ZERO MEAN: where transmittance cannot reach 0 (sky, thin foliage edges), a
+    /// [0, 1] background trains the colours darker by T x 0.5 to match on average, and the scene - scored and shown
+    /// over black - comes out too dark (Bicycle r0, 2026-10-08: -0.37 dB held out, exposure gains ~2% higher).
+    /// A negative background is fine inside the loss; the expected composite equals the render over black.
+    /// </summary>
+    public static bool ZeroMeanBackground { get; set; }
     /// <summary>The loss's D-SSIM share (the reference's 0.2; L1 gets the rest). Gates set 0 for a pure L1 loss: the loss a
     /// step returns is the L1 part only, so finite differences of it match the gradient only without D-SSIM.</summary>
     public float DssimWeight { get; set; } = ImageQuality.LambdaDssim;
@@ -2000,7 +2008,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         bool depthOn = PrepareDepthStep(splatCount);
         if (FixedBackground is { } fixedBg) _stepBackground = fixedBg;
         else if (RandomBackground)
-            _stepBackground = new Vector3(_backgroundRng.NextSingle(), _backgroundRng.NextSingle(), _backgroundRng.NextSingle());
+            _stepBackground = new Vector3(_backgroundRng.NextSingle(), _backgroundRng.NextSingle(), _backgroundRng.NextSingle())
+                - (ZeroMeanBackground ? new Vector3(0.5f) : Vector3.Zero);
         try { await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false, depth: depthOn); }
         finally { _stepBackground = Vector3.Zero; }
         if (LastKeyCount == 0)

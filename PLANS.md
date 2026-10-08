@@ -65,7 +65,7 @@ held-out number and looks worse off-path does not ship.
    a. is measured: Bathroom +1.3 dB, Bicycle neutral (b0r 25.17 vs b1 25.16) - default candidate for TJ.
 4. **Capture feedback:** DONE 10-07/08 - the scene card counts placed photos, the Photos tab badges the unplaced ones,
    the card names the directions no photo faces (CaptureCoverage, relative to the first photo), sideways photos are
-   placed. (The placement line was hidden under the card's buttons until 3dbacfa.) Next: WHY a photo was dropped.
+   placed. (The placement line was hidden under the card's buttons until 3dbacfa.) Why each photo was dropped is listed on the Photos tab (SfM reason).
 5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) default-on if the in/out wander views
    gain; 2D Mip filter in the viewer.
 6. **Far background:** a background shell / far-depth prior for sky and distant scenery (the Bicycle low-pose specks).

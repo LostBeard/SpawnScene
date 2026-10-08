@@ -1,5 +1,5 @@
 {
- "base": "https://huggingface.co/datasets/LostBeard/spawnscene-samples/resolve/main/",
+ "base": "https://hub.spawndev.com:44365/src?url=https://huggingface.co/datasets/LostBeard/spawnscene-samples/resolve/main/",
  "samples": [
   {
    "name": "Hamamni Persian Baths (interior)",

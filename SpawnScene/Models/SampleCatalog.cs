@@ -7,7 +7,12 @@ namespace SpawnScene.Models;
 /// </summary>
 public sealed class SampleCatalog
 {
-    /// <summary>Absolute URL every sample's <see cref="SampleEntry.Folder"/> is relative to (ends in '/').</summary>
+    /// <summary>
+    /// Absolute URL every sample's <see cref="SampleEntry.Folder"/> is relative to (ends in '/'). The photos live in the
+    /// LostBeard/spawnscene-samples Hugging Face dataset and are fetched THROUGH the hub's /src proxy - shipped code never
+    /// requests huggingface.co directly (TJ's standing rule: the hub caches, answers CORS and keeps us out of HF's rate
+    /// limiter; its /hf route parses model repos only).
+    /// </summary>
     public string Base { get; set; } = "";
     public List<SampleEntry> Samples { get; set; } = new();
 }

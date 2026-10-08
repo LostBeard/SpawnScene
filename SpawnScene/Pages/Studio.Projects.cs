@@ -1280,12 +1280,24 @@ public partial class Studio
         try
         {
             string folder = catalog.Base.TrimEnd('/') + "/" + sample.Folder.Trim('/') + "/";
+            // Six downloads in flight (the browser's per-host limit): through the hub, one at a time took 39.5 s for
+            // Hamamni's 59 photos on a cold cache. Stored in order as each completes.
+            const int InFlight = 6;
+            var pending = new Queue<Task<byte[]>>();
+            int next = 0;
+            void Fill()
+            {
+                while (pending.Count < InFlight && next < sample.Images.Count)
+                    pending.Enqueue(_http.GetByteArrayAsync(folder + Uri.EscapeDataString(sample.Images[next++])));
+            }
+            Fill();
             for (int i = 0; i < sample.Images.Count; i++)
             {
                 string file = sample.Images[i];
                 _statusMessage = $"Downloading {sample.Name}: photo {i + 1} of {sample.Images.Count}...";
                 BuildProjectDetailUI();
-                var bytes = await _http.GetByteArrayAsync(folder + Uri.EscapeDataString(file));
+                var bytes = await pending.Dequeue();
+                Fill();
                 int width = 0, height = 0;
                 try
                 {

@@ -41,8 +41,12 @@ by us (a showcase), credit it and keep it CC BY-SA.
 | hub.spawndev.com | Ours, but a deploy needs TJ, and it is one server. Fallback. |
 | AWS S3 (CLI configured, buckets exist) | Costs per GB served; CORS to configure. Fallback. |
 
-Layout: `samples/catalog.json` in the app (`SampleCatalog`: `base` + entries); photos at
-`https://huggingface.co/datasets/LostBeard/spawnscene-samples/resolve/main/<folder>/<NNN>.jpg`.
+Layout: `samples/catalog.json` in the app (`SampleCatalog`: `base` + entries); photos stored at
+`huggingface.co/datasets/LostBeard/spawnscene-samples/resolve/main/<folder>/<NNN>.jpg` and FETCHED through the hub:
+`https://hub.spawndev.com:44365/src?url=<that URL>`. Standing rule (memory ref-never-request-huggingface): shipped code
+never requests huggingface.co directly. The hub's `/hf/{org}/{repo}` route parses model repos only (a dataset path
+becomes `datasets/LostBeard` as the repo); `/src` proxies any URL - MEASURED 2026-10-07: 200, CORS `*`, an uncached
+photo in 0.9-1.1 s.
 
 ## Sizes
 

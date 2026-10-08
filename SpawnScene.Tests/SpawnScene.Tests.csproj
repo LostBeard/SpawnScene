@@ -84,6 +84,7 @@
     <Compile Include="..\SpawnScene\Services\GpuDensify.cs" Link="Linked\GpuDensify.cs" />
     <Compile Include="..\SpawnScene\Services\GpuMcmc.cs" Link="Linked\GpuMcmc.cs" />
     <Compile Include="..\SpawnScene\Services\OcclusionFill.cs" Link="Linked\OcclusionFill.cs" />
+    <Compile Include="..\SpawnScene\Services\HiddenLayerInpaint.cs" Link="Linked\HiddenLayerInpaint.cs" />
     <Compile Include="..\SpawnScene\Services\GpuPairMatcher.cs" Link="Linked\GpuPairMatcher.cs" />
     <Compile Include="..\SpawnScene\Services\GpuEpipolarRansac.cs" Link="Linked\GpuEpipolarRansac.cs" />
     <Compile Include="..\SpawnScene\Services\LearnedFeatureMatcher.cs" Link="Linked\LearnedFeatureMatcher.cs" />

@@ -253,6 +253,7 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("snapstep", out var ssq2) && float.TryParse(ssq2, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var ssv2)) DepthEdgeSnap.StepScale = ssv2;
         if (query.TryGetValue("depthmodel", out var dmq) && !string.IsNullOrWhiteSpace(dmq)) DepthModelOverride = dmq;
+        if (query.TryGetValue("inpaint", out var ipq)) DepthToGaussianKernel.InpaintHiddenLayer = ipq is "1" or "true";
         // &exposure=1: per-photo exposure compensation (Studio.Training.ExposureOption).
         if (query.TryGetValue("exposure", out var exq)) ExposureOption = exq is "1" or "true";
         if (query.TryGetValue("carveunseenpx", out var cupq) && float.TryParse(cupq,

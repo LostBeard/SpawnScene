@@ -38,6 +38,10 @@ public static class OcclusionFill
         /// <summary>Behind edges, one splat per this many cells each way (that many times bigger): the fill is a soft
         /// average, so its density follows a fixed grid, not the photo's - a 5K photo made 5.4M fill splats at 1.</summary>
         public int BehindStride;
+        /// <summary>1: the behind-edges layer takes its colour from an inpainted 512x512 image (HiddenLayerInpaint, MI-GAN)
+        /// instead of the push-pull pyramid; the grid maps into it at <see cref="InpaintScale"/> from the offsets.</summary>
+        public int UseInpaint;
+        public float InpaintScale, InpaintOffX, InpaintOffY;
     }
 
     public struct LevelParams
@@ -59,7 +63,11 @@ public static class OcclusionFill
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, int>? _normalize;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, LevelParams>? _up;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-        ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, Params>? _emitBehind;
+        ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>? _emitBehind;
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+        ArrayView1D<float, Stride1D.Dense>, Params>? _behindMask;
+    static Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+        ArrayView1D<float, Stride1D.Dense>, Params>? _packInpaint;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
         ArrayView1D<int, Stride1D.Dense>, Params, int>? _emitBorder;
     static Accelerator? _loadedFor;
@@ -68,7 +76,7 @@ public static class OcclusionFill
     {
         if (!ReferenceEquals(_loadedFor, a))
         {
-            _rowMax = null; _colMax = null; _rowMin = null; _colMin = null; _level0 = null; _down = null; _normalize = null; _up = null; _emitBehind = null; _emitBorder = null;
+            _rowMax = null; _colMax = null; _rowMin = null; _colMin = null; _level0 = null; _down = null; _normalize = null; _up = null; _emitBehind = null; _emitBorder = null; _behindMask = null; _packInpaint = null;
         }
         _loadedFor = a;
         _rowMax ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(RowMaxKernel);
@@ -81,7 +89,12 @@ public static class OcclusionFill
         _normalize ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, int>(NormalizeKernel);
         _up ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, LevelParams>(UpKernel);
         _emitBehind ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, Params>(EmitBehindKernel);
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, Params>(EmitBehindKernel);
+        _behindMask ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(BehindMaskKernel);
+        _packInpaint ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(PackInpaintKernel);
         _emitBorder ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, Params, int>(EmitBorderKernel);
     }
@@ -103,6 +116,17 @@ public static class OcclusionFill
     public static void Append(Accelerator a, ArrayView1D<float, Stride1D.Dense> depth, ArrayView1D<int, Stride1D.Dense> rgba,
         ArrayView1D<float, Stride1D.Dense> outPacked, ArrayView1D<int, Stride1D.Dense> counter, Params p,
         List<MemoryBuffer1D<float, Stride1D.Dense>> scratch)
+        => AppendAsync(a, depth, rgba, outPacked, counter, p, scratch, null).GetAwaiter().GetResult();
+
+    /// <summary>
+    /// <see cref="Append"/>, with the behind-edges layer coloured by <paramref name="inpaint"/> when given: the cells that
+    /// get a hidden splat are masked out of the photo and MI-GAN paints what is behind them (TJ 2026-10-07: "ml models
+    /// that can remove objects from a scene... where we need to see behind things"); the push-pull blur stays the
+    /// fallback (no model, or the model failed).
+    /// </summary>
+    public static async Task AppendAsync(Accelerator a, ArrayView1D<float, Stride1D.Dense> depth, ArrayView1D<int, Stride1D.Dense> rgba,
+        ArrayView1D<float, Stride1D.Dense> outPacked, ArrayView1D<int, Stride1D.Dense> counter, Params p,
+        List<MemoryBuffer1D<float, Stride1D.Dense>> scratch, HiddenLayerInpaint? inpaint)
     {
         Load(a);
         int cells = p.GridW * p.GridH;
@@ -117,7 +141,31 @@ public static class OcclusionFill
 
         var behind = p; behind.SeedAll = 0;
         var l0Behind = Pyramid(a, depth, rgba, bgMax, bgMin, behind, scratch);
-        _emitBehind!(cells, depth, bgMax.View, l0Behind.View, outPacked, counter, behind);
+        MemoryBuffer1D<float, Stride1D.Dense>? painted = null;
+        if (inpaint != null)
+        {
+            // The cells that will carry a hidden splat, masked out of the photo; the photo and mask letterboxed into
+            // MI-GAN's 512 square (a box average of the cells each of its pixels covers; masked if any of them is).
+            const int S = HiddenLayerInpaint.Size;
+            var maskGrid = a.Allocate1D<float>(cells); scratch.Add(maskGrid);
+            _behindMask!(cells, depth, bgMax.View, l0Behind.View, maskGrid.View, behind);
+            float scale = (float)S / Math.Max(p.GridW, p.GridH);
+            behind.InpaintScale = scale;
+            behind.InpaintOffX = 0.5f * (S - p.GridW * scale);
+            behind.InpaintOffY = 0.5f * (S - p.GridH * scale);
+            var img = a.Allocate1D<float>(3L * S * S); scratch.Add(img);
+            var msk = a.Allocate1D<float>((long)S * S); scratch.Add(msk);
+            _packInpaint!(S * S, rgba, maskGrid.View, img.View, msk.View, behind);
+            painted = await inpaint.RunAsync(a, img.View, msk.View);
+            if (painted != null) { scratch.Add(painted); behind.UseInpaint = 1; }
+        }
+        if (painted == null)
+        {
+            var none = a.Allocate1D<float>(1); scratch.Add(none);
+            painted = none;
+            behind.UseInpaint = 0;
+        }
+        _emitBehind!(cells, depth, bgMax.View, l0Behind.View, outPacked, counter, painted.View, behind);
         if (p.Margin > 0)
         {
             var border = p; border.SeedAll = 1;
@@ -331,7 +379,8 @@ public static class OcclusionFill
     }
 
     static void EmitBehindKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> depth, ArrayView1D<float, Stride1D.Dense> bgMax,
-        ArrayView1D<float, Stride1D.Dense> l0, ArrayView1D<float, Stride1D.Dense> outPacked, ArrayView1D<int, Stride1D.Dense> counter, Params p)
+        ArrayView1D<float, Stride1D.Dense> l0, ArrayView1D<float, Stride1D.Dense> outPacked, ArrayView1D<int, Stride1D.Dense> counter,
+        ArrayView1D<float, Stride1D.Dense> painted, Params p)
     {
         if (i >= p.GridW * p.GridH) return;
         int gx = i % p.GridW, gy = i / p.GridW;
@@ -346,7 +395,63 @@ public static class OcclusionFill
         int slot = Atomic.Add(ref counter[0], 1);
         if (slot >= p.Capacity) return;
         var q = p; q.SizeFactor = p.SizeFactor * bs;
-        WriteSplat(outPacked, slot, q, gx * p.Subsample, gy * p.Subsample, fd, l0[o], l0[o + 1], l0[o + 2]);
+        float r = l0[o], g = l0[o + 1], b = l0[o + 2];
+        if (p.UseInpaint != 0)
+        {
+            // MI-GAN's painting of what is behind this cell (0..255), nearest pixel of the letterboxed 512 square.
+            const int S = HiddenLayerInpaint.Size;
+            int ux = XMath.Clamp((int)(p.InpaintOffX + (gx + 0.5f) * p.InpaintScale), 0, S - 1);
+            int uy = XMath.Clamp((int)(p.InpaintOffY + (gy + 0.5f) * p.InpaintScale), 0, S - 1);
+            int pi = uy * S + ux;
+            r = painted[pi] / 255f; g = painted[S * S + pi] / 255f; b = painted[2 * S * S + pi] / 255f;
+        }
+        WriteSplat(outPacked, slot, q, gx * p.Subsample, gy * p.Subsample, fd, r, g, b);
+    }
+
+    /// <summary>0 where <see cref="EmitBehindKernel"/> puts a hidden splat (every cell, not only its stride: a whole region
+    /// to paint), 255 elsewhere - the MI-GAN convention (255 = known).</summary>
+    static void BehindMaskKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> depth, ArrayView1D<float, Stride1D.Dense> bgMax,
+        ArrayView1D<float, Stride1D.Dense> l0, ArrayView1D<float, Stride1D.Dense> maskGrid, Params p)
+    {
+        if (i >= p.GridW * p.GridH) return;
+        int gx = i % p.GridW, gy = i / p.GridW;
+        float d = DepthAt(depth, p, gx, gy);
+        float m = 255f;
+        if (d > 0f && bgMax[i] > d * (1f + p.Tau))
+        {
+            long o = (long)((gy + p.Margin) * (p.GridW + 2 * p.Margin) + gx + p.Margin) * Ch;
+            if (l0[o + 4] > 0f && l0[o + 3] > d * (1f + p.Tau)) m = 0f;
+        }
+        maskGrid[i] = m;
+    }
+
+    /// <summary>One pixel of the 512x512 MI-GAN input: the photo (0..255 planes) and mask over the grid cells it covers
+    /// (letterboxed, centred; masked if any covered cell is); the bars outside the photo are known (255).</summary>
+    static void PackInpaintKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> rgba, ArrayView1D<float, Stride1D.Dense> maskGrid,
+        ArrayView1D<float, Stride1D.Dense> img, ArrayView1D<float, Stride1D.Dense> msk, Params p)
+    {
+        const int S = HiddenLayerInpaint.Size;
+        if (i >= S * S) return;
+        int ux = i % S, uy = i / S;
+        float inv = 1f / p.InpaintScale;
+        int x0 = XMath.Clamp((int)((ux - p.InpaintOffX) * inv), 0, p.GridW - 1);
+        int y0 = XMath.Clamp((int)((uy - p.InpaintOffY) * inv), 0, p.GridH - 1);
+        int x1 = XMath.Clamp((int)((ux + 1 - p.InpaintOffX) * inv), x0 + 1, p.GridW);
+        int y1 = XMath.Clamp((int)((uy + 1 - p.InpaintOffY) * inv), y0 + 1, p.GridH);
+        bool inside = ux >= p.InpaintOffX && ux < S - p.InpaintOffX && uy >= p.InpaintOffY && uy < S - p.InpaintOffY;
+        float r = 0f, g = 0f, b = 0f, m = 255f;
+        int n = 0;
+        for (int gy = y0; gy < y1; gy++)
+            for (int gx = x0; gx < x1; gx++)
+            {
+                int c = rgba[gy * p.Subsample * p.Width + gx * p.Subsample];
+                r += c & 0xFF; g += (c >> 8) & 0xFF; b += (c >> 16) & 0xFF;
+                if (inside) m = XMath.Min(m, maskGrid[gy * p.GridW + gx]);
+                n++;
+            }
+        float k = 1f / XMath.Max(n, 1);
+        img[i] = r * k; img[S * S + i] = g * k; img[2 * S * S + i] = b * k;
+        msk[i] = m;
     }
 
     /// <summary>Layer 0: the continuation of every edge (<paramref name="l0"/>); layer 1: the background continuation

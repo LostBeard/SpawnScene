@@ -74,7 +74,16 @@ public class DepthToGaussianKernel
         SplatParams>?                         // params struct
         _unprojectAndPackKernel;
 
-    public DepthToGaussianKernel(GpuService gpu) => _gpu = gpu;
+    public DepthToGaussianKernel(GpuService gpu, SpawnDev.ILGPU.ML.Hub.IModelSource models)
+    {
+        _gpu = gpu;
+        _inpaint = new HiddenLayerInpaint(models);
+    }
+
+    readonly HiddenLayerInpaint _inpaint;
+
+    /// <summary>&amp;inpaint=1: colour the hidden background layer with MI-GAN instead of the push-pull blur (HiddenLayerInpaint).</summary>
+    public static bool InpaintHiddenLayer { get; set; }
 
     // ─────────────────────────────────────────────────────────────
     //  GPU Kernels
@@ -1147,7 +1156,7 @@ public class DepthToGaussianKernel
             {
                 // CPU transfer: one int, to report the surface / background split.
                 surfaceCount = (await counterBuf.CopyToHostAsync<int>(0, 1))[0];
-                OcclusionFill.Append(accelerator, depthView, rgbaView, outPackedBuf.View, counterBuf.View,
+                await OcclusionFill.AppendAsync(accelerator, depthView, rgbaView, outPackedBuf.View, counterBuf.View,
                     new OcclusionFill.Params
                     {
                         Width = w, Height = h, Subsample = subsample, GridW = sampledW, GridH = sampledH,
@@ -1156,7 +1165,7 @@ public class DepthToGaussianKernel
                         Capacity = capacity,
                         FocalX = fx, FocalY = fy, CenterX = cx, CenterY = cy, DepthScale = splatParams.DepthScaleCorrection,
                         Tau = 0.08f, BackgroundBand = 0.92f, SizeFactor = 1.5f, Opacity = 0.95f,
-                    }, scratch);
+                    }, scratch, InpaintHiddenLayer ? _inpaint : null);
             }
 
             // Readback valid splat count only (4 bytes)

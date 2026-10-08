@@ -70,6 +70,13 @@ as LostBeard/spawnscene-models/migan_float.onnx with the MIT notice, fetched thr
 (WebGPU) and matches onnxruntime to 3 decimals on 0..255 (hole centre 227.314 vs 227.314; red check: the hole differs
 from the input by 19.8 mean). Loads in 1.3 s, first 512x512 run 2.7 s including kernel compiles.
 
+**Integrated (opt-in `&inpaint=1`, 2026-10-07):** OcclusionFill masks the cells that get a hidden behind-edge splat,
+letterboxes photo + mask into MI-GAN's 512 square, and those splats take the painted colour (HiddenLayerInpaint; the
+push-pull blur stays the fallback). Kitchen, with &edgesnap=1, moved views (`img/inpaint-hidden-layer-kitchen-2026-10-07.jpg`,
+top: blur, bottom: MI-GAN): the yellow/orange blobs of foreground colour behind the cereal boxes are gone - the
+revealed area reads as countertop and backsplash. Soft (512 px painting of a 3840 px photo): tiles of 512 around each
+masked region would sharpen it. Load 1.2 s, paint 518 ms. Next: the past-the-frame layer (outpainting).
+
 Plan: OcclusionFill already knows WHERE the hidden layer goes (the far side of each depth edge, the band past the
 frame). Build the mask from it, inpaint the photo there (MI-GAN first), and colour the hidden layer from the inpainted
 image instead of the push-pull blur; its depth stays the far-side depth.

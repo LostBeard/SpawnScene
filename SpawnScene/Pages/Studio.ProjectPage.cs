@@ -239,12 +239,13 @@ public partial class Studio
 
         if (!string.IsNullOrEmpty(_activeProject?.Credit))
         {
-            parent.AddChild(new UILabel
+            // Wraps: the credit carries its source link, which the CC BY-SA sets ask for.
+            parent.AddChild(new UITextBlock
             {
-                X = x, Y = y - 6, Text = "Photos: " + _activeProject!.Credit,
+                X = x, Y = y - 6, Width = w, Height = 34, Text = "Photos: " + _activeProject!.Credit,
                 FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted,
             });
-            y += 18;
+            y += 36;
         }
 
         if (sources.Count >= 2)

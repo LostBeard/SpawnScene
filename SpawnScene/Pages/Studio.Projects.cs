@@ -1322,6 +1322,39 @@ public partial class Studio
         BuildProjectDetailUI();
     }
 
+    /// <summary>
+    /// <c>autotest=samples&amp;name=folder</c>: the catalog sample through <see cref="LoadSampleAsync"/> into a fresh project
+    /// - downloaded from the catalog's host (cross-origin), stored, credited. "[Dataset] DONE" / "[Dataset] FAIL".
+    /// </summary>
+    private async Task RunSampleAutotestAsync(string folder)
+    {
+        await EnsureSampleCatalogAsync();
+        var entry = _sampleCatalog?.Samples.FirstOrDefault(sm => sm.Folder == folder);
+        if (_sampleCatalog == null || entry == null) { Console.WriteLine($"[Dataset] FAIL: sample '{folder}' not in samples/catalog.json"); return; }
+        var project = await _projectService.CreateProjectAsync($"sample {folder} {DateTime.Now:MMdd-HHmmss}");
+        _projects = await _projectService.ListProjectsAsync();
+        _activeProject = project;
+        _state = StudioState.ProjectDetail;
+        _hideUiOverlay = false;
+        BuildProjectDetailUI();   // the empty project: the catalog's buttons
+        await Task.Delay(1000);
+        Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-sample_empty");
+        await Task.Delay(2000);
+        var t0 = DateTime.UtcNow;
+        await LoadSampleAsync(_sampleCatalog, entry);
+        var stored = _activeProject?.Sources ?? new();
+        bool sized = stored.Count > 0 && stored.All(src => src.Width > 0 && src.Height > 0);
+        Console.WriteLine($"[Dataset] sample {folder}: {stored.Count}/{entry.Images.Count} photos stored in " +
+            $"{(DateTime.UtcNow - t0).TotalSeconds:F1}s ({stored.Sum(src => src.SizeBytes) / 1e6:F1} MB, all decoded: {sized}); " +
+            $"credit: {_activeProject?.Credit}");
+        Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-sample_loaded");
+        await Task.Delay(1500);
+        if (stored.Count != entry.Images.Count || !sized || string.IsNullOrEmpty(_activeProject?.Credit))
+            Console.WriteLine("[Dataset] FAIL: sample not stored as the catalog lists it");
+        else
+            Console.WriteLine("[Dataset] DONE");
+    }
+
     /// <summary>The harness's <c>&amp;sample=</c> path: one image from the app's own samples/ folder.</summary>
     private async Task LoadSampleImage(string name, string path)
     {

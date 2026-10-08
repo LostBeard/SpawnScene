@@ -15,7 +15,9 @@ dotnet run
 dotnet publish ./SpawnScene/ --nologo -c:Release --output publish
 ```
 
-**Tests:** `dotnet test SpawnScene.Tests -c Release` (NUnit; links app sources, CPU). GPU checks run in the browser through
+**Tests:** `dotnet test SpawnScene.Tests -c Release` (NUnit; links app sources, CPU). The full run crashes the test host
+around KorniaRacoLightGlueParityTests (2026-10-08; cause not pinned - cumulative, every test passes in two runs: `--filter
+"FullyQualifiedName!~KorniaRacoLightGlueParity"` 512/512 in 40 min, then `"FullyQualifiedName~KorniaRacoLightGlueParity"` 7/7). GPU checks run in the browser through
 `tools/_cdp_*.js` against a served publish: `_cdp_trainer_gate.js` (trainer shaders vs CPU oracles), `_cdp_dataset.js`
 (datasets, `AUTOTEST=project` for the user path, `AUTOTEST=textlab` for text rendering), `_cdp_page.js` (screenshot any
 page; from Git Bash pass `MSYS_NO_PATHCONV=1`). Score captured views with `tools/score_views.py`.

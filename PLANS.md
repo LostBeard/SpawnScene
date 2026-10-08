@@ -41,9 +41,9 @@ Each item: measured on Bathroom (phone room), Bicycle (outdoor 360) and TruckFul
 Studio.Wander views (in/up/low/out/mid, pan-0..7, over-0/1), side by side with the run before. A change that wins the
 held-out number and looks worse off-path does not ship.
 
-1. **Re-baseline the carve on the census fix** (k1 Bicycle, k2 Truck, h6-h9 Bathroom, running). Decide the unseen bar
-   (1 px costs Bathroom 0.77 dB supervised; try 0.05) and whether the in-training carve earns its keep on rooms
-   (Bathroom: supervised 37.4 dB without it, 33.5 with; held-out equal).
+1. **Re-baseline the carve on the census fix:** DONE 10-08 (n0-n3, the new defaults): the carve is +0.64 dB fair on
+   Bathroom over no carve; the 1 px unseen bar removes 21% of the splats at no measurable cost; off-path views equal.
+   Defaults stay. Research/quality-roadmap-2026-10-07.md.
 0. **Single-photo tearing, measured 10-08:** MoGe-2 ViT-S/B (MIT) do not have fewer flying pixels than DAv3 Small (tie
    indoors, worse on foliage) - a bigger model is not the fix. The edge snap is, with its slope guard (bimodal depth
    window, `&snapmid`): kitchen 0.39 -> 0.25% flying pixels, castle 0.59 -> 0.32, garden no longer terraced.

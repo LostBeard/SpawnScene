@@ -244,3 +244,19 @@ coverage map after SfM, and the dropped photos by name with why.
 All within 0.4 dB held out (4-5 held-out photos: noise level); the carve costs 4 dB supervised for nothing measurable
 held out. Recorded 10-08; repeated as n0-n3 on the 10-08 defaults with the fair score before deciding (PLANS item 1).
 
+## Carve re-baseline n0-n3 (Bathroom, 7K, llffhold=8, 2026-10-08 - the 10-08 defaults: depthinit=4 + exposure gains)
+
+| Run | Setting | held out PSNR / SSIM | fair (right half, gains on left) | splats |
+|---|---|---|---|---|
+| n0 | carve on, unseen bar 1 px (default) | 18.69 / 0.8458 | 24.75 | 769K (209,246 unseen carved) |
+| n1 | `&carve=0` | 18.68 / 0.8416 | 24.11 | 969K |
+| n2 | `&carveunseen=0` (floaters only) | 18.67 / 0.8460 | 24.90 | 970K |
+| n3 | `&carveunseenpx=0.05` | 18.70 / 0.8471 | 24.87 | 934K (37,269 unseen carved) |
+
+- The floater carve earns its keep on the room: +0.64-0.79 dB fair over no carve, SSIM +0.004.
+- The unseen carve (1 px) removes 21% of the splats at no measurable cost (fair 24.75 vs 24.90, noise level on 4 views).
+- Off the photo path (Wander pan-0..7, `_shots/dataset/Bathroom__tuvok-n0_tuvok-n1_tuvok-n2_pan__wander.png`): the
+  well-covered headings are identical; the headings 2/33 photos face (pan-1..3) show the same dark smears in all three -
+  a coverage problem, not the carve's.
+- **Decision: defaults stay (carve on, unseen bar 1 px).** PLANS item 1 closed.
+

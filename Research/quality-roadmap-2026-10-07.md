@@ -365,3 +365,9 @@ each disk faced the centre camera, so from another viewpoint a ceiling of them w
 fill splat is the surface disk spanning its cell to the +x / +y neighbours at their filled depths
 (SplatCovariance.SurfaceDiskFromNeighbors, the single-photo layer's), capped at MaxCellStretch footprints.
 
+x2 (surface disks): no moire; mean T 3.5% (w0 5.6%); held out 18.78 / 0.8487; 53,158 splats in 9.0 s. Part of the
+ceiling is solid now, but (a) a band of it stays magenta - no view looked there: level views of 60 x ~47 degrees reach
+~23 degrees up, the up view ~30 degrees from the zenith, nothing covers ~23-60 degrees; (b) sawtooth sheets at its edges
+- from the centre the far ceiling is grazing and cells stretched to the single-photo cap of 8 footprints. x3: views at
+pitches 0 / +40 / -40 for each of the 8 headings (26 views), stretch cap 3.
+

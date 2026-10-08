@@ -31,7 +31,7 @@ public static class UnseenFill
         public int Stride;            // emit one splat every Stride grid cells
         public int Capacity;
         public float Opacity;
-        public float CellStretch;     // DepthToGaussianKernel.MaxCellStretch (kernels cannot read a mutable static)
+        public float CellStretch;     // longest a cell's disk may grow, in footprints (a parameter: kernels cannot read a mutable static)
     }
 
     /// <summary>The render resampled to the S x S paint grid: un-premultiplied colour 0..255, mask (255 = the scene's, 0 =
@@ -138,7 +138,7 @@ public static class UnseenFill
         rows[o + SplatFormat.OffPos + 1] = p.Py + ay * z;
         rows[o + SplatFormat.OffPos + 2] = p.Pz + az * z;
         for (int c = 0; c < 3; c++) rows[o + SplatFormat.OffColor + c] = painted[c * Px + i] / 255f;
-        // A cell's footprint head-on; a receding surface may stretch to MaxCellStretch of it (DepthToGaussianKernel's cap).
+        // A cell's footprint head-on; a receding surface may stretch to CellStretch of it.
         float aa = XMath.Sqrt(ax * ax + ay * ay + az * az);
         float footprint = z * aa * p.Stride * p.W / S / p.Fx;
         float cap = p.CellStretch * footprint;
@@ -216,8 +216,9 @@ public static class UnseenFill
     }
 
     /// <summary>
-    /// Fill the scene on <paramref name="renderer"/> around <paramref name="centre"/>: 8 headings 45 degrees apart
-    /// (60 degree horizontal field) plus straight up and down, rendered by <paramref name="trainer"/> at its size.
+    /// Fill the scene on <paramref name="renderer"/> around <paramref name="centre"/>: 8 headings 45 degrees apart at
+    /// pitches 0 / +40 / -40 (60 degree horizontal field) plus straight up and down, rendered by <paramref name="trainer"/>
+    /// at its size.
     /// Returns the splats added.
     /// </summary>
     public static async Task<int> FillAsync(Accelerator a, SplatTrainerGpu trainer, GpuGaussianRenderer renderer,
@@ -234,12 +235,17 @@ public static class UnseenFill
         var up = Vector3.Normalize(sceneUp);
         var side = Vector3.Normalize(MathF.Abs(up.X) < 0.9f ? Vector3.Cross(up, Vector3.UnitX) : Vector3.Cross(up, Vector3.UnitZ));
         var side2 = Vector3.Cross(up, side);
+        // 8 headings at three pitches (0, +40, -40 degrees) plus straight up and down. Level views alone (60 degrees
+        // across, ~47 up and down at 4:3) left the band from ~23 to ~60 degrees above the horizon to no view at all:
+        // x2's ceiling kept a magenta stripe there.
         var views = new List<(string Name, Vector3 Fwd, Vector3 Up)>();
-        for (int k = 0; k < 8; k++)
-        {
-            float t = k * MathF.PI / 4f;
-            views.Add(($"h{k * 45}", MathF.Cos(t) * side + MathF.Sin(t) * side2, up));
-        }
+        foreach (int pitch in new[] { 0, 40, -40 })
+            for (int k = 0; k < 8; k++)
+            {
+                float t = k * MathF.PI / 4f, pr = pitch * MathF.PI / 180f;
+                var heading = MathF.Cos(t) * side + MathF.Sin(t) * side2;
+                views.Add(($"h{k * 45}p{pitch}", MathF.Cos(pr) * heading + MathF.Sin(pr) * up, up));
+            }
         views.Add(("up", up, side));
         views.Add(("down", -up, side));
         int added = 0;
@@ -270,7 +276,9 @@ public static class UnseenFill
                     Px = centre.X, Py = centre.Y, Pz = centre.Z,
                     Rx = right.X, Ry = right.Y, Rz = right.Z, Ux = upO.X, Uy = upO.Y, Uz = upO.Z,
                     Fwx = cam.Forward.X, Fwy = cam.Forward.Y, Fwz = cam.Forward.Z,
-                    Stride = stride, Opacity = 0.95f, CellStretch = DepthToGaussianKernel.MaxCellStretch,
+                    // 3 footprints, not the single-photo layer's 8: seen from the centre the far ceiling is grazing, and
+                    // 8 turned its cells into long sawtooth sheets (x2).
+                    Stride = stride, Opacity = 0.95f, CellStretch = 3f,
                 };
                 var scratch = new List<MemoryBuffer1D<float, Stride1D.Dense>>();
                 try

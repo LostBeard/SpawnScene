@@ -58,6 +58,8 @@ candidate for TJ.
 down: a colour offset. Every photo learned a small positive offset (Truck mean +0.009..+0.017) and an offset folds into
 the scene only where it is opaque. `&exposure=gains` (per-channel gains only, gate-checked) queued as h0-h2 on all three.
 Not a default until it keeps Bathroom's gain without costing the benchmarks.
+**h0 Bathroom `&depthinit=4&exposure=gains`: held out 18.64 / 0.844** vs d0 (same build, full affine) 18.23 / 0.840 -
+gains-only is BETTER on the phone capture too (+0.4 dB). h1 Bicycle, h2 Truck pending.
 
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 

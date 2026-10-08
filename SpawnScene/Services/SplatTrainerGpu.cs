@@ -1621,6 +1621,10 @@ public sealed partial class SplatTrainerGpu : IDisposable
 
     /// <summary>The viewport the trainer is currently sized for.</summary>
     public (int Width, int Height) Size => (_width, _height);
+    /// <summary>The last forward's colour, 3 floats a pixel, composited over black (GPU-resident).</summary>
+    public MemoryBuffer1D<float, Stride1D.Dense>? RenderedColour => _outColour;
+    /// <summary>The last forward's final transmittance, 1 float a pixel (GPU-resident).</summary>
+    public MemoryBuffer1D<float, Stride1D.Dense>? RenderedTransmittance => _outFinalT;
 
     int SseWorkgroups => (_width * _height + 255) / 256;
 

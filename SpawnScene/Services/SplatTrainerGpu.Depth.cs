@@ -114,6 +114,20 @@ public sealed partial class SplatTrainerGpu
         });
     }
 
+    /// <summary>
+    /// Plain forwards with <c>depth: true</c> also write the rendered inverse depth, without the depth loss: the depth
+    /// variant's forward pipeline and depth_io (UnseenFill renders colour, transmittance and depth of views no photo
+    /// took). The first width x height floats of <see cref="RenderedInverseDepth"/> are sum(T a / z) per pixel.
+    /// </summary>
+    public void EnableDepthRender()
+    {
+        _rasterForwardDepth ??= MakePipeline(SplatTrainerShaders.DepthVariant(SplatTrainerShaders.RasterForward), "raster_forward");
+        EnsureDepthIo();
+    }
+
+    /// <summary>depth_io; its first width x height floats are the last depth forward's sum(T a / z). GPU-resident.</summary>
+    public MemoryBuffer1D<float, Stride1D.Dense>? RenderedInverseDepth => _depthIo;
+
     /// <summary>The rendered inverse depth of the last depth-supervised forward. CPU transfer: gate only.</summary>
     public async Task<float[]> ReadRenderedInverseDepthAsync()
     {

@@ -347,3 +347,16 @@ Per view (w0 vs p0): the views the photos cover are 1-3% (black: 4-13%); what re
 photos did not look - the "-3" views 11-28%, pan-2 (0/33 photos within 30 deg) 12%, pan-3 (1/33) 8%. In rooms the
 training side is close to done; the remaining dark is COVERAGE: nothing was photographed there.
 
+## Generative fill of what no photo saw (`&fillunseen=1`, opt-in - TJ 2026-10-08)
+
+UnseenFill (Services/UnseenFill.cs, Studio.Fill): after training, from the cameras' centre, 8 headings (60 deg) + up +
+down rendered by the trainer (colour, T, inverse depth); pixels < 70% covered masked; big-LaMa / MI-GAN paints them;
+each painted cell (stride 2 of 512) becomes a thin camera-facing splat at a push-pull depth; each view is pasted before
+the next renders. Everything on the GPU but two counters a view.
+
+x0 (Bathroom, defaults + `&fillunseen=1&inpaintmodel=lama`, over magenta): 8.3 s, 49,051 splats (the "up" view 59.5%
+uncovered: 39,015 of them). Mean T 5.6% (w0) -> 3.8%; the uncovered views roughly halve (in-3 26 -> 15%, low-3 24 ->
+11%, pan-2 12 -> 4%). Held out 18.92 / 0.8478 (no fill on held-out views' paths to speak of). BUT it looked wrong: the
+painted ceiling came out as hard-edged rectangles with gaps - the pull step took each coarse cell's depth (nearest), so
+the filled depth was flat steps and the fill splats sat on stepped planes. x1: bilinear pull.
+

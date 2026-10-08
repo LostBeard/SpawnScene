@@ -83,6 +83,18 @@ runs). GT | gsplat | ours (`_shots/hamamni_gt_gsplat_ours.png`): on 033 ours has
 match. TJ's "floating blur blobs" = these: dark splats in empty space in front of walls few photos see. Next: why our
 densify / prune leaves them and gsplat's does not (splat statistics: scale, opacity, distance to the cameras).
 
+**Splat statistics** (&splatstats=1 / tools/splat_stats.py; sizes and distances in camera spreads):
+
+| | splats | opacity p50 | > 0.5 | size p50 / p99 | within 0.5 spreads of a camera | held out |
+|---|---|---|---|---|---|---|
+| gsplat | 1.88M | **0.65** | **53%** | 0.016 / 0.064 | 3.6% | 21.41 |
+| ours, defaults (a11) | 1.56M | **0.12** | **12%** | 0.014 / 0.066 | 4.9% | 19.27 |
+| ours, extras off (a12) | 1.96M | 0.14 | 15% | 0.014 / 0.049 | 5.1% | 19.54 |
+
+Sizes and placement match; OPACITY does not: our scene is mostly translucent splats - haze, blur, see-through, the
+"blur blobs". Suspect: the opacity learning rate (on the logit) is 0.025 for us, 0.05 in gsplat; both reset opacity at
+3000 / 6000, so at 7K each has 1000 steps to regrow - at half the rate for us. o1 (= defaults + &opacitylr=0.05) running.
+
 No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
 by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.
 

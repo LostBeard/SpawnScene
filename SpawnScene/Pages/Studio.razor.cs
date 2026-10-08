@@ -268,6 +268,10 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("maxscale", out var msq) && float.TryParse(msq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var msf))
             MaxScaleFraction = msf;
+        // &opacitylr=X: the training opacity learning rate (logit; default 0.025, gsplat 0.05) - parity, every mode.
+        if (query.TryGetValue("opacitylr", out var opLrQ) && float.TryParse(opLrQ, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var opLrV))
+            TrainOpacityLr = Math.Max(0f, opLrV);
         // &projectrefine=0: no camera refinement in the project path (parity ablation; it is on for the user's scenes).
         if (query.TryGetValue("projectrefine", out var projRefQ)) ProjectRefinePoses = projRefQ is not ("0" or "false");
         // &randombgamp=A: the random background's width scale (default 0.5).

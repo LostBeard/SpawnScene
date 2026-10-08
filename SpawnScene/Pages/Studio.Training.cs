@@ -131,6 +131,10 @@ public partial class Studio
     /// that difference (c15 18.8 vs c17 24.0, 2026-10-04).
     /// </summary>
     public static bool RefinePoses { get; set; }
+    /// <summary>The opacity learning rate (on the logit, as gsplat's); &amp;opacitylr=X. 0.025 = the current reference 3DGS
+    /// code's; gsplat's default is 0.05. Parity 2026-10-08: on Hamamni our splats were mostly translucent (opacity median
+    /// 0.12 vs gsplat 0.65) one opacity reset (6000) before the 7K end.</summary>
+    public static float TrainOpacityLr { get; set; } = SplatOptimizer.DefaultOpacityLr;
     /// <summary>Camera refinement in the project path (on; &amp;projectrefine=0 off - the parity ablation, 2026-10-08).</summary>
     public static bool ProjectRefinePoses { get; set; } = true;
     /// <summary>Diagnostic (&amp;refineposes=2): refine only the HELD-OUT cameras against the finished scene, not the
@@ -706,7 +710,7 @@ public partial class Studio
                 bool readLoss = it < supervised.Count || it % supervised.Count == supervised.Count - 1
                     || it == iterations - 1;
                 if (ExposureOption) _trainer.ExposureLr = TrainingSchedule.ExponentialLr(0.01f, 0.001f, it, iterations);
-                float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo,
+                float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, opacityLr: TrainOpacityLr, geometry: geo,
                     readLoss: readLoss, poseSlot: poseAdam != null && geo != null && !RefineTestPosesOnly ? vi : -1,
                     exposureSlot: ExposureOption ? vi : -1);
 

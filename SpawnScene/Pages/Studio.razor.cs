@@ -254,6 +254,10 @@ public partial class Studio : IAsyncDisposable
             SplatTrainerGpu.RandomBackground = rbgq is "1" or "2" or "true";
             SplatTrainerGpu.ZeroMeanBackground = rbgq == "2";
         }
+        // &randombgamp=A: the random background's width scale (1 default; 0.5 = [-0.25, 0.25] with &randombg=2).
+        if (query.TryGetValue("randombgamp", out var rbaq) && float.TryParse(rbaq,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rbav))
+            SplatTrainerGpu.BackgroundAmplitude = Math.Max(0f, rbav);
         // &carve=S / &carvemargin=M: remove splats with share S of their weight in front of the photos' surfaces after
         // training (Studio.Training FloaterCensusAsync); the census itself is always reported.
         if (query.TryGetValue("carve", out var cvq) && float.TryParse(cvq,

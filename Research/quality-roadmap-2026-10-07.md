@@ -298,3 +298,16 @@ over black) - u0 Bicycle, u1 Bathroom (holes over magenta), t2 Truck.
 Truck (benchmark protocol, COLMAP poses, 7K): t0 black 23.97 / 0.8594, fair 24.197; t1 `&randombg=1` 23.96 / 0.8588,
 fair 24.189 - neutral.
 
+### Zero-mean random background (`&randombg=2`, [-0.5, 0.5]) - u0 / u1 / t2
+
+| Scene | black | `&randombg=1` [0, 1] | `&randombg=2` zero-mean |
+|---|---|---|---|
+| Bathroom held out / fair | 18.45-18.69 / 24.37-24.75 (p0, n0) | 18.83 / 25.17 (q0) | 18.86 / 25.15 (u1) |
+| Bathroom holes (magenta, mean of 34 views; views <= 1%) | 12.0%; 1/34 | 4.1%; 27/34 | 4.0%; 24/34 |
+| Truck held out / fair | 23.97 / 24.197 (t0) | 23.96 / 24.189 (t1) | 23.99 / 24.209 (t2) |
+| Bicycle held out / fair | 24.97 / 25.572 (m0) | 24.60 / 25.302 (r0) | 24.78 / 25.445 (u0) |
+
+Zero mean removes the colour bias (u0's exposure gains match m0's: 1.130 1.049 1.135 vs 1.127 1.048 1.125) and keeps the
+whole room gain; Truck neutral; Bicycle still -0.19 dB held out / -0.13 fair - the push to opacity itself, where the
+sky cannot be opaque. Next: v0/v1 at half width (`&randombgamp=0.5`).
+

@@ -1976,6 +1976,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// A negative background is fine inside the loss; the expected composite equals the render over black.
     /// </summary>
     public static bool ZeroMeanBackground { get; set; }
+    /// <summary>Scales the random background's width (1 = [0, 1] or [-0.5, 0.5]); smaller = a weaker push to opacity.</summary>
+    public static float BackgroundAmplitude { get; set; } = 1f;
     /// <summary>The loss's D-SSIM share (the reference's 0.2; L1 gets the rest). Gates set 0 for a pure L1 loss: the loss a
     /// step returns is the L1 part only, so finite differences of it match the gradient only without D-SSIM.</summary>
     public float DssimWeight { get; set; } = ImageQuality.LambdaDssim;
@@ -2008,8 +2010,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         bool depthOn = PrepareDepthStep(splatCount);
         if (FixedBackground is { } fixedBg) _stepBackground = fixedBg;
         else if (RandomBackground)
-            _stepBackground = new Vector3(_backgroundRng.NextSingle(), _backgroundRng.NextSingle(), _backgroundRng.NextSingle())
-                - (ZeroMeanBackground ? new Vector3(0.5f) : Vector3.Zero);
+            _stepBackground = BackgroundAmplitude * (new Vector3(_backgroundRng.NextSingle(), _backgroundRng.NextSingle(), _backgroundRng.NextSingle())
+                - (ZeroMeanBackground ? new Vector3(0.5f) : Vector3.Zero));
         try { await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false, depth: depthOn); }
         finally { _stepBackground = Vector3.Zero; }
         if (LastKeyCount == 0)

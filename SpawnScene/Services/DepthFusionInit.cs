@@ -55,7 +55,8 @@ public static class DepthFusionInit
     /// </summary>
     public static async Task<(MemoryBuffer1D<float, Stride1D.Dense> Packed, int Count, Report Report)?> FuseAsync(
         Accelerator a, IReadOnlyList<CameraParams?> cameras, IReadOnlyList<DepthMap?> depths, IReadOnlyList<int> views,
-        IReadOnlyList<Vector3> sparsePoints, IReadOnlyList<byte[]?>? rgba, int stride, float relTol, float maxScale)
+        IReadOnlyList<Vector3> sparsePoints, IReadOnlyList<byte[]?>? rgba, int stride, float relTol, float maxScale,
+        bool snapEdges = false)
     {
         // Per accelerator: a kernel cached from another (disposed) accelerator runs against freed state - MEASURED, the
         // second of two unit tests on fresh CPU accelerators failed only when run after the first.
@@ -96,6 +97,21 @@ public static class DepthFusionInit
                 hasRgba[k] = true;
             }
         }
+
+        // TJ 2026-10-07: the multi-photo seeds come from the same depth maps as a single photo - snap their edges to the
+        // colours too (DepthEdgeSnap), so a resize ramp between an object and the wall seeds no splats in mid-air.
+        int snappedViews = 0;
+        if (snapEdges)
+            for (int k = 0; k < used.Count; k++)
+            {
+                if (!hasRgba[k]) continue;
+                var d = depths[used[k]]!.Value;
+                long px = (long)d.Width * d.Height;
+                using var tmp = a.Allocate1D<float>(px);
+                DepthEdgeSnap.Run(a, allDepth.View.SubView(offsets[k], px), allRgba.View.SubView(offsets[k], px), tmp.View, d.Width, d.Height);
+                allDepth.View.SubView(offsets[k], px).CopyFrom(tmp.View);
+                snappedViews++;
+            }
 
         // -- Per-view depth scale from the SfM points (CPU transfer: one depth value per projected point) --
         var scales = new float[used.Count];
@@ -167,7 +183,8 @@ public static class DepthFusionInit
         }
         // CPU transfer: the emitted count.
         int emitted = Math.Min((await counter.CopyToHostAsync<int>(0, 1))[0], capacity);
-        return (outPacked, emitted, new Report(used.Count, scaled, candidates, emitted, scaleText));
+        return (outPacked, emitted, new Report(used.Count, scaled, candidates, emitted,
+            (snapEdges ? $"(edges snapped in {snappedViews} views) " : "") + scaleText));
     }
 
     static void GatherKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> src, ArrayView1D<int, Stride1D.Dense> idx,

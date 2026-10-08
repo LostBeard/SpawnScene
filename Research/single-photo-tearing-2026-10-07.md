@@ -62,6 +62,15 @@ Plan: OcclusionFill already knows WHERE the hidden layer goes (the far side of e
 frame). Build the mask from it, inpaint the photo there (MI-GAN first), and colour the hidden layer from the inpainted
 image instead of the push-pull blur; its depth stays the far-side depth.
 
+## Measured: DepthEdgeSnap v2 (two plateaus by colour), kitchen
+
+The first snap (colour-weighted median) failed its own unit test: ramp samples share the pixel's colour, so the median
+picked the ramp. v2 splits the window at the midpoint depth into near and far sides and gives the pixel the plateau
+(lo/hi) of the side whose mean colour it matches; same-colour sides = a slope, untouched (DepthEdgeSnapTests: ramp ->
+plateaus, slope unchanged). From the moved views: the cereal box is compact instead of a sheet smeared over the counter -
+the geometry tearing is gone at that edge. What opens behind it now shows OcclusionFill's push-pull BLUR (soft colour
+blobs) - the case for inpainting the hidden layer (MI-GAN). Still opt-in (&edgesnap=1) until TJ has looked.
+
 ## Measured: DAv3 Base vs Small (kitchen, 2026-10-07)
 
 `&depthmodel=depth-anything-v3-base` (onnx-community, Apache-2.0, ~500 MB, now selectable in project settings): from the

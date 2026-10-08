@@ -15,10 +15,11 @@ namespace SpawnScene.Services;
 /// </para>
 /// <para>
 /// Here each pixel whose neighbourhood spans more than <see cref="Params.MinRelRange"/> of its depth takes the
-/// COLOUR-WEIGHTED MEDIAN of the depths on a (2R+1)^2 grid around it, spaced by the upsampling factor: a ramp pixel
-/// lands on the plateau whose colour it shares (joint-bilateral in spirit, but a median, so it picks a side instead of
-/// averaging the two into a new ramp). Smooth regions are untouched; what opens behind the snapped edge is what
-/// OcclusionFill's hidden background layer is for.
+/// plateau depth of the side its COLOUR belongs to: the (2R+1)^2 grid around it (spaced by the upsampling factor) is split
+/// at the midpoint depth into a near and a far side, and the pixel takes lo or hi by which side's mean colour it is
+/// closer to - never a value from the ramp. If both sides have the same colour it is a slope, not an edge, and is left
+/// alone. (A colour-weighted MEDIAN came first: ramp samples share the pixel's colour too, so it picked the ramp -
+/// DepthEdgeSnapTests.) What opens behind the snapped edge is what OcclusionFill's hidden background layer is for.
 /// </para>
 /// </summary>
 public static class DepthEdgeSnap
@@ -26,8 +27,8 @@ public static class DepthEdgeSnap
     public struct Params
     {
         public int Width, Height, Step, Radius;
-        /// <summary>1 / (2 sigma^2) for the RGB distance (channels in 0..1).</summary>
-        public float ColourFalloff;
+        /// <summary>Squared RGB distance (channels 0..1) the two sides' mean colours need to count as an edge.</summary>
+        public float MinColourSeparation;
         /// <summary>1 / (2 sigma^2) for the grid distance (in steps).</summary>
         public float SpatialFalloff;
         /// <summary>Neighbourhood depth spread, relative to the pixel's depth, below which it is left alone.</summary>
@@ -41,7 +42,7 @@ public static class DepthEdgeSnap
     public const int ModelLongSide = 518;
 
     /// <summary>&amp;snapr=N: grid half-size in steps ((2N+1)^2 candidates).</summary>
-    public static int GridRadius { get; set; } = 2;
+    public static int GridRadius { get; set; } = 3;
     /// <summary>&amp;snapstep=X: candidate spacing as a multiple of the upsampling factor.</summary>
     public static float StepScale { get; set; } = 1f;
 
@@ -53,22 +54,14 @@ public static class DepthEdgeSnap
         _snap ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, Params>(SnapKernel);
         int step = Math.Max(1, (int)MathF.Round(StepScale * Math.Max(width, height) / ModelLongSide));
-        int radius = Math.Clamp(GridRadius, 1, 4);
+        int radius = Math.Clamp(GridRadius, 1, 6);
         _snap((int)((long)width * height), depth, rgba, output, new Params
         {
             Width = width, Height = height, Step = step, Radius = radius,
-            ColourFalloff = 1f / (2f * colourSigma * colourSigma),
+            MinColourSeparation = colourSigma * colourSigma,
             SpatialFalloff = 1f / (2f * (radius * 0.75f) * (radius * 0.75f)),
             MinRelRange = 0.03f,
         });
-    }
-
-    static float Weight(int c0, int c1, int dx, int dy, Params p)
-    {
-        float dr = ((c0 & 0xFF) - (c1 & 0xFF)) / 255f;
-        float dg = (((c0 >> 8) & 0xFF) - ((c1 >> 8) & 0xFF)) / 255f;
-        float db = (((c0 >> 16) & 0xFF) - ((c1 >> 16) & 0xFF)) / 255f;
-        return XMath.Exp(-(dr * dr + dg * dg + db * db) * p.ColourFalloff - (dx * dx + dy * dy) * p.SpatialFalloff);
     }
 
     static void SnapKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> depth, ArrayView1D<int, Stride1D.Dense> rgba,
@@ -87,34 +80,30 @@ public static class DepthEdgeSnap
             }
         if (!(d0 > 0f) || hi - lo <= p.MinRelRange * d0) { output[i] = d0; return; }
 
-        int c0 = rgba[i];
-        float total = 0f;
+        // Two sides of the edge: candidates nearer than the midpoint depth, and farther. Their mean colours (spatially
+        // weighted) say which side this pixel's colour belongs to; it takes that side's plateau depth (lo or hi), never
+        // a value from the ramp between. Both sides the same colour = a slope, not an edge: left alone.
+        float mid = 0.5f * (lo + hi);
+        float nr = 0f, ng = 0f, nb = 0f, nw = 0f, fr = 0f, fg = 0f, fb = 0f, fw = 0f;
         for (int dy = -r; dy <= r; dy++)
             for (int dx = -r; dx <= r; dx++)
             {
                 int sx = XMath.Clamp(x + dx * p.Step, 0, p.Width - 1), sy = XMath.Clamp(y + dy * p.Step, 0, p.Height - 1);
-                total += Weight(c0, rgba[sy * p.Width + sx], dx, dy, p);
+                int o = sy * p.Width + sx;
+                int c = rgba[o];
+                float w = XMath.Exp(-(dx * dx + dy * dy) * p.SpatialFalloff);
+                float cr = (c & 0xFF) / 255f, cg = ((c >> 8) & 0xFF) / 255f, cb = ((c >> 16) & 0xFF) / 255f;
+                if (depth[o] < mid) { nr += w * cr; ng += w * cg; nb += w * cb; nw += w; }
+                else { fr += w * cr; fg += w * cg; fb += w * cb; fw += w; }
             }
-
-        // Weighted median: the candidate whose weighted rank sits closest to half the total.
-        float best = d0, bestErr = float.MaxValue;
-        for (int jy = -r; jy <= r; jy++)
-            for (int jx = -r; jx <= r; jx++)
-            {
-                int ax = XMath.Clamp(x + jx * p.Step, 0, p.Width - 1), ay = XMath.Clamp(y + jy * p.Step, 0, p.Height - 1);
-                float dj = depth[ay * p.Width + ax];
-                float below = 0f;
-                for (int ky = -r; ky <= r; ky++)
-                    for (int kx = -r; kx <= r; kx++)
-                    {
-                        int bx = XMath.Clamp(x + kx * p.Step, 0, p.Width - 1), by = XMath.Clamp(y + ky * p.Step, 0, p.Height - 1);
-                        float dk = depth[by * p.Width + bx];
-                        float wk = Weight(c0, rgba[by * p.Width + bx], kx, ky, p);
-                        below += dk < dj ? wk : dk == dj ? 0.5f * wk : 0f;
-                    }
-                float err = XMath.Abs(below - 0.5f * total);
-                if (err < bestErr) { bestErr = err; best = dj; }
-            }
-        output[i] = best;
+        if (nw <= 0f || fw <= 0f) { output[i] = d0; return; }
+        nr /= nw; ng /= nw; nb /= nw; fr /= fw; fg /= fw; fb /= fw;
+        float sep = (nr - fr) * (nr - fr) + (ng - fg) * (ng - fg) + (nb - fb) * (nb - fb);
+        if (sep < p.MinColourSeparation) { output[i] = d0; return; }
+        int c0 = rgba[i];
+        float pr = (c0 & 0xFF) / 255f, pg = ((c0 >> 8) & 0xFF) / 255f, pb = ((c0 >> 16) & 0xFF) / 255f;
+        float toNear = (pr - nr) * (pr - nr) + (pg - ng) * (pg - ng) + (pb - nb) * (pb - nb);
+        float toFar = (pr - fr) * (pr - fr) + (pg - fg) * (pg - fg) + (pb - fb) * (pb - fb);
+        output[i] = toNear <= toFar ? lo : hi;
     }
 }

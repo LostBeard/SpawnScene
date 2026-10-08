@@ -77,6 +77,12 @@ top: blur, bottom: MI-GAN): the yellow/orange blobs of foreground colour behind 
 revealed area reads as countertop and backsplash. Soft (512 px painting of a 3840 px photo): tiles of 512 around each
 masked region would sharpen it. Load 1.2 s, paint 518 ms.
 
+**Tried and reverted: 512-cell tiles at grid resolution** for the behind-edge layer (20 tiles, ~0.15 s each). Worse:
+at full resolution the masked band sits against the foreground object's UNMASKED interior (only cells within the
+fill radius of an edge are masked), and MI-GAN continues the box's colours into it - the yellow blobs came back. The
+single 512 pass sees the band surrounded mostly by background. The fix is the mask, not the resolution: mask the whole
+near layer of an object (depth-layer segmentation, or a dilation of the near side until the depth jump), then paint.
+
 **Past the frame too (same &inpaint=1):** the padded grid letterboxed into 512 with the margin masked; the border layer
 takes MI-GAN's continuation. Garden path from moved views (`img/outpaint-garden-2026-10-07.jpg`, top: push-pull, bottom:
 MI-GAN): the olive smeared tunnel around the photo becomes sky, trees, grass and the path running on. Soft at 512 px;

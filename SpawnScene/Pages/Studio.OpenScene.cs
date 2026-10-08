@@ -51,7 +51,7 @@ public partial class Studio
             // Another tool's scene: a 3DGS .ply or an .spz (Studio.ForeignScene).
             if (!await ImportForeignBlobAsync(file, name, noOptions))
             {
-                _statusMessage = $"{name} is not a scene SpawnScene can open (.spawnscene, a 3DGS .ply, .spz or .splat)";
+                _statusMessage = $"{name} is not a scene SpawnScene can open (.spawnscene, a 3DGS .ply, .spz, .splat or .sog)";
                 Console.WriteLine($"[OpenScene] {name} is not a .spawnscene, a 3DGS .ply or an .spz");
             }
             file.Dispose();

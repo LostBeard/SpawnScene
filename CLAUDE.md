@@ -21,13 +21,14 @@ dotnet publish ./SpawnScene/ --nologo -c:Release --output publish
 page; from Git Bash pass `MSYS_NO_PATHCONV=1`). Score captured views with `tools/score_views.py`.
 
 **Other tools' scenes:** "Open scene file" and `?import=<url>` also take a 3DGS `.ply` (GaussianPly + GaussianPlyImport),
-PlayCanvas's compressed `.ply` (SuperSplat's export; GaussianPly.ParseCompressed), Niantic's `.spz` v2/v3 (SpzImport) and
+PlayCanvas's compressed `.ply` (SuperSplat's export; GaussianPly.ParseCompressed) and `.sog` (zip of WebP textures; SogMeta,
+SogImport - WebP decoded by the browser into a WebGPU texture, never a 2D canvas, which premultiplies), Niantic's `.spz` v2/v3 (SpzImport) and
 antimatter15's `.splat` (SplatFileImport), converted on the GPU into a new project. All are turned y-up by default (3DGS
 PLYs are in their SfM frame, y down, and the other formats in circulation carry the same frame - Spark's examples turn
 SPZ too); `&sceneup=keep` leaves them. Imports seat on the scene's dense core (20-80% box). Tests: GaussianPlyImportTests,
 CompressedPlyImportTests (vs a port of PlayCanvas's decoder), SpzImportTests (Niantic's packing ported),
-SplatFileImportTests; the y-up turn is checked against SH physics. Verified 2026-10-08 on Inria's Train (7K PLY),
-antimatter15's train.splat, Spark's butterfly/penguin .spz, PlayCanvas's biker/guitar compressed PLY. SPZ v4 (zstd
+SplatFileImportTests, SogImportTests (vs a port of PlayCanvas's SOG iterator); the y-up turn is checked against SH physics. Verified 2026-10-08 on Inria's Train (7K PLY),
+antimatter15's train.splat, Spark's butterfly/penguin .spz, PlayCanvas's biker/guitar compressed PLY and skull.sog (v2, SH 3). SPZ v4 (zstd
 streams, already in PlayCanvas's examples) is refused with a reason: Chrome's DecompressionStream has no zstd. A kernel
 with no SH bands must bind three DISTINCT stand-in buffers (WebGPU refuses aliased read_write bindings; CPU tests cannot
 see it). `_cdp_page.js` takes `PAGE_LOG=<regex>` to print the app's own console lines.

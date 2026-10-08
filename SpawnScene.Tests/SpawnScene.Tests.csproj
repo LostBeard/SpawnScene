@@ -90,6 +90,9 @@
     <Compile Include="..\SpawnScene\Services\GaussianPlyImport.cs" Link="Linked\GaussianPlyImport.cs" />
     <Compile Include="..\SpawnScene\Services\SpzImport.cs" Link="Linked\SpzImport.cs" />
     <Compile Include="..\SpawnScene\Services\SplatFileImport.cs" Link="Linked\SplatFileImport.cs" />
+    <Compile Include="..\SpawnScene\Services\SogImport.cs" Link="Linked\SogImport.cs" />
+    <Compile Include="..\SpawnScene\Formats\SogMeta.cs" Link="Linked\SogMeta.cs" />
+    <Compile Include="..\SpawnScene\Formats\ZipDirectory.cs" Link="Linked\ZipDirectory.cs" />
     <Compile Include="..\SpawnScene\Services\GpuPairMatcher.cs" Link="Linked\GpuPairMatcher.cs" />
     <Compile Include="..\SpawnScene\Services\GpuEpipolarRansac.cs" Link="Linked\GpuEpipolarRansac.cs" />
     <Compile Include="..\SpawnScene\Services\LearnedFeatureMatcher.cs" Link="Linked\LearnedFeatureMatcher.cs" />

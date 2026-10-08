@@ -23,7 +23,90 @@ public partial class Studio
     {
         if (await ImportPlyBlobAsync(file, name, query)) return true;
         if (await ImportSpzBlobAsync(file, name, query)) return true;
+        if (await ImportSogBlobAsync(file, name, query)) return true;
         return await ImportSplatBlobAsync(file, name, query);
+    }
+
+    static async Task<byte[]> SliceBytesAsync(Blob file, long start, long end)
+    {
+        using var slice = file.Slice(start, end);
+        using var ab = await slice.ArrayBuffer();
+        using var u = new Uint8Array(ab);
+        return u.ReadBytes();
+    }
+
+    /// <summary>Import PlayCanvas's SOG bundle (a zip of WebP textures and meta.json; Formats/SogMeta, Services/SogImport).
+    /// False when the file is not a zip with a meta.json.</summary>
+    async Task<bool> ImportSogBlobAsync(Blob file, string name, Dictionary<string, string> query)
+    {
+        if (file.Size < 22 || !ZipDirectory.IsZip(await SliceBytesAsync(file, 0, 4))) return false;
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        List<ZipDirectory.Entry> entries;
+        try
+        {
+            long tailStart = Math.Max(0, file.Size - 65557);
+            var tail = await SliceBytesAsync(file, tailStart, file.Size);
+            var (cdOffset, cdSize, cdCount) = ZipDirectory.FindEnd(tail, file.Size);
+            entries = ZipDirectory.Parse(await SliceBytesAsync(file, cdOffset, cdOffset + cdSize), cdCount);
+        }
+        catch (FormatException) { return false; }
+        var byName = entries.GroupBy(e => Path.GetFileName(e.Name)).ToDictionary(g => g.Key, g => g.First(), StringComparer.Ordinal);
+        if (!byName.ContainsKey("meta.json")) return false;
+        async Task<Blob> Open(string entryName)
+        {
+            if (!byName.TryGetValue(entryName, out var e)) throw new FormatException($"the SOG has no {entryName}");
+            long data = ZipDirectory.DataOffset(await SliceBytesAsync(file, e.LocalHeaderOffset, e.LocalHeaderOffset + 30), e);
+            var raw = file.Slice(data, data + e.CompressedSize);
+            if (e.Method == 0) return raw;
+            if (e.Method != 8) { raw.Dispose(); throw new FormatException($"zip method {e.Method} for {entryName} is not read"); }
+            using (raw)
+            {
+                // CPU transfer: none - inflated by the browser, JS-side.
+                using var src = raw.Stream();
+                using var inflate = new DecompressionStream("deflate-raw");
+                using var piped = src.PipeThrough(inflate);
+                using var resp = new Response(piped, (ResponseOptions?)null);
+                return await resp.Blob();
+            }
+        }
+        SogMeta meta;
+        try
+        {
+            using var metaBlob = await Open("meta.json");
+            meta = SogMeta.Parse(await metaBlob.Text());
+        }
+        catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException or KeyNotFoundException)
+        {
+            _statusMessage = $"Cannot open {name}: {ex.Message}";
+            Console.WriteLine($"[Import] {name}: {ex.Message}");
+            return true;
+        }
+        bool flip = TurnImportYUp(query);
+        using var window = _js.Get<Window>("window");
+        var (packed, sh, shDegree) = await SogImport.ConvertAsync(_gpuService.WebGPUAccelerator, window, meta, Open, flip);
+        Uint8Array packedU8;
+        var shU8 = new List<Uint8Array>();
+        try
+        {
+            // CPU transfer: file I/O - the decoded rows go to the project store as any saved scene does.
+            packedU8 = await packed.CopyToHostUint8ArrayAsync(0, (long)meta.Count * SplatFormat.Floats * sizeof(float));
+            if (sh != null)
+                foreach (var part in sh)
+                    shU8.Add(await part.CopyToHostUint8ArrayAsync(0, (long)meta.Count * SphericalHarmonics.PartFloatsPerSplat * sizeof(float)));
+        }
+        finally
+        {
+            packed.Dispose();
+            if (sh != null) foreach (var part in sh) part.Dispose();
+        }
+        var scene = new ProjectScene
+        {
+            SplatCount = meta.Count, FloatsPerSplat = SplatFormat.Floats, ColoursAreShDc = true, ShDegree = shDegree, ImportedFrom = name,
+        };
+        Console.WriteLine($"[Import] {name}: SOG v{meta.Version}, {meta.Count:N0} splats, SH degree {shDegree}, decoded in {t0.Elapsed.TotalSeconds:F1}s" +
+            (flip ? " (turned y-up)" : ""));
+        await SaveAndOpenImportedSceneAsync(Path.GetFileNameWithoutExtension(name), scene, packedU8, shU8, query, "sog");
+        return true;
     }
 
     /// <summary>Import antimatter15's .splat - no magic, so by name and a whole number of 32-byte splats.</summary>

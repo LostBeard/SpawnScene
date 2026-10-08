@@ -13,7 +13,8 @@ BASE = ("https://hub.spawndev.com:44365/src?url="
 ORDER = [
     ("hamamni-baths", "Nassima Chahboun"),
     ("pinecone", "NELAC, University of São Paulo"),
-    ("korno-rock", "Zbytovsky"),
+    # korno-rock (CC0, Zbytovsky) stays on HF but out of the list: s3 2026-10-07 - 106 MB, 25 min to train, a 594 MB
+    # scene of a plain rock face; not a demo.
     ("kitchen", "NeONBRAND (Unsplash)"),
     ("living-room", "Jarosław Ceborski (Unsplash)"),
     ("castle-room", "Daderot"),

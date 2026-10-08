@@ -58,8 +58,12 @@ Single photos are the opposite case: depth-based scenes use the full photo, so k
 ## Status
 
 - [x] Old buttons removed; catalog UI + loader (Studio.ProjectPage / Studio.Projects.LoadSampleAsync).
-- [ ] Each set reconstructed through the user path and judged off the photo path (wander + pan views) before it
-      goes in the catalog - a demo that looks bad is worse than none.
-- [ ] Upload to the HF dataset repo.
+- [x] Each set through the user path (7K, defaults), judged off the photo path (s1-s3, 2026-10-07):
+      Hamamni 57/59 placed, 1.24M splats, home view good, pulled-back views blobby (an inward capture of a pool) - kept;
+      ceramic pine cone 88/95 placed, 274K splats in 6 min, the object holds from nearly every angle - the best demo;
+      Korno rock 96 placed, 2.64M splats, 25 min, 594 MB, supervised SSIM 0.46 - DROPPED from the list (stays on HF).
+      Single photos (generate-room &sampleurl=): kitchen and garden path clean at home; the garden path exposed the
+      viewer-lens bug (fixed: a photo scene opens with the photo's own field of view).
+- [x] Uploaded to huggingface.co/datasets/LostBeard/spawnscene-samples, fetched through the hub, pre-warmed.
 - [ ] Ask TJ: may the Bathroom set be a sample? Would he capture 2-3 demo sets (an object on a table, a room, an
       outdoor scene) with his phone? Our own captures are the only fully clean multi-photo sources at quality.

@@ -101,7 +101,7 @@ public static class GaussianPlyImport
         GaussianPly.Layout L, bool flipToYUp, ArrayView1D<float, Stride1D.Dense> packed,
         ArrayView1D<float, Stride1D.Dense> sh0, ArrayView1D<float, Stride1D.Dense> sh1, ArrayView1D<float, Stride1D.Dense> sh2)
     {
-        if (!ReferenceEquals(_loadedFor, a)) { _kernel = null; _loadedFor = a; }
+        if (!ReferenceEquals(_loadedFor, a)) { _kernel = null; _compressed = null; _loadedFor = a; }
         _kernel ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(Kernel);
         _kernel(count, words, packed, sh0, sh1, sh2, new Params
@@ -111,6 +111,161 @@ public static class GaussianPlyImport
             S0 = L.Scale0, S1 = L.Scale1, S2 = L.Scale2, R0 = L.Rot0, R1 = L.Rot1, R2 = L.Rot2, R3 = L.Rot3,
             RestFirst = L.RestFirst, RestPerChannel = L.RestPerChannel, Flip = flipToYUp ? 1 : 0,
         });
+    }
+
+    // ── PlayCanvas compressed PLY (GaussianPly.CompressedLayout) ──────────────────────────────────────────────────
+
+    public struct CompressedParams
+    {
+        public int Count, V0, VFirst, ShFirst, ShPerChannel, ChunkProps, ChunkFirst, Flip;
+    }
+
+    static Action<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>,
+        ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+        ArrayView1D<float, Stride1D.Dense>, CompressedParams>? _compressed;
+
+    static uint Byte(ArrayView1D<uint, Stride1D.Dense> w, int addr) => (w[addr >> 2] >> ((addr & 3) * 8)) & 0xFFu;
+    static float Unorm(uint v, int bits) { uint m = (1u << bits) - 1u; return (v & m) / (float)m; }
+    static float Lerp(float a, float b, float t) => a * (1f - t) + b * t;
+
+    /// <summary>One splat of a compressed PLY - playcanvas/engine gsplat-compressed-data.js SplatCompressedIterator.read,
+    /// formula for formula: 11/10/11 position and log scale between the chunk's bounds, the 2+10+10+10 "largest of four"
+    /// rotation (index 0 = w), RGBA8 colour (between the chunk's colour bounds when it has them), SH v * 8/255 - 4.</summary>
+    static void CompressedKernel(Index1D i, ArrayView1D<uint, Stride1D.Dense> chunk, ArrayView1D<uint, Stride1D.Dense> vw,
+        ArrayView1D<uint, Stride1D.Dense> shw, ArrayView1D<float, Stride1D.Dense> packed,
+        ArrayView1D<float, Stride1D.Dense> sh0, ArrayView1D<float, Stride1D.Dense> sh1, ArrayView1D<float, Stride1D.Dense> sh2,
+        CompressedParams p)
+    {
+        if (i >= p.Count) return;
+        int v = p.V0 + i;
+        int ci = p.ChunkFirst + (v / 256) * p.ChunkProps * 4;   // byte address of this splat's chunk row
+        int vb = p.VFirst + i * 16;
+        uint pp = ReadU32(vw, vb), rr = ReadU32(vw, vb + 4), ss = ReadU32(vw, vb + 8), cc = ReadU32(vw, vb + 12);
+        float sgn = p.Flip != 0 ? -1f : 1f;
+        int o = v * SplatFormat.Floats;
+        packed[o] = Lerp(F(chunk, ci), F(chunk, ci + 12), Unorm(pp >> 21, 11));
+        packed[o + 1] = Lerp(F(chunk, ci + 4), F(chunk, ci + 16), Unorm(pp >> 11, 10)) * sgn;
+        packed[o + 2] = Lerp(F(chunk, ci + 8), F(chunk, ci + 20), Unorm(pp, 11)) * sgn;
+        packed[o + 6] = XMath.Exp(Lerp(F(chunk, ci + 24), F(chunk, ci + 36), Unorm(ss >> 21, 11)));
+        packed[o + 7] = XMath.Exp(Lerp(F(chunk, ci + 28), F(chunk, ci + 40), Unorm(ss >> 11, 10)));
+        packed[o + 8] = XMath.Exp(Lerp(F(chunk, ci + 32), F(chunk, ci + 44), Unorm(ss, 11)));
+        float r = Unorm(cc >> 24, 8), g = Unorm(cc >> 16, 8), b = Unorm(cc >> 8, 8);
+        if (p.ChunkProps > 12)
+        {
+            r = Lerp(F(chunk, ci + 48), F(chunk, ci + 60), r);
+            g = Lerp(F(chunk, ci + 52), F(chunk, ci + 64), g);
+            b = Lerp(F(chunk, ci + 56), F(chunk, ci + 68), b);
+        }
+        const float C0 = 0.28209479177387814f;
+        packed[o + 3] = (r - 0.5f) / C0; packed[o + 4] = (g - 0.5f) / C0; packed[o + 5] = (b - 0.5f) / C0;
+        packed[o + 9] = Unorm(cc, 8);
+        const float Sqrt2 = 1.41421356f;
+        float a = (Unorm(rr >> 20, 10) - 0.5f) * Sqrt2, bq = (Unorm(rr >> 10, 10) - 0.5f) * Sqrt2, c = (Unorm(rr, 10) - 0.5f) * Sqrt2;
+        float m = XMath.Sqrt(XMath.Max(0f, 1f - (a * a + bq * bq + c * c)));
+        uint largest = rr >> 30;
+        float qx, qy, qz, qw;
+        if (largest == 0) { qx = a; qy = bq; qz = c; qw = m; }
+        else if (largest == 1) { qx = m; qy = bq; qz = c; qw = a; }
+        else if (largest == 2) { qx = bq; qy = m; qz = c; qw = a; }
+        else { qx = bq; qy = c; qz = m; qw = a; }
+        if (p.Flip != 0)
+        {
+            float nw = -qx, nx = qw, ny = -qz, nz = qy;   // (1,0,0,0) * q, as Kernel
+            qw = nw; qx = nx; qy = ny; qz = nz;
+        }
+        packed[o + 10] = qx; packed[o + 11] = qy; packed[o + 12] = qz; packed[o + 13] = qw;
+
+        if (p.ShPerChannel == 0) return;
+        int partBase = v * SphericalHarmonics.PartFloatsPerSplat;
+        int sb = p.ShFirst + i * 3 * p.ShPerChannel;
+        for (int k = 1; k <= 15; k++)
+            for (int ch = 0; ch < 3; ch++)
+            {
+                float val = k <= p.ShPerChannel ? Byte(shw, sb + ch * p.ShPerChannel + k - 1) * (8f / 255f) - 4f : 0f;
+                if (p.Flip != 0 && ((FlipSignMask >> k) & 1) != 0) val = -val;
+                int f = (k - 1) * 3 + ch;
+                int part = f / SphericalHarmonics.PartFloatsPerSplat, idx = partBase + f % SphericalHarmonics.PartFloatsPerSplat;
+                if (part == 0) sh0[idx] = val;
+                else if (part == 1) sh1[idx] = val;
+                else sh2[idx] = val;
+            }
+    }
+
+    /// <summary>Decode compressed splats [v0, v0 + count) (their vertex and SH bytes uploaded at the given offsets,
+    /// the chunk table whole). Public for the CPU tests.</summary>
+    public static void RunCompressed(Accelerator a, ArrayView1D<uint, Stride1D.Dense> chunkTable, int chunkFirst,
+        ArrayView1D<uint, Stride1D.Dense> vertexWords, int vFirst, ArrayView1D<uint, Stride1D.Dense> shWords, int shFirst,
+        int v0, int count, GaussianPly.CompressedLayout L, bool flipToYUp, ArrayView1D<float, Stride1D.Dense> packed,
+        ArrayView1D<float, Stride1D.Dense> sh0, ArrayView1D<float, Stride1D.Dense> sh1, ArrayView1D<float, Stride1D.Dense> sh2)
+    {
+        if (!ReferenceEquals(_loadedFor, a)) { _kernel = null; _compressed = null; _loadedFor = a; }
+        _compressed ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<uint, Stride1D.Dense>,
+            ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, CompressedParams>(CompressedKernel);
+        _compressed(count, chunkTable, vertexWords, shWords, packed, sh0, sh1, sh2, new CompressedParams
+        {
+            Count = count, V0 = v0, VFirst = vFirst, ShFirst = shFirst, ShPerChannel = L.ShPerChannel,
+            ChunkProps = L.ChunkProps, ChunkFirst = chunkFirst, Flip = flipToYUp ? 1 : 0,
+        });
+    }
+
+    /// <summary>Bytes [start, start + length) of the file into <paramref name="dst"/> from word 0 (aligned down; a short
+    /// tail padded to a word). Returns the byte offset of <paramref name="start"/> in it.</summary>
+    static int UploadRange(GPUQueue queue, GPUBuffer dst, ArrayBuffer file, long start, long length)
+    {
+        long baseByte = start & ~3L, end = start + length;
+        long full = (end - baseByte) & ~3L;
+        if (full > 0) queue.WriteBuffer(dst, 0L, file, (int)baseByte, full);
+        if (end - baseByte > full)
+        {
+            using var tail = new Uint8Array(4);
+            using var src = new Uint8Array(file, baseByte + full, end - baseByte - full);
+            tail.Set(src);
+            using var tailBuf = tail.Buffer;
+            queue.WriteBuffer(dst, full, tailBuf, 0, 4L);
+        }
+        return (int)(start - baseByte);
+    }
+
+    /// <summary>A compressed PLY (JS-side) to rows and SH parts on the device, in batches of vertices.</summary>
+    public static async Task<(MemoryBuffer1D<float, Stride1D.Dense> Packed, MemoryBuffer1D<float, Stride1D.Dense>[]? Sh)> ConvertCompressedAsync(
+        WebGPUAccelerator a, ArrayBuffer file, GaussianPly.CompressedLayout L, bool flipToYUp)
+    {
+        if (L.Bytes > file.ByteLength) throw new FormatException("the compressed PLY is shorter than its header says (cut off?)");
+        if (L.Bytes > int.MaxValue) throw new FormatException("PLY files over 2 GB are not read yet");
+        int n = L.Count;
+        var packed = a.Allocate1D<float>(Math.Max(1L, (long)n * SplatFormat.Floats));
+        MemoryBuffer1D<float, Stride1D.Dense>[]? sh = null;
+        // Three distinct 1-float stand-ins when there are no SH bands: WebGPU refuses one buffer bound to two read_write
+        // slots (a degree-0 file failed exactly so in the browser; the CPU accelerator does not check).
+        using var dummy0 = a.Allocate1D<float>(1);
+        using var dummy1 = a.Allocate1D<float>(1);
+        using var dummy2 = a.Allocate1D<float>(1);
+        if (L.ShPerChannel > 0)
+        {
+            sh = new MemoryBuffer1D<float, Stride1D.Dense>[SphericalHarmonics.Parts];
+            for (int p = 0; p < sh.Length; p++) sh[p] = a.Allocate1D<float>(Math.Max(1L, (long)n * SphericalHarmonics.PartFloatsPerSplat));
+        }
+        var queue = a.NativeAccelerator.Queue!;
+        long chunkBytes = 4L * L.Chunks * L.ChunkProps;
+        using var chunk = a.Allocate1D<uint>(chunkBytes / 4 + 4);
+        a.FlushPendingCommands();
+        int chunkFirst = UploadRange(queue, chunk.GetGPUBuffer()!, file, L.ChunkOffset, chunkBytes);
+        int shPer = 3 * L.ShPerChannel;
+        int perBatch = Math.Max(256, ChunkBytes / (16 + shPer));
+        using var vbuf = a.Allocate1D<uint>((long)perBatch * 4 + 4);
+        using var sbuf = a.Allocate1D<uint>(Math.Max(1L, ((long)perBatch * shPer + 3) / 4 + 4));
+        for (int v0 = 0; v0 < n; v0 += perBatch)
+        {
+            int count = Math.Min(perBatch, n - v0);
+            a.FlushPendingCommands();   // the previous batch's kernel is queued before its bytes are overwritten
+            int vFirst = UploadRange(queue, vbuf.GetGPUBuffer()!, file, L.VertexOffset + 16L * v0, 16L * count);
+            int shFirst = shPer > 0 ? UploadRange(queue, sbuf.GetGPUBuffer()!, file, L.ShOffset + (long)shPer * v0, (long)shPer * count) : 0;
+            RunCompressed(a, chunk.View, chunkFirst, vbuf.View, vFirst, sbuf.View, shFirst, v0, count, L, flipToYUp, packed.View,
+                sh?[0].View ?? dummy0.View, sh?[1].View ?? dummy1.View, sh?[2].View ?? dummy2.View);
+        }
+        await a.SynchronizeAsync();
+        return (packed, sh);
     }
 
     /// <summary>Bytes of the file on the device at once.</summary>
@@ -129,7 +284,11 @@ public static class GaussianPlyImport
         int n = (int)L.Count;
         var packed = a.Allocate1D<float>(Math.Max(1L, (long)n * SplatFormat.Floats));
         MemoryBuffer1D<float, Stride1D.Dense>[]? sh = null;
-        using var dummy = a.Allocate1D<float>(1);
+        // Three distinct 1-float stand-ins when there are no SH bands: WebGPU refuses one buffer bound to two read_write
+        // slots (a degree-0 file failed exactly so in the browser; the CPU accelerator does not check).
+        using var dummy0 = a.Allocate1D<float>(1);
+        using var dummy1 = a.Allocate1D<float>(1);
+        using var dummy2 = a.Allocate1D<float>(1);
         if (L.ShDegree > 0)
         {
             sh = new MemoryBuffer1D<float, Stride1D.Dense>[SphericalHarmonics.Parts];
@@ -159,7 +318,7 @@ public static class GaussianPlyImport
                 queue.WriteBuffer(gpuChunk, full, tailBuf, 0, 4L);
             }
             RunChunk(a, chunk.View, (int)(start - baseByte), v0, count, L, flipToYUp, packed.View,
-                sh?[0].View ?? dummy.View, sh?[1].View ?? dummy.View, sh?[2].View ?? dummy.View);
+                sh?[0].View ?? dummy0.View, sh?[1].View ?? dummy1.View, sh?[2].View ?? dummy2.View);
             progress?.Invoke((v0 + count) / (double)n);
         }
         await a.SynchronizeAsync();

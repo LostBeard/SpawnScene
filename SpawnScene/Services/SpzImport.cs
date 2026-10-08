@@ -162,7 +162,11 @@ public static class SpzImport
         if (h.Bytes > int.MaxValue - 16) throw new FormatException("SPZ data over 2 GB is not read yet");
         var packed = a.Allocate1D<float>((long)h.Count * SplatFormat.Floats);
         MemoryBuffer1D<float, Stride1D.Dense>[]? sh = null;
-        using var dummy = a.Allocate1D<float>(1);
+        // Three distinct 1-float stand-ins when there are no SH bands: WebGPU refuses one buffer bound to two read_write
+        // slots (a degree-0 file failed exactly so in the browser; the CPU accelerator does not check).
+        using var dummy0 = a.Allocate1D<float>(1);
+        using var dummy1 = a.Allocate1D<float>(1);
+        using var dummy2 = a.Allocate1D<float>(1);
         if (h.KeptShDegree > 0)
         {
             sh = new MemoryBuffer1D<float, Stride1D.Dense>[SphericalHarmonics.Parts];
@@ -182,7 +186,7 @@ public static class SpzImport
             using var tailBuf = tail.Buffer;
             queue.WriteBuffer(words.GetGPUBuffer()!, full, tailBuf, 0, 4L);
         }
-        Run(a, words.View, h, packed.View, sh?[0].View ?? dummy.View, sh?[1].View ?? dummy.View, sh?[2].View ?? dummy.View, flipToYUp);
+        Run(a, words.View, h, packed.View, sh?[0].View ?? dummy0.View, sh?[1].View ?? dummy1.View, sh?[2].View ?? dummy2.View, flipToYUp);
         await a.SynchronizeAsync();
         return (packed, sh);
     }

@@ -54,7 +54,25 @@ public partial class Studio
         using (var mb = await slice.ArrayBuffer())
         using (var u = new Uint8Array(mb))
             magic = u.ReadBytes();
-        if (magic.Length < 2 || magic[0] != 0x1f || magic[1] != 0x8b) return false;
+        if (magic.Length < 2) return false;
+        if (magic[0] == (byte)'N' && magic[1] == (byte)'G')
+        {
+            // A raw NGSP header: SPZ v4 (per-attribute zstd streams after a 32-byte header and a table of contents). The
+            // browser's DecompressionStream has no zstd (Chrome 151: gzip / deflate only), so it needs a zstd decoder.
+            using var hs = file.Slice(0, Math.Min(8L, file.Size));
+            using var hb = await hs.ArrayBuffer();
+            using var hu = new Uint8Array(hb);
+            var h8 = hu.ReadBytes();
+            if (h8.Length == 8 && BitConverter.ToUInt32(h8) == SpzImport.Magic)
+            {
+                int v = (int)BitConverter.ToUInt32(h8, 4);
+                _statusMessage = $"Cannot open {name}: SPZ version {v} (zstd-compressed) is not read yet - versions 2 and 3 are";
+                Console.WriteLine($"[Import] {name}: SPZ v{v}, zstd streams - not read yet");
+                return true;
+            }
+            return false;
+        }
+        if (magic[0] != 0x1f || magic[1] != 0x8b) return false;
         var t0 = System.Diagnostics.Stopwatch.StartNew();
         // CPU transfer: none - gunzipped by the browser, JS-side.
         using var raw = await GzipAsync(file, decompress: true);
@@ -108,6 +126,7 @@ public partial class Studio
         using (var u = new Uint8Array(hb))
             head = u.ReadBytes();
         if (!GaussianPly.IsPly(head)) return false;
+        if (GaussianPly.ParseCompressed(head) is { } compressed) return await ImportCompressedPlyAsync(file, name, compressed, query);
         GaussianPly.Layout L;
         try { L = GaussianPly.Parse(head); }
         catch (FormatException ex)
@@ -145,6 +164,40 @@ public partial class Studio
         Console.WriteLine($"[Import] {name}: 3DGS PLY, {L.Count:N0} splats, SH degree {L.ShDegree}, converted in {t0.Elapsed.TotalSeconds:F1}s" +
             (flip ? " (turned y-up)" : ""));
         await SaveAndOpenImportedSceneAsync(Path.GetFileNameWithoutExtension(name), scene, packedU8, shU8, query, "ply");
+        return true;
+    }
+
+    /// <summary>PlayCanvas's compressed PLY (SuperSplat's export), decoded on the GPU (GaussianPlyImport.ConvertCompressedAsync).</summary>
+    async Task<bool> ImportCompressedPlyAsync(Blob file, string name, GaussianPly.CompressedLayout L, Dictionary<string, string> query)
+    {
+        bool flip = TurnImportYUp(query);
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        // CPU transfer: file I/O. The bytes stay JS-side; the GPU decodes them.
+        using var whole = await file.ArrayBuffer();
+        var (packed, sh) = await GaussianPlyImport.ConvertCompressedAsync(_gpuService.WebGPUAccelerator, whole, L, flip);
+        Uint8Array packedU8;
+        var shU8 = new List<Uint8Array>();
+        try
+        {
+            // CPU transfer: file I/O - the decoded rows go to the project store as any saved scene does.
+            packedU8 = await packed.CopyToHostUint8ArrayAsync(0, (long)L.Count * SplatFormat.Floats * sizeof(float));
+            if (sh != null)
+                foreach (var part in sh)
+                    shU8.Add(await part.CopyToHostUint8ArrayAsync(0, (long)L.Count * SphericalHarmonics.PartFloatsPerSplat * sizeof(float)));
+        }
+        finally
+        {
+            packed.Dispose();
+            if (sh != null) foreach (var part in sh) part.Dispose();
+        }
+        var scene = new ProjectScene
+        {
+            SplatCount = L.Count, FloatsPerSplat = SplatFormat.Floats, ColoursAreShDc = true,
+            ShDegree = sh != null ? L.ShDegree : 0, ImportedFrom = name,
+        };
+        Console.WriteLine($"[Import] {name}: compressed PLY, {L.Count:N0} splats, SH degree {L.ShDegree}, decoded in {t0.Elapsed.TotalSeconds:F1}s" +
+            (flip ? " (turned y-up)" : ""));
+        await SaveAndOpenImportedSceneAsync(Path.GetFileNameWithoutExtension(name).Replace(".compressed", ""), scene, packedU8, shU8, query, "compressed ply");
         return true;
     }
 

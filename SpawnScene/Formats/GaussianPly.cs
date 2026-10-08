@@ -105,4 +105,62 @@ public static class GaussianPly
             Need("scale_0"), Need("scale_1"), Need("scale_2"), Need("rot_0"), Need("rot_1"), Need("rot_2"), Need("rot_3"),
             restFirst, rest / 3);
     }
+
+    /// <summary>
+    /// PlayCanvas's compressed PLY (SuperSplat's default export; playcanvas/engine ply.js isCompressedPly): a
+    /// <c>chunk</c> element (12 or 18 floats per 256 splats: position min/max, log-scale min/max, optional colour min/max),
+    /// <c>vertex</c> with four uints (packed_position / rotation / scale / color) and an optional <c>sh</c> element of
+    /// 9, 24 or 45 uchar f_rest (channel-major). Byte offsets of each section from the start of the file.
+    /// </summary>
+    public sealed record CompressedLayout(int Chunks, int ChunkProps, int Count, int ShPerChannel, int HeaderBytes)
+    {
+        public long ChunkOffset => HeaderBytes;
+        public long VertexOffset => ChunkOffset + 4L * Chunks * ChunkProps;
+        public long ShOffset => VertexOffset + 16L * Count;
+        public long Bytes => ShOffset + 3L * ShPerChannel * Count;
+        public int ShDegree => ShPerChannel switch { 0 => 0, 3 => 1, 8 => 2, _ => 3 };
+    }
+
+    static readonly string[] ChunkProps18 =
+    {
+        "min_x", "min_y", "min_z", "max_x", "max_y", "max_z", "min_scale_x", "min_scale_y", "min_scale_z",
+        "max_scale_x", "max_scale_y", "max_scale_z", "min_r", "min_g", "min_b", "max_r", "max_g", "max_b",
+    };
+    static readonly string[] PackedProps = { "packed_position", "packed_rotation", "packed_scale", "packed_color" };
+
+    /// <summary>The compressed layout, or null when the header is not PlayCanvas's compressed PLY.</summary>
+    public static CompressedLayout? ParseCompressed(ReadOnlySpan<byte> head)
+    {
+        if (!IsPly(head)) return null;
+        var text = Encoding.ASCII.GetString(head);
+        int end = text.IndexOf("end_header", StringComparison.Ordinal);
+        if (end < 0) return null;
+        int headerBytes = text.IndexOf('\n', end) + 1;
+        var elements = new List<(string Name, int Count, List<(string Type, string Name)> Props)>();
+        string? format = null;
+        foreach (var raw in text[..end].Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var t = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (t.Length == 0) continue;
+            if (t[0] == "format" && t.Length > 1) format = t[1];
+            else if (t[0] == "element" && t.Length >= 3 && int.TryParse(t[2], out int c)) elements.Add((t[1], c, new()));
+            else if (t[0] == "property" && t.Length >= 3 && elements.Count > 0) elements[^1].Props.Add((t[1], t[2]));
+        }
+        if (format != "binary_little_endian" || elements.Count is < 2 or > 3) return null;
+        var (cn, cc, cp) = elements[0];
+        var (vn, vc, vp) = elements[1];
+        if (cn != "chunk" || vn != "vertex" || cp.Count is not (12 or 18) || vp.Count != 4) return null;
+        for (int k = 0; k < cp.Count; k++) if (cp[k].Name != ChunkProps18[k] || cp[k].Type is not ("float" or "float32")) return null;
+        for (int k = 0; k < 4; k++) if (vp[k].Name != PackedProps[k] || vp[k].Type is not ("uint" or "uint32")) return null;
+        if (cc != (vc + 255) / 256) return null;
+        int sh = 0;
+        if (elements.Count == 3)
+        {
+            var (sn, sc, sp) = elements[2];
+            if (sn != "sh" || sc != vc || sp.Count is not (9 or 24 or 45)) return null;
+            for (int k = 0; k < sp.Count; k++) if (sp[k].Name != $"f_rest_{k}" || sp[k].Type is not ("uchar" or "uint8")) return null;
+            sh = sp.Count / 3;
+        }
+        return new CompressedLayout(cc, cp.Count, vc, sh, headerBytes);
+    }
 }

@@ -9,6 +9,7 @@ const WebSocket = require('ws');
 const { ensureChrome, APP } = require('./_chrome_harness');
 
 const [pagePath = '/', out = 'page.png', size = '1600x1000', waitMs = '6000'] = process.argv.slice(2);
+const pageLog = process.env.PAGE_LOG ? new RegExp(process.env.PAGE_LOG) : null;
 const get = u => new Promise((res, rej) =>
   http.get(u, r => { let d = ''; r.on('data', c => d += c); r.on('end', () => res(JSON.parse(d))); }).on('error', rej));
 
@@ -36,7 +37,8 @@ const get = u => new Promise((res, rej) =>
     if (m.method === 'Runtime.consoleAPICalled') {
       const t = (m.params.args || []).map(a => a.value ?? a.description ?? '').join(' ');
       // Errors and warnings, and the app's autotest verdicts (?autotest=... pages report PASS / FAIL on the console).
-      if (/error|warn/.test(m.params.type) || /\[Autotest\]/.test(t)) console.log('CON ' + t.slice(0, 300));
+      // PAGE_LOG=<regex> also prints the app's own lines that match (e.g. PAGE_LOG='\[Import\]').
+      if (/error|warn/.test(m.params.type) || /\[Autotest\]/.test(t) || (pageLog && pageLog.test(t))) console.log('CON ' + t.slice(0, 300));
     }
   });
   const send = (method, params = {}) => new Promise(res => { const i = id++; pend.set(i, res); ws.send(JSON.stringify({ id: i, method, params })); });

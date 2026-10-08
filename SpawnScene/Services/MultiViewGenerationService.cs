@@ -900,6 +900,15 @@ public class MultiViewGenerationService
     /// </summary>
     public bool DenseInitFromBriefFeatures { get; set; } = true;
 
+    /// <summary>
+    /// &amp;depthinit=N: also seed splats from the photos' DAv3 depth where two views agree (DepthFusionInit), one grid
+    /// sample every N pixels; 0 = off (the default until measured).
+    /// </summary>
+    public int DepthFusionInitStride { get; set; }
+
+    /// <summary>&amp;depthtol=X: two views agree on a depth sample within this fraction of its camera depth.</summary>
+    public float DepthFusionRelTol { get; set; } = 0.03f;
+
     /// <summary>Dense init: largest reprojection error an observation may keep (pixels). &amp;densepx=N.</summary>
     /// <remarks>MEASURED 2026-10-02, TruckFull learned: 2 px / 1.5 deg gave 25,769 dense points and held-out 19.48 dB;
     /// 3 px / 0.5 deg 34,951 points and 19.63 dB / SSIM 0.666 (FAST/BRIEF front end: 19.78 / 0.668). Low-parallax points
@@ -1707,6 +1716,30 @@ public class MultiViewGenerationService
             LastChunkOf = poses.ChunkOf.ToArray();
             var packedCloud = SparsePointCloudInit.BuildPacked(baCloud);
             Console.WriteLine($"[MultiView] init from the bundle-adjusted sparse cloud: {baCloud.Count:N0} points");
+            if (DepthFusionInitStride > 0)
+            {
+                // Seeds on every surface two photos' depths agree on, not only where features matched (DepthFusionInit).
+                var t0 = System.Diagnostics.Stopwatch.StartNew();
+                var placed = posed.Select(i => poses.Cameras[i]!).ToList();
+                float maxScale = 0.1f * MathF.Max(TrainingSchedule.CamerasExtent(placed.Select(c => c.Position).ToList()), 1e-3f);
+                var depthMaps = poses.Depths.Select(d => d?.RawDepthGpu is { } g
+                    ? new DepthFusionInit.DepthMap(g, d.Width, d.Height) : (DepthFusionInit.DepthMap?)null).ToList();
+                var fused = await DepthFusionInit.FuseAsync(_gpu.Accelerator!, poses.Cameras, depthMaps, posed,
+                    baCloud.Positions, images.Select(im => (byte[]?)im.RgbaPixels).ToList(), DepthFusionInitStride,
+                    DepthFusionRelTol, maxScale);
+                if (fused is { } f)
+                {
+                    Console.WriteLine($"[MultiView] depth fusion init: {f.Count:N0} seeds from {f.Report.Candidates:N0} samples of " +
+                        $"{f.Report.ScaledViews}/{f.Report.Views} views (stride {DepthFusionInitStride}, agree within {DepthFusionRelTol:P0}) " +
+                        $"in {t0.Elapsed.TotalSeconds:F1}s; depth scales {f.Report.Scales}");
+                    LastCameras = poses.Cameras;
+                    LastPoseSource = "dav3-chunked";
+                    LastChunkOf = poses.ChunkOf.ToArray();
+                    return await GenerateFromPointCloudAsync(packedCloud, baCloud.Count, placed, poseSource: "dav3-chunked",
+                        appendGpu: f.Packed, appendCount: f.Count);
+                }
+                Console.WriteLine("[MultiView] depth fusion init: fewer than two views could be scaled to the SfM points - sparse cloud only");
+            }
             return await GenerateFromPointCloudAsync(packedCloud, baCloud.Count, posed.Select(i => poses.Cameras[i]!),
                 poseSource: "dav3-chunked");
         }
@@ -2235,14 +2268,26 @@ public class MultiViewGenerationService
     /// </summary>
     public async Task<(MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)?>
         GenerateFromPointCloudAsync(float[] packed, int splatCount, IEnumerable<CameraParams> cameras,
-            string poseSource = "colmap")
+            string poseSource = "colmap", MemoryBuffer1D<float, Stride1D.Dense>? appendGpu = null, int appendCount = 0)
     {
         if (splatCount <= 0) return null;
         var accelerator = _gpu.Accelerator!;
 
         SetStatus($"Uploading {splatCount:N0} splats from the sparse cloud...");
+        int sparseCount = splatCount;
+        if (appendGpu == null) appendCount = 0;
+        splatCount += appendCount;
         var buf = accelerator.Allocate1D<float>((long)splatCount * SplatFormat.Floats);
-        buf.CopyFromCPU(packed);
+        buf.View.SubView(0, (long)sparseCount * SplatFormat.Floats).CopyFromCPU(packed);
+        if (appendGpu != null)
+        {
+            // Device to device: the fused seeds never visit the host.
+            if (appendCount > 0)
+                buf.View.SubView((long)sparseCount * SplatFormat.Floats, (long)appendCount * SplatFormat.Floats)
+                    .CopyFrom(appendGpu.View.SubView(0, (long)appendCount * SplatFormat.Floats));
+            await accelerator.SynchronizeAsync();
+            appendGpu.Dispose();
+        }
         await accelerator.SynchronizeAsync();
 
         await AlignToGravityAsync(buf, splatCount, cameras);

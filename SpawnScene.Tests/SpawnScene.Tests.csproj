@@ -60,6 +60,7 @@
     <Compile Include="..\SpawnScene\Services\LodPageKernels.cs" Link="Linked\LodPageKernels.cs" />
     <Compile Include="..\SpawnScene\Services\SceneCodec.cs" Link="Linked\SceneCodec.cs" />
     <Compile Include="..\SpawnScene\Services\SplatRows.cs" Link="Linked\SplatRows.cs" />
+    <Compile Include="..\SpawnScene\Services\DepthFusionInit.cs" Link="Linked\DepthFusionInit.cs" />
     <Compile Include="..\SpawnScene\Services\XRMenuGeometry.cs" Link="Linked\XRMenuGeometry.cs" />
     <Compile Include="..\SpawnScene\Services\TouchNavigator.cs" Link="Linked\TouchNavigator.cs" />
     <Compile Include="..\SpawnScene\Models\Gaussian3D.cs" Link="Linked\Gaussian3D.cs" />

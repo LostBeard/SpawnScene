@@ -239,6 +239,12 @@ public partial class Studio : IAsyncDisposable
             CarveFrontMargin = Math.Clamp(cmv, 0f, 0.9f);
         if (query.TryGetValue("carveevery", out var ceq) && int.TryParse(ceq, out var cei)) CarveEveryIters = Math.Max(0, cei);
         if (query.TryGetValue("carveunseen", out var cuq)) CarveUnseen = cuq is "1" or "true";
+        // &depthinit=N: seed splats from the photos' DAv3 depth where two views agree, every N pixels (DepthFusionInit).
+        if (query.TryGetValue("depthinit", out var depthInitQ) && int.TryParse(depthInitQ, out var depthInitV))
+            _multiViewService.DepthFusionInitStride = Math.Max(0, depthInitV);
+        if (query.TryGetValue("depthtol", out var dtq) && float.TryParse(dtq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var dtv))
+            _multiViewService.DepthFusionRelTol = Math.Clamp(dtv, 0.001f, 0.5f);
         // &exposure=1: per-photo exposure compensation (Studio.Training.ExposureOption).
         if (query.TryGetValue("exposure", out var exq)) ExposureOption = exq is "1" or "true";
         if (query.TryGetValue("carveunseenpx", out var cupq) && float.TryParse(cupq,

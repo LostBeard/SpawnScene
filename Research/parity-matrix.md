@@ -93,7 +93,11 @@ densify / prune leaves them and gsplat's does not (splat statistics: scale, opac
 
 Sizes and placement match; OPACITY does not: our scene is mostly translucent splats - haze, blur, see-through, the
 "blur blobs". Suspect: the opacity learning rate (on the logit) is 0.025 for us, 0.05 in gsplat; both reset opacity at
-3000 / 6000, so at 7K each has 1000 steps to regrow - at half the rate for us. o1 (= defaults + &opacitylr=0.05) running.
+3000 / 6000, so at 7K each has 1000 steps to regrow - at half the rate for us.
+
+o1 (defaults + &opacitylr=0.05): opacity median 0.12 -> 0.20, > 0.5 12% -> 31%, but held out WORSE: 18.37 / 0.695 (ours
+19.2-19.4). The rate is not the fix, and the opacity is still far from gsplat's. Line-by-line comparison of our opacity /
+density control with gsplat's DefaultStrategy in progress (Research/opacity-vs-gsplat-2026-10-08.md).
 
 No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
 by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.

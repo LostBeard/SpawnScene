@@ -131,6 +131,8 @@ public partial class Studio
     /// that difference (c15 18.8 vs c17 24.0, 2026-10-04).
     /// </summary>
     public static bool RefinePoses { get; set; }
+    /// <summary>Camera refinement in the project path (on; &amp;projectrefine=0 off - the parity ablation, 2026-10-08).</summary>
+    public static bool ProjectRefinePoses { get; set; } = true;
     /// <summary>Diagnostic (&amp;refineposes=2): refine only the HELD-OUT cameras against the finished scene, not the
     /// training ones - the control that separates a better scene from test views that were merely aligned.</summary>
     public static bool RefineTestPosesOnly { get; set; }

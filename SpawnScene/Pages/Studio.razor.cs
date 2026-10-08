@@ -261,6 +261,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("filldump", out var fdmq)) FillDumpOption = fdmq is "1" or "true";
         // &exportcolmap=1 (harness): after Generate, our SfM as COLMAP text for a reference trainer (Studio.ColmapExport).
         if (query.TryGetValue("exportcolmap", out var ecq)) ExportColmapOption = ecq is "1" or "true";
+        // &projectrefine=0: no camera refinement in the project path (parity ablation; it is on for the user's scenes).
+        if (query.TryGetValue("projectrefine", out var projRefQ)) ProjectRefinePoses = projRefQ is not ("0" or "false");
         // &randombgamp=A: the random background's width scale (default 0.5).
         if (query.TryGetValue("randombgamp", out var rbaq) && float.TryParse(rbaq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rbav))

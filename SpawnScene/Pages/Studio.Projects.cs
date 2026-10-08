@@ -869,7 +869,7 @@ public partial class Studio
         // Not in a partitioned block: the views' cameras are shared and refined in place, so each block re-fitted all
         // of them to its own region and the next block started from poses its coarse model was never fitted to
         // (TruckFull 2x2: block 1 began at 21.91 dB against the coarse model's 22.16). The coarse run refines them once.
-        RefinePoses = _frozenOutside == null;
+        RefinePoses = _frozenOutside == null && ProjectRefinePoses;
         long savedMaxKeys = SplatTrainerGpu.MaxTotalKeys;
         DensifyEveryIters = 100;
         OpacityResetEveryIters = 3000;

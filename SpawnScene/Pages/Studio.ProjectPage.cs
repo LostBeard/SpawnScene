@@ -261,6 +261,30 @@ public partial class Studio
             y += 18;
         }
 
+        // Why the latest generate left photos out (SfM's own reason, MultiViewGenerationService.LastDropReasons): the
+        // tiles say "not placed", this says what to do about it. At most four lines.
+        if (_activeProject!.Scenes.LastOrDefault(sc => sc.PhotosTotal >= 2) is { PhotosNotPlaced: { Length: > 0 } np } last)
+        {
+            var why = last.PhotosNotPlacedReasons ?? Array.Empty<string>();
+            int shown = 0;
+            for (int k = 0; k < np.Length && shown < 4; k++, shown++)
+            {
+                string reason = k < why.Length && !string.IsNullOrEmpty(why[k]) ? why[k] : "no camera position was found for it";
+                parent.AddChild(new UILabel
+                {
+                    X = x, Y = y, Text = $"{np[k]} not placed: {reason}", FontSize = FontSize.Caption,
+                    Color = Color.FromArgb(255, 230, 180, 90),
+                });
+                y += 18;
+            }
+            if (np.Length > shown)
+            {
+                parent.AddChild(new UILabel { X = x, Y = y, Text = $"... and {np.Length - shown} more", FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted });
+                y += 18;
+            }
+            y += 6;
+        }
+
         if (sources.Count == 0)
         {
             parent.AddChild(new UITextBlock

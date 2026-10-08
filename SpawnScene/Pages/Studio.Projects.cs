@@ -377,10 +377,16 @@ public partial class Studio
         for (int i = 0; i < images.Count && i < poses.Length; i++)
             if (poses[i] is { } pc) { if (pc.Height > pc.Width) portrait++; else if (pc.Width > pc.Height) landscape++; }
         bool majorityPortrait = portrait >= landscape;
+        var notPlacedWhy = new List<string>();
         for (int i = 0; i < images.Count && i < poses.Length; i++)
         {
             var cam = poses[i];
-            if (cam == null) { unposed++; notPlaced.Add(images[i].FileName); continue; }
+            if (cam == null)
+            {
+                unposed++; notPlaced.Add(images[i].FileName);
+                notPlacedWhy.Add(_multiViewService.LastDropReasons.TryGetValue(i, out var why) ? why : "");
+                continue;
+            }
 
             string name = fromProjectStore ? images[i].FileName : images[i].SourceUrl;
             if (string.IsNullOrEmpty(name)) { unposed++; continue; }
@@ -416,8 +422,11 @@ public partial class Studio
             scene.TrainingCameras.Add(cam);
         }
 
-        for (int i = poses.Length; i < images.Count; i++) notPlaced.Add(images[i].FileName);
+        for (int i = poses.Length; i < images.Count; i++) { notPlaced.Add(images[i].FileName); notPlacedWhy.Add(""); }
         _lastPlacement = (posed, images.Count, notPlaced.ToArray());
+        _lastNotPlacedWhy = notPlacedWhy.ToArray();
+        for (int k = 0; k < notPlaced.Count; k++)
+            Console.WriteLine($"[Studio] not placed: {notPlaced[k]} - {(notPlacedWhy[k].Length > 0 ? notPlacedWhy[k] : "no camera position was found for it")}");
         _lastFacing = CaptureCoverage.FacingCounts(poses.Where(p => p != null).Select(p => p!).ToList());
 
         var turnCounts = scene.TrainingViews
@@ -1049,6 +1058,7 @@ public partial class Studio
                 projectScene.PhotosTotal = lp.Total;
                 projectScene.PhotosNotPlaced = lp.NotPlaced;
                 projectScene.FacingCounts = _lastFacing;
+                projectScene.PhotosNotPlacedReasons = _lastNotPlacedWhy;
                 _lastPlacement = null;
                 _lastFacing = null;
             }
@@ -1288,6 +1298,7 @@ public partial class Studio
     /// <summary>The last RecordTrainingViews: photos placed, of how many, and the names of those that were not.</summary>
     (int Placed, int Total, string[] NotPlaced)? _lastPlacement;
     int[]? _lastFacing;
+    string[]? _lastNotPlacedWhy;
 
     SampleCatalog? _sampleCatalog;
     Task? _sampleCatalogTask;

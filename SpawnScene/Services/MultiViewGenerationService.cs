@@ -36,6 +36,10 @@ public class MultiViewGenerationService
     /// </summary>
     public CameraParams?[] LastCameras { get; private set; } = [];
 
+    /// <summary>Why SfM left a photo out, by image index, in words for the user (the Photos tab shows it). Photos with
+    /// no entry and no camera were simply never placed.</summary>
+    public Dictionary<int, string> LastDropReasons { get; } = new();
+
     /// <summary>Where <see cref="LastCameras"/> came from: sfm, dav3, dav3-chunked or fallback.</summary>
     public string LastPoseSource { get; private set; } = "none";
 
@@ -479,6 +483,7 @@ public class MultiViewGenerationService
         bad.UnionWith(unplaced);
 
         var dropped = new HashSet<int>();   // cameras not in the final solution (unplaced, failed verification, outside the core)
+        LastDropReasons.Clear();
         // One camera = one sensor, either way up: the shared focal is fx = fy = f with each camera's own principal point
         // (GpuBundleAdjuster), so a photo held sideways shares it. By exact size, TJ's one landscape Bathroom photo would
         // have switched the whole solve to fixed per-view focals.
@@ -717,6 +722,10 @@ public class MultiViewGenerationService
             {
                 var (corr, inl) = lastTry.TryGetValue(c, out var lt) ? lt : (0, 0);
                 Console.WriteLine($"[BA]   view {posed[c]}: NOT placed ({corr} correspondences, best {inl} agree) - dropped");
+                if (!LastDropReasons.ContainsKey(posed[c]))
+                    LastDropReasons[posed[c]] = corr == 0
+                        ? "nothing in it matched the other photos - take it with more overlap"
+                        : $"too few points matched the other photos ({corr}) - take it with more overlap";
             }
             solve = await SolveBundleAsync(cams, tracks, Ob, exclude: pending, oneCamera, "BA final");
             if (solve == null) return null;
@@ -744,6 +753,7 @@ public class MultiViewGenerationService
                     Console.WriteLine(
                         $"[BA]   verify {verify}: view {posed[c]} disagrees with the solution " +
                         $"({stats[c].Kept}/{stats[c].Total} kept, median {stats[c].MedianError:F1} px) - dropped");
+                    LastDropReasons[posed[c]] = "its matches disagree with the other photos (moving things, or a repeated pattern)";
                 }
                 solve = await SolveBundleAsync(cams, tracks, Ob, exclude: pending, oneCamera, $"BA verify {verify}");
                 if (solve == null) return null;
@@ -832,6 +842,7 @@ public class MultiViewGenerationService
                 {
                     int best = core.Select(q => shared[c, q]).DefaultIfEmpty(0).Max();
                     Console.WriteLine($"[BA]   core: view {posed[c]} joins the core through at most {best} shared points (< {CoreSharedPoints}) - dropped");
+                    LastDropReasons[posed[c]] = $"it shares only {best} points with the rest - one more photo between it and its neighbours would link it";
                 }
                 dropped.UnionWith(outside);
                 var coreSolve = await SolveBundleAsync(cams, tracks, Ob, exclude: dropped, oneCamera, "BA core");

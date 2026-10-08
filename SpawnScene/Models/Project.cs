@@ -70,6 +70,9 @@ public class ProjectScene
     /// <summary>The photos it could not place (file names) - shown on the scene card so a user knows which to retake.</summary>
     public string[]? PhotosNotPlaced { get; set; }
 
+    /// <summary>Why each photo in <see cref="PhotosNotPlaced"/> was left out (same order; empty when unknown).</summary>
+    public string[]? PhotosNotPlacedReasons { get; set; }
+
     /// <summary>
     /// How many placed photos face each of 8 horizontal directions, from the first photo's heading clockwise in 45 degree
     /// steps (CaptureCoverage). A direction no photo faces is a wall or side the scene never saw. Null for older scenes.

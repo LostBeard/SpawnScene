@@ -84,6 +84,10 @@ reproduced); d1 + `&depthloss=1` 18.20 / 0.8375, 0.89M splats vs 0.76M. Off the 
 a little fuller in the up views and with one black gap in pan-2 where d0 has grey smear. Neutral at 7K with depth init
 already seeding the walls: it stays opt-in. Open: the 1500-iteration smoke run reached 18.65 / 0.836 - a short schedule
 with depth may match the 7K one; a d2 at 1500/3000 without depth would say whether that is the loss or just fewer steps.
+**Answered (i0/i1, Bathroom 1,500 its, depthinit + exposure):** i0 without depth loss 18.48 / 0.831, i1 with 18.58 / 0.834
+(d0 at 7K: 18.23 / 0.840). It is the schedule, not the loss: a thin 33-photo room's held-out PSNR saturates by 1,500
+iterations (133 s vs 300 s), 7K adds only SSIM. Depth loss +0.1 dB at 1,500 - at the noise floor. Stays opt-in. A
+capture-size-aware schedule (stop when held-out / a validation view stops improving) is a candidate for thin captures.
 
 ## The candidates
 

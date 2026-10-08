@@ -231,3 +231,16 @@ coverage map after SfM, and the dropped photos by name with why.
 - IndoorGS: https://openaccess.thecvf.com/content/CVPR2025/papers/Ruan_IndoorGS_Geometric_Cues_Guided_Gaussian_Splatting_for_Indoor_Scene_Reconstruction_CVPR_2025_paper.pdf
 - Spark 2.0: https://sparkjs.dev/docs/new-features-2.0/
 - Brush: https://github.com/ArthurBrussee/brush
+
+## Carve re-baseline h6-h9 (Bathroom, 7K, llffhold=8, 2026-10-07 evening - OLD defaults: no depth init, no exposure)
+
+| Run | Setting | held out PSNR / SSIM | supervised | unseen splats carved |
+|---|---|---|---|---|
+| h6 | carve on (unseen bar 1 px) | 15.57 / 0.7116 | 32.44 | 159,874 |
+| h7 | `&carve=0` | 15.42 / 0.7135 | 36.53 | - |
+| h8 | `&carveunseen=0` (floaters only) | 15.23 / 0.6999 | 33.51 | 0 |
+| h9 | `&carveunseenpx=0.05` | 15.19 / 0.7075 | 33.49 | 22,719 |
+
+All within 0.4 dB held out (4-5 held-out photos: noise level); the carve costs 4 dB supervised for nothing measurable
+held out. Recorded 10-08; repeated as n0-n3 on the 10-08 defaults with the fair score before deciding (PLANS item 1).
+

@@ -194,9 +194,9 @@ public partial class Studio
             using var response = await window.Fetch(importUrl);
             if (!response.Ok) { Console.WriteLine($"[Import] FAIL: HTTP {response.Status}"); return; }
             using var blob = await response.Blob();
-            // Another tool's 3DGS .ply (Studio.ForeignScene), else a .spawnscene.
+            // Another tool's 3DGS .ply or .spz (Studio.ForeignScene), else a .spawnscene.
             string name = Uri.TryCreate(importUrl, UriKind.Absolute, out var iu) ? Path.GetFileName(iu.AbsolutePath) : Path.GetFileName(importUrl.Split('?')[0]);
-            if (await ImportPlyBlobAsync(blob, string.IsNullOrEmpty(name) ? "scene.ply" : name, query)) return;
+            if (await ImportForeignBlobAsync(blob, string.IsNullOrEmpty(name) ? "scene" : name, query)) return;
             using var bytes = await blob.ArrayBuffer();
             await ImportSceneBytesAsync(bytes, query);
         }

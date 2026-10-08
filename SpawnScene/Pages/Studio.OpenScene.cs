@@ -48,11 +48,11 @@ public partial class Studio
         var noOptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (version == 0)
         {
-            // Another tool's scene: a 3DGS .ply (Studio.ForeignScene).
-            if (!await ImportPlyBlobAsync(file, name, noOptions))
+            // Another tool's scene: a 3DGS .ply or an .spz (Studio.ForeignScene).
+            if (!await ImportForeignBlobAsync(file, name, noOptions))
             {
-                _statusMessage = $"{name} is not a scene SpawnScene can open (.spawnscene or a 3DGS .ply)";
-                Console.WriteLine($"[OpenScene] {name} is not a .spawnscene or a 3DGS .ply");
+                _statusMessage = $"{name} is not a scene SpawnScene can open (.spawnscene, a 3DGS .ply or .spz)";
+                Console.WriteLine($"[OpenScene] {name} is not a .spawnscene, a 3DGS .ply or an .spz");
             }
             file.Dispose();
             return;

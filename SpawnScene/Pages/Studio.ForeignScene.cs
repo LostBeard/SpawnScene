@@ -7,12 +7,77 @@ using SpawnScene.Services;
 namespace SpawnScene.Pages;
 
 /// <summary>
-/// "Open scene file" for scenes other tools made: a 3DGS .ply (the reference trainer, gsplat, nerfstudio, Postshot,
-/// Polycam...) converted on the GPU (GaussianPlyImport) into a new project, as a .spawnscene v1/v2 import is. The file is
-/// turned y-up by default (a 3DGS .ply is in its SfM frame, y down); <c>&amp;plyup=keep</c> leaves it as it is.
+/// "Open scene file" for scenes other tools made, converted on the GPU into a new project as a .spawnscene v1/v2 import
+/// is: a 3DGS .ply (the reference trainer, gsplat, nerfstudio, Postshot, Polycam...; GaussianPlyImport), turned y-up by
+/// default (a 3DGS .ply is in its SfM frame, y down), or Niantic's .spz (SpzImport; in practice also y down);
+/// <c>&amp;sceneup=keep</c> leaves either as it is.
 /// </summary>
 public partial class Studio
 {
+    /// <summary>Another tool's scene is turned y-up unless <c>&amp;sceneup=keep</c> (or the older <c>&amp;plyup=keep</c>).</summary>
+    static bool TurnImportYUp(Dictionary<string, string> query) =>
+        !((query.TryGetValue("sceneup", out var s) && s == "keep") || (query.TryGetValue("plyup", out var p) && p == "keep"));
+
+    /// <summary>A .ply or .spz: imported (or refused with a status) and true; false when it is neither.</summary>
+    async Task<bool> ImportForeignBlobAsync(Blob file, string name, Dictionary<string, string> query)
+    {
+        if (await ImportPlyBlobAsync(file, name, query)) return true;
+        return await ImportSpzBlobAsync(file, name, query);
+    }
+
+    /// <summary>Import a .spz (gzip around the NGSP stream); false when the file is not gzip or not SPZ inside.</summary>
+    async Task<bool> ImportSpzBlobAsync(Blob file, string name, Dictionary<string, string> query)
+    {
+        byte[] magic;
+        using (var slice = file.Slice(0, Math.Min(2L, file.Size)))
+        using (var mb = await slice.ArrayBuffer())
+        using (var u = new Uint8Array(mb))
+            magic = u.ReadBytes();
+        if (magic.Length < 2 || magic[0] != 0x1f || magic[1] != 0x8b) return false;
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        // CPU transfer: none - gunzipped by the browser, JS-side.
+        using var raw = await GzipAsync(file, decompress: true);
+        byte[] head;
+        using (var hu = new Uint8Array(raw, 0, Math.Min(16L, raw.ByteLength)))
+            head = hu.ReadBytes();
+        if (head.Length < 4 || BitConverter.ToUInt32(head) != SpzImport.Magic) return false;
+        SpzImport.Header h;
+        try { h = SpzImport.ParseHeader(head); }
+        catch (FormatException ex)
+        {
+            _statusMessage = $"Cannot open {name}: {ex.Message}";
+            Console.WriteLine($"[Import] {name}: {ex.Message}");
+            return true;
+        }
+        bool flip = TurnImportYUp(query);
+        var (packed, sh) = await SpzImport.ConvertAsync(_gpuService.WebGPUAccelerator, raw, h, flip);
+        Uint8Array packedU8;
+        var shU8 = new List<Uint8Array>();
+        try
+        {
+            // CPU transfer: file I/O - the decoded rows go to the project store as any saved scene does.
+            packedU8 = await packed.CopyToHostUint8ArrayAsync(0, (long)h.Count * SplatFormat.Floats * sizeof(float));
+            if (sh != null)
+                foreach (var part in sh)
+                    shU8.Add(await part.CopyToHostUint8ArrayAsync(0, (long)h.Count * SphericalHarmonics.PartFloatsPerSplat * sizeof(float)));
+        }
+        finally
+        {
+            packed.Dispose();
+            if (sh != null) foreach (var part in sh) part.Dispose();
+        }
+        var scene = new ProjectScene
+        {
+            SplatCount = h.Count, FloatsPerSplat = SplatFormat.Floats, ColoursAreShDc = true,
+            ShDegree = sh != null ? h.KeptShDegree : 0, ImportedFrom = name,
+        };
+        Console.WriteLine($"[Import] {name}: SPZ v{h.Version}, {h.Count:N0} splats, SH degree {h.ShDegree}" +
+            (h.ShDegree > 3 ? " (band 4 dropped)" : "") + (h.Antialiased ? ", antialiased" : "") + $", decoded in {t0.Elapsed.TotalSeconds:F1}s" +
+            (flip ? " (turned y-up)" : ""));
+        await SaveAndOpenImportedSceneAsync(Path.GetFileNameWithoutExtension(name), scene, packedU8, shU8, query, "spz");
+        return true;
+    }
+
     /// <summary>Import a picked or fetched PLY; false (and a status) when it is not one we can read.</summary>
     async Task<bool> ImportPlyBlobAsync(Blob file, string name, Dictionary<string, string> query)
     {
@@ -30,7 +95,7 @@ public partial class Studio
             Console.WriteLine($"[Import] {name}: {ex.Message}");
             return true;
         }
-        bool flip = !(query.TryGetValue("plyup", out var up) && up == "keep");
+        bool flip = TurnImportYUp(query);
         var t0 = System.Diagnostics.Stopwatch.StartNew();
         // CPU transfer: file I/O. The bytes stay JS-side; the GPU converts them a chunk at a time.
         using var whole = await file.ArrayBuffer();

@@ -88,6 +88,7 @@
     <Compile Include="..\SpawnScene\Services\HiddenLayerInpaint.cs" Link="Linked\HiddenLayerInpaint.cs" />
     <Compile Include="..\SpawnScene\Formats\GaussianPly.cs" Link="Linked\GaussianPly.cs" />
     <Compile Include="..\SpawnScene\Services\GaussianPlyImport.cs" Link="Linked\GaussianPlyImport.cs" />
+    <Compile Include="..\SpawnScene\Services\SpzImport.cs" Link="Linked\SpzImport.cs" />
     <Compile Include="..\SpawnScene\Services\GpuPairMatcher.cs" Link="Linked\GpuPairMatcher.cs" />
     <Compile Include="..\SpawnScene\Services\GpuEpipolarRansac.cs" Link="Linked\GpuEpipolarRansac.cs" />
     <Compile Include="..\SpawnScene\Services\LearnedFeatureMatcher.cs" Link="Linked\LearnedFeatureMatcher.cs" />

@@ -155,6 +155,41 @@ public static class UnseenFill
         rows[o + SplatFormat.OffQuat + 3] = disk.Q.W;
     }
 
+    /// <summary>
+    /// Diagnostic (&amp;filldump=1): one view's [render with the mask in magenta | painted | filled depth | mask] as RGBA,
+    /// 4S x S. CPU transfer: a debugging dump, never on the fill's own path.
+    /// </summary>
+    static async Task<byte[]> DumpStripAsync(MemoryBuffer1D<float, Stride1D.Dense> image, MemoryBuffer1D<float, Stride1D.Dense> mask,
+        MemoryBuffer1D<float, Stride1D.Dense> painted, MemoryBuffer1D<float, Stride1D.Dense> depth)
+    {
+        const int Px = S * S;
+        var img = await image.CopyToHostAsync<float>(0, 3L * Px);
+        var msk = await mask.CopyToHostAsync<float>(0, Px);
+        var pnt = await painted.CopyToHostAsync<float>(0, 3L * Px);
+        var dep = await depth.CopyToHostAsync<float>(0, Px);
+        float zMax = 0f;
+        foreach (var z in dep) if (z > zMax && float.IsFinite(z)) zMax = z;
+        var rgba = new byte[4 * S * S * 4];
+        for (int y = 0; y < S; y++)
+            for (int x = 0; x < S; x++)
+            {
+                int i = y * S + x;
+                bool known = msk[i] > 127f;
+                for (int panel = 0; panel < 4; panel++)
+                {
+                    int o = ((y * 4 * S) + panel * S + x) * 4;
+                    float r, g, b;
+                    if (panel == 0) { r = known ? img[i] : 255f; g = known ? img[Px + i] : 0f; b = known ? img[2 * Px + i] : 255f; }
+                    else if (panel == 1) { r = pnt[i]; g = pnt[Px + i]; b = pnt[2 * Px + i]; }
+                    else if (panel == 2) { float v = zMax > 0f ? 255f * dep[i] / zMax : 0f; r = g = b = v; }
+                    else { r = g = b = known ? 255f : 0f; }
+                    rgba[o] = (byte)Math.Clamp(r, 0f, 255f); rgba[o + 1] = (byte)Math.Clamp(g, 0f, 255f);
+                    rgba[o + 2] = (byte)Math.Clamp(b, 0f, 255f); rgba[o + 3] = 255;
+                }
+            }
+        return rgba;
+    }
+
     /// <summary>The (unnormalised, forward-component 1) world-space ray of grid cell (x, y)'s centre: depth z along it is
     /// the camera-space depth z.</summary>
     static void Ray(Params p, int x, int y, out float dx, out float dy, out float dz)
@@ -222,7 +257,8 @@ public static class UnseenFill
     /// Returns the splats added.
     /// </summary>
     public static async Task<int> FillAsync(Accelerator a, SplatTrainerGpu trainer, GpuGaussianRenderer renderer,
-        HiddenLayerInpaint inpaint, Vector3 centre, Vector3 sceneUp, int stride = 2, float known = 0.7f, float minMasked = 0.01f)
+        HiddenLayerInpaint inpaint, Vector3 centre, Vector3 sceneUp, int stride = 2, float known = 0.7f, float minMasked = 0.01f,
+        Func<string, byte[], int, int, Task>? dump = null)
     {
         Load(a);
         var (w, h) = trainer.Size;
@@ -307,6 +343,7 @@ public static class UnseenFill
                     // Owned by the clipboard below (it disposes it), not by scratch.
                     var rows = a.Allocate1D<float>((long)capacity * SplatFormat.Floats);
                     _emit!(S * S, painted.View, mask.View, depth.View, rows.View, counters.View, p);
+                    if (dump != null) await dump($"fill-{name}", await DumpStripAsync(image, mask, painted, depth), 4 * S, S);
                     // CPU transfer: one counter - the rows emitted.
                     int count = Math.Min(capacity, (await counters.CopyToHostAsync<int>(1, 1))[0]);
                     if (count <= 0) { rows.Dispose(); continue; }

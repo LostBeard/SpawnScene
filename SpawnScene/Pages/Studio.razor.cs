@@ -258,6 +258,7 @@ public partial class Studio : IAsyncDisposable
         }
         // &fillunseen=1: after training, paint what no photo saw around the capture position (Studio.Fill, opt-in).
         if (query.TryGetValue("fillunseen", out var fuq)) FillUnseenOption = fuq is "1" or "true";
+        if (query.TryGetValue("filldump", out var fdmq)) FillDumpOption = fdmq is "1" or "true";
         // &randombgamp=A: the random background's width scale (default 0.5).
         if (query.TryGetValue("randombgamp", out var rbaq) && float.TryParse(rbaq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rbav))

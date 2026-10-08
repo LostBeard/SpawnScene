@@ -580,7 +580,7 @@ fn exposure_backward(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invo
 @group(0) @binding(1) var<storage, read_write> expo     : array<f32>;   // 12 per view
 @group(0) @binding(2) var<storage, read_write> moments  : array<f32>;   // 24 per view: m then v
 @group(0) @binding(3) var<storage, read_write> steps    : array<f32>;   // 1 per view
-@group(0) @binding(4) var<uniform>             cfg      : vec4<f32>;    // x partial count, y view slot, z learning rate
+@group(0) @binding(4) var<uniform>             cfg      : vec4<f32>;    // x partial count, y view slot, z learning rate, w 1 = gains only
 
 var<workgroup> red : array<f32, 3072>;
 
@@ -602,7 +602,10 @@ fn exposure_adam(@builtin(local_invocation_index) li : u32) {
     let slot = u32(cfg.y);
     let t = steps[slot] + 1.0;
     storageBarrier();   // every invocation has read steps[slot] before invocation 0 rewrites it
-    if (li < 12u) {
+    // Gains only (cfg.w): just the diagonal m[c][c] (slots 0, 5, 10) moves; the cross terms and offsets stay at the
+    // identity's 0. A per-channel gain folds into the scene exactly; an offset only where the scene is opaque.
+    let gainsOnly = cfg.w > 0.5;
+    if (li < 12u && (!gainsOnly || li == 0u || li == 5u || li == 10u)) {
         let g = red[li];
         let i = slot * 12u + li;
         if (g == g && abs(g) < 1e30) {   // NaN / inf guard: one bad frame must not wreck a photo's exposure

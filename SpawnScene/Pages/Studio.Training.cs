@@ -103,6 +103,9 @@ public partial class Studio
     /// </summary>
     public static bool ExposureOption { get; set; }
 
+    /// <summary><c>&amp;exposure=gains</c>: per-photo exposure as per-channel gains only (SplatTrainerGpu.ExposureGainsOnly).</summary>
+    public static bool ExposureGainsOnlyOption { get; set; }
+
     /// <summary>
     /// <c>&amp;depthloss=X</c>: depth supervision (SplatTrainerGpu.Depth, the reference's <c>-d</c>) - an L1 between the rendered
     /// inverse depth and each photo's DAv3 depth scaled to the SfM points (DepthFusionInit), weight X decaying to X/100
@@ -547,7 +550,9 @@ public partial class Studio
             if (ExposureOption)
             {
                 _trainer.ResetExposure(views.Count);
-                Console.WriteLine($"[Train] per-photo exposure: {views.Count} affine colour transforms, lr 0.01 -> 0.001");
+                _trainer.ExposureGainsOnly = ExposureGainsOnlyOption;
+                Console.WriteLine($"[Train] per-photo exposure: {views.Count} " +
+                    (ExposureGainsOnlyOption ? "per-channel gains" : "affine colour transforms") + ", lr 0.01 -> 0.001");
             }
             if (SplatTrainerGpu.MipFilter > 0)
                 Console.WriteLine($"[Train] Mip 3D filter {SplatTrainerGpu.MipFilter}: scale floor = filter x depth / focal over {supervised.Count} cameras");

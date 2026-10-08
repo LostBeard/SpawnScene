@@ -83,6 +83,18 @@ public partial class Studio
             await _gpuService.WebGPUAccelerator.SynchronizeAsync();
         }
 
+        // Gains only (&exposure=gains): against the full transform (offsets included), only the diagonal may move.
+        trainer.ExposureGainsOnly = true;
+        float[] g;
+        try { g = await FitAsync(target, 300); }
+        finally { trainer.ExposureGainsOnly = false; }
+        float off = 0f;
+        for (int r = 0; r < 3; r++)
+            for (int k = 0; k < 4; k++) if (k != r) off = MathF.Max(off, MathF.Abs(g[r * 4 + k]));
+        float gainMove = MathF.Abs(g[0] - 1f) + MathF.Abs(g[5] - 1f) + MathF.Abs(g[10] - 1f);
+        Console.WriteLine($"[TrainerGate] exposure gains only, against gains + offsets: {Rows(g)} (largest cross/offset {off:F5}, gains moved {gainMove:F3})");
+        if (off != 0f || gainMove < 0.05f) { Console.WriteLine("[TrainerGate] FAIL exposure: gains-only moved a cross term or offset, or no gain"); return false; }
+
         var id = await FitAsync(img, 200);
         float drift = 0f;
         for (int r = 0; r < 3; r++)

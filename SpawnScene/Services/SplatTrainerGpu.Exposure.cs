@@ -29,6 +29,13 @@ public sealed partial class SplatTrainerGpu
     /// <summary>Learning rate of the next exposure steps (the caller decays it: the reference goes 0.01 -> 0.001).</summary>
     public float ExposureLr { get; set; } = 0.01f;
 
+    /// <summary>
+    /// Learn only per-channel gains (the 3x4's diagonal), no cross terms or offsets (<c>&amp;exposure=gains</c>). Shutter,
+    /// ISO and white balance are gains; and a gain folds into the scene exactly, an offset only where it is opaque - the
+    /// full affine cost fixed-exposure captures 0.2-0.6 dB held out through the fold (Truck e2, Bicycle e1, 2026-10-08).
+    /// </summary>
+    public bool ExposureGainsOnly { get; set; }
+
     /// <summary>Identity exposure for <paramref name="views"/> photos, fresh optimiser state.</summary>
     public void ResetExposure(int views)
     {
@@ -95,7 +102,7 @@ public sealed partial class SplatTrainerGpu
             Buf(0, _dLdPix!.GetGPUBuffer()!), Buf(1, _rawColour!.GetGPUBuffer()!),
             Buf(2, _exposure!.GetGPUBuffer()!), Buf(3, _exposurePartials!.GetGPUBuffer()!), Buf(4, _exposureDimsBuf!),
         });
-        WriteVec4(_exposureCfgBuf!, groups, slot, ExposureLr, 0f);
+        WriteVec4(_exposureCfgBuf!, groups, slot, ExposureLr, ExposureGainsOnly ? 1f : 0f);
         Dispatch(_exposureAdam!, 1, 1, new[]
         {
             Buf(0, _exposurePartials.GetGPUBuffer()!), Buf(1, _exposure.GetGPUBuffer()!),

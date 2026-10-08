@@ -42,6 +42,8 @@ public static class OcclusionFill
         /// instead of the push-pull pyramid; the grid maps into it at <see cref="InpaintScale"/> from the offsets.</summary>
         public int UseInpaint;
         public float InpaintScale, InpaintOffX, InpaintOffY;
+        /// <summary>1: the past-the-frame layer takes its colour from an OUTPAINTED 512 square of the padded grid.</summary>
+        public int UseOutpaint;
     }
 
     public struct LevelParams
@@ -69,14 +71,16 @@ public static class OcclusionFill
     static Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
         ArrayView1D<float, Stride1D.Dense>, Params>? _packInpaint;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-        ArrayView1D<int, Stride1D.Dense>, Params, int>? _emitBorder;
+        ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params, int>? _emitBorder;
+    static Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+        Params>? _packOutpaint;
     static Accelerator? _loadedFor;
 
     static void Load(Accelerator a)
     {
         if (!ReferenceEquals(_loadedFor, a))
         {
-            _rowMax = null; _colMax = null; _rowMin = null; _colMin = null; _level0 = null; _down = null; _normalize = null; _up = null; _emitBehind = null; _emitBorder = null; _behindMask = null; _packInpaint = null;
+            _rowMax = null; _colMax = null; _rowMin = null; _colMin = null; _level0 = null; _down = null; _normalize = null; _up = null; _emitBehind = null; _emitBorder = null; _behindMask = null; _packInpaint = null; _packOutpaint = null;
         }
         _loadedFor = a;
         _rowMax ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(RowMaxKernel);
@@ -96,7 +100,9 @@ public static class OcclusionFill
         _packInpaint ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(PackInpaintKernel);
         _emitBorder ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, Params, int>(EmitBorderKernel);
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params, int>(EmitBorderKernel);
+        _packOutpaint ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, Params>(PackOutpaintKernel);
     }
 
     /// <summary>Splats <see cref="Append"/> may add at most, beyond the surface layer: one per cell behind edges, one per margin cell.</summary>
@@ -171,10 +177,30 @@ public static class OcclusionFill
             var border = p; border.SeedAll = 1;
             var l0Border = Pyramid(a, depth, rgba, bgMax, bgMin, border, scratch);
             int padded = (p.GridW + 2 * p.Margin) * (p.GridH + 2 * p.Margin);
-            _emitBorder!(padded, l0Border.View, l0Behind.View, outPacked, counter, border, 0);
+            MemoryBuffer1D<float, Stride1D.Dense>? outpainted = null;
+            border.UseInpaint = 0;
+            if (inpaint != null)
+            {
+                // The photo continued past its frame by MI-GAN: the padded grid letterboxed into the 512 square, the
+                // margin masked (0), the photo known (255).
+                const int S = HiddenLayerInpaint.Size;
+                int pw = p.GridW + 2 * p.Margin, ph = p.GridH + 2 * p.Margin;
+                float scale = (float)S / Math.Max(pw, ph);
+                border.InpaintScale = scale;
+                border.InpaintOffX = 0.5f * (S - pw * scale);
+                border.InpaintOffY = 0.5f * (S - ph * scale);
+                var img = a.Allocate1D<float>(3L * S * S); scratch.Add(img);
+                var msk = a.Allocate1D<float>((long)S * S); scratch.Add(msk);
+                _packOutpaint!(S * S, rgba, img.View, msk.View, border);
+                outpainted = await inpaint.RunAsync(a, img.View, msk.View);
+                if (outpainted != null) scratch.Add(outpainted);
+            }
+            border.UseOutpaint = outpainted != null ? 1 : 0;
+            if (outpainted == null) { outpainted = a.Allocate1D<float>(1); scratch.Add(outpainted); }
+            _emitBorder!(padded, l0Border.View, l0Behind.View, outPacked, counter, outpainted.View, border, 0);
             // And the background past the frame, where it lies behind that continuation (a plant in the corner of the
             // photo is continued at its own depth; turning past it needs the wall behind it too).
-            _emitBorder!(padded, l0Border.View, l0Behind.View, outPacked, counter, border, 1);
+            _emitBorder!(padded, l0Border.View, l0Behind.View, outPacked, counter, outpainted.View, border, 1);
         }
     }
 
@@ -425,6 +451,35 @@ public static class OcclusionFill
         maskGrid[i] = m;
     }
 
+    /// <summary>One pixel of the 512x512 outpainting input: the PADDED grid letterboxed (centred) - photo cells known (255,
+    /// box-averaged colour), margin cells and the bars masked (0).</summary>
+    static void PackOutpaintKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> rgba, ArrayView1D<float, Stride1D.Dense> img,
+        ArrayView1D<float, Stride1D.Dense> msk, Params p)
+    {
+        const int S = HiddenLayerInpaint.Size;
+        if (i >= S * S) return;
+        int ux = i % S, uy = i / S;
+        float inv = 1f / p.InpaintScale;
+        int pw = p.GridW + 2 * p.Margin, ph = p.GridH + 2 * p.Margin;
+        int x0 = (int)((ux - p.InpaintOffX) * inv), y0 = (int)((uy - p.InpaintOffY) * inv);
+        int x1 = XMath.Max((int)((ux + 1 - p.InpaintOffX) * inv), x0 + 1), y1 = XMath.Max((int)((uy + 1 - p.InpaintOffY) * inv), y0 + 1);
+        float r = 0f, g = 0f, b = 0f;
+        int n = 0;
+        bool allPhoto = x0 >= 0 && y0 >= 0 && x1 <= pw && y1 <= ph;
+        for (int py = y0; py < y1 && allPhoto; py++)
+            for (int px = x0; px < x1; px++)
+            {
+                int gx = px - p.Margin, gy = py - p.Margin;
+                if (gx < 0 || gy < 0 || gx >= p.GridW || gy >= p.GridH) { allPhoto = false; break; }
+                int c = rgba[gy * p.Subsample * p.Width + gx * p.Subsample];
+                r += c & 0xFF; g += (c >> 8) & 0xFF; b += (c >> 16) & 0xFF;
+                n++;
+            }
+        float k = 1f / XMath.Max(n, 1);
+        img[i] = allPhoto ? r * k : 0f; img[S * S + i] = allPhoto ? g * k : 0f; img[2 * S * S + i] = allPhoto ? b * k : 0f;
+        msk[i] = allPhoto ? 255f : 0f;
+    }
+
     /// <summary>One pixel of the 512x512 MI-GAN input: the photo (0..255 planes) and mask over the grid cells it covers
     /// (letterboxed, centred; masked if any covered cell is); the bars outside the photo are known (255).</summary>
     static void PackInpaintKernel(Index1D i, ArrayView1D<int, Stride1D.Dense> rgba, ArrayView1D<float, Stride1D.Dense> maskGrid,
@@ -457,7 +512,8 @@ public static class OcclusionFill
     /// <summary>Layer 0: the continuation of every edge (<paramref name="l0"/>); layer 1: the background continuation
     /// (<paramref name="behind"/>) where it lies behind layer 0.</summary>
     static void EmitBorderKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> l0, ArrayView1D<float, Stride1D.Dense> behind,
-        ArrayView1D<float, Stride1D.Dense> outPacked, ArrayView1D<int, Stride1D.Dense> counter, Params p, int layer)
+        ArrayView1D<float, Stride1D.Dense> outPacked, ArrayView1D<int, Stride1D.Dense> counter, ArrayView1D<float, Stride1D.Dense> painted,
+        Params p, int layer)
     {
         int pw = p.GridW + 2 * p.Margin;
         if (i >= pw * (p.GridH + 2 * p.Margin)) return;
@@ -475,6 +531,15 @@ public static class OcclusionFill
             float bd = behind[o + 3];
             if (behind[o + 4] <= 0f || bd <= d * (1f + p.Tau)) return;
             d = bd; r = behind[o]; g = behind[o + 1]; b = behind[o + 2];
+        }
+        else if (p.UseOutpaint != 0)
+        {
+            // MI-GAN's continuation of the photo at this margin cell (0..255), nearest pixel of the letterboxed square.
+            const int S = HiddenLayerInpaint.Size;
+            int ux = XMath.Clamp((int)(p.InpaintOffX + (gx + p.Margin + 0.5f) * p.InpaintScale), 0, S - 1);
+            int uy = XMath.Clamp((int)(p.InpaintOffY + (gy + p.Margin + 0.5f) * p.InpaintScale), 0, S - 1);
+            int pi = uy * S + ux;
+            r = painted[pi] / 255f; g = painted[S * S + pi] / 255f; b = painted[2 * S * S + pi] / 255f;
         }
         int slot = Atomic.Add(ref counter[0], 1);
         if (slot >= p.Capacity) return;

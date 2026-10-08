@@ -75,7 +75,12 @@ letterboxes photo + mask into MI-GAN's 512 square, and those splats take the pai
 push-pull blur stays the fallback). Kitchen, with &edgesnap=1, moved views (`img/inpaint-hidden-layer-kitchen-2026-10-07.jpg`,
 top: blur, bottom: MI-GAN): the yellow/orange blobs of foreground colour behind the cereal boxes are gone - the
 revealed area reads as countertop and backsplash. Soft (512 px painting of a 3840 px photo): tiles of 512 around each
-masked region would sharpen it. Load 1.2 s, paint 518 ms. Next: the past-the-frame layer (outpainting).
+masked region would sharpen it. Load 1.2 s, paint 518 ms.
+
+**Past the frame too (same &inpaint=1):** the padded grid letterboxed into 512 with the margin masked; the border layer
+takes MI-GAN's continuation. Garden path from moved views (`img/outpaint-garden-2026-10-07.jpg`, top: push-pull, bottom:
+MI-GAN): the olive smeared tunnel around the photo becomes sky, trees, grass and the path running on. Soft at 512 px;
+paint 0.25-0.45 s per layer.
 
 Plan: OcclusionFill already knows WHERE the hidden layer goes (the far side of each depth edge, the band past the
 frame). Build the mask from it, inpaint the photo there (MI-GAN first), and colour the hidden layer from the inpainted

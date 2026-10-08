@@ -371,3 +371,8 @@ ceiling is solid now, but (a) a band of it stays magenta - no view looked there:
 - from the centre the far ceiling is grazing and cells stretched to the single-photo cap of 8 footprints. x3: views at
 pitches 0 / +40 / -40 for each of the 8 headings (26 views), stretch cap 3.
 
+x3 (pitched views, cap 3): mean T 2.5% (w0 5.6%, x2 3.5%); 59,527 splats in 11.4 s; held out 18.86 / 0.8488 (w0 19.00 /
+0.8501, x0-x2 18.78-18.92: within the room's noise). up-3 now shows a plausible solid white ceiling. Still wrong: a black
+wedge in in-3 / low-3 (painted content at a wrong depth, nearer than the ceiling), crumpled edges where fill meets the
+trained ceiling, a thin magenta band. Side by side: `_shots/fill_x3.png` (w0 | x2 | x3, views in-3, low-3, pan-2, up-3).
+

@@ -93,9 +93,10 @@ off), frames per second, two rounds:
 
 What this says, plainly:
 
-- **SpawnScene is the slowest of the four uncapped**, at 221-309 fps (3.2-4.5 ms a frame) against roughly 400-560
-  for GaussianSplats3D. Its rate barely changes from pose to pose, which points to a fixed per-frame cost rather than
-  splat drawing; finding it is open work. Drawing every splat (`&lodpx=0`, no 0.3 px cull) measured the same.
+- **SpawnScene is the slowest of the four uncapped**, at 221-309 fps (3.2-4.5 ms a frame) against 392-559 for
+  GaussianSplats3D. The gap is a steady factor, not a fixed overhead: SpawnScene runs at 0.55-0.61x GaussianSplats3D's
+  rate at every pose, rising and falling with it, so the extra cost grows with the splats drawn. Finding it is open
+  work. Drawing every splat (`&lodpx=0`, no 0.3 px cull) measured the same.
 - **SpawnScene and GaussianSplats3D repeat within 1%** between rounds. Spark and PlayCanvas do not: up to 2.8x apart
   at an unchanged camera.
 - **The uncapped numbers do not measure the same work.** Spark, PlayCanvas and GaussianSplats3D sort on a worker

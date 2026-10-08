@@ -378,7 +378,9 @@ public partial class Studio
         float x = gutter, w = width - gutter * 2;
         // No "Scenes" heading: the tab already says it.
 
-        const float cardH = 112, gap = 12;
+        // Tall enough for the placement and coverage lines ABOVE the buttons: at 112 the buttons sat on the
+        // "N of M photos placed" line and hid it (2026-10-08 screenshot).
+        const float cardH = 150, gap = 12;
         int cols = Math.Max(1, (int)((w + gap) / (420 + gap)));
         float cardW = (w - gap * (cols - 1)) / cols;
         for (int i = 0; i < scenes.Count; i++)
@@ -419,6 +421,13 @@ public partial class Studio
                     X = lx, Y = 76, Text = text, FontSize = FontSize.Caption,
                     Color = missing.Length == 0 ? UITheme.Current.TextMuted : Color.FromArgb(255, 230, 180, 90),
                 });
+                // Which way no photo looks - the walls or sides the scene never saw (PLANS: capture feedback).
+                if (scene.FacingCounts is { Length: 8 } facing && CaptureCoverage.Describe(facing) is { } gaps)
+                    card.AddChild(new UILabel
+                    {
+                        X = lx, Y = 94, Text = gaps, FontSize = FontSize.Caption,
+                        Color = gaps.StartsWith("Photos face every") ? UITheme.Current.TextMuted : Color.FromArgb(255, 230, 180, 90),
+                    });
             }
             var sceneRef = scene;
             card.AddChild(new UIButton

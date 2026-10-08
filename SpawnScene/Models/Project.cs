@@ -70,6 +70,12 @@ public class ProjectScene
     /// <summary>The photos it could not place (file names) - shown on the scene card so a user knows which to retake.</summary>
     public string[]? PhotosNotPlaced { get; set; }
 
+    /// <summary>
+    /// How many placed photos face each of 8 horizontal directions, from the first photo's heading clockwise in 45 degree
+    /// steps (CaptureCoverage). A direction no photo faces is a wall or side the scene never saw. Null for older scenes.
+    /// </summary>
+    public int[]? FacingCounts { get; set; }
+
     /// <summary>A single-photo scene's tan of half field of view (x, y) - the viewer's lens at home (GaussianScene.PhotoHalfTan).</summary>
     public float[]? PhotoHalfTan { get; set; }
 

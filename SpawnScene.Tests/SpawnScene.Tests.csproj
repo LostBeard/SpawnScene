@@ -21,6 +21,7 @@
 
   <ItemGroup>
     <Compile Include="..\SpawnScene\Models\CameraParams.cs" Link="Linked\CameraParams.cs" />
+    <Compile Include="..\SpawnScene\Models\CaptureCoverage.cs" Link="Linked\CaptureCoverage.cs" />
     <Compile Include="..\SpawnScene\Models\ImageModels.cs" Link="Linked\ImageModels.cs" />
     <Compile Include="..\SpawnScene\Services\FeatureDetector.cs" Link="Linked\FeatureDetector.cs" />
     <Compile Include="..\SpawnScene\Services\GpuFeatureDetector.cs" Link="Linked\GpuFeatureDetector.cs" />

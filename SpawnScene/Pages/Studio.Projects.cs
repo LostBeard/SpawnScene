@@ -418,6 +418,7 @@ public partial class Studio
 
         for (int i = poses.Length; i < images.Count; i++) notPlaced.Add(images[i].FileName);
         _lastPlacement = (posed, images.Count, notPlaced.ToArray());
+        _lastFacing = CaptureCoverage.FacingCounts(poses.Where(p => p != null).Select(p => p!).ToList());
 
         var turnCounts = scene.TrainingViews
             .GroupBy(v => v.QuarterTurns)
@@ -1047,7 +1048,9 @@ public partial class Studio
                 projectScene.PhotosPlaced = lp.Placed;
                 projectScene.PhotosTotal = lp.Total;
                 projectScene.PhotosNotPlaced = lp.NotPlaced;
+                projectScene.FacingCounts = _lastFacing;
                 _lastPlacement = null;
+                _lastFacing = null;
             }
             await _projectService.SaveSceneAsync(_activeProject.Id, projectScene, packedU8);
             _viewedProjectScene = projectScene;
@@ -1284,6 +1287,7 @@ public partial class Studio
 
     /// <summary>The last RecordTrainingViews: photos placed, of how many, and the names of those that were not.</summary>
     (int Placed, int Total, string[] NotPlaced)? _lastPlacement;
+    int[]? _lastFacing;
 
     SampleCatalog? _sampleCatalog;
     Task? _sampleCatalogTask;

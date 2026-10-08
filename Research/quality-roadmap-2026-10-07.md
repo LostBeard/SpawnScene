@@ -311,3 +311,13 @@ Zero mean removes the colour bias (u0's exposure gains match m0's: 1.130 1.049 1
 whole room gain; Truck neutral; Bicycle still -0.19 dB held out / -0.13 fair - the push to opacity itself, where the
 sky cannot be opaque. Next: v0/v1 at half width (`&randombgamp=0.5`).
 
+### Half width (`&randombg=2&randombgamp=0.5`, [-0.25, 0.25]) - v0 / v1
+
+| Scene | black | zero-mean full | zero-mean half |
+|---|---|---|---|
+| Bicycle held out / fair | 24.97 / 0.7683 / 25.572 (m0) | 24.78 / 0.7610 / 25.445 (u0) | 24.89 / 0.7656 / 25.535 (v0) |
+| Bathroom held out / fair | 18.45-18.69 / 24.37-24.75 | 18.86 / 25.15 (u1) | 18.82 / 0.8499 / 24.76 (v1) |
+| Bathroom holes (mean; views <= 1%) | 12.0%; 1/34 | 4.0%; 24/34 | 5.4%; 23/34 |
+
+Half the push keeps most of the room fix and costs Bicycle -0.08 dB held out / -0.04 fair. Truck t3 running.
+

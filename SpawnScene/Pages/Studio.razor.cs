@@ -261,6 +261,11 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("filldump", out var fdmq)) FillDumpOption = fdmq is "1" or "true";
         // &exportcolmap=1 (harness): after Generate, our SfM as COLMAP text for a reference trainer (Studio.ColmapExport).
         if (query.TryGetValue("exportcolmap", out var ecq)) ExportColmapOption = ecq is "1" or "true";
+        // &maxscale=F: the splat size cap, F x the rig radius (default 0.1, Studio.Training.MaxScaleFraction). Every mode:
+        // the parity ablation needs it on the project / sample path (Hamamni's blurred vault, 2026-10-08).
+        if (query.TryGetValue("maxscale", out var msq) && float.TryParse(msq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var msf))
+            MaxScaleFraction = msf;
         // &projectrefine=0: no camera refinement in the project path (parity ablation; it is on for the user's scenes).
         if (query.TryGetValue("projectrefine", out var projRefQ)) ProjectRefinePoses = projRefQ is not ("0" or "false");
         // &randombgamp=A: the random background's width scale (default 0.5).
@@ -644,9 +649,7 @@ public partial class Studio : IAsyncDisposable
             // gave each view ~31k splats where a 6-view run gave ~40k each.
             if (query.TryGetValue("budget", out var bg) && int.TryParse(bg, out var bgi))
                 _multiViewService.SplatBudget = bgi;
-            // ?maxscale=N caps a splat at N * scene diagonal; ?poslr=N scales the position rate.
-            if (query.TryGetValue("maxscale", out var ms) && float.TryParse(ms, out var msf))
-                MaxScaleFraction = msf;
+            // ?poslr=N scales the position rate (?maxscale moved to the options every mode reads).
             if (query.TryGetValue("poslr", out var pl) && float.TryParse(pl, out var plf))
                 PositionLrScale = plf;
             // ?heldevery=N evaluates held-out PSNR every N cycles (0 = only at the ends).

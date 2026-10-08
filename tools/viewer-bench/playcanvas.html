@@ -1,0 +1,22 @@
+<!doctype html><html><head><meta charset="utf-8"><title>PlayCanvas bench</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}canvas{width:100vw;height:100vh;display:block}</style>
+<script type="importmap">{"imports":{"playcanvas":"https://cdn.jsdelivr.net/npm/playcanvas@2.23.1/build/playcanvas.mjs"}}</script>
+</head><body><script type="module">
+import * as pc from "playcanvas";
+import { options, run } from "./bench.js";
+const o = options();
+const canvas = document.createElement("canvas"); document.body.appendChild(canvas);
+const app = new pc.Application(canvas, { graphicsDeviceOptions: { antialias: false } });
+app.setCanvasFillMode(pc.FILLMODE_FILL_WINDOW); app.setCanvasResolution(pc.RESOLUTION_AUTO);
+app.graphicsDevice.maxPixelRatio = 1;
+app.start();
+const cam = new pc.Entity("cam");
+cam.addComponent("camera", { clearColor: new pc.Color(0, 0, 0), fov: o.fov, nearClip: 0.05, farClip: 1000 });
+app.root.addChild(cam);
+const asset = new pc.Asset("scene", "gsplat", { url: o.url });
+app.assets.add(asset);
+await new Promise(r => { asset.ready(r); app.assets.load(asset); });
+const e = new pc.Entity("splat"); e.addComponent("gsplat", { asset }); app.root.addChild(e);
+console.log("[Bench] playcanvas loaded");
+run("playcanvas", p => { cam.setPosition(...p.pos); cam.lookAt(new pc.Vec3(...p.target), new pc.Vec3(...p.up)); });
+</script></body></html>

@@ -49,8 +49,60 @@ bathroom (held out every 8th photo):
 
 ## Viewer
 
-**In progress:** frame time of SpawnScene's renderer against Spark, PlayCanvas (SuperSplat's viewer), antimatter15/splat
-and GaussianSplats3D on the same scene (Inria's *Train*, 741,883 splats, SH degree 3) at the same window size.
+The same scene in four browser viewers, from the same seven camera poses: Inria's *Train* at 7K iterations
+(741,883 splats, SH degree 3, the reference trainer's PLY), 1600x900 at device pixel ratio 1, vertical field of view
+50°. Pose 0 is a home view; poses 1-6 are pseudo-random (seeded) around the scene - 5-35° above it, 1.2-2.2 scene
+radii away - so no viewer was tuned for them. Measured 2026-10-08 on an RTX 4070 (driver 596.21), Chrome 151,
+Windows 11. Tools: `tools/viewer-bench/` (pages, `make_poses.py`, `compose_sheets.py`) and
+`tools/_cdp_viewer_bench.js`.
+
+| Viewer | Version | API | Defaults changed |
+|---|---|---|---|
+| SpawnScene | 2026-10-08 | WebGPU | none |
+| [Spark](https://sparkjs.dev) | 2.3.1 (three.js 0.186.1) | WebGL2 | none |
+| [PlayCanvas](https://playcanvas.com) (SuperSplat's engine) | 2.23.1 | WebGL2 | none |
+| [GaussianSplats3D](https://github.com/mkkellogg/GaussianSplats3D) | 0.4.7 | WebGL2 | SH degree 3 (its default is 0) |
+
+### What they draw
+
+All four draw the same picture; differences are small and mostly sharpness. SpawnScene applies contrast-adaptive
+sharpening by default (strength 0.5, a Settings slider), so its frames look crisper than the raw blend the others show.
+Mean absolute pixel difference from GaussianSplats3D (0-255, the frame band below): SpawnScene 8.6-17.4, PlayCanvas
+6.5-12.5, Spark 3.9-6.7.
+
+![Pose 0](img/viewer-bench/train-pose0.jpg)
+![Pose 3](img/viewer-bench/train-pose3.jpg)
+![Pose 5](img/viewer-bench/train-pose5.jpg)
+
+All seven: [img/viewer-bench/](img/viewer-bench/) (`train-pose0..6.jpg`).
+
+### Frame rate
+
+At the display's 60 Hz every viewer held 60 fps at every pose. Uncapped (Chrome with vsync and the frame-rate limit
+off), frames per second, two rounds:
+
+| Pose | SpawnScene | Spark | PlayCanvas | GaussianSplats3D |
+|---|---|---|---|---|
+| 0 | 261 / 261 | 1149 / 784 | 491 / 504 | 474 / 473 |
+| 1 | 309 / 309 | 403 / 145 | 969 / 585 | 555 / 559 |
+| 2 | 267 / 267 | 670 / 485 | 531 / 1074 | 462 / 463 |
+| 3 | 259 / 259 | 425 / 585 | 317 / 368 | 425 / 425 |
+| 4 | 240 / 240 | 437 / 809 | 337 / 470 | 415 / 414 |
+| 5 | 222 / 221 | 212 / 413 | 310 / 251 | 392 / 392 |
+| 6 | 238 / 238 | 719 / 305 | 458 / 468 | 421 / 415 |
+
+What this says, plainly:
+
+- **SpawnScene is the slowest of the four uncapped**, at 221-309 fps (3.2-4.5 ms a frame) against roughly 400-560
+  for GaussianSplats3D. Its rate barely changes from pose to pose, which points to a fixed per-frame cost rather than
+  splat drawing; finding it is open work. Drawing every splat (`&lodpx=0`, no 0.3 px cull) measured the same.
+- **SpawnScene and GaussianSplats3D repeat within 1%** between rounds. Spark and PlayCanvas do not: up to 2.8x apart
+  at an unchanged camera.
+- **The uncapped numbers do not measure the same work.** Spark, PlayCanvas and GaussianSplats3D sort on a worker
+  thread and draw each frame with the latest finished order. Uncapped, Spark's sort fell behind its drawing: at poses
+  4-6 in some rounds it drew with a stale order (the train's far side painted over its near side). At 60 Hz the same
+  poses drew correctly, and those are the Spark frames shown above. A frame counter cannot see that, so read the
+  Spark and PlayCanvas columns as drawing speed, not sorted-drawing speed.
 
 ### Formats
 

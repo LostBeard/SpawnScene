@@ -1,0 +1,23 @@
+<!doctype html><html><head><meta charset="utf-8"><title>GaussianSplats3D bench</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}</style>
+<script type="importmap">{"imports":{
+ "three":"https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+ "@mkkellogg/gaussian-splats-3d":"https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d@0.4.7/build/gaussian-splats-3d.module.js"}}</script>
+</head><body><script type="module">
+import * as GaussianSplats3D from "@mkkellogg/gaussian-splats-3d";
+import { options, run } from "./bench.js";
+const o = options();
+const poses = (await (await fetch(o.posesUrl)).json()).ply;
+const viewer = new GaussianSplats3D.Viewer({
+  cameraUp: poses[0].up, initialCameraPosition: poses[0].pos, initialCameraLookAt: poses[0].target,
+  sharedMemoryForWorkers: false, useBuiltInControls: false, sphericalHarmonicsDegree: 3,
+});
+viewer.camera.fov = o.fov; viewer.camera.updateProjectionMatrix();
+await viewer.addSplatScene(o.url, { showLoadingUI: false, progressiveLoad: false });
+viewer.start();
+console.log("[Bench] gs3d loaded");
+run("gs3d", p => {
+  viewer.camera.position.set(...p.pos); viewer.camera.up.set(...p.up); viewer.camera.lookAt(...p.target);
+  viewer.camera.fov = o.fov; viewer.camera.updateProjectionMatrix();
+});
+</script></body></html>

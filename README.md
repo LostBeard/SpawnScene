@@ -48,6 +48,11 @@ Same photos, same camera poses (COLMAP), same resolution, same split. Bicycle wi
 motion instead of COLMAP's poses: 25.17 dB - posing in the browser costs nothing measurable. Details, the protocol and
 side-by-side renders: [Docs/benchmarks.md](Docs/benchmarks.md).
 
+**Viewer:** opened in SpawnScene, Spark, PlayCanvas and GaussianSplats3D from the same seven camera poses, a 742K-splat
+scene draws the same picture in all four, and all four hold 60 fps at 1600x900 on an RTX 4070. Uncapped, SpawnScene is
+currently the slowest of the four (221-309 fps against about 400-560 for GaussianSplats3D) - a fixed per-frame cost we
+are working on. Screenshots and the full table: [Docs/benchmarks.md#viewer](Docs/benchmarks.md#viewer).
+
 ## Features
 
 ### From many photos or a video

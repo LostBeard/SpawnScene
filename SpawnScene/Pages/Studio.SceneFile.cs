@@ -326,6 +326,10 @@ public partial class Studio
         if (query.TryGetValue("lodpx", out var lpq) && float.TryParse(lpq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var lpv))
             _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);
+        // &cas=N: CAS sharpening 0..1 (default 0.5); &cas=0 shows the raw blend, as other viewers do (viewer bench).
+        if (query.TryGetValue("cas", out var casq) && float.TryParse(casq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var casv))
+            _gpuRenderer.SharpeningStrength = casv;
     }
 
     /// <summary>What every import does once its scene is on screen: the harness's exact camera, XR hook, render mode.</summary>

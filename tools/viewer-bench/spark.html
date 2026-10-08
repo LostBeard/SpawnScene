@@ -1,0 +1,24 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Spark bench</title>
+<style>html,body{margin:0;background:#000;overflow:hidden}</style>
+<script type="importmap">{"imports":{
+ "three":"https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
+ "three/addons/":"https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/",
+ "@sparkjsdev/spark":"https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.3.1/dist/spark.module.js"}}</script>
+</head><body><script type="module">
+import * as THREE from "three";
+import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+import { options, run } from "./bench.js";
+const o = options();
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(1); renderer.setSize(innerWidth, innerHeight);
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.add(new SparkRenderer({ renderer }));
+const camera = new THREE.PerspectiveCamera(o.fov, innerWidth / innerHeight, 0.05, 1000);
+const splat = new SplatMesh({ url: o.url });
+scene.add(splat);
+if (splat.initialized && splat.initialized.then) await splat.initialized;
+console.log("[Bench] spark loaded");
+renderer.setAnimationLoop(() => renderer.render(scene, camera));
+run("spark", p => { camera.position.set(...p.pos); camera.up.set(...p.up); camera.lookAt(...p.target); });
+</script></body></html>

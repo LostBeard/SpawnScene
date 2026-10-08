@@ -41,7 +41,7 @@ splats draw exactly that; no post-processing of that depth can recover a box. Th
 | **DA3MONO-LARGE** | **Apache-2.0** | ~350M params, ~700 MB fp16 | DAv3's monocular-specialised large model - the obvious first try |
 | DA3METRIC-LARGE | Apache-2.0 | same | metric depth (single-photo scale!) |
 | DA3-BASE | Apache-2.0 | ~120M params | multi-view, for the pose/fusion path |
-| DA3-LARGE (multi-view) | CC-BY-NC-4.0 | - | NOT usable (commercial) |
+| DA3-LARGE (multi-view) | CC-BY-NC-4.0 | - | allowed (SpawnScene is non-commercial, TJ 10-07), flagged NC; prefer open |
 | **MoGe-2 ViT-S / ViT-B** (Microsoft) | MIT | ~35M / ~100M params | "sharp details" + metric scale + normals; boundary F1 17.9 on iBims-1 vs Depth Pro 14.3 |
 | Depth Pro (Apple) | Apple sample-code licence (use and redistribute with notice) | ~1.9 GB | best boundary F1 on Sintel (0.409 vs DAv2 0.228); too heavy for a browser default |
 
@@ -114,9 +114,48 @@ map + normals, so it needs its own pipeline in ILGPU.ML (Data). DA3MONO-LARGE ha
 
 Licences (TJ 2026-10-07): SpawnScene is non-commercial, so NC weights are allowed; prefer open ones, flag NC.
 
+## Measured: MoGe-2 vs DAv3 Small, and what the snap really fixes (2026-10-07 late)
+
+Numbers, not impressions. `tools/depth_model_compare.py` runs both models on CPU onnxruntime (author's ONNX exports via
+the hub: Ruicheng/moge-2-vits-normal-onnx 141 MB, -vitb- 419 MB; DAv3 Small onnx-community 105 MB) at 1008 px, unprojects
+each with MoGe's own focal and point-renders orbits of 20/35 degrees (`img/moge2-vs-dav3-kitchen-2026-10-07.jpg`).
+`tools/flying_pixels.py`: inside a 7x7 window with a >25% depth step, the share of pixels stranded in the middle 20-80%
+of the step - the points that become rubber sheets in a moved view.
+
+| photo | DAv3 Small | MoGe-2 ViT-S | MoGe-2 ViT-B |
+|---|---|---|---|
+| kitchen | 0.39% | 0.39% | 0.40% |
+| living room | 0.31% | 0.22% | 0.30% |
+| castle room | 0.59% | 0.80% | 0.81% |
+| garden path | 2.30% | 3.53% | 4.29% |
+
+**MoGe-2 does not have fewer flying pixels.** Its depth maps LOOK crisper (island, cereal box outlines) and its moved
+views are slightly cleaner on the kitchen, but at the steps it is a tie indoors and worse on foliage, at 1.3x (S) / 4x (B)
+the download. Regression depth networks all blur steps; swapping models does not fix tearing. What MoGe-2 does offer:
+metric scale, a focal estimate and a validity mask (sky) in one pass. Its graph's ops (41 types incl. If, ReduceL2,
+ConvTranspose) are all in ILGPU.ML's registry. Parked as an option, not the fix.
+
+**The snap is the lever - with a slope guard.** `tools/snap_flying_eval.py` (numpy port of DepthEdgeSnap):
+
+| photo | raw | snap (colour test only) | snap + bimodal guard 0.3 |
+|---|---|---|---|
+| kitchen | 0.39% | 0.28% | **0.25%** |
+| living room | 0.31% | 0.25% | **0.22%** |
+| castle room | 0.59% | **0.32%** | **0.32%** |
+| garden path | 2.30% | 3.71% (worse) | 2.49% |
+
+The colour-only snap terraced the textured garden path (gravel + brick pass the two-sides-differ test by chance;
+`img/edgesnap-bimodal-guard-2026-10-07.jpg`, top middle). An EDGE's depths bunch at two plateaus; a SLOPE's spread evenly.
+The guard: snap only when at most 30% of the window lies in the middle half of [lo, hi]. It keeps every indoor gain and
+removes most of the garden harm (DepthEdgeSnapTests.ATexturedSlopeIsLeftAlone, red before: 291 px snapped). A colour
+coherence (Fisher) guard was tried first: it traded the indoor gains away with the garden harm. Snapping twice is worse
+everywhere (never iterate it). MoGe-2 + snap is the best indoor pair measured (kitchen 0.19%, living room 0.11%) - its
+edges sit closer to the colour edges.
+
 ## Order
 
 1. ~~MaxCellStretch A/B~~ (no effect).
-2. A larger / sharper depth model behind a setting: DA3MONO-LARGE and MoGe-2 ViT-S through ILGPU.ML (ask Data).
+2. ~~A larger / sharper depth model~~: measured, MoGe-2 S/B do not reduce flying pixels (above). DA3MONO-LARGE has no
+   ONNX export to test. Edge snap + bimodal guard is the fix; judge it in the app (&edgesnap=1) next.
 3. MI-GAN for the hidden layer's colour.
 4. Then the same depth refinement for DepthFusionInit (TJ: the multi-photo path seeds from the same depth maps).

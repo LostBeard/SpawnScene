@@ -262,6 +262,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("snapr", out var snapRq) && int.TryParse(snapRq, out var snapRv)) DepthEdgeSnap.GridRadius = snapRv;
         if (query.TryGetValue("snapstep", out var ssq2) && float.TryParse(ssq2, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var ssv2)) DepthEdgeSnap.StepScale = ssv2;
+        if (query.TryGetValue("snapmid", out var snapMidQ) && float.TryParse(snapMidQ, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var snapMidV)) DepthEdgeSnap.MaxMidFraction = Math.Clamp(snapMidV, 0.05f, 1f);
         if (query.TryGetValue("depthmodel", out var dmq) && !string.IsNullOrWhiteSpace(dmq)) DepthModelOverride = dmq;
         if (query.TryGetValue("inpaint", out var ipq)) DepthToGaussianKernel.InpaintHiddenLayer = ipq is "1" or "true";
         // &exposure=1: per-photo exposure compensation (Studio.Training.ExposureOption).

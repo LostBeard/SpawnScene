@@ -33,6 +33,9 @@ public static class DepthEdgeSnap
         public float SpatialFalloff;
         /// <summary>Neighbourhood depth spread, relative to the pixel's depth, below which it is left alone.</summary>
         public float MinRelRange;
+        /// <summary>Most of the grid allowed in the middle half of [lo, hi] for an EDGE: an edge's depths bunch at two
+        /// plateaus (only the ramp lies between), a slope's spread evenly (about half in the middle).</summary>
+        public float MaxMidFraction;
     }
 
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>? _snap;
@@ -45,6 +48,12 @@ public static class DepthEdgeSnap
     public static int GridRadius { get; set; } = 3;
     /// <summary>&amp;snapstep=X: candidate spacing as a multiple of the upsampling factor.</summary>
     public static float StepScale { get; set; } = 1f;
+
+    /// <summary>&amp;snapmid=X: <see cref="Params.MaxMidFraction"/>. 0.3 measured 2026-10-07 on the four single-photo
+    /// samples (flying pixels at depth steps, numpy port): kitchen 0.39% raw / 0.28 colour-only / 0.25 guarded, living
+    /// room 0.31 / 0.25 / 0.22, castle room 0.59 / 0.32 / 0.32, garden path 2.30 / 3.71 / 2.49 (the colour-only snap
+    /// terraced the textured path). 1 = no guard.</summary>
+    public static float MaxMidFraction { get; set; } = 0.3f;
 
     /// <summary>Snap <paramref name="depth"/> (W x H) into <paramref name="output"/> using the photo's packed RGBA.</summary>
     public static void Run(Accelerator a, ArrayView1D<float, Stride1D.Dense> depth, ArrayView1D<int, Stride1D.Dense> rgba,
@@ -61,6 +70,7 @@ public static class DepthEdgeSnap
             MinColourSeparation = colourSigma * colourSigma,
             SpatialFalloff = 1f / (2f * (radius * 0.75f) * (radius * 0.75f)),
             MinRelRange = 0.03f,
+            MaxMidFraction = MaxMidFraction,
         });
     }
 
@@ -84,7 +94,9 @@ public static class DepthEdgeSnap
         // weighted) say which side this pixel's colour belongs to; it takes that side's plateau depth (lo or hi), never
         // a value from the ramp between. Both sides the same colour = a slope, not an edge: left alone.
         float mid = 0.5f * (lo + hi);
+        float q1 = lo + 0.25f * (hi - lo), q3 = lo + 0.75f * (hi - lo);
         float nr = 0f, ng = 0f, nb = 0f, nw = 0f, fr = 0f, fg = 0f, fb = 0f, fw = 0f;
+        int inMid = 0;
         for (int dy = -r; dy <= r; dy++)
             for (int dx = -r; dx <= r; dx++)
             {
@@ -93,10 +105,14 @@ public static class DepthEdgeSnap
                 int c = rgba[o];
                 float w = XMath.Exp(-(dx * dx + dy * dy) * p.SpatialFalloff);
                 float cr = (c & 0xFF) / 255f, cg = ((c >> 8) & 0xFF) / 255f, cb = ((c >> 16) & 0xFF) / 255f;
-                if (depth[o] < mid) { nr += w * cr; ng += w * cg; nb += w * cb; nw += w; }
+                float ds = depth[o];
+                if (ds > q1 && ds < q3) inMid++;
+                if (ds < mid) { nr += w * cr; ng += w * cg; nb += w * cb; nw += w; }
                 else { fr += w * cr; fg += w * cg; fb += w * cb; fw += w; }
             }
         if (nw <= 0f || fw <= 0f) { output[i] = d0; return; }
+        // Depths spread evenly through the window: a slope (textured ground passes the colour test by chance).
+        if (inMid > p.MaxMidFraction * (2 * r + 1) * (2 * r + 1)) { output[i] = d0; return; }
         nr /= nw; ng /= nw; nb /= nw; fr /= fw; fg /= fw; fb /= fw;
         float sep = (nr - fr) * (nr - fr) + (ng - fg) * (ng - fg) + (nb - fb) * (nb - fb);
         if (sep < p.MinColourSeparation) { output[i] = d0; return; }

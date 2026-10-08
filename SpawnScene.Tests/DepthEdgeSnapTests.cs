@@ -71,4 +71,31 @@ public class DepthEdgeSnapTests
         for (int x = 10; x < W - 10; x += 37)
             Assert.That(outp[(H / 2) * W + x], Is.EqualTo(depth[(H / 2) * W + x]), $"x {x} was snapped on a slope");
     }
+
+    /// <summary>A receding path with TEXTURE (gravel and brick stripes) is still a slope: the two sides of the midpoint
+    /// depth differ in colour by chance, but the window's depths are spread evenly, not bunched at two plateaus. The
+    /// colour-only test snapped it into terraces (garden-path sample, 2026-10-07).</summary>
+    [Test]
+    public void ATexturedSlopeIsLeftAlone()
+    {
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var a = context.CreateCPUAccelerator(0);
+        var depth = new float[W * H];
+        var rgba = new int[W * H];
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++)
+            {
+                depth[y * W + x] = 1f + x * 0.01f;
+                rgba[y * W + x] = (x / 5) % 2 == 0 ? 0xA0B0C0 : 0x203080;   // 5 px stripes of two colours
+            }
+        using var d = a.Allocate1D(depth);
+        using var c = a.Allocate1D(rgba);
+        using var o = a.Allocate1D<float>(depth.Length);
+        DepthEdgeSnap.Run(a, d.View, c.View, o.View, W, H);
+        var outp = o.GetAsArray1D();
+        int moved = 0;
+        for (int x = 10; x < W - 10; x++)
+            if (outp[(H / 2) * W + x] != depth[(H / 2) * W + x]) moved++;
+        Assert.That(moved, Is.Zero, $"{moved} pixels of a textured slope were snapped");
+    }
 }

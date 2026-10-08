@@ -45,8 +45,18 @@ public partial class Studio
         using (var u = new Uint8Array(hb))
             first = u.ReadBytes();
         int version = SceneFile.Version(first);
-        if (version == 0) { Console.WriteLine($"[OpenScene] {name} is not a .spawnscene file"); file.Dispose(); return; }
         var noOptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (version == 0)
+        {
+            // Another tool's scene: a 3DGS .ply (Studio.ForeignScene).
+            if (!await ImportPlyBlobAsync(file, name, noOptions))
+            {
+                _statusMessage = $"{name} is not a scene SpawnScene can open (.spawnscene or a 3DGS .ply)";
+                Console.WriteLine($"[OpenScene] {name} is not a .spawnscene or a 3DGS .ply");
+            }
+            file.Dispose();
+            return;
+        }
         if (version != 3)
         {
             using var whole = await file.ArrayBuffer();

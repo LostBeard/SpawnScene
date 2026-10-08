@@ -193,7 +193,11 @@ public partial class Studio
             using var window = _js.Get<Window>("window");
             using var response = await window.Fetch(importUrl);
             if (!response.Ok) { Console.WriteLine($"[Import] FAIL: HTTP {response.Status}"); return; }
-            using var bytes = await response.ArrayBuffer();
+            using var blob = await response.Blob();
+            // Another tool's 3DGS .ply (Studio.ForeignScene), else a .spawnscene.
+            string name = Uri.TryCreate(importUrl, UriKind.Absolute, out var iu) ? Path.GetFileName(iu.AbsolutePath) : Path.GetFileName(importUrl.Split('?')[0]);
+            if (await ImportPlyBlobAsync(blob, string.IsNullOrEmpty(name) ? "scene.ply" : name, query)) return;
+            using var bytes = await blob.ArrayBuffer();
             await ImportSceneBytesAsync(bytes, query);
         }
         catch (Exception ex) { Console.WriteLine($"[Import] FAIL: {ex.Message}"); }
@@ -293,19 +297,7 @@ public partial class Studio
                 sceneName = h.Name;
             }
 
-            var project = await _projectService.CreateProjectAsync(sceneName);
-            await _projectService.SaveSceneAsync(project.Id, scene, packedU8);
-            if (sh.Count > 0) await _projectService.SaveSceneShRestAsync(project.Id, scene, sh.ToArray());
-            packedU8.Dispose();
-            foreach (var s in sh) s.Dispose();
-            Console.WriteLine($"[Import] '{sceneName}' (v{version}): {scene.SplatCount:N0} splats" + (scene.ShDegree > 0 ? $", SH degree {scene.ShDegree}" : "") + " - opening");
-
-            _projects = await _projectService.ListProjectsAsync();
-            var opened = _projects.First(p => p.Id == project.Id);
-            OnOpenProject(opened);
-            ApplyImportViewerOptions(query);
-            await LoadProjectSceneAsync(opened.Scenes.First(s => s.Id == scene.Id));
-            await FinishImportAsync(query);
+            await SaveAndOpenImportedSceneAsync(sceneName, scene, packedU8, sh, query, $"v{version}");
         }
         catch (Exception ex) { Console.WriteLine($"[Import] FAIL: {ex.Message}"); }
     }

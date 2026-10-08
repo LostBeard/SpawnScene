@@ -970,8 +970,12 @@ public partial class Studio
             _cameraController.SetPose(new(h[0], h[1], h[2]), new(h[3], h[4], h[5]), new(h[6], h[7], h[8]));
             return;
         }
-        if (scene.TrainedIterations <= 0 || _gpuRenderer.PackedSplatBuffer is not { } packed) return;
-        var box = await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount);
+        if ((scene.TrainedIterations <= 0 && scene.ImportedFrom == null) || _gpuRenderer.PackedSplatBuffer is not { } packed) return;
+        // Another tool's scene is often a 360 capture with its background shell (trees, sky) trained in: the 1-99% box
+        // reaches into it and the seat landed among the trees, the subject far away (Inria's Train, 2026-10-08). Frame
+        // the dense middle instead.
+        var box = await SplatBounds.ComputeRobustAsync(_gpuService.WebGPUAccelerator, packed, _gpuRenderer.SplatCount,
+            tail: scene.ImportedFrom != null ? 0.2 : 0.01);
         if (box is not { } b) return;
         var centre = new System.Numerics.Vector3(b.CentreX, b.CentreY, b.CentreZ);
         float radius = 0.5f * b.Diagonal;

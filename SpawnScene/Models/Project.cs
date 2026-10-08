@@ -61,6 +61,9 @@ public class ProjectScene
     /// reconstruction - a reopened Truck started inside the truck.</summary>
     public float[]? HomeView { get; set; }
 
+    /// <summary>The file this scene was imported from (another tool's .ply), or null.</summary>
+    public string? ImportedFrom { get; set; }
+
     /// <summary>A multi-photo scene: photos the pipeline placed, of how many (0 = not recorded).</summary>
     public int PhotosPlaced { get; set; }
     public int PhotosTotal { get; set; }

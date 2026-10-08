@@ -86,6 +86,7 @@ public partial class Studio
             var toSubject = subject - c;
             float dist = toSubject.Length();
             poses.Add(($"in-{q}", c + toSubject * 0.5f));                 // half way to the subject
+            poses.Add(($"close-{q}", c + toSubject * 0.85f));             // ~7x closer than the photo: Mip-Splatting's case
             poses.Add(($"up-{q}", c + up * (0.5f * dist)));               // raised, looking down at it
             poses.Add(($"low-{q}", c - up * (0.2f * dist)));              // lowered
             poses.Add(($"out-{q}", subject - toSubject * 1.5f));          // pulled back

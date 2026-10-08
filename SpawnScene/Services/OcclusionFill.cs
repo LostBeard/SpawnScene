@@ -68,6 +68,8 @@ public static class OcclusionFill
         ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>? _emitBehind;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
         ArrayView1D<float, Stride1D.Dense>, Params>? _behindMask;
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+        Params>? _wideMask;
     static Action<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
         ArrayView1D<float, Stride1D.Dense>, Params>? _packInpaint;
     static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
@@ -80,7 +82,7 @@ public static class OcclusionFill
     {
         if (!ReferenceEquals(_loadedFor, a))
         {
-            _rowMax = null; _colMax = null; _rowMin = null; _colMin = null; _level0 = null; _down = null; _normalize = null; _up = null; _emitBehind = null; _emitBorder = null; _behindMask = null; _packInpaint = null; _packOutpaint = null;
+            _rowMax = null; _colMax = null; _rowMin = null; _colMin = null; _level0 = null; _down = null; _normalize = null; _up = null; _emitBehind = null; _emitBorder = null; _behindMask = null; _wideMask = null; _packInpaint = null; _packOutpaint = null;
         }
         _loadedFor = a;
         _rowMax ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(RowMaxKernel);
@@ -97,6 +99,8 @@ public static class OcclusionFill
             ArrayView1D<float, Stride1D.Dense>, Params>(EmitBehindKernel);
         _behindMask ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(BehindMaskKernel);
+        _wideMask ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<float, Stride1D.Dense>, Params>(WideMaskKernel);
         _packInpaint ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
             ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(PackInpaintKernel);
         _emitBorder ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
@@ -154,7 +158,19 @@ public static class OcclusionFill
             // MI-GAN's 512 square (a box average of the cells each of its pixels covers; masked if any of them is).
             const int S = HiddenLayerInpaint.Size;
             var maskGrid = a.Allocate1D<float>(cells); scratch.Add(maskGrid);
-            _behindMask!(cells, depth, bgMax.View, l0Behind.View, maskGrid.View, behind);
+            if (InpaintMaskReach > 1f)
+            {
+                // Mask the near side out to InpaintMaskReach x the fill radius: an object's interior left unmasked is
+                // context MI-GAN continues into the hole (tiles at full resolution brought the cereal box's colours back).
+                var wide = p; wide.Radius = (int)MathF.Round(p.Radius * InpaintMaskReach);
+                var rowMaxW = a.Allocate1D<float>(cells); scratch.Add(rowMaxW);
+                var bgMaxW = a.Allocate1D<float>(cells); scratch.Add(bgMaxW);
+                _rowMax!(cells, depth, rowMaxW.View, wide);
+                _colMax!(cells, rowMaxW.View, bgMaxW.View, wide);
+                _wideMask!(cells, depth, bgMaxW.View, maskGrid.View, behind);
+            }
+            else
+                _behindMask!(cells, depth, bgMax.View, l0Behind.View, maskGrid.View, behind);
             float scale = (float)S / Math.Max(p.GridW, p.GridH);
             behind.InpaintScale = scale;
             behind.InpaintOffX = 0.5f * (S - p.GridW * scale);
@@ -432,6 +448,20 @@ public static class OcclusionFill
             r = painted[pi] / 255f; g = painted[S * S + pi] / 255f; b = painted[2 * S * S + pi] / 255f;
         }
         WriteSplat(outPacked, slot, q, gx * p.Subsample, gy * p.Subsample, fd, r, g, b);
+    }
+
+    /// <summary>Inpainting mask reach, in fill radii (&amp;inpaintreach=X; 1 = exactly the cells that get a hidden splat).</summary>
+    public static float InpaintMaskReach { get; set; } = 1f;
+
+    /// <summary>0 for every cell with a farther surface within the WIDE window (the near side of an edge, out to
+    /// <see cref="InpaintMaskReach"/> fill radii), 255 elsewhere.</summary>
+    static void WideMaskKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> depth, ArrayView1D<float, Stride1D.Dense> bgMaxWide,
+        ArrayView1D<float, Stride1D.Dense> maskGrid, Params p)
+    {
+        if (i >= p.GridW * p.GridH) return;
+        int gx = i % p.GridW, gy = i / p.GridW;
+        float d = DepthAt(depth, p, gx, gy);
+        maskGrid[i] = d > 0f && bgMaxWide[i] > d * (1f + p.Tau) ? 0f : 255f;
     }
 
     /// <summary>0 where <see cref="EmitBehindKernel"/> puts a hidden splat (every cell, not only its stride: a whole region

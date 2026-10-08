@@ -83,6 +83,9 @@ fill radius of an edge are masked), and MI-GAN continues the box's colours into 
 single 512 pass sees the band surrounded mostly by background. The fix is the mask, not the resolution: mask the whole
 near layer of an object (depth-layer segmentation, or a dilation of the near side until the depth jump), then paint.
 
+**&inpaintreach=X** (mask the near side out to X fill radii): 2 and 3 look the same as 1 in the single 512 pass on the
+kitchen - at that scale the band is already surrounded by background. Kept as a knob for a tiles + wide-mask retry.
+
 **Past the frame too (same &inpaint=1):** the padded grid letterboxed into 512 with the margin masked; the border layer
 takes MI-GAN's continuation. Garden path from moved views (`img/outpaint-garden-2026-10-07.jpg`, top: push-pull, bottom:
 MI-GAN): the olive smeared tunnel around the photo becomes sky, trees, grass and the path running on. Soft at 512 px;

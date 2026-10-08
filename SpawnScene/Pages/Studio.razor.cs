@@ -202,6 +202,8 @@ public partial class Studio : IAsyncDisposable
         // ?depthinit=4 (multi-photo seeds from DAv3 depth), ?exposure=1 (per-photo exposure), ?depthmodel=<id>.
         if (query.TryGetValue("edgesnap", out var uEs)) DepthToGaussianKernel.EdgeSnapEnabled = uEs is "1" or "true";
         if (query.TryGetValue("inpaint", out var uIp)) DepthToGaussianKernel.InpaintHiddenLayer = uIp is "1" or "true";
+        if (query.TryGetValue("inpaintreach", out var uIr) && float.TryParse(uIr, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var uIrv)) OcclusionFill.InpaintMaskReach = Math.Clamp(uIrv, 1f, 4f);
         if (query.TryGetValue("depthinit", out var uDi) && int.TryParse(uDi, out var uDiv)) _multiViewService.DepthFusionInitStride = Math.Max(0, uDiv);
         if (query.TryGetValue("exposure", out var uEx)) ExposureOption = uEx is "1" or "true";
         if (query.TryGetValue("depthmodel", out var uDm) && !string.IsNullOrWhiteSpace(uDm)) DepthModelOverride = uDm;

@@ -89,6 +89,12 @@ vs b1 25.16), gains +0.16 fair (j0 -> j1); Truck gains neutral (h2 24.00 vs k2 2
 better in every pair looked at. Cost: depth fusion 2.6 s on Bicycle and ~15% more splats. The full affine
 (`exposure=1`) stays an option; it loses on fixed-exposure captures (offsets do not fold).
 
+**Mip-Splatting 3D filter on the proposed defaults (k0/k1, same build as j1/j3):** Bicycle `&mipfilter=0.2` 24.97 /
+0.7682, fair 25.569 (j1 24.99 / 0.7683, 25.575); Bathroom 18.62 / 0.8439, fair 24.157 (j3 18.57 / 0.8439, 24.316).
+Neutral on held-out photos, as expected, and the Wander "in" views (half way to the subject, ~2x) look the same - not
+close enough for the filter's case (needles when zooming far past the photos). Stays opt-in; a fair test needs a
+close-up view set (4-8x) or a render at another resolution, which the Wander set does not have yet.
+
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 
 L1 between the rendered inverse depth sum(w/z) and each photo's DAv3 depth scaled by DepthFusionInit (kept per view,

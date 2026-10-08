@@ -66,8 +66,8 @@ held-out number and looks worse off-path does not ship.
 4. **Capture feedback:** DONE 10-07/08 - the scene card counts placed photos, the Photos tab badges the unplaced ones,
    the card names the directions no photo faces (CaptureCoverage, relative to the first photo), sideways photos are
    placed. (The placement line was hidden under the card's buttons until 3dbacfa.) Why each photo was dropped is listed on the Photos tab (SfM reason).
-5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) default-on if the in/out wander views
-   gain; 2D Mip filter in the viewer.
+5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) measured 10-08 on the proposed defaults:
+   neutral held out and at the Wander "in" views (2x) - needs close-up views (4-8x) to judge; 2D Mip filter in the viewer.
 6. **Far background:** a background shell / far-depth prior for sky and distant scenery (the Bicycle low-pose specks).
 7. **Density control at 30K:** revisit MCMC at equal budget, error-driven densification (Bulo et al.), Taming-style
    budget for the device.

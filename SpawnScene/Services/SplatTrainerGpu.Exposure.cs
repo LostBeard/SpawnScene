@@ -118,7 +118,8 @@ public sealed partial class SplatTrainerGpu
     /// average photo. Nothing pins the exposures' overall level during training: on Bathroom (f2, 2026-10-07) every gain
     /// drifted up (0.95..1.36, ~1.15 mean) while the scene drifted darker, and held-out photos - scored at identity -
     /// lost 1.3 dB. rgb = C0 dc + 0.5, so dc' = (M (C0 dc + 0.5) + b - 0.5) / C0 is exact for the base colour; the SH
-    /// bands (view-dependent residuals) are left as they are. Returns the folded mean for the log, or null.
+    /// bands (view-dependent residuals) are left as they are. Gains fold exactly at any coverage; an offset b scales with a
+    /// pixel's opacity (exact where the scene is opaque, as a trained one is almost everywhere). Returns the folded mean, or null.
     /// </summary>
     public async Task<ExposureFold?> FoldMeanExposureAsync(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
         IReadOnlyList<int> slots)

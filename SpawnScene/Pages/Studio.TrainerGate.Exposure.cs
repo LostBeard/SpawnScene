@@ -49,19 +49,28 @@ public partial class Studio
         Console.WriteLine($"[TrainerGate] exposure fit to gains 0.8/0.9/1.1, offsets +0.05/-0.03/+0.02: {Rows(e)} (worst error {worst:F4})");
         if (worst > 0.03f) { Console.WriteLine("[TrainerGate] FAIL exposure: did not recover the transform"); return false; }
 
-        // The fold: that transform moved into the scene's colours, the plain render (no exposure) must now BE the target.
-        // Gate scale: the rows are saved and restored around it.
+        // The fold: a fitted GAINS-only transform moved into the scene's base colours must make the plain render (no
+        // exposure) equal the transformed render - exactly, at any coverage (an offset would scale with each pixel's
+        // opacity: this gate scene is half transparent, so an offset fold read 0.015 here, not 0). Base colour only (the
+        // SH bands are left by the fold) and the rows are restored afterwards.
         var saved = await splatBuf.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
+        int savedDeg = trainer.ActiveShDegree;
         try
         {
+            trainer.ActiveShDegree = 0;
+            var img0 = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar, readback: true);
+            var gainsOnly = new float[img0.Length];
+            for (int i = 0; i < img0.Length; i++) gainsOnly[i] = gain[i % 3] * img0[i];
+            await FitAsync(gainsOnly, 600);
             var fold = await trainer.FoldMeanExposureAsync(splatBuf, n, new[] { 0 });
             trainer.ResetExposure(1);
             var plain = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar, readback: true);
             double err = 0, before = 0;
-            for (int i = 0; i < plain.Length; i++) { err += Math.Abs(plain[i] - target[i]); before += Math.Abs(img[i] - target[i]); }
+            for (int i = 0; i < plain.Length; i++) { err += Math.Abs(plain[i] - gainsOnly[i]); before += Math.Abs(img0[i] - gainsOnly[i]); }
             err /= plain.Length; before /= plain.Length;
-            Console.WriteLine($"[TrainerGate] exposure fold: plain render vs the transformed target, mean |error| {before:F4} before -> {err:F4} after");
-            if (fold == null || err > 0.01 || err > 0.25 * before)
+            Console.WriteLine($"[TrainerGate] exposure fold (gains 0.8/0.9/1.1): plain render vs the transformed render, mean |error| " +
+                $"{before:F5} before -> {err:F5} after");
+            if (fold == null || err > 0.002 || err > 0.1 * before)
             {
                 Console.WriteLine("[TrainerGate] FAIL exposure: the folded scene does not render the photo's exposure");
                 return false;
@@ -69,6 +78,7 @@ public partial class Studio
         }
         finally
         {
+            trainer.ActiveShDegree = savedDeg;
             splatBuf.CopyFromCPU(saved);
             await _gpuService.WebGPUAccelerator.SynchronizeAsync();
         }

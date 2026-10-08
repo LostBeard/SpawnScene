@@ -131,7 +131,7 @@ public partial class Studio
         try
         {
             // Load depth model from project settings (or default). Unknown / retired ids fall back.
-            var targetModel = _activeProject.Settings.DepthModel ?? DepthEstimationService.DefaultModelId;
+            var targetModel = DepthModelOverride ?? _activeProject.Settings.DepthModel ?? DepthEstimationService.DefaultModelId;
             if (!DepthEstimationService.AvailableModels.Any(m => m.Id == targetModel))
                 targetModel = DepthEstimationService.DefaultModelId;
             if (!_depthService.IsReady || _depthService.LoadedModelId != targetModel)
@@ -1260,6 +1260,9 @@ public partial class Studio
             await _videoExtractor.RevokeAsync(url);
         }
     }
+
+    /// <summary>&amp;depthmodel=id (harness): the single-photo depth model for this tab, over the project's setting.</summary>
+    public static string? DepthModelOverride { get; set; }
 
     SampleCatalog? _sampleCatalog;
     Task? _sampleCatalogTask;

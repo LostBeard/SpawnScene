@@ -32,6 +32,10 @@ public class DepthEstimationService : IAsyncDisposable
     public static readonly DepthModelInfo[] AvailableModels = new[]
     {
         new DepthModelInfo("depth-anything-v3-small", "Depth Anything V3 Small", RepoId, "~100 MB", IsDirectDepth: true),
+        // Same export layout and family (onnx-community, Apache-2.0), ~4x the parameters: sharper edges for single
+        // photos (TJ 2026-10-07, tearing - Research/single-photo-tearing-2026-10-07.md). NOT DA3-LARGE: its weights are
+        // CC-BY-NC-4.0.
+        new DepthModelInfo("depth-anything-v3-base", "Depth Anything V3 Base", "onnx-community/depth-anything-v3-base", "~500 MB", IsDirectDepth: true),
     };
 
     public static readonly string DefaultModelId = "depth-anything-v3-small";
@@ -159,7 +163,7 @@ public class DepthEstimationService : IAsyncDisposable
             Console.WriteLine($"[Depth] binding pixel_values to [1,1,3,{inH},{inW}] " +
                 $"({inW / PatchSize}x{inH / PatchSize} patches)");
             _pipe = await DepthEstimationPipeline.CreateFromHubAsync(
-                accelerator, _modelSource, RepoId,
+                accelerator, _modelSource, model.Path,
                 inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, inH, inW } });
             // One-shot photo path: capture/replay warmup is for video.
             _pipe.EnableGraphCapture = false;

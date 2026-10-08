@@ -62,6 +62,16 @@ Plan: OcclusionFill already knows WHERE the hidden layer goes (the far side of e
 frame). Build the mask from it, inpaint the photo there (MI-GAN first), and colour the hidden layer from the inpainted
 image instead of the push-pull blur; its depth stays the far-side depth.
 
+## Measured: DAv3 Base vs Small (kitchen, 2026-10-07)
+
+`&depthmodel=depth-anything-v3-base` (onnx-community, Apache-2.0, ~500 MB, now selectable in project settings): from the
+orbit view the cereal box stands more upright with a shorter smear, the island edge is cleaner; thin objects (the
+hanging lamps) smear in both. A real but modest gain for 5x the download - an option, not the default yet. MoGe-2
+ViT-S/B (author's ONNX exports: Ruicheng/moge-2-vits-normal-onnx, -vitb-) is the next candidate; it outputs a point
+map + normals, so it needs its own pipeline in ILGPU.ML (Data). DA3MONO-LARGE has no ONNX export yet.
+
+Licences (TJ 2026-10-07): SpawnScene is non-commercial, so NC weights are allowed; prefer open ones, flag NC.
+
 ## Order
 
 1. ~~MaxCellStretch A/B~~ (no effect).

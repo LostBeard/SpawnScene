@@ -360,3 +360,8 @@ uncovered: 39,015 of them). Mean T 5.6% (w0) -> 3.8%; the uncovered views roughl
 painted ceiling came out as hard-edged rectangles with gaps - the pull step took each coarse cell's depth (nearest), so
 the filled depth was flat steps and the fill splats sat on stepped planes. x1: bilinear pull.
 
+x1 (bilinear pull): blocks gone, mean T 3.8% (same), but the ceiling striped with magenta between the fill splats (moire):
+each disk faced the centre camera, so from another viewpoint a ceiling of them was tilted against the surface. x2: each
+fill splat is the surface disk spanning its cell to the +x / +y neighbours at their filled depths
+(SplatCovariance.SurfaceDiskFromNeighbors, the single-photo layer's), capped at MaxCellStretch footprints.
+

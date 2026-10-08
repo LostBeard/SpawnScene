@@ -31,6 +31,7 @@ public static class UnseenFill
         public int Stride;            // emit one splat every Stride grid cells
         public int Capacity;
         public float Opacity;
+        public float CellStretch;     // DepthToGaussianKernel.MaxCellStretch (kernels cannot read a mutable static)
     }
 
     /// <summary>The render resampled to the S x S paint grid: un-premultiplied colour 0..255, mask (255 = the scene's, 0 =
@@ -118,56 +119,51 @@ public static class UnseenFill
         if (mask[i] > 127f) return;
         float z = depth[i];
         if (!(z > 0f)) return;
-        // The cell's centre in render pixels, then its ray (image y down = -up).
-        float u = (x + 0.5f * p.Stride) * p.W / S, v = (y + 0.5f * p.Stride) * p.H / S;
-        float a = (u - p.Cx) / p.Fx, b = (v - p.Cy) / p.Fy;
-        float dx = p.Fwx + a * p.Rx - b * p.Ux;
-        float dy = p.Fwy + a * p.Ry - b * p.Uy;
-        float dz = p.Fwz + a * p.Rz - b * p.Uz;
+        // The cell's point and its +x / +y neighbours' (each at its filled depth), relative to the camera: their surface
+        // disk (SplatCovariance.SurfaceDiskFromNeighbors, the single-photo layer's) lies ALONG the filled surface and
+        // spans to the next cells. x1 made camera-facing disks: from any other viewpoint a ceiling of them was tilted
+        // against the surface and striped with gaps.
+        int xq = XMath.Min(S - 1, x + p.Stride), yr = XMath.Min(S - 1, y + p.Stride);
+        float zq = depth[y * S + xq], zr = depth[yr * S + x];
+        if (!(zq > 0f)) zq = z;
+        if (!(zr > 0f)) zr = z;
+        Ray(p, x, y, out float ax, out float ay, out float az);
+        Ray(p, xq, y, out float bx, out float by, out float bz);
+        Ray(p, x, yr, out float cx, out float cy, out float cz);
+        var disk = SplatCovariance.SurfaceDiskFromNeighbors(ax * z, ay * z, az * z, bx * zq, by * zq, bz * zq, cx * zr, cy * zr, cz * zr);
         int k = Atomic.Add(ref counters[1], 1);
         if (k >= p.Capacity) return;
         int o = k * SplatFormat.Floats;
-        rows[o + SplatFormat.OffPos] = p.Px + dx * z;
-        rows[o + SplatFormat.OffPos + 1] = p.Py + dy * z;
-        rows[o + SplatFormat.OffPos + 2] = p.Pz + dz * z;
+        rows[o + SplatFormat.OffPos] = p.Px + ax * z;
+        rows[o + SplatFormat.OffPos + 1] = p.Py + ay * z;
+        rows[o + SplatFormat.OffPos + 2] = p.Pz + az * z;
         for (int c = 0; c < 3; c++) rows[o + SplatFormat.OffColor + c] = painted[c * Px + i] / 255f;
-        // In-plane 1 sigma = 0.6 of the cell's footprint (neighbours overlap and blend into a surface); 0.2 of that across.
-        float ray = XMath.Sqrt(1f + a * a + b * b);
-        float sigma = 0.6f * z * ray * p.Stride * p.W / S / p.Fx;
-        rows[o + SplatFormat.OffScale] = sigma;
-        rows[o + SplatFormat.OffScale + 1] = sigma;
-        rows[o + SplatFormat.OffScale + 2] = 0.2f * sigma;
+        // A cell's footprint head-on; a receding surface may stretch to MaxCellStretch of it (DepthToGaussianKernel's cap).
+        float aa = XMath.Sqrt(ax * ax + ay * ay + az * az);
+        float footprint = z * aa * p.Stride * p.W / S / p.Fx;
+        float cap = p.CellStretch * footprint;
+        float su = XMath.Min(disk.Su, cap), sv = XMath.Min(disk.Sv, cap);
+        if (!(su > 1e-6f)) su = footprint;
+        if (!(sv > 1e-6f)) sv = footprint;
+        rows[o + SplatFormat.OffScale] = su;
+        rows[o + SplatFormat.OffScale + 1] = sv;
+        rows[o + SplatFormat.OffScale + 2] = XMath.Min(su, sv) * 0.15f;
         rows[o + SplatFormat.OffOpacity] = p.Opacity;
-        // Local axes -> world: x = right, y = up, z = -forward (right-handed; the disk's normal along the view).
-        float m00 = p.Rx, m10 = p.Ry, m20 = p.Rz;
-        float m01 = p.Ux, m11 = p.Uy, m21 = p.Uz;
-        float m02 = -p.Fwx, m12 = -p.Fwy, m22 = -p.Fwz;
-        float qw, qx, qy, qz;
-        float tr = m00 + m11 + m22;
-        if (tr > 0f)
-        {
-            float s = XMath.Sqrt(tr + 1f) * 2f;
-            qw = 0.25f * s; qx = (m21 - m12) / s; qy = (m02 - m20) / s; qz = (m10 - m01) / s;
-        }
-        else if (m00 > m11 && m00 > m22)
-        {
-            float s = XMath.Sqrt(1f + m00 - m11 - m22) * 2f;
-            qw = (m21 - m12) / s; qx = 0.25f * s; qy = (m01 + m10) / s; qz = (m02 + m20) / s;
-        }
-        else if (m11 > m22)
-        {
-            float s = XMath.Sqrt(1f + m11 - m00 - m22) * 2f;
-            qw = (m02 - m20) / s; qx = (m01 + m10) / s; qy = 0.25f * s; qz = (m12 + m21) / s;
-        }
-        else
-        {
-            float s = XMath.Sqrt(1f + m22 - m00 - m11) * 2f;
-            qw = (m10 - m01) / s; qx = (m02 + m20) / s; qy = (m12 + m21) / s; qz = 0.25f * s;
-        }
-        rows[o + SplatFormat.OffQuat] = qx;
-        rows[o + SplatFormat.OffQuat + 1] = qy;
-        rows[o + SplatFormat.OffQuat + 2] = qz;
-        rows[o + SplatFormat.OffQuat + 3] = qw;
+        rows[o + SplatFormat.OffQuat] = disk.Q.X;
+        rows[o + SplatFormat.OffQuat + 1] = disk.Q.Y;
+        rows[o + SplatFormat.OffQuat + 2] = disk.Q.Z;
+        rows[o + SplatFormat.OffQuat + 3] = disk.Q.W;
+    }
+
+    /// <summary>The (unnormalised, forward-component 1) world-space ray of grid cell (x, y)'s centre: depth z along it is
+    /// the camera-space depth z.</summary>
+    static void Ray(Params p, int x, int y, out float dx, out float dy, out float dz)
+    {
+        float u = (x + 0.5f) * p.W / S, v = (y + 0.5f) * p.H / S;
+        float a = (u - p.Cx) / p.Fx, b = (v - p.Cy) / p.Fy;
+        dx = p.Fwx + a * p.Rx - b * p.Ux;
+        dy = p.Fwy + a * p.Ry - b * p.Uy;
+        dz = p.Fwz + a * p.Rz - b * p.Uz;
     }
 
     static Accelerator? _for;
@@ -274,7 +270,7 @@ public static class UnseenFill
                     Px = centre.X, Py = centre.Y, Pz = centre.Z,
                     Rx = right.X, Ry = right.Y, Rz = right.Z, Ux = upO.X, Uy = upO.Y, Uz = upO.Z,
                     Fwx = cam.Forward.X, Fwy = cam.Forward.Y, Fwz = cam.Forward.Z,
-                    Stride = stride, Opacity = 0.95f,
+                    Stride = stride, Opacity = 0.95f, CellStretch = DepthToGaussianKernel.MaxCellStretch,
                 };
                 var scratch = new List<MemoryBuffer1D<float, Stride1D.Dense>>();
                 try

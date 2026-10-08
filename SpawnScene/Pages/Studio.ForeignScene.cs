@@ -22,7 +22,28 @@ public partial class Studio
     async Task<bool> ImportForeignBlobAsync(Blob file, string name, Dictionary<string, string> query)
     {
         if (await ImportPlyBlobAsync(file, name, query)) return true;
-        return await ImportSpzBlobAsync(file, name, query);
+        if (await ImportSpzBlobAsync(file, name, query)) return true;
+        return await ImportSplatBlobAsync(file, name, query);
+    }
+
+    /// <summary>Import antimatter15's .splat - no magic, so by name and a whole number of 32-byte splats.</summary>
+    async Task<bool> ImportSplatBlobAsync(Blob file, string name, Dictionary<string, string> query)
+    {
+        if (!name.EndsWith(".splat", StringComparison.OrdinalIgnoreCase) || file.Size == 0 || file.Size % SplatFileImport.BytesPerSplat != 0)
+            return false;
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        bool flip = TurnImportYUp(query);
+        // CPU transfer: file I/O. The bytes stay JS-side; the GPU converts them.
+        using var whole = await file.ArrayBuffer();
+        int n = (int)(whole.ByteLength / SplatFileImport.BytesPerSplat);
+        var packed = await SplatFileImport.ConvertAsync(_gpuService.WebGPUAccelerator, whole, flip);
+        Uint8Array packedU8;
+        try { packedU8 = await packed.CopyToHostUint8ArrayAsync(0, (long)n * SplatFormat.Floats * sizeof(float)); }
+        finally { packed.Dispose(); }
+        var scene = new ProjectScene { SplatCount = n, FloatsPerSplat = SplatFormat.Floats, ColoursAreShDc = true, ImportedFrom = name };
+        Console.WriteLine($"[Import] {name}: .splat, {n:N0} splats, converted in {t0.Elapsed.TotalSeconds:F1}s" + (flip ? " (turned y-up)" : ""));
+        await SaveAndOpenImportedSceneAsync(Path.GetFileNameWithoutExtension(name), scene, packedU8, new List<Uint8Array>(), query, "splat");
+        return true;
     }
 
     /// <summary>Import a .spz (gzip around the NGSP stream); false when the file is not gzip or not SPZ inside.</summary>

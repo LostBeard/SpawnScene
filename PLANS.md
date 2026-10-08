@@ -65,8 +65,8 @@ held-out number and looks worse off-path does not ship.
 6. **Far background:** a background shell / far-depth prior for sky and distant scenery (the Bicycle low-pose specks).
 7. **Density control at 30K:** revisit MCMC at equal budget, error-driven densification (Bulo et al.), Taming-style
    budget for the device.
-8. **Viewer:** per-tile sort against popping (StopThePop). Import: 3DGS .ply and .spz v2/v3 DONE 2026-10-08 (GPU
-   conversion, y-up turn); next SOG / compressed PLY (PlayCanvas), .splat in the Studio, SPZ v4 (zstd) when released.
+8. **Viewer:** per-tile sort against popping (StopThePop). Import: 3DGS .ply, .spz v2/v3 and .splat DONE 2026-10-08
+   (GPU conversion, y-up turn); next SOG / compressed PLY (PlayCanvas), SPZ v4 (zstd) when released.
 
 ## Demo samples (done 2026-10-07, pending TJ)
 

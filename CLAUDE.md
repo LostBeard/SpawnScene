@@ -21,11 +21,11 @@ dotnet publish ./SpawnScene/ --nologo -c:Release --output publish
 page; from Git Bash pass `MSYS_NO_PATHCONV=1`). Score captured views with `tools/score_views.py`.
 
 **Other tools' scenes:** "Open scene file" and `?import=<url>` also take a 3DGS `.ply` (GaussianPly + GaussianPlyImport)
-and Niantic's `.spz` v2/v3 (SpzImport), converted on the GPU into a new project. Both are turned y-up by default (3DGS
+Niantic's `.spz` v2/v3 (SpzImport) and antimatter15's `.splat` (SplatFileImport), converted on the GPU into a new project. Both are turned y-up by default (3DGS
 PLYs are in their SfM frame, y down, and SPZ files in circulation carry the same frame - Spark's examples turn them too);
 `&sceneup=keep` leaves them. Imports seat on the scene's dense core (20-80% box). Tests: GaussianPlyImportTests,
 SpzImportTests (Niantic's packing ported; the y-up turn checked against SH physics). Verified 2026-10-08 on Inria's
-reference Train (7K PLY) and Spark's butterfly/penguin .spz.
+reference Train (7K PLY), antimatter15's train.splat (same scene, same framing) and Spark's butterfly/penguin .spz.
 
 **Samples:** `wwwroot/samples/catalog.json` (SampleCatalog) - openly licensed Commons sets and photos in the
 LostBeard/spawnscene-samples HF dataset, fetched through the hub's `/src` proxy (never huggingface.co directly).

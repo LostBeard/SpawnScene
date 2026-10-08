@@ -62,8 +62,11 @@ Not a default until it keeps Bathroom's gain without costing the benchmarks.
 gains-only is BETTER on the phone capture too (+0.4 dB). **h1 Bicycle `&depthinit=4&exposure=gains`: 24.94 / 0.7682**
 vs b1 (no exposure) 25.16 / 0.7661 and e1 (full affine) 24.55 / 0.7663 - most of the affine's loss recovered, best SSIM,
 still -0.22 dB PSNR. Part may be the scoring: held-out photos are rendered at the photos' MEAN exposure, while the
-reference fits each held-out photo's exposure (on half the image) before scoring. Next: that fair scoring, then decide.
-h2 Truck pending.
+reference fits each held-out photo's exposure (on half the image) before scoring. Fair scoring is now logged for every run ("held out RIGHT HALF", d7e394f); the j chain reruns the Bicycle and
+Bathroom pairs with it. **h2 TruckFull `&exposure=gains`: 24.00 / 0.8598** vs k2 (none) 24.07 / 0.8592 and e2 (affine)
+23.87 / 0.8587 - neutral within noise; the folded offsets are exactly 0, as designed. Summary so far: gains-only wins
+the phone room (+0.4 dB over the affine, the best Bathroom number), costs nothing on Truck, 0.2 dB PSNR (SSIM up) on
+Bicycle under the mean-exposure score.
 
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 

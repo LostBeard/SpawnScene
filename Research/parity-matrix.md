@@ -26,7 +26,7 @@ Reference numbers with sources: [parity-references-2026-10-08.md](parity-referen
 | Capture | SpawnScene | gsplat on SpawnScene's poses | notes |
 |---|---|---|---|
 | Bathroom (35 phone photos) | held out 19.00 / 0.850, fair 24.82, see-through 5.6% (w0) | - | room |
-| Hamamni Baths (59, Samsung S21 FE) | live0: supervised 23.74, "TONS of floating blur blobs ... missing walls" (TJ) | - | depth for 19/57 views; fix b33eb0a, hb1 measuring |
+| Hamamni Baths (59, Samsung S21 FE; 473x1024; 7 held out: 009..057) | hb2: 19.18 / 0.703, 1.54M, ~9 min (7K-end) | **21.41 / 0.732 / LPIPS 0.471, 1.88M, 3 min** (gsplat default, 7K-end, our exported cameras) | gsplat wins 6 of 7 views (033: 27.25 vs 22.16; 009: 23.27 vs 18.77); ours wins 057. TJ live: blobs + missing walls. Depth for 19/57 views fixed (b33eb0a) - not the cause. Ablation of our defaults next |
 
 ## Viewer
 
@@ -41,5 +41,5 @@ nowhere (always 120 frames); TruckVideo is a slideshow of the Truck photos (no b
 changes enable a user-path test (see the audit). Queued after parity (TJ).
 
 ## Open gaps (biggest first)
-1. Hamamni Baths: missing walls / blobs (depth coverage) - in progress.
+1. Hamamni Baths: -2.2 dB held out against gsplat ON THE SAME CAMERAS (trainer, not capture). Ablating our defaults.
 2. No fair 7K reference on any scene yet; only Truck 30K is like for like (-0.18 dB PSNR, +0.010 SSIM, 4.3x fewer splats).

@@ -1442,6 +1442,14 @@ public partial class Studio
                 return;
             }
             if (ExportColmapOption) await ExportColmapAsync();
+            // &dumpheld=1: the trainer's render of every held-out photo's view (saved as held-<name>-trainer.png), to
+            // compare with another trainer's renders of the same photos (parity, Hamamni 2026-10-08).
+            if (DumpHeldOption)
+                foreach (var hv in liveScene.TrainingViews.Where(v => !v.UsedForSupervision))
+                {
+                    await StashTrainerRenderAsync($"held-{System.IO.Path.GetFileNameWithoutExtension(hv.ImageName)}", hv.Camera);
+                    await Task.Delay(1500);   // the harness polls every 500 ms
+                }
             Console.WriteLine($"[Dataset] sample scene {saved.Id} saved after {(DateTime.UtcNow - tg).TotalSeconds:F0}s: " +
                 $"{saved.SplatCount:N0} splats, trained {saved.TrainedIterations:N0} iters, {liveScene.TrainingViews.Count} training views");
             if (saved.TrainedIterations != generateIters)

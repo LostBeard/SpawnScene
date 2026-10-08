@@ -15,6 +15,9 @@ public partial class Studio
     /// </summary>
     public static bool ExportColmapOption { get; set; }
 
+    /// <summary>&amp;dumpheld=1 (harness): the trainer's render of every held-out view after Generate (sample autotest).</summary>
+    public static bool DumpHeldOption { get; set; }
+
     async Task ExportColmapAsync()
     {
         if (_multiViewService.LastSfm is not { } sfm) { Console.WriteLine("[Dataset] COLMAP-EXPORT none (no SfM result)"); return; }

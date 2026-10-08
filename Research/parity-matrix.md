@@ -21,9 +21,11 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Room (images_2) | 7K-end | - | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
 | Counter (images_2) | 7K-end | - | - | 27.62 / 0.889 / 0.192, 0.88M | - | see refs |
 | Kitchen (images_2) | 7K-end | - | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
-| Bonsai (images_2) | 7K-end | - | - | (running) | - | see refs |
-| Train (979) | 7K / 30K | - | - | - | - | see refs |
-| DrJohnson, Playroom | 7K / 30K | - | - | - | - | see refs |
+| Bonsai (images_2) | 7K-end | - | - | 30.18 / 0.928 / 0.156, 1.23M | - | see refs |
+| Truck (979, clean folder) | 7K-end | - | - | 23.87 / 0.853 / 0.134, 2.06M | - | see refs |
+| Train (979) | 7K-end | - | - | 20.41 / 0.771 / 0.231, 0.93M | - | see refs |
+| DrJohnson | 7K-end | - | - | 28.29 / 0.890 / 0.235, 2.10M | - | see refs |
+| Playroom | 7K-end | - | - | 29.43 / 0.899 / 0.203, 1.31M | - | see refs |
 
 Data: one clean folder per scene (junctions, nothing copied) at the gsplat scratch `gs/parity/<scene>/` = `sparse/0` +
 `images/` -> F:/Downloads/mipnerf360/<scene>/images_4 (bicycle, garden, stump) or images_2 (room, counter, kitchen,

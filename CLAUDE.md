@@ -20,6 +20,11 @@ dotnet publish ./SpawnScene/ --nologo -c:Release --output publish
 (datasets, `AUTOTEST=project` for the user path, `AUTOTEST=textlab` for text rendering), `_cdp_page.js` (screenshot any
 page; from Git Bash pass `MSYS_NO_PATHCONV=1`). Score captured views with `tools/score_views.py`.
 
+**Samples:** `wwwroot/samples/catalog.json` (SampleCatalog) - openly licensed Commons sets and photos in the
+LostBeard/spawnscene-samples HF dataset, fetched through the hub's `/src` proxy (never huggingface.co directly).
+`autotest=samples&name=<folder>` loads one into a project. Tools: commons_fetch.py, package_sample.py,
+make_sample_catalog.py. Research/demo-samples-2026-10-07.md.
+
 ## Project Overview
 
 SpawnScene is a fully client-side Blazor WebAssembly Gaussian Splatting application. It generates 3D scenes from a single photo using monocular depth estimation (DepthAnything V2), with the entire pipeline running on the GPU via WebGPU and SpawnDev.ILGPU. No server backend.
@@ -158,10 +163,18 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   splat's share of blending weight in front of the photos' surfaces; >= 0.9 is removed every 1000 iterations while
   densifying and at the end, plus splats under 1 px of weight in every photo. Bicycle 7K held out 25.01 -> 24.97 dB,
   SSIM 0.7630 -> 0.7643, sky drips and near-grass haze gone off the photo path; TruckFull 7K 23.74 -> 23.94 dB.
+- **Census: a pixel with no surface has nothing in front of it** (fixed 2026-10-07, 37c1fd2). Pixels that never turned
+  opaque kept a 3e38 sentinel and every splat on them counted as a floater: the carve deleted the still-thin walls of
+  TJ's Bathroom ("TONS of holes"). TrainerGate's thin-splat-in-a-hole case guards it. Bicycle unchanged by the fix
+  (k1 25.06 / 0.7662 vs 25.07 / 0.7663). The end carve's splats are compacted before the save (GpuDensify PruneOnly).
+- **Opt-ins under evaluation:** `&exposure=1` per-photo 3x4 affine exposure (reference 3DGS; TrainerGate exposure case),
+  `&depthinit=N` seeds from the photos' DAv3 depth where two views agree (DepthFusionInit, DepthFusionInitTests),
+  `&carveunseenpx=W` (unseen bar, default 1 px). A/B runs: Research/quality-roadmap-2026-10-07.md, PLANS.md.
 - **Splat size cap 0.1 x rig radius** (was 0.05, a leftover from i32 fixed-point gradients): far background at the cap
   shattered into tiny depth-drifting splats = dark specks in the sky off-path. Bicycle 7K held out 24.98 -> 25.07 dB,
   TruckFull 23.94 -> 24.10; no cap at all is worse on Truck (23.85) and brings sky drips back on Bicycle.
-- Judge quality OFF the photo path too: Studio.Wander's views (in/up/low/out/mid) in the project and dataset
+- Judge quality OFF the photo path too: Studio.Wander's views (in/up/low/out/mid, pan-0..7 = turning around at the rig
+  centre with the photo count per heading, over-0/1 = outside the rig) in the project and dataset
   autotests, `tools/compose_wander.py <Dataset> <TAG>[,<TAG2>] [gsplat dir]`. Every held-out view sits beside a photo.
 - Every per-splat / per-pixel WGSL pass dispatches through `SplatTrainerGpu.DispatchLinear` (wraps past 65535
   workgroups; the shader rebuilds the flat index from `num_workgroups`). An X-only dispatch dies past 4,194,240 items.

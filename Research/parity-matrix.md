@@ -59,6 +59,14 @@ changes enable a user-path test (see the audit). Queued after parity (TJ).
 | a6 | exposure | 19.22 / 0.691 | 19.13 |
 | gsplat | (its default, our cameras) | 21.41 / 0.732 | - |
 
+| a0 | - (baseline repeat: noise ~0.2 dB) | 19.38 / 0.710 | 21.88 |
+| a7 | all six off (nearest gsplat's setup) | 19.53 / 0.701, 1.91M splats | 18.86 |
+
+a7 settles it: with every SpawnScene-only default off, still 1.9 dB under gsplat (21.41) at a similar splat count (1.91M vs
+1.88M) - the gap is in the CORE trainer. Per photo it is concentrated: 033 (a close look at the upper wall) 19.31 vs
+gsplat 27.25; the others within 0-2 dB. Not the near plane (033's surfaces are 1.8-2.3 units away, the cull is 0.2).
+Next: a8/a9 (the splat size cap: 10x / 0.5x rig radius), a10 (= a7 + the trainer's held-out renders to compare).
+
 No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
 by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.
 

@@ -246,15 +246,17 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var mfv))
             SplatTrainerGpu.MipFilter = Math.Max(0f, mfv);
-        // &randombg=1: train each step over a random background colour (the reference's --random_background), so surfaces
-        // the photos saw must be opaque to match them (SplatTrainerGpu.RandomBackground).
+        // Random training background (SplatTrainerGpu.RandomBackground; the reference's --random_background), so surfaces
+        // the photos saw must be opaque to match them. DEFAULT (2026-10-08): zero-mean at half width, [-0.25, 0.25].
+        // &randombg=0 trains over black; =1 the reference's [0, 1] at full width (r0/q0); =2 zero-mean (width from
+        // &randombgamp, default 0.5; u0/u1 were =2&randombgamp=1).
         if (query.TryGetValue("randombg", out var rbgq))
         {
-            // &randombg=2: the zero-mean background ([-0.5, 0.5] per channel).
-            SplatTrainerGpu.RandomBackground = rbgq is "1" or "2" or "true";
-            SplatTrainerGpu.ZeroMeanBackground = rbgq == "2";
+            SplatTrainerGpu.RandomBackground = rbgq is not ("0" or "false");
+            SplatTrainerGpu.ZeroMeanBackground = rbgq != "1";
+            if (rbgq == "1") SplatTrainerGpu.BackgroundAmplitude = 1f;
         }
-        // &randombgamp=A: the random background's width scale (1 default; 0.5 = [-0.25, 0.25] with &randombg=2).
+        // &randombgamp=A: the random background's width scale (default 0.5).
         if (query.TryGetValue("randombgamp", out var rbaq) && float.TryParse(rbaq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rbav))
             SplatTrainerGpu.BackgroundAmplitude = Math.Max(0f, rbav);

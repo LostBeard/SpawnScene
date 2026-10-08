@@ -186,6 +186,13 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   photos' DAv3 depth where two views agree; `&depthinit=0` off) and exposure gains only (`&exposure=0` off, `=1`/`affine`
   the full 3x4). Bathroom held out 15.58 -> 18.57 dB with both, fair score (gains fitted on the left half, right half
   scored - logged as "held out RIGHT HALF") 18.88 -> 24.32 from the gains; Bicycle fair +0.16; Truck neutral.
+- **Random training background is a DEFAULT (2026-10-08, TJ):** each step composites over a random colour, zero-mean
+  at half width ([-0.25, 0.25]; SplatTrainerGpu.RandomBackground/ZeroMeanBackground/BackgroundAmplitude). Over black a
+  half-transparent wall matched the photos as well as a solid one: the black off the photo path in rooms was the
+  background showing through (`&bg=1,0,1` captures over magenta). Bathroom see-through 12.0% -> 5.4% of off-path
+  pixels, held out 18.82 dB (black 18.45-18.69); Truck neutral; Bicycle -0.04 fair. [0, 1] (the reference's) darkens
+  scenes where T stays > 0 (Bicycle -0.37 dB). `&randombg=0` black, `=1` [0, 1], `&randombgamp=A`. Scoring, the
+  census, held-out pose refinement and the TrainerGate stay over black (the gate's background stage = FD-verified).
 - **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):
   `exposure=1` per-photo 3x4 affine exposure, the photos' mean folded into the scene at the end (TrainerGate exposure
   case); `depthinit=N` seeds from the photos' DAv3 depth where two views agree, coloured from the device decode

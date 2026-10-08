@@ -69,7 +69,7 @@ held-out number and looks worse off-path does not ship.
 4b. **Holes in rooms off the photo path - FOUND 10-08:** the black is the background showing through half-transparent
    splats (training over black lets a see-through wall match the photos). Random training background, zero mean, half
    width (`&randombg=2&randombgamp=0.5`; gate-verified): Bathroom see-through 12.0% -> 5.4% of off-path pixels, held
-   out 18.82 dB (black 18.45-18.69); Truck neutral; Bicycle -0.04 fair. **Default candidate - TJ to decide.** What
+   out 18.82 dB (black 18.45-18.69); Truck neutral; Bicycle -0.04 fair. **DEFAULT since 2026-10-08 (TJ).** What
    remains faces where no photo looked (coverage: item 6).
 5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) measured 10-08 on the proposed defaults:
    neutral held out and at the Wander "in" views (2x) - needs close-up views (4-8x) to judge; 2D Mip filter in the viewer.

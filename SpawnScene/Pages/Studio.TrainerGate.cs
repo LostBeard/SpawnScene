@@ -86,6 +86,10 @@ public partial class Studio
     async Task RunTrainerGateAsync()
     {
         Console.WriteLine("[TrainerGate] starting");
+        // The gate's stages compare against CPU oracles that composite over black: no random training background here
+        // (its own stage sets FixedBackground, which takes precedence).
+        bool randomBg = SplatTrainerGpu.RandomBackground;
+        SplatTrainerGpu.RandomBackground = false;
         try
         {
             if (!_gpuService.IsInitialized) await _gpuService.InitializeAsync();
@@ -345,6 +349,7 @@ public partial class Studio
         {
             Console.WriteLine($"[TrainerGate] FAIL: {ex}");
         }
+        finally { SplatTrainerGpu.RandomBackground = randomBg; }
     }
 
     /// <summary>

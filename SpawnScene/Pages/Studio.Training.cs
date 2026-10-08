@@ -958,6 +958,11 @@ public partial class Studio
             {
                 var frozen = g1 with { PositionLr = 0f, LogScaleLr = 0f, RotationLr = 0f };
                 int refined = 0;
+                // Over black, as the views are scored: a random background would only add noise to the pose gradient.
+                bool randomBg = SplatTrainerGpu.RandomBackground;
+                SplatTrainerGpu.RandomBackground = false;
+                try
+                {
                 for (int hv = 0; hv < views.Count; hv++)
                 {
                     if (views[hv].UsedForSupervision) continue;
@@ -974,6 +979,8 @@ public partial class Studio
                     }
                     refined++;
                 }
+                }
+                finally { SplatTrainerGpu.RandomBackground = randomBg; }
                 Console.WriteLine($"[Train] held-out poses refined against the frozen scene: {refined} views x {PoseTestIterations} steps");
             }
 

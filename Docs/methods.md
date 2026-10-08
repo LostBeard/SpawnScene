@@ -41,6 +41,12 @@ cost).
 - **Per-photo exposure** (gains only): each photo gets three per-channel gains, learned with the scene and folded into
   it at the end (the reference's appearance model is a full 3x4 affine; its offsets cannot fold into a semi-transparent
   scene and cost fixed-exposure captures 0.2-0.6 dB, so we keep the gains). Default since 2026-10-08.
+- **Random background while training**: each step composites the render over a random colour, so a surface only
+  matches the photos if it is opaque. Trained over black, a half-transparent wall matches as well as a solid one, and
+  from any other angle the background shows through - the dark holes in room captures. The reference's
+  `--random_background` uses [0, 1], which darkens scenes where some light always passes (sky, thin foliage: Bicycle
+  -0.37 dB); ours is zero-mean at half width ([-0.25, 0.25]). Bathroom: see-through pixels off the photo path 12.0% ->
+  5.4%, held out 18.82 dB vs 18.45-18.69; Truck neutral; Bicycle -0.04 dB (fair score). Default since 2026-10-08.
 - Optional: depth supervision (`&depthloss`, an L1 on rendered inverse depth, gradient checked against finite
   differences), Mip-Splatting's 3D filter (`&mipfilter`), MCMC densification (`&mcmc`).
 - WebGPU has no float atomics: per-splat gradients are reduced per tile in the backward pass and summed with an atomic

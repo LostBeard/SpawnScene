@@ -1966,8 +1966,10 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// Train each step over a random background colour (the reference 3DGS's --random_background), so a surface only
     /// matches the photos by being opaque. Over black, half-transparent walls scored as well as solid ones and showed
     /// the black through from every other angle (Bathroom 2026-10-08: up to 33% of an off-path view).
+    /// DEFAULT since 2026-10-08 (TJ), zero-mean at half width: Bathroom see-through 12.0% -> 5.4% of off-path pixels,
+    /// held out 18.82 dB (black 18.45-18.69); Truck neutral; Bicycle -0.04 fair. `&amp;randombg=0` trains over black.
     /// </summary>
-    public static bool RandomBackground { get; set; }
+    public static bool RandomBackground { get; set; } = true;
     /// <summary>
     /// With <see cref="RandomBackground"/>: draw each channel from [-0.5, 0.5] instead of [0, 1]. Same variance (so
     /// transparency costs the same), but ZERO MEAN: where transmittance cannot reach 0 (sky, thin foliage edges), a
@@ -1975,9 +1977,10 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// over black - comes out too dark (Bicycle r0, 2026-10-08: -0.37 dB held out, exposure gains ~2% higher).
     /// A negative background is fine inside the loss; the expected composite equals the render over black.
     /// </summary>
-    public static bool ZeroMeanBackground { get; set; }
-    /// <summary>Scales the random background's width (1 = [0, 1] or [-0.5, 0.5]); smaller = a weaker push to opacity.</summary>
-    public static float BackgroundAmplitude { get; set; } = 1f;
+    public static bool ZeroMeanBackground { get; set; } = true;
+    /// <summary>Scales the random background's width (1 = [0, 1] or [-0.5, 0.5]); smaller = a weaker push to opacity.
+    /// Default 0.5 ([-0.25, 0.25]): full width cost Bicycle -0.13 fair, half -0.04, and kept most of the room fix.</summary>
+    public static float BackgroundAmplitude { get; set; } = 0.5f;
     /// <summary>The loss's D-SSIM share (the reference's 0.2; L1 gets the rest). Gates set 0 for a pure L1 loss: the loss a
     /// step returns is the L1 part only, so finite differences of it match the gradient only without D-SSIM.</summary>
     public float DssimWeight { get; set; } = ImageQuality.LambdaDssim;

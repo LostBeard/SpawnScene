@@ -59,7 +59,11 @@ down: a colour offset. Every photo learned a small positive offset (Truck mean +
 the scene only where it is opaque. `&exposure=gains` (per-channel gains only, gate-checked) queued as h0-h2 on all three.
 Not a default until it keeps Bathroom's gain without costing the benchmarks.
 **h0 Bathroom `&depthinit=4&exposure=gains`: held out 18.64 / 0.844** vs d0 (same build, full affine) 18.23 / 0.840 -
-gains-only is BETTER on the phone capture too (+0.4 dB). h1 Bicycle, h2 Truck pending.
+gains-only is BETTER on the phone capture too (+0.4 dB). **h1 Bicycle `&depthinit=4&exposure=gains`: 24.94 / 0.7682**
+vs b1 (no exposure) 25.16 / 0.7661 and e1 (full affine) 24.55 / 0.7663 - most of the affine's loss recovered, best SSIM,
+still -0.22 dB PSNR. Part may be the scoring: held-out photos are rendered at the photos' MEAN exposure, while the
+reference fits each held-out photo's exposure (on half the image) before scoring. Next: that fair scoring, then decide.
+h2 Truck pending.
 
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 

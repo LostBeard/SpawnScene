@@ -20,12 +20,17 @@ dotnet publish ./SpawnScene/ --nologo -c:Release --output publish
 (datasets, `AUTOTEST=project` for the user path, `AUTOTEST=textlab` for text rendering), `_cdp_page.js` (screenshot any
 page; from Git Bash pass `MSYS_NO_PATHCONV=1`). Score captured views with `tools/score_views.py`.
 
-**Other tools' scenes:** "Open scene file" and `?import=<url>` also take a 3DGS `.ply` (GaussianPly + GaussianPlyImport)
-Niantic's `.spz` v2/v3 (SpzImport) and antimatter15's `.splat` (SplatFileImport), converted on the GPU into a new project. Both are turned y-up by default (3DGS
-PLYs are in their SfM frame, y down, and SPZ files in circulation carry the same frame - Spark's examples turn them too);
-`&sceneup=keep` leaves them. Imports seat on the scene's dense core (20-80% box). Tests: GaussianPlyImportTests,
-SpzImportTests (Niantic's packing ported; the y-up turn checked against SH physics). Verified 2026-10-08 on Inria's
-reference Train (7K PLY), antimatter15's train.splat (same scene, same framing) and Spark's butterfly/penguin .spz.
+**Other tools' scenes:** "Open scene file" and `?import=<url>` also take a 3DGS `.ply` (GaussianPly + GaussianPlyImport),
+PlayCanvas's compressed `.ply` (SuperSplat's export; GaussianPly.ParseCompressed), Niantic's `.spz` v2/v3 (SpzImport) and
+antimatter15's `.splat` (SplatFileImport), converted on the GPU into a new project. All are turned y-up by default (3DGS
+PLYs are in their SfM frame, y down, and the other formats in circulation carry the same frame - Spark's examples turn
+SPZ too); `&sceneup=keep` leaves them. Imports seat on the scene's dense core (20-80% box). Tests: GaussianPlyImportTests,
+CompressedPlyImportTests (vs a port of PlayCanvas's decoder), SpzImportTests (Niantic's packing ported),
+SplatFileImportTests; the y-up turn is checked against SH physics. Verified 2026-10-08 on Inria's Train (7K PLY),
+antimatter15's train.splat, Spark's butterfly/penguin .spz, PlayCanvas's biker/guitar compressed PLY. SPZ v4 (zstd
+streams, already in PlayCanvas's examples) is refused with a reason: Chrome's DecompressionStream has no zstd. A kernel
+with no SH bands must bind three DISTINCT stand-in buffers (WebGPU refuses aliased read_write bindings; CPU tests cannot
+see it). `_cdp_page.js` takes `PAGE_LOG=<regex>` to print the app's own console lines.
 
 **Samples:** `wwwroot/samples/catalog.json` (SampleCatalog) - openly licensed Commons sets and photos in the
 LostBeard/spawnscene-samples HF dataset, fetched through the hub's `/src` proxy (never huggingface.co directly).

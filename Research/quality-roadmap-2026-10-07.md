@@ -49,6 +49,10 @@ fusion depth) 16.57 / 0.7915, vs grey-seeded g1/g2 16.91-16.97 / 0.795-0.798; th
 indistinguishable. Seed colour is neutral (training repaints it within the first cycle); the edge snap does nothing for
 the multi-photo seeds (agreement between two views already rejects ramp samples).
 
+**b0r (Bicycle user path, no depth init, rerun of the invalid b0):** held out 25.17 / 0.7649, 2.14M splats - vs b1
+`&depthinit=4` 25.16 / 0.7661, 2.46M. Depth init is neutral outdoors and +1.3 dB on the Bathroom (g0 -> g1): a default
+candidate for TJ.
+
 **Exposure on fixed-exposure captures (2026-10-08):** e1 Bicycle `&depthinit=4&exposure=1` held out 24.55 / 0.7663 vs b1
 (depthinit only) 25.16 / 0.7661; e2 TruckFull `&exposure=1` 23.87 / 0.8587 vs k2 24.07 / 0.8592. SSIM unchanged, PSNR
 down: a colour offset. Every photo learned a small positive offset (Truck mean +0.009..+0.017) and an offset folds into

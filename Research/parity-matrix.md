@@ -19,6 +19,12 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Train (979) | 7K / 30K | - | - | - | - | see refs |
 | DrJohnson, Playroom | 7K / 30K | - | - | - | - | see refs |
 
+Data: one clean folder per scene (junctions, nothing copied) at the gsplat scratch `gs/parity/<scene>/` = `sparse/0` +
+`images/` -> F:/Downloads/mipnerf360/<scene>/images_4 (bicycle, garden, stump) or images_2 (room, counter, kitchen,
+bonsai), C:/Users/TJ/Downloads/tandt_db/... images (truck, train, drjohnson, playroom) - the same files SpawnScene's
+manifests name. Flowers / treehill are not on disk. Queued 10-08 16:19: gsplat 7K-end on all 11 (after the Hamamni
+ablation chain), then SpawnScene GTPOSES on the same folders.
+
 Reference numbers with sources: [parity-references-2026-10-08.md](parity-references-2026-10-08.md) (being written).
 
 ## Phone / Commons captures (no ground-truth poses: own SfM only)

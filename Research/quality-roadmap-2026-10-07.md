@@ -319,5 +319,6 @@ sky cannot be opaque. Next: v0/v1 at half width (`&randombgamp=0.5`).
 | Bathroom held out / fair | 18.45-18.69 / 24.37-24.75 | 18.86 / 25.15 (u1) | 18.82 / 0.8499 / 24.76 (v1) |
 | Bathroom holes (mean; views <= 1%) | 12.0%; 1/34 | 4.0%; 24/34 | 5.4%; 23/34 |
 
-Half the push keeps most of the room fix and costs Bicycle -0.08 dB held out / -0.04 fair. Truck t3 running.
+Half the push keeps most of the room fix and costs Bicycle -0.08 dB held out / -0.04 fair. Truck t3: 24.03 / 0.8599,
+fair 24.247 (t0 black 23.97 / 0.8594 / 24.197) - neutral. **Proposed default (TJ's call): `&randombg=2&randombgamp=0.5`.**
 

@@ -66,6 +66,11 @@ held-out number and looks worse off-path does not ship.
 4. **Capture feedback:** DONE 10-07/08 - the scene card counts placed photos, the Photos tab badges the unplaced ones,
    the card names the directions no photo faces (CaptureCoverage, relative to the first photo), sideways photos are
    placed. (The placement line was hidden under the card's buttons until 3dbacfa.) Why each photo was dropped is listed on the Photos tab (SfM reason).
+4b. **Holes in rooms off the photo path - FOUND 10-08:** the black is the background showing through half-transparent
+   splats (training over black lets a see-through wall match the photos). Random training background, zero mean, half
+   width (`&randombg=2&randombgamp=0.5`; gate-verified): Bathroom see-through 12.0% -> 5.4% of off-path pixels, held
+   out 18.82 dB (black 18.45-18.69); Truck neutral; Bicycle -0.04 fair. **Default candidate - TJ to decide.** What
+   remains faces where no photo looked (coverage: item 6).
 5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) measured 10-08 on the proposed defaults:
    neutral held out and at the Wander "in" views (2x) - needs close-up views (4-8x) to judge; 2D Mip filter in the viewer.
 6. **Far background:** a background shell / far-depth prior for sky and distant scenery (the Bicycle low-pose specks).

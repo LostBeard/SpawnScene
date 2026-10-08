@@ -95,6 +95,14 @@ public partial class Studio
     /// </summary>
     public static bool McmcOption { get; set; }
 
+    /// <summary>
+    /// <c>&amp;exposure=1</c>: per-photo exposure compensation (SplatTrainerGpu.Exposure) - a 3x4 affine colour transform
+    /// per training photo, learned with the scene (lr 0.01 -> 0.001, the reference's). For captures whose photos were
+    /// exposed one by one: a phone's auto exposure, white balance and HDR merges (TJ's Bathroom). The viewer shows the
+    /// scene's own appearance; the exposures stay in training.
+    /// </summary>
+    public static bool ExposureOption { get; set; }
+
     /// <summary>gsplat MCMCStrategy.refine_stop_iter: relocation and growth stop here (noise and the regularisers do not).</summary>
     public static int McmcUntilIter { get; set; } = 25_000;
 
@@ -522,6 +530,11 @@ public partial class Studio
                 poseSpread = Math.Max(1e-6f, views.Max(v => System.Numerics.Vector3.Distance(v.Camera.Position, centroid)));
                 Console.WriteLine($"[Train] refining camera poses: rotation {PoseLrRotation:G3} rad, translation {PoseLrTranslation:G3} x spread {poseSpread:F3} per update, decaying to 10%");
             }
+            if (ExposureOption)
+            {
+                _trainer.ResetExposure(views.Count);
+                Console.WriteLine($"[Train] per-photo exposure: {views.Count} affine colour transforms, lr 0.01 -> 0.001");
+            }
             if (SplatTrainerGpu.MipFilter > 0)
                 Console.WriteLine($"[Train] Mip 3D filter {SplatTrainerGpu.MipFilter}: scale floor = filter x depth / focal over {supervised.Count} cameras");
 
@@ -657,8 +670,10 @@ public partial class Studio
                 // cost no CPU-GPU round trip; NaN = not read this step.
                 bool readLoss = it < supervised.Count || it % supervised.Count == supervised.Count - 1
                     || it == iterations - 1;
+                if (ExposureOption) _trainer.ExposureLr = TrainingSchedule.ExponentialLr(0.01f, 0.001f, it, iterations);
                 float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, geometry: geo,
-                    readLoss: readLoss, poseSlot: poseAdam != null && geo != null && !RefineTestPosesOnly ? vi : -1);
+                    readLoss: readLoss, poseSlot: poseAdam != null && geo != null && !RefineTestPosesOnly ? vi : -1,
+                    exposureSlot: ExposureOption ? vi : -1);
 
                 // How much of the gradient survives the fixed-point atomic? Gradients cross it
                 // as scaled integers, and dL/d(pixel) is 1/(3*W*H) - about 1e-6 at this
@@ -926,6 +941,8 @@ public partial class Studio
                 Console.WriteLine($"[Train] held-out poses refined against the frozen scene: {refined} views x {PoseTestIterations} steps");
             }
 
+            if (ExposureOption) await ReportExposureAsync(views, supervised);
+
             if (await FloaterCensusAsync(packed, n, views, targets, box, w, h))
             {
                 // The end carve only zeroes opacity. Nothing densifies after it, so without this the scene was SAVED with
@@ -1018,6 +1035,24 @@ public partial class Studio
     /// The floater census over every supervised view, reported always; with <see cref="CarveFloaterShare"/> the floaters
     /// are removed and the supervised views scored before and after, so the carve's cost on the photos is on record.
     /// </summary>
+    /// <summary>What the per-photo exposures learned: each photo's gain (mean of the diagonal) and colour cast.</summary>
+    private async Task ReportExposureAsync(IReadOnlyList<TrainingView> views, IReadOnlyList<int> supervised)
+    {
+        var e = await _trainer!.ReadExposureAsync(views.Count);
+        if (e.Length < views.Count * 12) return;
+        var parts = new List<string>();
+        var gains = new List<float>();
+        foreach (int v in supervised)
+        {
+            int o = v * 12;
+            float r = e[o], g = e[o + 5], b = e[o + 10], gain = (r + g + b) / 3f;
+            gains.Add(gain);
+            parts.Add($"{v}:{gain:F3}({r / gain:F2},{g / gain:F2},{b / gain:F2})+{(e[o + 3] + e[o + 7] + e[o + 11]) / 3f:+0.000;-0.000}");
+        }
+        Console.WriteLine($"[Train] exposure per photo, gain(r,g,b cast)+offset: gains {gains.Min():F3}..{gains.Max():F3}; " +
+            string.Join(" ", parts));
+    }
+
     /// <returns>True when splats were carved (opacity 0), so the caller compacts them away.</returns>
     private async Task<bool> FloaterCensusAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
         MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box, int w, int h)

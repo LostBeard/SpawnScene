@@ -327,6 +327,9 @@ public partial class Studio
             // -- Floater census: front shares on a scene with a known answer, the carve, and its red check --
             if (!await FloaterCensusGateAsync(cam)) return;
 
+            // -- Per-photo exposure: a known colour transform of the scene's own render is recovered --
+            if (!await ExposureGateAsync(trainer, splatBuf, n, cam, depthNear, depthFar)) return;
+
             // -- Past 65535 workgroups: a per-splat pass over more than 4,194,240 splats reaches every one --
             if (!await LinearDispatchGateAsync(trainer)) return;
 

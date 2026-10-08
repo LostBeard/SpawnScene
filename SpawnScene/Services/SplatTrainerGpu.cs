@@ -1961,7 +1961,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         float opacityLr = SplatOptimizer.DefaultOpacityLr,
         GeometryStep? geometry = null,
         bool readLoss = true,
-        int poseSlot = -1)
+        int poseSlot = -1,
+        int exposureSlot = -1)
     {
         var accel = _gpu.WebGPUAccelerator;
         var splatGpu = splatBuf.GetGPUBuffer()!;
@@ -1993,6 +1994,9 @@ public sealed partial class SplatTrainerGpu : IDisposable
         int lossGroups = (pixels + 63) / 64;
         int lossGroupsX = Math.Min(lossGroups, 32768), lossGroupsY = (lossGroups + lossGroupsX - 1) / lossGroupsX;
         WriteU32x4(_lossDimsBuf!, (uint)pixels, (uint)lossGroupsX, (uint)lossGroups, 0);
+        // This photo's exposure (SplatTrainerGpu.Exposure): the loss compares the EXPOSED render with the photo.
+        bool exposed = ExposureReady(exposureSlot);
+        if (exposed) DispatchExposureApply(exposureSlot, pixels, lossGroupsX, lossGroupsY, lossGroups);
         Dispatch(_lossL1!, lossGroupsX, lossGroupsY, new[]
         {
             Buf(0, _outColour!.GetGPUBuffer()!), Buf(1, _target!.GetGPUBuffer()!),
@@ -2049,6 +2053,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
             });
         }
         if (SsimPerChannel && HasSsimWindows) WriteSsimCfg();
+        // dL/d(exposed) -> dL/d(raw render) for the backward below, and one Adam step on the exposure.
+        if (exposed) DispatchExposureBackward(exposureSlot, lossGroupsX, lossGroupsY, lossGroups);
 
         await PhaseAsync("loss+ssim");
         // ── Backward: one workgroup per tile, no atomics for signed grads ──
@@ -2459,6 +2465,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         DisposeFloaterCensus();
         // Per VIEW, not per splat: they live through every resize. In DisposeBuffers (which every densify resize runs)
         // they were freed after the first densify, and camera refinement silently stepped no camera (c19, 2026-10-04).
+        DisposeExposure();
         _posePartials?.Dispose(); _posePartials = null;
         _poseGrads?.Dispose(); _poseGrads = null;
         _radixSort?.Dispose(); _radixSort = null;

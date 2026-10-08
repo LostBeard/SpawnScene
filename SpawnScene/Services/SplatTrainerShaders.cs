@@ -488,6 +488,131 @@ fn raster_forward(
 ";
 
     /// <summary>
+    /// Per-photo exposure (SplatTrainerGpu.Exposure), the reference 3DGS's appearance compensation: the render passes
+    /// through the photo's own 3x4 affine colour transform before the loss, so a phone's auto exposure / white balance /
+    /// HDR merge is explained by 12 numbers per photo instead of by floaters hugging the camera. Pass 1: keep the raw
+    /// render, write the exposed one where the loss reads. Exposure rows: out_c = m[c].xyz . raw + m[c].w.
+    /// Same 2D grid of 64-pixel workgroups as <see cref="LossL1"/> (dims x pixels, y workgroups per grid row).
+    /// </summary>
+    public const string ExposureApply = @"
+@group(0) @binding(0) var<storage, read_write> colour : array<f32>;   // 3 per pixel: raw render in, exposed out
+@group(0) @binding(1) var<storage, read_write> raw    : array<f32>;   // 3 per pixel: the raw render, for the gradient
+@group(0) @binding(2) var<storage, read>       expo   : array<f32>;   // 12 per view
+@group(0) @binding(3) var<uniform>             dims   : vec4<u32>;    // x pixels, y workgroups per grid row, z view slot
+
+@compute @workgroup_size(64)
+fn exposure_apply(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_index) lid : u32) {
+    let p = (wid.y * dims.y + wid.x) * 64u + lid;
+    if (p >= dims.x) { return; }
+    let o = dims.z * 12u;
+    let c = vec3<f32>(colour[p * 3u], colour[p * 3u + 1u], colour[p * 3u + 2u]);
+    raw[p * 3u] = c.x; raw[p * 3u + 1u] = c.y; raw[p * 3u + 2u] = c.z;
+    for (var r = 0u; r < 3u; r = r + 1u) {
+        let m = vec4<f32>(expo[o + r * 4u], expo[o + r * 4u + 1u], expo[o + r * 4u + 2u], expo[o + r * 4u + 3u]);
+        colour[p * 3u + r] = dot(m.xyz, c) + m.w;
+    }
+}
+";
+
+    /// <summary>
+    /// Pass 2, after the loss and D-SSIM have written dL/d(exposed pixel): chain it back through the affine
+    /// (dL/draw = M^T g, in place, before the rasteriser's backward reads it) and sum this workgroup's share of the
+    /// exposure's own gradient, dL/dm[c][k] = g_c raw_k, dL/dm[c].w = g_c (12 per workgroup). Every invocation reaches
+    /// the barriers; pixels past the end contribute 0.
+    /// </summary>
+    public const string ExposureBackward = @"
+@group(0) @binding(0) var<storage, read_write> dL_dpix  : array<f32>;   // 3 per pixel: d/d(exposed) in, d/d(raw) out
+@group(0) @binding(1) var<storage, read>       raw      : array<f32>;   // 3 per pixel
+@group(0) @binding(2) var<storage, read>       expo     : array<f32>;   // 12 per view
+@group(0) @binding(3) var<storage, read_write> partials : array<f32>;   // 12 per workgroup
+@group(0) @binding(4) var<uniform>             dims     : vec4<u32>;    // x pixels, y workgroups per grid row, z slot, w workgroups
+
+var<workgroup> red : array<f32, 768>;
+
+@compute @workgroup_size(64)
+fn exposure_backward(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocation_index) lid : u32) {
+    let group = wid.y * dims.y + wid.x;
+    let p = group * 64u + lid;
+    let o = dims.z * 12u;
+    var g = vec3<f32>(0.0);
+    var c = vec3<f32>(0.0);
+    if (p < dims.x) {
+        g = vec3<f32>(dL_dpix[p * 3u], dL_dpix[p * 3u + 1u], dL_dpix[p * 3u + 2u]);
+        c = vec3<f32>(raw[p * 3u], raw[p * 3u + 1u], raw[p * 3u + 2u]);
+        let m0 = vec3<f32>(expo[o], expo[o + 1u], expo[o + 2u]);
+        let m1 = vec3<f32>(expo[o + 4u], expo[o + 5u], expo[o + 6u]);
+        let m2 = vec3<f32>(expo[o + 8u], expo[o + 9u], expo[o + 10u]);
+        let back = m0 * g.x + m1 * g.y + m2 * g.z;   // M^T g
+        dL_dpix[p * 3u] = back.x; dL_dpix[p * 3u + 1u] = back.y; dL_dpix[p * 3u + 2u] = back.z;
+    }
+    for (var r = 0u; r < 3u; r = r + 1u) {
+        red[lid * 12u + r * 4u] = g[r] * c.x;
+        red[lid * 12u + r * 4u + 1u] = g[r] * c.y;
+        red[lid * 12u + r * 4u + 2u] = g[r] * c.z;
+        red[lid * 12u + r * 4u + 3u] = g[r];
+    }
+    workgroupBarrier();
+    for (var s = 32u; s > 0u; s = s >> 1u) {
+        if (lid < s) {
+            for (var k = 0u; k < 12u; k = k + 1u) { red[lid * 12u + k] = red[lid * 12u + k] + red[(lid + s) * 12u + k]; }
+        }
+        workgroupBarrier();
+    }
+    if (lid == 0u && group < dims.w) {
+        for (var k = 0u; k < 12u; k = k + 1u) { partials[group * 12u + k] = red[k]; }
+    }
+}
+";
+
+    /// <summary>
+    /// Pass 3: total the workgroup partials and take one Adam step on this view's 12 exposure numbers (torch defaults:
+    /// betas 0.9 / 0.999, eps 1e-8; bias correction from the view's own step count, steps[slot]).
+    /// </summary>
+    public const string ExposureAdam = @"
+@group(0) @binding(0) var<storage, read>       partials : array<f32>;   // 12 per workgroup
+@group(0) @binding(1) var<storage, read_write> expo     : array<f32>;   // 12 per view
+@group(0) @binding(2) var<storage, read_write> moments  : array<f32>;   // 24 per view: m then v
+@group(0) @binding(3) var<storage, read_write> steps    : array<f32>;   // 1 per view
+@group(0) @binding(4) var<uniform>             cfg      : vec4<f32>;    // x partial count, y view slot, z learning rate
+
+var<workgroup> red : array<f32, 3072>;
+
+@compute @workgroup_size(256)
+fn exposure_adam(@builtin(local_invocation_index) li : u32) {
+    let n = u32(cfg.x);
+    var acc = array<f32, 12>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+    for (var j = li; j < n; j = j + 256u) {
+        for (var k = 0u; k < 12u; k = k + 1u) { acc[k] = acc[k] + partials[j * 12u + k]; }
+    }
+    for (var k = 0u; k < 12u; k = k + 1u) { red[li * 12u + k] = acc[k]; }
+    workgroupBarrier();
+    for (var s = 128u; s > 0u; s = s >> 1u) {
+        if (li < s) {
+            for (var k = 0u; k < 12u; k = k + 1u) { red[li * 12u + k] = red[li * 12u + k] + red[(li + s) * 12u + k]; }
+        }
+        workgroupBarrier();
+    }
+    let slot = u32(cfg.y);
+    let t = steps[slot] + 1.0;
+    storageBarrier();   // every invocation has read steps[slot] before invocation 0 rewrites it
+    if (li < 12u) {
+        let g = red[li];
+        let i = slot * 12u + li;
+        if (g == g && abs(g) < 1e30) {   // NaN / inf guard: one bad frame must not wreck a photo's exposure
+            let m = 0.9 * moments[slot * 24u + li] + 0.1 * g;
+            let v = 0.999 * moments[slot * 24u + 12u + li] + 0.001 * g * g;
+            moments[slot * 24u + li] = m;
+            moments[slot * 24u + 12u + li] = v;
+            let mh = m / (1.0 - pow(0.9, t));
+            let vh = v / (1.0 - pow(0.999, t));
+            expo[i] = expo[i] - cfg.z * mh / (sqrt(vh) + 1e-8);
+        }
+    }
+    if (li == 0u) { steps[slot] = t; }
+}
+";
+
+    /// <summary>
     /// Floater census, one workgroup per tile, over the keys and ranges the forward pass of the SAME view just built.
     /// Per pixel, first the SURFACE depth: the depth of the splat at which transmittance falls through 0.5 (the median
     /// of the blending weights along the ray); then every splat's blending weight w = alpha * T there, summed per splat

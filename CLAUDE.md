@@ -167,9 +167,17 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   opaque kept a 3e38 sentinel and every splat on them counted as a floater: the carve deleted the still-thin walls of
   TJ's Bathroom ("TONS of holes"). TrainerGate's thin-splat-in-a-hole case guards it. Bicycle unchanged by the fix
   (k1 25.06 / 0.7662 vs 25.07 / 0.7663). The end carve's splats are compacted before the save (GpuDensify PruneOnly).
-- **Opt-ins under evaluation:** `&exposure=1` per-photo 3x4 affine exposure (reference 3DGS; TrainerGate exposure case),
-  `&depthinit=N` seeds from the photos' DAv3 depth where two views agree (DepthFusionInit, DepthFusionInitTests),
-  `&carveunseenpx=W` (unseen bar, default 1 px). A/B runs: Research/quality-roadmap-2026-10-07.md, PLANS.md.
+- **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):
+  `exposure=1` per-photo 3x4 affine exposure, the photos' mean folded into the scene at the end (TrainerGate exposure
+  case); `depthinit=N` seeds from the photos' DAv3 depth where two views agree, coloured from the device decode
+  (DepthFusionInit, DepthFusionInitTests). Bathroom both: held out 15.58 -> 18.27 dB, SSIM 0.709 -> 0.836 (g4).
+  `edgesnap=1` single-photo depth edges snapped to colour (DepthEdgeSnap, DepthEdgeSnapTests); `inpaint=1` MI-GAN paints
+  the hidden behind-edge and past-the-frame layers (HiddenLayerInpaint, LostBeard/spawnscene-models via the hub;
+  autotest=inpaint-parity = onnxruntime to 3 decimals); `depthmodel=depth-anything-v3-base`. Harness-only:
+  `&carveunseenpx=W`, `&inpaintreach=X`, `&cellstretch=X`. Research/single-photo-tearing-2026-10-07.md, PLANS.md.
+- **Capture feedback:** ProjectScene.PhotosPlaced/Total/NotPlaced; the scene card counts them, the Photos tab badges
+  the photos SfM could not place. A photo held sideways enters SfM with transposed intrinsics and trains with one
+  quarter turn; the focal calibration uses the majority intrinsics' pairs.
 - **Splat size cap 0.1 x rig radius** (was 0.05, a leftover from i32 fixed-point gradients): far background at the cap
   shattered into tiny depth-drifting splats = dark specks in the sky off-path. Bicycle 7K held out 24.98 -> 25.07 dB,
   TruckFull 23.94 -> 24.10; no cap at all is worse on Truck (23.85) and brings sky drips back on Bicycle.

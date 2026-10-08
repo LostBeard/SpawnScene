@@ -1441,6 +1441,7 @@ public partial class Studio
                 Console.WriteLine($"[Dataset] FAIL: Generate produced no saved scene ({_statusMessage})");
                 return;
             }
+            if (ExportColmapOption) await ExportColmapAsync();
             Console.WriteLine($"[Dataset] sample scene {saved.Id} saved after {(DateTime.UtcNow - tg).TotalSeconds:F0}s: " +
                 $"{saved.SplatCount:N0} splats, trained {saved.TrainedIterations:N0} iters, {liveScene.TrainingViews.Count} training views");
             if (saved.TrainedIterations != generateIters)

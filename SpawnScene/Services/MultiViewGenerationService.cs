@@ -36,6 +36,14 @@ public class MultiViewGenerationService
     /// </summary>
     public CameraParams?[] LastCameras { get; private set; } = [];
 
+    /// <summary>
+    /// The last chunked generate's structure from motion, snapshotted right after bundle adjustment (before levelling
+    /// and training-time pose refinement, which move the cameras in place): cameras (null = not placed), the sparse
+    /// cloud in the same frame, and each image's name and decoded / source sizes. For exporting the poses as COLMAP text
+    /// (Studio &amp;exportcolmap=1), so a reference trainer can run on exactly the same cameras.
+    /// </summary>
+    public (CameraParams?[] Cameras, PointCloud Cloud, string[] Names, (int W, int H)[] Sizes, (int W, int H)[] SourceSizes)? LastSfm { get; private set; }
+
     /// <summary>Why SfM left a photo out, by image index, in words for the user (the Photos tab shows it). Photos with
     /// no entry and no camera were simply never placed.</summary>
     public Dictionary<int, string> LastDropReasons { get; } = new();
@@ -1766,6 +1774,16 @@ public class MultiViewGenerationService
         // A refine that returned nothing never placed a placeholder: its pose is still a copy, not a pose.
         if (baCloud == null) foreach (int i in placeholders) poses.Cameras[i] = null;
         posed = sfmViews.Where(i => poses.Cameras[i] != null).ToList();   // views BA could not place were dropped
+        if (baCloud != null)
+            LastSfm = (poses.Cameras.Select(c => c == null ? null : new CameraParams
+                {
+                    Width = c.Width, Height = c.Height, FocalX = c.FocalX, FocalY = c.FocalY, CenterX = c.CenterX,
+                    CenterY = c.CenterY, Near = c.Near, Far = c.Far, Position = c.Position, Forward = c.Forward, Up = c.Up,
+                }).ToArray(),
+                new PointCloud { Positions = baCloud.Positions.ToArray(), Colors = baCloud.Colors.ToArray() },
+                images.Select(im => im.FileName).ToArray(),
+                images.Select(im => (im.Width, im.Height)).ToArray(),
+                images.Select(im => (im.SourceWidth > 0 ? im.SourceWidth : im.Width, im.SourceHeight > 0 ? im.SourceHeight : im.Height)).ToArray());
 
         // Initialise from the adjusted SPARSE CLOUD, as 3DGS does from COLMAP, not from per-view depth shells.
         // Depth unprojection gives one private shell per camera (drjohnson: 91.9% of splats constrained by at

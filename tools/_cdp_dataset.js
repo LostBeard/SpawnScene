@@ -94,6 +94,7 @@ const closeTab = (id) => new Promise(res =>
     let done = false, failed = null, ready = false;
     const pendingFree = [];
     const viewMap = {};
+    let pendingColmap = false;   // [Dataset] COLMAP-EXPORT: our SfM as COLMAP text on window.__colmapExport (Studio.ColmapExport)
     const pendingTrainer = [];   // view-<k>: the trainer's own render of that pose, on #trainerdump
     const pendingPhoto = [];     // view-<k>: the photograph when it is a video frame (in memory), on #photodump
     ws.on('message', raw => {
@@ -114,6 +115,7 @@ const closeTab = (id) => new Promise(res =>
         // photo's pose and intrinsics, for a side-by-side with that photo (tools/compose_views.py).
         const free = s.match(/\[Dataset\] READY-FOR-CAPTURE free-(\w+)/);
         const view = s.match(/\[Dataset\] READY-FOR-CAPTURE view-(\w+-\d+) (\S+) (\d+x\d+)/);
+        if (/\[Dataset\] COLMAP-EXPORT \d+ cameras/.test(s)) pendingColmap = true;
         const trainerRender = s.match(/\[Dataset\] TRAINER-RENDER (\S+)/);
         if (trainerRender) pendingTrainer.push(trainerRender[1]);
         const photoDump = s.match(/\[Dataset\] PHOTO-DUMP (\S+)/);
@@ -154,6 +156,18 @@ const closeTab = (id) => new Promise(res =>
     let shot = false;
     while (Date.now() < deadline && !done && !failed) {
       await new Promise(r => setTimeout(r, 500));
+      if (pendingColmap) {
+        pendingColmap = false;
+        const r = await send('Runtime.evaluate', { expression: "JSON.stringify(window.__colmapExport)", returnByValue: true });
+        const json = r.result && r.result.result && r.result.result.value;
+        if (typeof json === 'string') {
+          const files = JSON.parse(json);
+          const dir = path.join(__dirname, '..', '_shots', 'dataset', `${NAME}__${process.env.RUN_TAG || 'untagged'}__colmap`);
+          require('fs').mkdirSync(dir, { recursive: true });
+          for (const [name, text] of Object.entries(files)) require('fs').writeFileSync(path.join(dir, name), text);
+          console.log('colmap export written to ' + dir);
+        } else console.log('colmap export: no data');
+      }
       // The trainer's render of a view, saved next to the viewer's capture of the same pose.
       while (pendingTrainer.length) {
         const name = pendingTrainer.shift();

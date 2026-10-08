@@ -1,200 +1,75 @@
-# SpawnScene Development Plans
+# SpawnScene Plans
 
-## Current State (2026-03-16)
+Goal (TJ, 2026-10-07): **the best Gaussian splat generator and viewer on the web.** Quality first: a scene has to hold up
+when the camera leaves the photo path, on the photos people actually take (phones, rooms, thin coverage), not only on
+the benchmark captures.
 
-### What Works
-- **Single-image pipeline**: Photo → Depth (DistillAnyDepth Small) → Unproject → Gaussian Splats → Stochastic Renderer @ 60 FPS
-- **Multi-view 2D offset**: Feature matching → pixel offset → extended panoramic coverage (near-parallel views)
-- **Multi-view world-space (GT)**: Ground truth R/t/K → per-view depth → R^T rotation → world-space fusion (validated with TempleRing)
-- **Per-view depth scale alignment**: Project scene center into each view, sample MDE depth, compute scale to match actual camera-to-center distance
-- **Studio UI**: WebGPU-rendered UI, project management, OPFS persistence
-- **XR/VR**: WebGL fallback path (session starts, rendering not yet verified on headset)
+Detail lives elsewhere; this file is the map and the order:
+- Research/quality-roadmap-2026-10-07.md - the survey (what the best generators do, evidence, our status).
+- Research/demo-samples-2026-10-07.md - demo sources, licenses, hosting.
+- Plans/lod-streaming.md - massive scenes (done: LOD tree, .spawnscene v3, paged streaming, partitioned training).
+- Research/README.md, validation-strategy.md - the 3DGS reference numbers and how to measure without fooling ourselves.
+- CLAUDE.md "Training defaults worth knowing" - every default with the measurement that set it.
 
-### What Doesn't Work Yet
-- **SfM for real photos**: Camera poses from essential matrix + PnP are too noisy for near-parallel views (bathroom photos). Works conceptually but produces garbled fusion.
-- **Seam blending**: Hard cut between reference and extension views creates visible depth discontinuity at boundaries
-- **Depth scale alignment from SfM**: Only 54 sparse points → noisy scale ratios. Per-view center projection works better with GT.
+## Where we are (2026-10-07)
 
----
+**Multi-photo (the main product):** learned matching (RaCo-ALIKED + LightGlue) -> GPU SfM (five-point, rotation
+averaging, GPU bundle adjustment, dense FAST/BRIEF init) -> WebGPU 3DGS training (AbsGS densification, SH 3, D-SSIM,
+pose refinement, floater census carve, size cap 0.1 x rig radius) -> sorted full-resolution viewer, LOD streaming,
+WebXR. Versus gsplat on the same photos and COLMAP poses (TruckFull 30K): 24.95 dB / SSIM 0.887 with 0.89M splats vs
+25.13 / 0.877 with 3.79M. At parity on the benchmark.
 
-## Priority 1: Single-Image Quality (Quick Wins from BLUNT)
+**Single photo:** DAv3 depth (EXIF or estimated focal) -> splats sized to their cells -> occlusion fill (background
+behind depth edges, the photo continued past its frame) -> Scene depth control.
 
-Source: https://github.com/SonnyC56/blunt — Python tool doing similar single-image-to-splat conversion.
+**What still goes wrong (measured or seen by TJ):**
+1. Rooms from phone photos (TJ's Bathroom): smears and empty areas off the photo path, black where no photo looked.
+   Init is 7.8K SfM points for a whole room; walls fill from those seeds or not at all. Exposure varies 6x.
+2. Far background from extreme poses (Bicycle, low look-up pose): depth-ambiguous specks.
+3. Photos dropped by the pipeline: a landscape photo among portraits is skipped by the multi-view depth pass; 2 of 35
+   Bathroom photos unplaced. The user is not told which or why.
+4. Popping when turning (one depth per splat in the global sort).
 
-### 1.1 EXIF Focal Length
-- Read focal length from image EXIF data (SpawnDev.BlazorJS can access this)
-- BLUNT uses `max(w,h) * 0.7` as fallback; we use `1.2` — test which is better
-- **Files**: `DepthToGaussianKernel.cs` (RunUnprojectAsync), `MultiViewGenerationService.cs`
+**Fixed 2026-10-07:** the floater census counted every splat on a not-yet-opaque pixel as a floater (37c1fd2) - the carve
+was deleting the thin walls of exactly the captures that need them (TJ's "TONS of holes"). The stochastic renderer was
+the Generate default (now sorted, full resolution). AOT trainer crash (ILGPU 5.3.5). End-carve splats left in the
+file (compacted).
 
-### 1.2 Flying Pixel Removal
-- At depth discontinuities, pixels get unprojected to wrong positions ("floaters")
-- BLUNT detects these via depth gradient magnitude and removes them
-- We already compute depth gradient for edge sharpness — extend to cull extreme gradients
-- **Files**: `DepthToGaussianKernel.cs` (UnprojectAndPackKernel)
+## Next, in order
 
-### 1.3 Near-Camera Culling
-- Remove closest ~5-8% of splats by depth (often noise/artifacts)
-- Simple threshold after min/max normalization
-- **Files**: `DepthToGaussianKernel.cs`
+Each item: measured on Bathroom (phone room), Bicycle (outdoor 360) and TruckFull (object) - held-out photos AND the
+Studio.Wander views (in/up/low/out/mid, pan-0..7, over-0/1), side by side with the run before. A change that wins the
+held-out number and looks worse off-path does not ship.
 
-### 1.4 Edge-Aware Opacity
-- Splats at depth edges get reduced opacity (currently all 0.9)
-- Use the existing depth gradient to modulate opacity: high gradient → lower alpha
-- **Files**: `DepthToGaussianKernel.cs` (line that sets `outPacked[outOff + 9] = 0.9f`)
+1. **Re-baseline the carve on the census fix** (k1 Bicycle, k2 Truck, h6-h9 Bathroom, running). Decide the unseen bar
+   (1 px costs Bathroom 0.77 dB supervised; try 0.05) and whether the in-training carve earns its keep on rooms
+   (Bathroom: supervised 37.4 dB without it, 33.5 with; held-out equal).
+2. **Per-photo exposure** (done, opt-in `&exposure=1`, gate-verified): A/B on Bathroom; default-on if rooms gain and
+   benchmarks do not lose. Then the held-out exposure fit for fair scoring (the reference fits the left half).
+3. **Depth from DAv3 in training** (we compute it for posing and throw it away):
+   a. Dense init: each photo's DAv3 depth aligned (scale/shift) to the SfM points it sees, back-projected on a grid,
+      voxel-thinned - seeds on every surface a photo saw, not only where features matched.
+   b. Inverse-depth L1 against the aligned depth, weight 1.0 -> 0.01 over training (the reference's `-d`). Indoor first.
+4. **Capture feedback:** after SfM, show which photos were dropped and why, and a coverage ring (headings with photos,
+   as the pan views log). Fix the landscape-photo skip in the multi-view depth pass.
+5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) default-on if the in/out wander views
+   gain; 2D Mip filter in the viewer.
+6. **Far background:** a background shell / far-depth prior for sky and distant scenery (the Bicycle low-pose specks).
+7. **Density control at 30K:** revisit MCMC at equal budget, error-driven densification (Bulo et al.), Taming-style
+   budget for the device.
+8. **Viewer:** per-tile sort against popping (StopThePop); SPZ / SOG import so people can open what others publish.
 
-### 1.5 Median Filtering on Depth
-- Smooth depth map before unprojection to reduce noise
-- ILGPU kernel: 3x3 or 5x5 median filter on the depth buffer
-- **Files**: New kernel in `DepthToGaussianKernel.cs` or `DepthEstimationService.cs`
+## Demo samples (done 2026-10-07, pending TJ)
 
-### 1.6 Depth Anything V3 ✅ (2026-03-17)
-- FP16 ONNX model converted from onnx-community/depth-anything-v3-small (50.5 MB)
-- Patched `/backbone/Resize` from cubic→linear for ORT WebGPU EP compat
-- Outputs: `predicted_depth`, `confidence`, `extrinsics`, `intrinsics` — multi-view native
-- DAv3 outputs direct depth (high=far), flipped to disparity-like in `DepthEstimationService.FlipDepthKernel`
-- Model selector added to Studio UI, DAv3 is now default
-- **Status**: Inference works, testing depth quality
+samples/catalog.json -> huggingface.co/datasets/LostBeard/spawnscene-samples: 3 sets (Hamamni Baths interior, ceramic
+pine cone, Korno rock; CC BY-SA 4.0 / CC0) + 5 CC0 photos at 3840 px. Each set gets judged off the photo path before it
+stays (s1-s3 runs). Wanted from TJ: OK to add his Bathroom set; 2-3 phone captures of his own (an object on a table, a
+room walked around, an outdoor scene) - the only multi-photo sources that are both clean and ours.
 
-### 1.7 Kernel Struct Refactor ✅ (2026-03-17)
-- `SplatParams` and `SplatWorldParams` structs replace all `float[] p` magic-index arrays
-- No GPU buffer allocation for params — ILGPU decomposes to scalar bindings
-- Optional `CameraParams? camera` on all public methods for EXIF flow-through
+## Standing measurement rules
 
-### 1.8 EXIF Focal Length ✅ (2026-03-17)
-- Pure C# EXIF parser (`ExifReader.cs`) extracts FocalLength + FocalLengthIn35mmFilm from JPEG bytes
-- `CameraParams.CreateFromExif()`: FocalLength35mm (exact) → phone estimate (7x crop) → 1.2x heuristic
-- Integrated into single-image, multi-view, and SfM paths
-
-### 1.9 Normal-Based Flying Pixel Removal
-- Compute surface normals from cross-product of neighboring 3D points (ILGPU kernel)
-- Cull or reduce opacity of splats where normal is nearly perpendicular to camera ray (grazing angle)
-- More general than depth-gradient culling — works for any scene geometry
-- **Files**: New kernel in `DepthToGaussianKernel.cs` or separate `NormalFilterKernel.cs`
-
----
-
-## Priority 2: Multi-View Fusion Improvements
-
-### 2.1 Better SfM for Wide-Baseline Views
-- TempleRing GT validates the world-space kernel math is correct
-- SfM needs: better RANSAC thresholds, cheirality check, more features
-- Test with TempleRing (SfM vs GT) to measure pose error
-- **Files**: `SfmReconstructor.cs`, `GpuSfmKernels.cs`
-
-### 2.2 Multi-Point Depth Scale Alignment
-- Current: project scene center into view, sample one MDE depth → one scale ratio
-- Better: project multiple SfM sparse points → multiple ratios → robust median/RANSAC
-- Or: least-squares fit `D_sfm = s * D_mde + b` per view using multiple correspondences
-- **Files**: `MultiViewGenerationService.cs`
-
-### 2.3 Seam Blending for 2D Offset Mode
-- Current: hard cut between reference and extension → visible seam
-- Better: overlap band (100-200px) where both views contribute with opacity gradient
-- Reference fades from 1.0→0.0, extension fades from 0.0→1.0 across the band
-- Use sigmoid/cosine fade based on distance from image center → smooth dissolve between views
-- **Files**: `DepthToGaussianKernel.cs` (exclusion zone → blend zone)
-
-### 2.5 Global Alignment Kernel (Relative Depth + Sparse SfM)
-- Use sparse SfM points as "metric skeleton" to anchor relative MDE depth
-- ILGPU kernel: find global scale `s` and bias `b` that best fits MDE to SfM world coords
-- Scene-agnostic: works for any scene without per-view manual tuning
-- Alternative to metric depth models (which are too large for browser)
-- **Files**: New `GlobalAlignmentKernel.cs`
-
-### 2.6 DAv3 Multi-View Native Inference
-- DAv3 accepts `[1, N, 3, H, W]` input — process multiple views in single forward pass
-- Outputs extrinsics `[1, N, 3, 4]` and intrinsics — eliminates need for separate SfM
-- Could replace SfmReconstructor entirely for supported view counts
-- **Files**: `DepthEstimationService.cs`, `MultiViewGenerationService.cs`
-
-### 2.4 Homography Instead of Translation
-- 2D offset (median dx, dy) assumes pure translation between views
-- For rotating camera (panning), correct transformation is a homography
-- Compute homography from 4+ matched feature pairs using DLT + RANSAC
-- Near objects shift more than far objects (parallax) — homography handles this for planar scenes
-- **Files**: New `HomographyEstimator.cs` or extend `MultiViewGenerationService.cs`
-
----
-
-## Priority 3: SOG Format + Streaming LOD
-
-### 3.1 Morton Code Spatial Organization
-- Assign each splat to a spatial chunk using Z-order curves
-- ILGPU kernel: quantize position → interleave bits → Morton code
-- Radix sort by Morton code (reuse GpuSplatSorter)
-- Build chunk table: (mortonCode, startIndex, count)[]
-- **Files**: New `SpatialOrganizer.cs`
-
-### 3.2 Frustum Culling by Chunk
-- Before rendering, test chunk AABBs against camera frustum
-- Build active chunk list per frame
-- **Files**: `GpuGaussianRenderer.cs`
-
-### 3.3 Distance-Based LOD + Stochastic Morton Masking
-- Budget ~14-20M active splats for 60 FPS
-- Near chunks: full density, Medium: 1/4, Far: 1/16
-- **Stochastic Morton LOD**: Use LSBs of Morton index as density mask — further splats get masked
-  by progressively more bits, maintaining constant screen-space density regardless of scene size.
-  Pre-compute Morton index during unprojection kernel for O(1) voxel lookup later.
-- This enables 100M+ splat scenes without exceeding WASM memory or GPU frame budget
-- **Files**: `GpuGaussianRenderer.cs`, `DepthToGaussianKernel.cs` (Morton pre-computation)
-
-### 3.4 SOG File Format
-- Header + chunk index + quantized splat data
-- Save/load via OPFS
-- **Files**: New `SogFormat.cs`, extend `ProjectService.cs`
-
----
-
-## Priority 4: Video Input
-
-### 4.1 Keyframe Extraction
-- HTMLVideoElement → seek at intervals → OffscreenCanvas → RGBA
-- Score frames by sharpness (Laplacian variance) and diversity (feature distance)
-- **Files**: New `VideoFrameExtractor.cs`
-
-### 4.2 Studio Integration
-- Accept video files in file picker
-- Extract keyframes → add as project sources → run multi-view pipeline
-- **Files**: `Studio.Projects.cs`, `Studio.UI.cs`
-
----
-
-## Future: WebRTC Multi-Device Scanning
-- Multiple phones stream camera feeds to PC via WebRTC
-- PC runs incremental SfM + scene generation in real-time
-- VR headset on PC views the scene being built
-- See NOTES.md for full architecture notes
-
----
-
-## Test Datasets (wwwroot/datasets/)
-| Dataset | Images | Ground Truth | Notes |
-|---------|--------|-------------|-------|
-| TempleRing | 16 (every 3rd) | R/t/K in templeR_par.txt | Middlebury benchmark, ring around temple |
-| DinoSparseRing | 16 | Possibly (check) | Similar ring capture |
-| Skull | 75 | None | Real photos, good coverage |
-| Bathroom | 16+ | None | Phone photos, near-parallel, challenging |
-| SouthBuilding | 22 | None | Outdoor, wide baseline |
-| SmallPlastic | 14 | None | Small object |
-
----
-
-## SpawnDev.ILGPU Bugs to Fix
-
-### WGSL `_uf_group_iter` Redeclaration Bug
-- **Symptom:** When multiple kernels are loaded via `LoadStreamKernel` on the same `WebGPUAccelerator`, the generated WGSL shader has duplicate declarations of `var _uf_group_iter`, causing `CreateShaderModule` to fail silently. Kernels that reference `Grid.IdxX` don't execute (output buffers stay zeroed or unchanged).
-- **Repro:** Load 3+ stream kernels (e.g., 2 MatMul + 1 LayerNorm + 1 Softmax), all using `Grid.IdxX`. The WGSL compiler reports `redeclaration of '_uf_group_iter'` at multiple line offsets.
-- **Workaround:** Use `LoadAutoGroupedStreamKernel` with `Index1D` instead (sequential-per-row approach for reduction kernels). This avoids `Grid.IdxX` in the generated WGSL.
-- **Fix:** The WGSL code generator needs to emit unique variable names per kernel entry point when multiple kernels share a shader module, or compile each `LoadStreamKernel` into its own WGSL module.
-- **Files:** SpawnDev.ILGPU WebGPU backend WGSL code generator
-- **Priority:** Medium — workaround exists, but shared memory reductions would be faster for large C dimensions
-
----
-
-## Reference Projects
-- **SuperSplat** (PlayCanvas): Editor/viewer for pre-made splats, SOG format, walk mode, annotations
-- **BLUNT**: Python single-image-to-splat tool, good quality improvements (flying pixel removal, edge-aware opacity, EXIF focal length)
-- **DepthSplat** (CVPR 2025): Multi-view depth + transformer → high-quality splats
-- **Splatt3r**: Pose-free stereo pairs → splats at 4 FPS
-- **DUSt3R/MASt3R**: Foundation models for dense 3D from 2+ images
+- Off the photo path or it did not happen (Wander views in every project/dataset autotest; compose_wander.py).
+- Per-photo numbers, not only means: one photo losing 13 dB was the census bug's signature.
+- Against gsplat at the same poses (render_turns.py) when a claim is about parity.
+- Phone captures (Bathroom) next to the benchmark sets; the benchmarks have no auto exposure and no thin rooms.
+- No timing comparisons while a peer's heavy job runs; check the board first.

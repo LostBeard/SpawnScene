@@ -180,6 +180,10 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   opaque kept a 3e38 sentinel and every splat on them counted as a floater: the carve deleted the still-thin walls of
   TJ's Bathroom ("TONS of holes"). TrainerGate's thin-splat-in-a-hole case guards it. Bicycle unchanged by the fix
   (k1 25.06 / 0.7662 vs 25.07 / 0.7663). The end carve's splats are compacted before the save (GpuDensify PruneOnly).
+- **Depth init + per-photo exposure gains are DEFAULTS (2026-10-08, TJ):** `DepthFusionInitStride` 4 (seeds from the
+  photos' DAv3 depth where two views agree; `&depthinit=0` off) and exposure gains only (`&exposure=0` off, `=1`/`affine`
+  the full 3x4). Bathroom held out 15.58 -> 18.57 dB with both, fair score (gains fitted on the left half, right half
+  scored - logged as "held out RIGHT HALF") 18.88 -> 24.32 from the gains; Bicycle fair +0.16; Truck neutral.
 - **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):
   `exposure=1` per-photo 3x4 affine exposure, the photos' mean folded into the scene at the end (TrainerGate exposure
   case); `depthinit=N` seeds from the photos' DAv3 depth where two views agree, coloured from the device decode

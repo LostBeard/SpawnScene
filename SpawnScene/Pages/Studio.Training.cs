@@ -101,10 +101,13 @@ public partial class Studio
     /// exposed one by one: a phone's auto exposure, white balance and HDR merges (TJ's Bathroom). The viewer shows the
     /// scene's own appearance; the exposures stay in training.
     /// </summary>
-    public static bool ExposureOption { get; set; }
+    /// <remarks>On by default (gains only) since 2026-10-08 (TJ): Bathroom held out 16.88 -> 18.57 dB (fair score 18.88 ->
+    /// 24.32), Bicycle fair +0.16, Truck neutral. &amp;exposure=0 off, =1 / affine the full 3x4 (its offsets cost
+    /// fixed-exposure captures 0.2-0.6 dB), =gains the default.</remarks>
+    public static bool ExposureOption { get; set; } = true;
 
     /// <summary><c>&amp;exposure=gains</c>: per-photo exposure as per-channel gains only (SplatTrainerGpu.ExposureGainsOnly).</summary>
-    public static bool ExposureGainsOnlyOption { get; set; }
+    public static bool ExposureGainsOnlyOption { get; set; } = true;
 
     /// <summary>
     /// <c>&amp;depthloss=X</c>: depth supervision (SplatTrainerGpu.Depth, the reference's <c>-d</c>) - an L1 between the rendered

@@ -212,7 +212,7 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("inpaintreach", out var uIr) && float.TryParse(uIr, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var uIrv)) OcclusionFill.InpaintMaskReach = Math.Clamp(uIrv, 1f, 4f);
         if (query.TryGetValue("depthinit", out var uDi) && int.TryParse(uDi, out var uDiv)) _multiViewService.DepthFusionInitStride = Math.Max(0, uDiv);
-        if (query.TryGetValue("exposure", out var uEx)) { ExposureOption = uEx is "1" or "true" or "gains"; ExposureGainsOnlyOption = uEx == "gains"; }
+        if (query.TryGetValue("exposure", out var uEx)) { ExposureOption = uEx is not ("0" or "false"); ExposureGainsOnlyOption = uEx is not ("1" or "true" or "affine"); }
         if (query.TryGetValue("depthmodel", out var uDm) && !string.IsNullOrWhiteSpace(uDm)) DepthModelOverride = uDm;
         if (!query.TryGetValue("autotest", out var mode))
             return;
@@ -274,7 +274,7 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("depthmodel", out var dmq) && !string.IsNullOrWhiteSpace(dmq)) DepthModelOverride = dmq;
         if (query.TryGetValue("inpaint", out var ipq)) DepthToGaussianKernel.InpaintHiddenLayer = ipq is "1" or "true";
         // &exposure=1: per-photo exposure compensation (Studio.Training.ExposureOption).
-        if (query.TryGetValue("exposure", out var exq)) { ExposureOption = exq is "1" or "true" or "gains"; ExposureGainsOnlyOption = exq == "gains"; }
+        if (query.TryGetValue("exposure", out var exq)) { ExposureOption = exq is not ("0" or "false"); ExposureGainsOnlyOption = exq is not ("1" or "true" or "affine"); }
         if (query.TryGetValue("carveunseenpx", out var cupq) && float.TryParse(cupq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cupv))
             CarveUnseenMinWeight = Math.Max(0f, cupv);

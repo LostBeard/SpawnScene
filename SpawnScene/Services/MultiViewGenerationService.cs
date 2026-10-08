@@ -933,7 +933,9 @@ public class MultiViewGenerationService
     /// &amp;depthinit=N: also seed splats from the photos' DAv3 depth where two views agree (DepthFusionInit), one grid
     /// sample every N pixels; 0 = off (the default until measured).
     /// </summary>
-    public int DepthFusionInitStride { get; set; }
+    /// <remarks>Default 4 since 2026-10-08 (TJ): Bathroom held out 15.58 -> 16.91 dB, Bicycle neutral (25.17 / 25.16);
+    /// &amp;depthinit=0 turns it off. Research/quality-roadmap-2026-10-07.md.</remarks>
+    public int DepthFusionInitStride { get; set; } = 4;
 
     /// <summary>&amp;depthtol=X: two views agree on a depth sample within this fraction of its camera depth.</summary>
     public float DepthFusionRelTol { get; set; } = 0.03f;

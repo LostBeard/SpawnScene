@@ -55,7 +55,7 @@ held-out number and looks worse off-path does not ship.
    0.2-0.6 dB (its offsets do not fold into the scene); `&exposure=gains` (per-channel gains only) wins the phone room
    (h0 Bathroom 18.64 dB vs affine 18.23), is neutral on Truck (24.00 vs 24.07 none), -0.22 dB / SSIM up on Bicycle under
    the mean-exposure score. Fair score (j0-j3): gains WINS Bicycle (+0.16) and Bathroom (+5.4 fair, +1.7 held out).
-   **Proposed default with depthinit=4 - TJ's call** (Research/quality-roadmap-2026-10-07.md).
+   **DEFAULT since 2026-10-08 (TJ), with depthinit=4.**
 3. **Depth from DAv3 in training** (we compute it for posing and throw it away):
    a. Dense init: each photo's DAv3 depth aligned (scale/shift) to the SfM points it sees, back-projected on a grid,
       voxel-thinned - seeds on every surface a photo saw, not only where features matched.

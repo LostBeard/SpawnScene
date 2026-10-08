@@ -32,7 +32,11 @@ Done 2026-10-08: Docs/benchmarks.md#viewer (SpawnScene 0.55-0.61x GaussianSplats
 
 ## Video
 
-No end-to-end test yet (TruckVideo dataset exists): audit in progress.
+Audit: [video-path-audit-2026-10-08.md](video-path-audit-2026-10-08.md). The code works through the DATASET harness only
+(TruckVideo 2026-09-25: 126/126 frames posed, focal 582.3 vs GT 581.9, held out 20.64 / 0.764 at 7K, a 2-week-old
+build); the USER path (add a video to a project -> Generate) has never run; `&videoframes` is documented but read
+nowhere (always 120 frames); TruckVideo is a slideshow of the Truck photos (no blur / rolling shutter). Three small
+changes enable a user-path test (see the audit). Queued after parity (TJ).
 
 ## Open gaps (biggest first)
 1. Hamamni Baths: missing walls / blobs (depth coverage) - in progress.

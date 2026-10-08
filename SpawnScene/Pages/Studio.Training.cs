@@ -990,6 +990,7 @@ public partial class Studio
 
             var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box, logPerView: true);
             WarnOnEvalOverflow(fitted, views.Count);
+            await ReportHeldOutFittedGainsAsync(_trainer, packed, n, views, targets, box);
             await ReportHeldOutCrossMatchAsync(_trainer, packed, n, views, targets, box);
 
             Console.WriteLine(
@@ -1724,6 +1725,58 @@ public partial class Studio
         public string Describe() =>
             $"held out PSNR {HeldPsnr:F2} dB SSIM {HeldSsim:F4} | " +
             $"supervised PSNR {SupPsnr:F2} dB SSIM {SupSsim:F4}";
+    }
+
+    /// <summary>
+    /// The fair held-out score for per-photo exposure (the reference's train_test_exp protocol, gains only): each held-out
+    /// photo's per-channel gains are fitted on the LEFT half of the image (least squares, closed form: g = sum(r t) /
+    /// sum(r r)) and PSNR is measured on the RIGHT half, as-is and with the gains - for EVERY run, so a run with
+    /// &amp;exposure and one without are scored alike. Without it a scene that learned the photos' MEAN exposure is scored
+    /// against photos exposed one by one (Bicycle h1: -0.22 dB vs no exposure, SSIM up). CPU transfer: the held-out
+    /// renders and photos, evaluation only.
+    /// </summary>
+    static async Task ReportHeldOutFittedGainsAsync(SplatTrainerGpu trainer, MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
+        IReadOnlyList<TrainingView> views, MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box)
+    {
+        var (w, h) = trainer.Size;
+        double rawSum = 0, fitSum = 0;
+        int count = 0;
+        var gains = new List<string>();
+        for (int i = 0; i < views.Count; i++)
+        {
+            if (views[i].UsedForSupervision) continue;
+            var cam = views[i].Camera.ScaledTo(w, h);
+            var (near, far) = SplatBounds.DepthRangeFor(box, cam);
+            var r = await trainer.RenderForwardAsync(packed, n, cam, near, far, readback: true);
+            trainer.SetTargetFrom(targets, i);
+            var t = await trainer.ReadTargetAsync();
+            if (r.Length != t.Length || r.Length == 0) continue;
+            int half = w / 2;
+            var g = new double[3];
+            for (int c = 0; c < 3; c++)
+            {
+                double rt = 0, rr = 0;
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < half; x++) { int k = (y * w + x) * 3 + c; rt += r[k] * t[k]; rr += r[k] * r[k]; }
+                g[c] = rr > 1e-9 ? rt / rr : 1.0;
+            }
+            double seRaw = 0, seFit = 0; long m = 0;
+            for (int y = 0; y < h; y++)
+                for (int x = half; x < w; x++)
+                    for (int c = 0; c < 3; c++)
+                    {
+                        int k = (y * w + x) * 3 + c;
+                        double a = Math.Clamp(r[k], 0f, 1f) - t[k], b = Math.Clamp(r[k] * g[c], 0.0, 1.0) - t[k];
+                        seRaw += a * a; seFit += b * b; m++;
+                    }
+            rawSum += 10 * Math.Log10(1.0 / Math.Max(seRaw / m, 1e-12));
+            fitSum += 10 * Math.Log10(1.0 / Math.Max(seFit / m, 1e-12));
+            count++;
+            gains.Add($"{(g[0] + g[1] + g[2]) / 3:F3}");
+        }
+        if (count == 0) return;
+        Console.WriteLine($"[Train] held out RIGHT HALF over {count} views: PSNR {rawSum / count:F3} dB as rendered, {fitSum / count:F3} dB with " +
+            $"per-photo gains fitted on the left half (mean gains {string.Join(" ", gains.Take(12))})");
     }
 
     static async Task<EvalScores> EvaluateAsync(

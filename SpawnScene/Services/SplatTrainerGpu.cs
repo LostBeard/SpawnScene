@@ -975,6 +975,13 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// Point the loss at one image inside a GPU-resident stack of targets (view-major,
     /// width*height*3 floats each). Device-to-device, so a multi-view run pays the upload once.
     /// </summary>
+    /// <summary>The current target as RGB floats. CPU transfer: evaluation only (the fair held-out score).</summary>
+    public async Task<float[]> ReadTargetAsync()
+    {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        return await _target!.CopyToHostAsync<float>(0, (long)_width * _height * 3);
+    }
+
     public void SetTargetFrom(MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex)
     {
         long pixels = (long)_width * _height;

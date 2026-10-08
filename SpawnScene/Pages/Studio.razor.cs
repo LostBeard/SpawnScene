@@ -245,6 +245,13 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("depthtol", out var dtq) && float.TryParse(dtq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var dtv))
             _multiViewService.DepthFusionRelTol = Math.Clamp(dtv, 0.001f, 0.5f);
+        // &edgesnap=1: single-photo depth edges snapped to the photo's colour edges (DepthEdgeSnap).
+        if (query.TryGetValue("edgesnap", out var esq)) DepthToGaussianKernel.EdgeSnapEnabled = esq is "1" or "true";
+        if (query.TryGetValue("cellstretch", out var cellStretchQ) && float.TryParse(cellStretchQ, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var cellStretchV)) DepthToGaussianKernel.MaxCellStretch = Math.Max(1f, cellStretchV);
+        if (query.TryGetValue("snapr", out var snapRq) && int.TryParse(snapRq, out var snapRv)) DepthEdgeSnap.GridRadius = snapRv;
+        if (query.TryGetValue("snapstep", out var ssq2) && float.TryParse(ssq2, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var ssv2)) DepthEdgeSnap.StepScale = ssv2;
         // &exposure=1: per-photo exposure compensation (Studio.Training.ExposureOption).
         if (query.TryGetValue("exposure", out var exq)) ExposureOption = exq is "1" or "true";
         if (query.TryGetValue("carveunseenpx", out var cupq) && float.TryParse(cupq,

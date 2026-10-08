@@ -37,6 +37,8 @@ public class DepthToGaussianKernel
         // Exclusion rect: skip pixels inside this region (multi-view overlap avoidance)
         public int ExclX0, ExclY0, ExclX1, ExclY1;
         public float DepthScaleCorrection;
+        /// <summary>Longest a cell's splat may grow along a receding surface, in pixel footprints (MaxCellStretch).</summary>
+        public float CellStretch;
     }
 
     /// <summary>
@@ -198,7 +200,7 @@ public class DepthToGaussianKernel
             rPosX, rPosY, dny);
         var quat = disk.Q;
         float shrink = splatScale / (pixelScale > 1e-6f ? pixelScale : 1e-6f);
-        float cap = MaxCellStretch * pixelScale;
+        float cap = p.CellStretch * pixelScale;
         float su = MathF.Min(disk.Su, cap) * shrink, sv = MathF.Min(disk.Sv, cap) * shrink;
         if (!(su > 1e-6f)) su = splatScale;
         if (!(sv > 1e-6f)) sv = splatScale;
@@ -230,8 +232,8 @@ public class DepthToGaussianKernel
     /// </summary>
     private const float SurfaceFlatten = 0.15f;
 
-    /// <summary>Longest a depth-grid cell's splat may grow along a receding surface, in pixel footprints.</summary>
-    private const float MaxCellStretch = 8f;
+    /// <summary>Longest a depth-grid cell's splat may grow along a receding surface, in pixel footprints (&amp;cellstretch=X).</summary>
+    public static float MaxCellStretch { get; set; } = 8f;
 
     /// <summary>
     /// Splats within this many pixels of the frame edge are dropped outright. Edge geometry is
@@ -837,6 +839,7 @@ public class DepthToGaussianKernel
             ExclX0 = exclX0, ExclY0 = exclY0,
             ExclX1 = exclX1, ExclY1 = exclY1,
             DepthScaleCorrection = depthScaleCorrection,
+            CellStretch = MaxCellStretch,
         };
 
         using var counterBuf = accelerator.Allocate1D<int>(1);
@@ -1088,6 +1091,7 @@ public class DepthToGaussianKernel
             MaxDepth = depth.MaxDepth,
             EdgeSharpness = edgeSharpness,
             DepthScaleCorrection = 1.0f,
+            CellStretch = MaxCellStretch,
         };
 
         // Atomic compaction counter
@@ -1119,8 +1123,17 @@ public class DepthToGaussianKernel
         if (depth.RawDepthGpu == null)
             throw new InvalidOperationException("DepthResult.RawDepthGpu is null — GPU path requires GPU-resident depth.");
 
+        // Depth edges snapped to colour edges (DepthEdgeSnap): no ramp of in-between depths for splats to sheet along.
+        using var snapped = EdgeSnapEnabled ? accelerator.Allocate1D<float>((long)w * h) : null;
+        var depthView = depth.RawDepthGpu.View;
+        if (snapped != null)
+        {
+            DepthEdgeSnap.Run(accelerator, depthView, rgbaView, snapped.View, w, h);
+            depthView = snapped.View;
+        }
+
         _unprojectAndPackKernel!(numPoints,
-            depth.RawDepthGpu.View,
+            depthView,
             rgbaView,
             outPackedBuf.View,
             counterBuf.View,
@@ -1134,7 +1147,7 @@ public class DepthToGaussianKernel
             {
                 // CPU transfer: one int, to report the surface / background split.
                 surfaceCount = (await counterBuf.CopyToHostAsync<int>(0, 1))[0];
-                OcclusionFill.Append(accelerator, depth.RawDepthGpu.View, rgbaView, outPackedBuf.View, counterBuf.View,
+                OcclusionFill.Append(accelerator, depthView, rgbaView, outPackedBuf.View, counterBuf.View,
                     new OcclusionFill.Params
                     {
                         Width = w, Height = h, Subsample = subsample, GridW = sampledW, GridH = sampledH,
@@ -1162,6 +1175,9 @@ public class DepthToGaussianKernel
         }
 
     }
+
+    /// <summary>&amp;edgesnap=1: snap the depth's edges to the photo's colour edges before unprojecting (DepthEdgeSnap).</summary>
+    public static bool EdgeSnapEnabled { get; set; }
 
     /// <summary>
     /// Single-photo scenes get a hidden background layer behind their depth edges (<see cref="OcclusionFill"/>), so a

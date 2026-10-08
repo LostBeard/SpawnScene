@@ -1442,6 +1442,7 @@ public partial class Studio
                 return;
             }
             if (ExportColmapOption) await ExportColmapAsync();
+            if (SplatStatsOption) await LogSplatStatsAsync(liveScene);
             // &dumpheld=1: the trainer's render of every held-out photo's view (saved as held-<name>-trainer.png), to
             // compare with another trainer's renders of the same photos (parity, Hamamni 2026-10-08).
             if (DumpHeldOption)

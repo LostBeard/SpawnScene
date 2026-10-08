@@ -262,6 +262,7 @@ public partial class Studio : IAsyncDisposable
         // &exportcolmap=1 (harness): after Generate, our SfM as COLMAP text for a reference trainer (Studio.ColmapExport).
         if (query.TryGetValue("exportcolmap", out var ecq)) ExportColmapOption = ecq is "1" or "true";
         if (query.TryGetValue("dumpheld", out var dhq)) DumpHeldOption = dhq is "1" or "true";
+        if (query.TryGetValue("splatstats", out var splatStatsQ)) SplatStatsOption = splatStatsQ is "1" or "true";
         // &maxscale=F: the splat size cap, F x the rig radius (default 0.1, Studio.Training.MaxScaleFraction). Every mode:
         // the parity ablation needs it on the project / sample path (Hamamni's blurred vault, 2026-10-08).
         if (query.TryGetValue("maxscale", out var msq) && float.TryParse(msq, System.Globalization.NumberStyles.Float,

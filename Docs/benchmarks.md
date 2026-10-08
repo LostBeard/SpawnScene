@@ -24,11 +24,13 @@ it says so.
 | Tanks and Temples *Truck* (all 251 photos, 979 px) | 30K | PSNR / SSIM | 24.95 dB / **0.887** | **25.13** dB / 0.877 |
 | | | splats | **0.89M** | 3.79M |
 | | | time | 25 min | - |
-| Mip-NeRF 360 *Bicycle* (194 photos, 1237 px) | 7K | PSNR / SSIM | **25.07 dB / 0.766** | 23.14 dB / 0.666 |
+Provenance: Truck - SpawnScene run c49 (2026-10-06), gsplat 30K run of the same date and split (`val_step29999.json`
+kept).
 
-Provenance: Truck - SpawnScene run c49 (2026-10-06), gsplat run of the same date and split. Bicycle - SpawnScene run k1
-(2026-10-07, COLMAP poses), gsplat 7K from 2026-10-06 at the same resolution and split. **A fresh paired re-run of both
-tools with the logs published here is in progress.**
+**Withdrawn 2026-10-08: the Bicycle 7K row** (SpawnScene 25.07 / 0.766 vs gsplat 23.14 / 0.666). The gsplat figure was
+measured at step 7,000 of a 30K run, whose learning rates had not yet decayed - not a 7K run. A 7K-only gsplat run at the
+same resolution scored 21.29 / 0.552, below published 3DGS numbers for the scene, unexplained so far. Neither is a fair
+reference; both tools are being re-run per scene (the matrix below will replace this table).
 
 ### Without COLMAP
 

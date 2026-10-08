@@ -42,11 +42,9 @@ Measured with the reference protocol (every 8th photo held out, never trained on
 |---|---|---|---|
 | Tanks and Temples *Truck*, 30K iterations | PSNR / SSIM | 24.95 dB / **0.887** | 25.13 dB / 0.877 |
 | | splats | **0.89M** | 3.79M |
-| Mip-NeRF 360 *Bicycle*, 7K iterations | PSNR / SSIM | **25.07 dB / 0.766** | 23.14 dB / 0.666 |
-
-Same photos, same camera poses (COLMAP), same resolution, same split. Bicycle with SpawnScene's **own** structure from
-motion instead of COLMAP's poses: 25.17 dB - posing in the browser costs nothing measurable. Details, the protocol and
-side-by-side renders: [Docs/benchmarks.md](Docs/benchmarks.md).
+Same photos, same camera poses (COLMAP), same resolution, same split. A comparison across every standard scene and the
+other trainers (gsplat, the reference 3DGS, Brush) is being measured now; an earlier Bicycle row was withdrawn because
+its gsplat number was not a like-for-like 7K run. Details and the protocol: [Docs/benchmarks.md](Docs/benchmarks.md).
 
 **Viewer:** opened in SpawnScene, Spark, PlayCanvas and GaussianSplats3D from the same seven camera poses, a 742K-splat
 scene draws the same picture in all four, and all four hold 60 fps at 1600x900 on an RTX 4070. Uncapped, SpawnScene is

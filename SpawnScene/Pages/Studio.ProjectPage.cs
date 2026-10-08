@@ -237,6 +237,16 @@ public partial class Studio
         // No "Photos" heading: the tab already says it (with the count); this row is the Add / Remove actions.
         y += 40;
 
+        if (!string.IsNullOrEmpty(_activeProject?.Credit))
+        {
+            parent.AddChild(new UILabel
+            {
+                X = x, Y = y - 6, Text = "Photos: " + _activeProject!.Credit,
+                FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted,
+            });
+            y += 18;
+        }
+
         if (sources.Count >= 2)
         {
             // MEASURED 2026-10-02: on a small room (Bathroom, 24 training photos) neither resolution nor iterations moved
@@ -260,35 +270,42 @@ public partial class Studio
                 FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
             });
             y += 52;
-            parent.AddChild(new UILabel { X = x, Y = y, Text = "Or try a sample:", FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted });
-            y += 24;
-            var samples = new[]
+            // Samples: samples/catalog.json, photos hosted off-site (SampleCatalog). TJ 2026-10-07: the old 640 px PNGs
+            // were not worth demoing - high-resolution single photos and real multi-photo sets instead.
+            if (_sampleCatalog == null) { _ = EnsureSampleCatalogAsync(); return y; }
+            if (_sampleCatalog.Samples.Count == 0) return y;
+            var catalog = _sampleCatalog;
+            foreach (var (heading, sets) in new[] { ("Or try a photo set:", true), ("Or a single photo:", false) })
             {
-                ("Room", "samples/room.png"), ("Garden", "samples/garden.png"),
-                ("Living Room HD", "samples/living_room_hd.png"), ("Garden HD", "samples/garden_hd.png"),
-            };
-            float bx = x;
-            foreach (var (name, path) in samples)
-            {
-                float bw = Math.Max(80, name.Length * 8 + 20);
-                if (bx + bw > x + w) { bx = x; y += 34; }
-                var samplePath = path; var sampleName = name;
-                parent.AddChild(new UIButton
+                var group = catalog.Samples.Where(sm => sm.IsSet == sets).ToList();
+                if (group.Count == 0) continue;
+                parent.AddChild(new UILabel { X = x, Y = y, Text = heading, FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted });
+                y += 24;
+                float bx = x;
+                foreach (var sample in group)
                 {
-                    X = bx, Y = y, Width = bw, Height = 28, Text = name, FontSize = FontSize.Caption,
-                    NormalColor = AccentMuted, Enabled = !_pipelineBusy,
-                    OnClick = () => _ = LoadSampleImage(sampleName, samplePath),
-                });
-                bx += bw + 8;
+                    string label = sets
+                        ? $"{sample.Name} ({sample.Images.Count} photos, {sample.Bytes / (1024 * 1024)} MB)"
+                        : $"{sample.Name} ({Math.Max(1, sample.Bytes / (1024 * 1024))} MB)";
+                    float bw = Math.Max(80, label.Length * 7 + 20);
+                    if (bx + bw > x + w) { bx = x; y += 34; }
+                    var picked = sample;
+                    parent.AddChild(new UIButton
+                    {
+                        X = bx, Y = y, Width = bw, Height = 28, Text = label, FontSize = FontSize.Caption,
+                        NormalColor = AccentMuted, Enabled = !_pipelineBusy,
+                        OnClick = () => _ = LoadSampleAsync(catalog, picked),
+                    });
+                    bx += bw + 8;
+                }
+                y += 40;
             }
-            y += 40;
-            parent.AddChild(new UIButton
+            parent.AddChild(new UILabel
             {
-                X = x, Y = y, Width = 200, Height = 28, Text = "TempleRing (GT cameras)", FontSize = FontSize.Caption,
-                NormalColor = AccentMuted, Enabled = !_pipelineBusy,
-                OnClick = () => _ = GenerateFromTempleRingAsync(),
+                X = x, Y = y - 6, Text = "Sample photos are openly licensed; each keeps its credit with the project.",
+                FontSize = FontSize.Caption, Color = UITheme.Current.TextMuted,
             });
-            return y + 40;
+            return y + 24;
         }
 
         // Square tiles (the thumbnails are centre-cropped squares), as many columns as fit at ~148 px. A click selects.

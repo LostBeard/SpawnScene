@@ -1247,6 +1247,82 @@ public partial class Studio
         }
     }
 
+    SampleCatalog? _sampleCatalog;
+    bool _sampleCatalogLoading;
+
+    /// <summary>Fetch samples/catalog.json once; the project page rebuilds when it lands. A failure leaves no list.</summary>
+    private async Task EnsureSampleCatalogAsync()
+    {
+        if (_sampleCatalog != null || _sampleCatalogLoading) return;
+        _sampleCatalogLoading = true;
+        try
+        {
+            _sampleCatalog = await System.Net.Http.Json.HttpClientJsonExtensions.GetFromJsonAsync<SampleCatalog>(
+                _http, "samples/catalog.json", new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                ?? new SampleCatalog();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Studio] sample catalog unavailable: {ex.Message}");
+            _sampleCatalog = new SampleCatalog();
+        }
+        if (_state == StudioState.ProjectDetail) BuildProjectDetailUI();
+    }
+
+    /// <summary>
+    /// Download a catalog sample into the open project, photo by photo, exactly as picked files are stored, and keep
+    /// its credit on the project (the licenses ask for attribution wherever the photos are used).
+    /// </summary>
+    private async Task LoadSampleAsync(SampleCatalog catalog, SampleEntry sample)
+    {
+        if (_activeProject == null || _pipelineBusy) return;
+        var project = _activeProject;
+        try
+        {
+            string folder = catalog.Base.TrimEnd('/') + "/" + sample.Folder.Trim('/') + "/";
+            for (int i = 0; i < sample.Images.Count; i++)
+            {
+                string file = sample.Images[i];
+                _statusMessage = $"Downloading {sample.Name}: photo {i + 1} of {sample.Images.Count}...";
+                BuildProjectDetailUI();
+                var bytes = await _http.GetByteArrayAsync(folder + Uri.EscapeDataString(file));
+                int width = 0, height = 0;
+                try
+                {
+                    string type = file.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/jpeg";
+                    using var blob = new Blob(new byte[][] { bytes }, new BlobOptions { Type = type });
+                    using var bitmap = await _js.CallAsync<Blob, ImageBitmap>("createImageBitmap", blob);
+                    width = (int)bitmap.Width;
+                    height = (int)bitmap.Height;
+                }
+                catch (Exception decode)
+                {
+                    Console.WriteLine($"[Studio] sample {file}: decode failed ({decode.Message}), stored anyway");
+                }
+                // Prefixed with the sample's folder so two samples in one project cannot collide.
+                await _projectService.AddSourceAsync(project.Id, $"{sample.Folder.Trim('/')}_{file}", bytes, width, height);
+            }
+
+            _projects = await _projectService.ListProjectsAsync();
+            var updated = _projects.FirstOrDefault(p => p.Id == project.Id) ?? project;
+            string credit = $"{sample.Name}: {sample.Credit}, {sample.License}" + (string.IsNullOrEmpty(sample.Source) ? "" : $" ({sample.Source})");
+            updated.Credit = string.IsNullOrEmpty(updated.Credit) ? credit : $"{updated.Credit}; {credit}";
+            await _projectService.UpdateProjectAsync(updated);
+            _activeProject = updated;
+            _statusMessage = null;
+            Console.WriteLine($"[Studio] Loaded sample '{sample.Name}': {sample.Images.Count} photos");
+        }
+        catch (Exception ex)
+        {
+            _statusMessage = $"Could not download the sample: {ex.Message}";
+            Console.WriteLine($"[Studio] Error loading sample {sample.Name}: {ex}");
+            _projects = await _projectService.ListProjectsAsync();
+            _activeProject = _projects.FirstOrDefault(p => p.Id == project.Id) ?? project;
+        }
+        BuildProjectDetailUI();
+    }
+
+    /// <summary>The harness's <c>&amp;sample=</c> path: one image from the app's own samples/ folder.</summary>
     private async Task LoadSampleImage(string name, string path)
     {
         if (_activeProject == null) return;

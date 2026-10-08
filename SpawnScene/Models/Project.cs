@@ -16,6 +16,9 @@ public class Project
     public ProjectSettings Settings { get; set; } = new();
     public List<ProjectSource> Sources { get; set; } = new();
     public List<ProjectScene> Scenes { get; set; } = new();
+    /// <summary>Attribution for photos that came from a sample (SampleCatalog): "Name - credit, license, source".
+    /// Shown on the project page; null for the user's own photos.</summary>
+    public string? Credit { get; set; }
 }
 
 /// <summary>Source image or video in a project.</summary>

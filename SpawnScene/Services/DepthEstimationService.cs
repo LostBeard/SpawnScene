@@ -52,6 +52,9 @@ public class DepthEstimationService : IAsyncDisposable
     public bool IsLoading { get; private set; }
     public bool IsReady => _pipe != null;
 
+    /// <summary>Tries at loading a model's weights before <see cref="LoadModelAsync"/> reports a failure.</summary>
+    const int LoadAttempts = 3;
+
     public DepthEstimationService(GpuService gpu, SpawnDev.ILGPU.ML.Hub.IModelSource modelSource)
     {
         _gpu = gpu;
@@ -162,9 +165,23 @@ public class DepthEstimationService : IAsyncDisposable
             var (inW, inH) = InputShape;
             Console.WriteLine($"[Depth] binding pixel_values to [1,1,3,{inH},{inW}] " +
                 $"({inW / PatchSize}x{inH / PatchSize} patches)");
-            _pipe = await DepthEstimationPipeline.CreateFromHubAsync(
-                accelerator, _modelSource, model.Path,
-                inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, inH, inW } });
+            // A dropped fetch of the weights (seen 10-07 on Bicycle: "Failed to fetch" on model.onnx_data, fine a minute
+            // later) must not cost the user the generate: try again before giving up.
+            for (int attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    _pipe = await DepthEstimationPipeline.CreateFromHubAsync(
+                        accelerator, _modelSource, model.Path,
+                        inputShapes: new Dictionary<string, int[]> { ["pixel_values"] = new[] { 1, 1, 3, inH, inW } });
+                    break;
+                }
+                catch (Exception ex) when (attempt < LoadAttempts)
+                {
+                    Console.WriteLine($"[Depth] load attempt {attempt} of {LoadAttempts} failed ({ex.Message}); retrying");
+                    await Task.Delay(2000 * attempt);
+                }
+            }
             // One-shot photo path: capture/replay warmup is for video.
             _pipe.EnableGraphCapture = false;
             _pipe.ResizeMode = ResizeMode;

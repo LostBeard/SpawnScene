@@ -1195,6 +1195,10 @@ public class MultiViewGenerationService
             SetStatus("Loading depth model...");
             await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
         }
+        // Without a depth model the legacy 2D-offset path below would run instead of SfM and save an untrained
+        // depth collage (10-07 Bicycle b0: a dropped weights fetch -> 14.8M splats, 0 training views). Fail loudly.
+        if (!_depthService.IsReady)
+            throw new InvalidOperationException($"The depth model did not load, so the photos cannot be posed. {_depthService.Status}");
 
         // DAv3 native multi-view: single inference → consistent depth + predicted camera poses
         bool isDav3 = _depthService.LoadedModelId?.StartsWith("depth-anything-v3") == true;

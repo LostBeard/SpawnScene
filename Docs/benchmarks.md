@@ -27,10 +27,11 @@ it says so.
 Provenance: Truck - SpawnScene run c49 (2026-10-06), gsplat 30K run of the same date and split (`val_step29999.json`
 kept).
 
-**Withdrawn 2026-10-08: the Bicycle 7K row** (SpawnScene 25.07 / 0.766 vs gsplat 23.14 / 0.666). The gsplat figure was
-measured at step 7,000 of a 30K run, whose learning rates had not yet decayed - not a 7K run. A 7K-only gsplat run at the
-same resolution scored 21.29 / 0.552, below published 3DGS numbers for the scene, unexplained so far. Neither is a fair
-reference; both tools are being re-run per scene (the matrix below will replace this table).
+**Withdrawn 2026-10-08: the Bicycle 7K row** (SpawnScene 25.07 / 0.766 vs gsplat 23.14 / 0.666). The two numbers were
+taken under different schedules: gsplat's at step 7,000 of a 30K run - which is how the 3DGS paper and gsplat publish
+"7K" - and SpawnScene's from a run whose schedule ENDS at 7K (its learning rates fully decayed), which favours
+SpawnScene. A gsplat run that ends at 7K scored 21.29 / 0.552, below the published numbers for the scene, unexplained so
+far. Both tools are being re-run per scene under one schedule (Research/parity-matrix.md, parity-references-2026-10-08.md).
 
 ### Without COLMAP
 

@@ -2,9 +2,11 @@
 
 The tracker. One row per scene and iteration count; one cell per tool. A number goes in only with its run ID and a kept
 artifact (log / stats JSON); "-" = not run yet. Protocol: every 8th photo held out (sorted names; gsplat --test_every 8 =
-SpawnScene &llffhold=8), same images and resolution, COLMAP poses unless the column says own SfM. 7K = a run whose
-schedule ENDS at 7K (gsplat --max_steps 7000), never step 7000 of a 30K run. Held-out PSNR / SSIM (LPIPS when the tool
-reports it); splats; wall time on the RTX 4070.
+SpawnScene &llffhold=8), same images and resolution (ONE clean image folder per scene; gsplat otherwise makes its own
+bicubic images_N_png and Brush caps at 1920 px), COLMAP poses unless the column says own SfM. Two 7K protocols, never mixed
+in one row: "7K/30K" = step 7000 of a 30K run (how the 3DGS paper and gsplat publish 7K) and "7K-end" = a run whose
+schedule ends at 7K (gsplat --max_steps 7000, SpawnScene 7000 iterations). Every tool's saved renders rescored by one
+script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats; wall time on the RTX 4070.
 
 ## Training quality
 

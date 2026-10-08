@@ -25,7 +25,11 @@ Three different things read as "tearing":
   colour-weighted median of depths on a 5x5 grid spaced by the upsampling factor (~7 px at 3840). Effect on (1):
   small - edges a little cleaner; the box and chair smear (2) unchanged. Wider windows (&snapr=3/4, &snapstep=1.5/2)
   break surfaces into speckle and staircase edges. Not a default.
-- **MaxCellStretch** (`&cellstretch=X`): A/B pending (the first attempt ran on a stale build).
+- **MaxCellStretch** (`&cellstretch=X`): 3 and 2 look the same as 8 from the moved views. Not the cause.
+
+**Conclusion:** the smear is the DEPTH. DAv3 Small makes the cereal box a slanted wall receding into the counter and the
+splats draw exactly that; no post-processing of that depth can recover a box. The lever is a sharper/larger depth model
+(below), then inpainting for what was behind.
 
 ## Candidates
 
@@ -60,7 +64,7 @@ image instead of the push-pull blur; its depth stays the far-side depth.
 
 ## Order
 
-1. MaxCellStretch A/B (cheap).
+1. ~~MaxCellStretch A/B~~ (no effect).
 2. A larger / sharper depth model behind a setting: DA3MONO-LARGE and MoGe-2 ViT-S through ILGPU.ML (ask Data).
 3. MI-GAN for the hidden layer's colour.
 4. Then the same depth refinement for DepthFusionInit (TJ: the multi-photo path seeds from the same depth maps).

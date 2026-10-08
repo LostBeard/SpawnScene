@@ -81,6 +81,38 @@ public partial class Studio
             Console.WriteLine($"[Import] {name}: {ex.Message}");
             return true;
         }
+        await ImportSogAsync(meta, Open, name, query, t0);
+        return true;
+    }
+
+    /// <summary>An unbundled SOG: <c>?import=.../meta.json</c>, its textures fetched beside it (PlayCanvas serves them so).</summary>
+    async Task ImportSogUrlAsync(string metaUrl, string metaText, Dictionary<string, string> query)
+    {
+        var t0 = System.Diagnostics.Stopwatch.StartNew();
+        SogMeta meta;
+        try { meta = SogMeta.Parse(metaText); }
+        catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException or KeyNotFoundException)
+        {
+            _statusMessage = $"Cannot open {metaUrl}: {ex.Message}";
+            Console.WriteLine($"[Import] {metaUrl}: {ex.Message}");
+            return;
+        }
+        var baseUri = new Uri(new Uri(_nav.Uri), metaUrl);
+        async Task<Blob> Open(string file)
+        {
+            using var window = _js.Get<Window>("window");
+            using var response = await window.Fetch(new Uri(baseUri, file).ToString());
+            if (!response.Ok) throw new FormatException($"{file}: HTTP {response.Status}");
+            return await response.Blob();
+        }
+        string name = baseUri.Segments.Length >= 2 ? baseUri.Segments[^2].TrimEnd('/') : "scene";
+        await ImportSogAsync(meta, Open, name, query, t0);
+    }
+
+    /// <summary>Decode a SOG (SogImport) and open it as a new project.</summary>
+    async Task ImportSogAsync(SogMeta meta, Func<string, Task<Blob>> Open, string name, Dictionary<string, string> query,
+        System.Diagnostics.Stopwatch t0)
+    {
         bool flip = TurnImportYUp(query);
         using var window = _js.Get<Window>("window");
         var (packed, sh, shDegree) = await SogImport.ConvertAsync(_gpuService.WebGPUAccelerator, window, meta, Open, flip);
@@ -106,7 +138,6 @@ public partial class Studio
         Console.WriteLine($"[Import] {name}: SOG v{meta.Version}, {meta.Count:N0} splats, SH degree {shDegree}, decoded in {t0.Elapsed.TotalSeconds:F1}s" +
             (flip ? " (turned y-up)" : ""));
         await SaveAndOpenImportedSceneAsync(Path.GetFileNameWithoutExtension(name), scene, packedU8, shU8, query, "sog");
-        return true;
     }
 
     /// <summary>Import antimatter15's .splat - no magic, so by name and a whole number of 32-byte splats.</summary>

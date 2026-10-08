@@ -193,6 +193,12 @@ public partial class Studio
             using var window = _js.Get<Window>("window");
             using var response = await window.Fetch(importUrl);
             if (!response.Ok) { Console.WriteLine($"[Import] FAIL: HTTP {response.Status}"); return; }
+            // An unbundled SOG: its meta.json, the textures beside it (Studio.ForeignScene).
+            if (importUrl.Split('?')[0].EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            {
+                await ImportSogUrlAsync(importUrl, await response.Text(), query);
+                return;
+            }
             using var blob = await response.Blob();
             // Another tool's 3DGS .ply or .spz (Studio.ForeignScene), else a .spawnscene.
             string name = Uri.TryCreate(importUrl, UriKind.Absolute, out var iu) ? Path.GetFileName(iu.AbsolutePath) : Path.GetFileName(importUrl.Split('?')[0]);

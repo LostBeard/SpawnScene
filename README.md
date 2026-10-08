@@ -34,16 +34,38 @@ machine.
 
 [![Project page](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/project-page.jpg)](https://raw.githubusercontent.com/LostBeard/SpawnScene/master/SpawnScene/wwwroot/screenshots/project-page.jpg)
 
+## How good is it?
+
+Measured with the reference protocol (every 8th photo held out, never trained on; PSNR / SSIM on those photos):
+
+| Scene | | SpawnScene (in the browser) | gsplat 1.5.3 (CUDA reference) |
+|---|---|---|---|
+| Tanks and Temples *Truck*, 30K iterations | PSNR / SSIM | 24.95 dB / **0.887** | 25.13 dB / 0.877 |
+| | splats | **0.89M** | 3.79M |
+| Mip-NeRF 360 *Bicycle*, 7K iterations | PSNR / SSIM | **25.07 dB / 0.766** | 23.14 dB / 0.666 |
+
+Same photos, same camera poses (COLMAP), same resolution, same split. Bicycle with SpawnScene's **own** structure from
+motion instead of COLMAP's poses: 25.17 dB - posing in the browser costs nothing measurable. Details, the protocol and
+side-by-side renders: [Docs/benchmarks.md](Docs/benchmarks.md).
+
 ## Features
 
 ### From many photos or a video
 
 - **Learned feature matching** - RaCo-ALIKED keypoints with LightGlue+ matching, on the GPU.
 - **Structure from motion on the GPU** - five-point relative poses, rotation averaging, global positioning and GPU
-  bundle adjustment place the cameras; no COLMAP needed. A video is split into frames first.
-- **Gaussian splat training in the browser** - a WebGPU trainer with SSIM + L1 loss, spherical harmonics up to degree 3,
-  and AbsGS density control. On Tanks and Temples *Truck* (30K iterations, every 8th photo held out) it scores
-  24.95 dB PSNR / 0.887 SSIM with 0.89M splats in 25 minutes, against the gsplat reference's 25.13 / 0.877 with 3.79M.
+  bundle adjustment place the cameras; no COLMAP needed. A video is split into frames first. Photos held sideways are
+  placed too.
+- **Capture feedback** - the project page says how many photos were placed, **why** each one that was not was left
+  out ("nothing in it matched the other photos"), and which directions no photo faces - the walls a room capture
+  never saw.
+- **Gaussian splat training in the browser** - a WebGPU trainer with SSIM + L1 loss, spherical harmonics up to degree 3
+  and AbsGS density control, plus:
+  - **seeds from the photos' depth**: Depth Anything V3 depth where two photos agree, so walls that few features
+    matched still start covered (a phone capture of a bathroom: +1.3 dB on held-out photos);
+  - **per-photo exposure**: per-channel gains learned for each photo, so a phone's auto exposure does not end up
+    baked into the scene (the same bathroom: +1.7 dB held out);
+  - **floater removal**: a GPU census removes splats that hang in front of what the photos saw.
 - **Quality presets** for photo resolution, keypoints, iterations and scene size, sized to your GPU's memory.
 
 ### From a single photo
@@ -51,9 +73,18 @@ machine.
 - **Depth Anything V3** depth, with the camera's focal length from EXIF or estimated by the model.
 - **Super-resolution** (ESPCN x3) for small photos before they become splats - finer colour and geometry.
 - **No holes when you move**: every splat spans its surface cell, a hidden background layer fills in behind each depth
-  edge, and the photo continues softly past its frame.
+  edge, and the photo continues past its frame.
+- Options: `?edgesnap=1` snaps depth edges to colour edges (fewer stretched "rubber sheet" edges), `?inpaint=1` paints
+  the hidden layer with MI-GAN (or `&inpaintmodel=lama` - big-LaMa, better behind objects).
 - **Scene depth slider** to correct a depth estimate that came out too deep or too flat, without changing the photo's
   own view.
+
+### Open other tools' scenes
+
+**Open scene file** (or `?import=<url>`) takes standard 3DGS **`.ply`** (the reference trainer, gsplat, nerfstudio,
+Postshot, Polycam), SuperSplat's **compressed `.ply`**, PlayCanvas **`.sog`**, Niantic **`.spz`** (v2/v3) and
+**`.splat`** - all decoded on the GPU (a 30K PLY is 0.5-0.8 GB) and turned upright. For example
+[spawnscene.com/studio?import=...skull.sog](https://spawnscene.com/studio?import=https://raw.githubusercontent.com/playcanvas/engine/main/examples/assets/splats/skull.sog).
 
 ### Big scenes
 
@@ -76,6 +107,8 @@ machine.
   in-headset box selection.
 - The whole interface is drawn with WebGPU ([SpawnDev.GameUI](https://github.com/LostBeard/SpawnDev.GameUI)), so it
   works the same in a headset.
+- **Samples** to try without photos of your own: openly licensed photo sets and single photos, one click from a new
+  project.
 
 ## Tech stack
 
@@ -84,7 +117,7 @@ machine.
 | App | .NET 10 Blazor WebAssembly (AOT), C# 13 |
 | JS interop | [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) |
 | GPU compute | [SpawnDev.ILGPU](https://github.com/LostBeard/SpawnDev.ILGPU) (WebGPU backend) |
-| Machine learning | [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML) - Depth Anything V3, RaCo-ALIKED, LightGlue+, ESPCN |
+| Machine learning | [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML) - Depth Anything V3, RaCo-ALIKED, LightGlue+, ESPCN, MI-GAN, big-LaMa - all run as WebGPU compute, no ONNX Runtime |
 | User interface | [SpawnDev.GameUI](https://github.com/LostBeard/SpawnDev.GameUI) (WebGPU) |
 | Rendering and training | Native WebGPU, WGSL shaders |
 | Storage | Origin Private File System (projects, photos, scenes) |
@@ -125,6 +158,8 @@ SpawnScene/
 └── wwwroot/    samples, datasets for the built-in tests, screenshots
 SpawnScene.Tests/   NUnit tests (CPU accelerator)
 tools/              browser test harnesses (Chrome DevTools Protocol)
+Docs/               methods and benchmarks (how it works, how it compares)
+Research/           working notes and every measurement behind a default
 Plans/              design notes (e.g. lod-streaming.md)
 ```
 

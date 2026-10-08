@@ -365,6 +365,14 @@ public partial class Studio
         }
 
         int held = 0, posed = 0, unposed = 0;
+        // The trainer shares ONE viewport (LoadTargetAsync refuses a photo whose aspect differs, and that fails the whole
+        // run). SfM places a photo held sideways (MultiViewGenerationService: transposed intrinsics) - TJ's Bathroom has
+        // one landscape among 34 portraits - so a photo shaped the other way from the majority takes one quarter turn:
+        // the rotated camera and the rotated picture describe the same rays (ImageOrientation, ImageOrientationTests).
+        int portrait = 0, landscape = 0;
+        for (int i = 0; i < images.Count && i < poses.Length; i++)
+            if (poses[i] is { } pc) { if (pc.Height > pc.Width) portrait++; else if (pc.Width > pc.Height) landscape++; }
+        bool majorityPortrait = portrait >= landscape;
         for (int i = 0; i < images.Count && i < poses.Length; i++)
         {
             var cam = poses[i];
@@ -374,6 +382,8 @@ public partial class Studio
             if (string.IsNullOrEmpty(name)) { unposed++; continue; }
 
             int turns = poseFrameHasGravity ? ImageOrientation.QuarterTurnsToUpright(cam) : 0;
+            if (!poseFrameHasGravity && cam.Width != cam.Height && (cam.Height > cam.Width) != majorityPortrait)
+                turns = 1;
 
             // Hold every fourth posed view out, so the run reports a novel-view number rather
             // than a reconstruction of its own input. &llffhold=N instead uses the reference's split

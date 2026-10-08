@@ -1761,7 +1761,14 @@ public class MultiViewGenerationService
                     ? new DepthFusionInit.DepthMap(g, d.Width, d.Height) : (DepthFusionInit.DepthMap?)null).ToList();
                 var fused = await DepthFusionInit.FuseAsync(_gpu.Accelerator!, poses.Cameras, depthMaps, posed,
                     baCloud.Positions, images.Select(im => (byte[]?)im.RgbaPixels).ToList(), DepthFusionInitStride,
-                    DepthFusionRelTol, maxScale, snapEdges: DepthToGaussianKernel.EdgeSnapEnabled);
+                    DepthFusionRelTol, maxScale, snapEdges: DepthToGaussianKernel.EdgeSnapEnabled,
+                    deviceRgba: async i =>
+                    {
+                        var im = images[i];
+                        bool made = await GpuImageOps.EnsureOnDeviceAsync(_gpu.Accelerator!, im);
+                        if (im.GpuRgba == null) return null;
+                        return (im.GpuRgba.View, () => { if (made) im.DisposeGpu(); });
+                    });
                 if (fused is { } f)
                 {
                     Console.WriteLine($"[MultiView] depth fusion init: {f.Count:N0} seeds from {f.Report.Candidates:N0} samples of " +

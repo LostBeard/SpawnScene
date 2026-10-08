@@ -56,7 +56,8 @@ public static class DepthFusionInit
     public static async Task<(MemoryBuffer1D<float, Stride1D.Dense> Packed, int Count, Report Report)?> FuseAsync(
         Accelerator a, IReadOnlyList<CameraParams?> cameras, IReadOnlyList<DepthMap?> depths, IReadOnlyList<int> views,
         IReadOnlyList<Vector3> sparsePoints, IReadOnlyList<byte[]?>? rgba, int stride, float relTol, float maxScale,
-        bool snapEdges = false)
+        bool snapEdges = false,
+        Func<int, Task<(ArrayView1D<int, Stride1D.Dense> Rgba, Action Release)?>>? deviceRgba = null)
     {
         // Per accelerator: a kernel cached from another (disposed) accelerator runs against freed state - MEASURED, the
         // second of two unit tests on fresh CPU accelerators failed only when run after the first.
@@ -95,6 +96,18 @@ public static class DepthFusionInit
                 Buffer.BlockCopy(pixels, 0, words, 0, pixels.Length);
                 allRgba.View.SubView(offsets[k], px).CopyFromCPU(words);
                 hasRgba[k] = true;
+            }
+            else if (deviceRgba != null && await deviceRgba(used[k]) is { } dev)
+            {
+                // The project flow keeps photos encoded and decodes them onto the device where used (ImportedImage.GpuRgba):
+                // copy this one in (device to device) and let it go before the next.
+                if (dev.Rgba.Length == px)
+                {
+                    allRgba.View.SubView(offsets[k], px).CopyFrom(dev.Rgba);
+                    await a.SynchronizeAsync();
+                    hasRgba[k] = true;
+                }
+                dev.Release();
             }
         }
 

@@ -338,3 +338,12 @@ See-through (strong magenta): 27/34 Wander views at 0%; pan-1..5 21/14/55/69/61%
 face - nothing was photographed there. Faint pink tints remain on covered surfaces (in-0) and pan-0 (9/57 photos) still
 shows patches: the strong-magenta measure undercounts partial transparency. Coverage (PLANS 6) is the next limit.
 
+### Continuous see-through measure (mean T from the magenta captures, 2026-10-08)
+
+Over magenta a pixel is C + T(1, 0, 1): T ~ ((R - G) + (B - G)) / 2 in grey rooms (counts the faint tints the strong-magenta
+share missed). Mean over 34 Wander views: p0 black 10.4%; q0 [0, 1] 4.8%; u1 zero-mean x1 4.2%; v1 x0.5 6.0%; w0 default
+(no flags) 5.6%; live0 Hamamni (spawnscene.com) 6.1%.
+Per view (w0 vs p0): the views the photos cover are 1-3% (black: 4-13%); what remains is in views facing where the
+photos did not look - the "-3" views 11-28%, pan-2 (0/33 photos within 30 deg) 12%, pan-3 (1/33) 8%. In rooms the
+training side is close to done; the remaining dark is COVERAGE: nothing was photographed there.
+

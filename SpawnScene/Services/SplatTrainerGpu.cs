@@ -1968,7 +1968,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// the black through from every other angle (Bathroom 2026-10-08: up to 33% of an off-path view).
     /// </summary>
     public static bool RandomBackground { get; set; }
-    /// <summary>The loss's D-SSIM share (the reference's 0.2; L1 gets the rest). Gates set 0 for a pure L1 loss.</summary>
+    /// <summary>The loss's D-SSIM share (the reference's 0.2; L1 gets the rest). Gates set 0 for a pure L1 loss: the loss a
+    /// step returns is the L1 part only, so finite differences of it match the gradient only without D-SSIM.</summary>
     public float DssimWeight { get; set; } = ImageQuality.LambdaDssim;
     /// <summary>Gate hook: every training step composites over this colour (a repeatable step for finite differences).</summary>
     public Vector3? FixedBackground { get; set; }

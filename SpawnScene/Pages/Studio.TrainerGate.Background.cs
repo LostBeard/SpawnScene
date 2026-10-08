@@ -14,8 +14,9 @@ namespace SpawnScene.Pages;
 /// <list type="number">
 /// <item>The target is the scene's own render over BLACK and the step composites over a fixed colour: the only error
 /// left is the background showing through, so the loss and its gradient run through the new term. Pure L1, after a
-/// control through the colour path alone (the D-SSIM share's position gradient is off by 2.5-6x at a real colour error,
-/// MEASURED 2026-10-08; the depth gate checks it only at zero colour error). The analytic
+/// control through the colour path alone: the loss a step RETURNS is the L1 part only (LossReduce), while the gradient
+/// also carries the D-SSIM share - so with D-SSIM on, finite differences of the returned loss cannot match (they did
+/// not, by 2.5-6x, 2026-10-08; the D-SSIM gradient itself is FD-gated via ImageQuality). The analytic
 /// dL/d(position) along the camera axis of the five splats it moves most must match central finite differences of the
 /// step's own loss. Without the term the analytic gradient misses the background entirely.</item>
 /// <item>It descends: opacity only, over the same background the loss falls (a little: uncovered pixels are a floor).</item>
@@ -76,8 +77,8 @@ public partial class Studio
             await trainer.TrainStepAsync(splatBuf, n, cam, depthNear, depthFar, 0f, 0f, frozen, readLoss: true);
             var img = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar, readback: true);
             trainer.SetTarget(img);
-            // Pure L1: with the 0.2 D-SSIM share the colour path's position gradient already disagreed with finite
-            // differences by 2.5-6x at a real colour error (the depth gate only checks it at zero colour error).
+            // Pure L1: the returned step loss is the L1 part only, so finite differences of it match the gradient only
+            // when the D-SSIM share is 0 (with it on they were 2.5-6x apart - the loss readout, not the gradient).
             trainer.DssimWeight = 0f;
             // Control: no background, a target 0.7x the render - a colour error of similar size, through the colour path
             // alone. Must match, or the setup cannot judge the background term.

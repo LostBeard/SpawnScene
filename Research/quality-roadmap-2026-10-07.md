@@ -49,6 +49,12 @@ fusion depth) 16.57 / 0.7915, vs grey-seeded g1/g2 16.91-16.97 / 0.795-0.798; th
 indistinguishable. Seed colour is neutral (training repaints it within the first cycle); the edge snap does nothing for
 the multi-photo seeds (agreement between two views already rejects ramp samples).
 
+**Exposure on fixed-exposure captures (2026-10-08):** e1 Bicycle `&depthinit=4&exposure=1` held out 24.55 / 0.7663 vs b1
+(depthinit only) 25.16 / 0.7661; e2 TruckFull `&exposure=1` 23.87 / 0.8587 vs k2 24.07 / 0.8592. SSIM unchanged, PSNR
+down: a colour offset. Every photo learned a small positive offset (Truck mean +0.009..+0.017) and an offset folds into
+the scene only where it is opaque. `&exposure=gains` (per-channel gains only, gate-checked) queued as h0-h2 on all three.
+Not a default until it keeps Bathroom's gain without costing the benchmarks.
+
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 
 L1 between the rendered inverse depth sum(w/z) and each photo's DAv3 depth scaled by DepthFusionInit (kept per view,

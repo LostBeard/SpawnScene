@@ -1394,7 +1394,10 @@ public partial class Studio
     /// <c>autotest=samples&amp;name=folder</c>: the catalog sample through <see cref="LoadSampleAsync"/> into a fresh project
     /// - downloaded from the catalog's host (cross-origin), stored, credited. "[Dataset] DONE" / "[Dataset] FAIL".
     /// </summary>
-    private async Task RunSampleAutotestAsync(string folder)
+    /// <param name="generateIters">&gt; 0 (<c>&amp;generate=N</c>): then press Generate with N iterations and capture the trained
+    /// scene from its first camera and off the photo path (Studio.Wander) - training tested end to end on the LIVE site,
+    /// whose samples come through the hub like a user's (the local datasets are not deployed).</param>
+    private async Task RunSampleAutotestAsync(string folder, int generateIters = 0)
     {
         await EnsureSampleCatalogAsync();
         var entry = _sampleCatalog?.Samples.FirstOrDefault(sm => sm.Folder == folder);
@@ -1418,9 +1421,35 @@ public partial class Studio
         Console.WriteLine("[Dataset] READY-FOR-CAPTURE free-sample_loaded");
         await Task.Delay(1500);
         if (stored.Count != entry.Images.Count || !sized || string.IsNullOrEmpty(_activeProject?.Credit))
+        {
             Console.WriteLine("[Dataset] FAIL: sample not stored as the catalog lists it");
-        else
-            Console.WriteLine("[Dataset] DONE");
+            return;
+        }
+        if (generateIters > 0 && _activeProject != null)
+        {
+            // -- Generate, exactly as the button does (the project autotest's step), on the sample's photos --
+            _activeProject.Settings.TrainIterations = generateIters;
+            var tg = DateTime.UtcNow;
+            await GenerateMultiViewScene();
+            var liveScene = _sceneManager.ActiveScene;
+            var saved = _activeProject?.Scenes.LastOrDefault();
+            if (saved == null || liveScene == null)
+            {
+                Console.WriteLine($"[Dataset] FAIL: Generate produced no saved scene ({_statusMessage})");
+                return;
+            }
+            Console.WriteLine($"[Dataset] sample scene {saved.Id} saved after {(DateTime.UtcNow - tg).TotalSeconds:F0}s: " +
+                $"{saved.SplatCount:N0} splats, trained {saved.TrainedIterations:N0} iters, {liveScene.TrainingViews.Count} training views");
+            if (saved.TrainedIterations != generateIters)
+            {
+                Console.WriteLine($"[Dataset] FAIL: asked for {generateIters} iterations, the saved scene got {saved.TrainedIterations}");
+                return;
+            }
+            var seat = liveScene.TrainingCameras.Count > 0 ? liveScene.TrainingCameras[0] : null;
+            await CaptureProjectViewAsync("live", seat);
+            await CaptureWanderViewsAsync(liveScene);
+        }
+        Console.WriteLine("[Dataset] DONE");
     }
 
     /// <summary>The harness's <c>&amp;sample=</c> path: one image from the app's own samples/ folder.</summary>

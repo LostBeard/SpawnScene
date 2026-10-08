@@ -410,7 +410,9 @@ public partial class Studio : IAsyncDisposable
         else if (mode == "samples")
         {
             // The catalog's "try a sample" path: &name=<folder> into a new project, as the button does (Studio.Projects).
-            await RunSampleAutotestAsync(query.TryGetValue("name", out var sn) ? sn : "kitchen");
+            // &generate=N: then train it (N iterations) and capture the result - the live site's end-to-end training check.
+            await RunSampleAutotestAsync(query.TryGetValue("name", out var sn) ? sn : "kitchen",
+                query.TryGetValue("generate", out var sgq) && int.TryParse(sgq, out var sgi) ? sgi : 0);
         }
         else if (mode == "project")
         {

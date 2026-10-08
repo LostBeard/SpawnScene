@@ -330,6 +330,12 @@ public partial class Studio
         if (query.TryGetValue("cas", out var casq) && float.TryParse(casq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var casv))
             _gpuRenderer.SharpeningStrength = casv;
+        // &viewexp=nodepth,8bit,10bit,obb (harness): desktop sorted-pass variants, to measure what each costs (viewer bench).
+        if (query.TryGetValue("viewexp", out var vxq))
+        {
+            var vx = vxq.Split(',');
+            _gpuRenderer.SetViewExperiment(noDepth: vx.Contains("nodepth"), eightBit: vx.Contains("8bit"), obb: vx.Contains("obb"), tenBit: vx.Contains("10bit"));
+        }
     }
 
     /// <summary>What every import does once its scene is on screen: the harness's exact camera, XR hook, render mode.</summary>

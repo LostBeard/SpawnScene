@@ -105,6 +105,20 @@ What this says, plainly:
   poses drew correctly, and those are the Spark frames shown above. A frame counter cannot see that, so read the
   Spark and PlayCanvas columns as drawing speed, not sorted-drawing speed.
 
+### Where SpawnScene's frame time goes
+
+Measured with harness-only switches on the same poses ([Research/viewer-speed-2026-10-08.md](../Research/viewer-speed-2026-10-08.md)):
+
+- **The 16-bit float blend target.** SpawnScene blends splats into an `rgba16float` image; the same renderer blending
+  into 8 bits runs 1.37-1.42x faster. We keep 16 bits on purpose: 8-bit blending changes the picture by up to 120/255
+  in places (24-30 dB) - it clamps after every splat, while the trainer composites unclamped - and cost the viewer
+  0.7-3.6 dB against the trainer's own renders when we measured it (2026-09-24).
+- **Not pixel count.** Ellipse-aligned quads rasterise about 20% fewer pixels than SpawnScene's axis-aligned ones and
+  give an identical image, but measured no faster. A depth attachment that rejects nothing costs under 1%.
+- **Which pictures agree** (mean PSNR over the seven poses): SpawnScene and PlayCanvas 31.2 dB; SpawnScene's 8-bit
+  variant and Spark 31.7 dB, and GaussianSplats3D 30.2 dB; GaussianSplats3D and Spark 30.1 dB; SpawnScene and
+  GaussianSplats3D 23.8 dB. Which of these is closest to a reference renderer at these poses has not been measured yet.
+
 ### Formats
 
 SpawnScene opens 3DGS `.ply`, SuperSplat compressed `.ply`, PlayCanvas `.sog`, Niantic `.spz` (v2/v3) and `.splat`,

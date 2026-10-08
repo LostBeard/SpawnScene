@@ -927,64 +927,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
 
         // ── Splat Pipeline (packed vertex format) ──
         using var splatShader = _device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = SplatShaderSource });
-        _splatPipeline = _device.CreateRenderPipeline(new GPURenderPipelineDescriptor
-        {
-            Layout = "auto",
-            Vertex = new GPUVertexState
-            {
-                Module = splatShader,
-                EntryPoint = "vs_trainer",
-                Buffers = new[]
-                {
-                    new GPUVertexBufferLayout
-                    {
-                        ArrayStride = (ulong)PackedBytesPerSplat,
-                        StepMode = GPUVertexStepMode.Instance,
-                        Attributes = new GPUVertexAttribute[]
-                        {
-                            new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },  // position (12B)
-                            new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.Float16x4 },  // color+alpha (8B)
-                            new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float32x3 },  // scale sx,sy,sz (12B f32)
-                            new() { ShaderLocation = 3, Offset = 32, Format = GPUVertexFormat.Float32x4 },  // rotation quat (16B f32)
-                        }
-                    }
-                }
-            },
-            Fragment = new GPUFragmentState
-            {
-                Module = splatShader,
-                EntryPoint = "fs_trainer",
-                Targets = new[]
-                {
-                    new GPUColorTargetState
-                    {
-                        Format = SortedTargetFormat,
-                        Blend = new GPUBlendState
-                        {
-                            Color = new GPUBlendComponent
-                            {
-                                SrcFactor = GPUBlendFactor.SrcAlpha,
-                                DstFactor = GPUBlendFactor.OneMinusSrcAlpha,
-                                Operation = GPUBlendOperation.Add,
-                            },
-                            Alpha = new GPUBlendComponent
-                            {
-                                SrcFactor = GPUBlendFactor.One,
-                                DstFactor = GPUBlendFactor.OneMinusSrcAlpha,
-                                Operation = GPUBlendOperation.Add,
-                            }
-                        }
-                    }
-                }
-            },
-            Primitive = new GPUPrimitiveState { Topology = GPUPrimitiveTopology.TriangleList },
-            DepthStencil = new GPUDepthStencilState
-            {
-                Format = "depth24plus",
-                DepthWriteEnabled = false,
-                DepthCompare = "less",
-            }
-        });
+        _splatPipeline = _device.CreateRenderPipeline(SortedSplatPipelineDesc(splatShader, SortedTargetFormat, depth: true));
 
         // ── Stochastic Splat Pipeline (sort-free, depth-tested, opaque writes) ──
         var splatVertexBuffers = new[]
@@ -1181,6 +1124,101 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         RebuildCachedDescriptors();
     }
 
+    /// <summary>The sorted splat pipeline: instanced packed splats (vs_trainer/fs_trainer), back-to-front alpha blend
+    /// into <paramref name="format"/>, with or without the depth24plus attachment (compare "less", no writes).</summary>
+    private static GPURenderPipelineDescriptor SortedSplatPipelineDesc(GPUShaderModule splatShader, string format, bool depth)
+        => new GPURenderPipelineDescriptor
+        {
+            Layout = "auto",
+            Vertex = new GPUVertexState
+            {
+                Module = splatShader,
+                EntryPoint = "vs_trainer",
+                Buffers = new[]
+                {
+                    new GPUVertexBufferLayout
+                    {
+                        ArrayStride = (ulong)PackedBytesPerSplat,
+                        StepMode = GPUVertexStepMode.Instance,
+                        Attributes = new GPUVertexAttribute[]
+                        {
+                            new() { ShaderLocation = 0, Offset = 0,  Format = GPUVertexFormat.Float32x3 },  // position (12B)
+                            new() { ShaderLocation = 1, Offset = 12, Format = GPUVertexFormat.Float16x4 },  // color+alpha (8B)
+                            new() { ShaderLocation = 2, Offset = 20, Format = GPUVertexFormat.Float32x3 },  // scale sx,sy,sz (12B f32)
+                            new() { ShaderLocation = 3, Offset = 32, Format = GPUVertexFormat.Float32x4 },  // rotation quat (16B f32)
+                        }
+                    }
+                }
+            },
+            Fragment = new GPUFragmentState
+            {
+                Module = splatShader,
+                EntryPoint = "fs_trainer",
+                Targets = new[]
+                {
+                    new GPUColorTargetState
+                    {
+                        Format = format,
+                        Blend = new GPUBlendState
+                        {
+                            Color = new GPUBlendComponent
+                            {
+                                SrcFactor = GPUBlendFactor.SrcAlpha,
+                                DstFactor = GPUBlendFactor.OneMinusSrcAlpha,
+                                Operation = GPUBlendOperation.Add,
+                            },
+                            Alpha = new GPUBlendComponent
+                            {
+                                SrcFactor = GPUBlendFactor.One,
+                                DstFactor = GPUBlendFactor.OneMinusSrcAlpha,
+                                Operation = GPUBlendOperation.Add,
+                            }
+                        }
+                    }
+                }
+            },
+            Primitive = new GPUPrimitiveState { Topology = GPUPrimitiveTopology.TriangleList },
+            DepthStencil = depth ? new GPUDepthStencilState
+            {
+                Format = "depth24plus",
+                DepthWriteEnabled = false,
+                DepthCompare = "less",
+            } : null,
+        };
+
+    // ── Viewer experiments (harness only, desktop sorted path; &viewexp=nodepth,8bit,obb) ──
+    // nodepth: no depth attachment - the pass clears depth to 1 and never writes it, so "less" rejects nothing the
+    // clipper had not already removed. 10bit: rgb10a2unorm (32 bits a pixel like 8-bit, 4x finer steps; the desktop
+    // pass never reads the target's alpha). 8bit: blend into rgba8unorm instead of rgba16float (measurement only: 8-bit
+    // blending cost the viewer 0.7-3.6 dB against the trainer, see SortedTargetFormat). XR keeps _splatPipeline.
+    private GPURenderPipeline? _splatPipelineView;
+    private GPUBindGroup? _uniformBindGroupView;
+    private bool _viewNoDepth;
+    private string _viewTargetFormat = SortedTargetFormat;
+
+    /// <summary>Harness: switch the desktop sorted pass to a pipeline variant, to measure what each choice costs.</summary>
+    public void SetViewExperiment(bool noDepth, bool eightBit, bool obb = false, bool tenBit = false)
+    {
+        if (_device == null || _uniformBuffer == null) { Console.WriteLine("[Import] viewexp NOT applied: renderer not ready"); return; }
+        _viewNoDepth = noDepth;
+        _viewTargetFormat = eightBit ? "rgba8unorm" : tenBit ? "rgb10a2unorm" : SortedTargetFormat;
+        _splatPipelineView?.Dispose(); _splatPipelineView = null;
+        _uniformBindGroupView?.Dispose(); _uniformBindGroupView = null;
+        if (noDepth || eightBit || tenBit || obb)
+        {
+            var code = obb ? SplatShaderSource.Replace("const OBB_QUAD : bool = false;", "const OBB_QUAD : bool = true;") : SplatShaderSource;
+            using var shader = _device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = code });
+            _splatPipelineView = _device.CreateRenderPipeline(SortedSplatPipelineDesc(shader, _viewTargetFormat, depth: !noDepth));
+            _uniformBindGroupView = _device.CreateBindGroup(new GPUBindGroupDescriptor
+            {
+                Layout = _splatPipelineView.GetBindGroupLayout(0),
+                Entries = new[] { new GPUBindGroupEntry { Binding = 0, Resource = new GPUBufferBinding { Buffer = _uniformBuffer } } },
+            });
+        }
+        CreateOffscreenTexture();
+        Console.WriteLine($"[Import] viewexp: depth {(noDepth ? "off" : "on")}, target {_viewTargetFormat}, quads {(obb ? "ellipse-aligned" : "axis-aligned")}");
+    }
+
     private void CreateOffscreenTexture()
     {
         _offscreenView?.Dispose();
@@ -1190,7 +1228,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         _offscreenTexture = _device!.CreateTexture(new GPUTextureDescriptor
         {
             Size = new[] { _canvasWidth, _canvasHeight },
-            Format = SortedTargetFormat,
+            Format = _viewTargetFormat,
             Usage = GPUTextureUsage.RenderAttachment | GPUTextureUsage.TextureBinding,
         });
         _offscreenView = _offscreenTexture.CreateView();
@@ -1380,7 +1418,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
             _splatPassDescCas = new GPURenderPassDescriptor
             {
                 ColorAttachments = new[] { _splatColorAttachCas },
-                DepthStencilAttachment = new GPURenderPassDepthStencilAttachment
+                DepthStencilAttachment = _viewNoDepth ? null : new GPURenderPassDepthStencilAttachment
                 {
                     View = _depthView,
                     DepthLoadOp = "clear",
@@ -1784,8 +1822,8 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         // Always the f32-precision path: splats blend into the rgba16float offscreen target, then the CAS
         // pass writes the canvas. Strength 0 (or low-res motion) makes CAS an exact copy.
         using var splatPass = encoder.BeginRenderPass(_splatPassDescCas!);
-        splatPass.SetPipeline(_splatPipeline!);
-        splatPass.SetBindGroup(0, _uniformBindGroupSorted!);
+        splatPass.SetPipeline(_splatPipelineView ?? _splatPipeline!);
+        splatPass.SetBindGroup(0, _uniformBindGroupView ?? _uniformBindGroupSorted!);
         splatPass.SetVertexBuffer(0, _splatBuffer!);
         DrawSortedSplats(splatPass, visibleCount);
         splatPass.End();
@@ -2564,6 +2602,8 @@ fn lod_args() {
         _casUniformBuffer?.Dispose();
         _casSampler?.Dispose();
         _splatPipeline?.Dispose();
+        _splatPipelineView?.Dispose();
+        _uniformBindGroupView?.Dispose();
         _casPipeline?.Dispose();
         _packCountBuf?.Destroy();
         _lodArgsBuf?.Destroy(); _lodArgsBuf?.Dispose();
@@ -2637,6 +2677,9 @@ struct VertexOutput {
     // vs_trainer only: the trainer's conic (inverse 2D covariance) and centre, framebuffer pixels (y down).
     @location(4) @interpolate(flat) conic     : vec3<f32>,
     @location(5) @interpolate(flat) centre_px : vec2<f32>,
+    // vs_trainer only: the trainer's tile box (lo.xy, hi.xy), framebuffer pixels; an ellipse-aligned quad can reach
+    // past it, so fs_trainer keeps only the pixel centres inside it (OBB_QUAD).
+    @location(6) @interpolate(flat) box : vec4<f32>,
 };
 
 // The trainer's footprint, not a fixed ellipse: like the reference rasteriser it has NO sigma cutoff, only
@@ -2646,6 +2689,9 @@ struct VertexOutput {
 const VIEW_MIN_ALPHA : f32 = 0.00392156862;   // 1/255, SplatTrainerShaders.MIN_ALPHA
 const VIEW_MAX_ALPHA : f32 = 0.99;            // SplatTrainerShaders.MAX_ALPHA
 const TRAINER_TILE : f32 = 16.0;              // SplatTrainerShaders TILE
+// Ellipse-aligned quads (viewer experiment, &viewexp=obb): the alpha contour's rectangle along the splat's own axes
+// when it is smaller than the axis-aligned box. The same pixels pass the fragment tests; fewer are rasterised.
+const OBB_QUAD : bool = false;
 const TRAINER_TILE_SIGMAS : f32 = 3.0;        // SplatTrainerShaders SIGMA_CUTOFF (tile overlap extent)
 
 // Footprint cutoff in standard deviations. 3 sigma captures 98.9% of the mass; below ~2.5 the
@@ -2785,7 +2831,22 @@ fn vs_trainer(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOu
     hi = min(hi, ceil(centre_px + half));
     if (hi.x <= lo.x || hi.y <= lo.y) { return splat_reject(uv, rgb); }
 
-    let corner_px = select(lo, hi, uv > vec2<f32>(0.0, 0.0));
+    var corner_px = select(lo, hi, uv > vec2<f32>(0.0, 0.0));
+    if (OBB_QUAD) {
+        // Pixel-space covariance [[cov_a, -cov_b], [-cov_b, cov_c]] (y down, as the conic). Its alpha contour
+        // (Mahalanobis^2 = k2) spans sqrt(k2 lambda_i) along eigenvector i; +1 px as the axis-aligned box.
+        let l2 = max(mid - sqrt(max(mid * mid - det, 0.0)), 0.0);
+        let b = -cov_b;
+        var e1 = select(vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0), cov_c > cov_a);
+        if (abs(b) > 1e-6 * (cov_a + cov_c)) { e1 = normalize(vec2<f32>(b, l1 - cov_a)); }
+        let e2 = vec2<f32>(-e1.y, e1.x);
+        let h1 = sqrt(k2 * l1) + 1.0;
+        let h2 = sqrt(k2 * l2) + 1.0;
+        let ext = hi - lo;
+        if (4.0 * h1 * h2 < ext.x * ext.y) {
+            corner_px = centre_px + e1 * (uv.x * h1) + e2 * (uv.y * h2);
+        }
+    }
     let ndc = vec2<f32>(corner_px.x / u.viewport.x * 2.0 - 1.0, 1.0 - corner_px.y / u.viewport.y * 2.0);
 
     var out : VertexOutput;
@@ -2796,6 +2857,7 @@ fn vs_trainer(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOu
     out.cut = 1.0;
     out.conic = conic;
     out.centre_px = centre_px;
+    out.box = vec4<f32>(lo, hi);
     return out;
 }
 
@@ -2924,6 +2986,10 @@ fn vs_main(input : VertexInput, @builtin(vertex_index) vid : u32) -> VertexOutpu
 // The trainer's per-pixel weight (SplatTrainerShaders splat_weight) at this pixel's centre, with its alpha rules.
 @fragment
 fn fs_trainer(input : VertexOutput) -> @location(0) vec4<f32> {
+    if (OBB_QUAD) {
+        let p = input.clip_pos.xy;
+        if (any(p < input.box.xy) || any(p > input.box.zw)) { discard; }
+    }
     let d = input.clip_pos.xy - input.centre_px;
     let c = input.conic;
     let power = -0.5 * (c.x * d.x * d.x + c.z * d.y * d.y) - c.y * d.x * d.y;

@@ -941,7 +941,13 @@ public partial class Studio
                 Console.WriteLine($"[Train] held-out poses refined against the frozen scene: {refined} views x {PoseTestIterations} steps");
             }
 
-            if (ExposureOption) await ReportExposureAsync(views, supervised);
+            if (ExposureOption)
+            {
+                await ReportExposureAsync(views, supervised);
+                if (await _trainer.FoldMeanExposureAsync(packed, n, supervised) is { } fold)
+                    Console.WriteLine($"[Train] exposure: the photos' mean folded into the scene (gains {fold.M00:F3}/{fold.M11:F3}/{fold.M22:F3}, " +
+                        $"offsets {fold.B0:+0.000;-0.000}/{fold.B1:+0.000;-0.000}/{fold.B2:+0.000;-0.000}) - the viewer shows the average photo's exposure");
+            }
 
             if (await FloaterCensusAsync(packed, n, views, targets, box, w, h))
             {

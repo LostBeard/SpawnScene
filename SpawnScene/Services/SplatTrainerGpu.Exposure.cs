@@ -3,6 +3,7 @@ using ILGPU.Runtime;
 using SpawnDev.ILGPU;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnDev.SpawnJS.JSObjects;
+using SpawnScene.Models;
 
 namespace SpawnScene.Services;
 
@@ -100,6 +101,66 @@ public sealed partial class SplatTrainerGpu
             Buf(0, _exposurePartials.GetGPUBuffer()!), Buf(1, _exposure.GetGPUBuffer()!),
             Buf(2, _exposureMoments!.GetGPUBuffer()!), Buf(3, _exposureSteps!.GetGPUBuffer()!), Buf(4, _exposureCfgBuf!),
         });
+    }
+
+    /// <summary>The mean affine of the supervised photos, folded into the scene (<see cref="FoldMeanExposureAsync"/>).</summary>
+    public struct ExposureFold
+    {
+        public float M00, M01, M02, B0, M10, M11, M12, B1, M20, M21, M22, B2;
+        public int Count;
+    }
+
+    static Action<Index1D, ArrayView1D<float, Stride1D.Dense>, ExposureFold>? _foldKernel;
+    static Accelerator? _foldFor;
+
+    /// <summary>
+    /// Fold the supervised photos' MEAN exposure into the scene's base colours, so what the viewer shows matches the
+    /// average photo. Nothing pins the exposures' overall level during training: on Bathroom (f2, 2026-10-07) every gain
+    /// drifted up (0.95..1.36, ~1.15 mean) while the scene drifted darker, and held-out photos - scored at identity -
+    /// lost 1.3 dB. rgb = C0 dc + 0.5, so dc' = (M (C0 dc + 0.5) + b - 0.5) / C0 is exact for the base colour; the SH
+    /// bands (view-dependent residuals) are left as they are. Returns the folded mean for the log, or null.
+    /// </summary>
+    public async Task<ExposureFold?> FoldMeanExposureAsync(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
+        IReadOnlyList<int> slots)
+    {
+        if (_exposure == null || slots.Count == 0 || splatCount <= 0) return null;
+        // CPU transfer: 12 floats a view, once a run.
+        var e = await _exposure.CopyToHostAsync<float>(0, _exposureViews * 12L);
+        var m = new double[12];
+        int used = 0;
+        foreach (int v in slots)
+        {
+            if (v < 0 || v >= _exposureViews) continue;
+            for (int k = 0; k < 12; k++) m[k] += e[v * 12 + k];
+            used++;
+        }
+        if (used == 0) return null;
+        for (int k = 0; k < 12; k++) m[k] /= used;
+        var f = new ExposureFold
+        {
+            M00 = (float)m[0], M01 = (float)m[1], M02 = (float)m[2], B0 = (float)m[3],
+            M10 = (float)m[4], M11 = (float)m[5], M12 = (float)m[6], B1 = (float)m[7],
+            M20 = (float)m[8], M21 = (float)m[9], M22 = (float)m[10], B2 = (float)m[11],
+            Count = splatCount,
+        };
+        var a = _gpu.WebGPUAccelerator;
+        if (!ReferenceEquals(_foldFor, a)) { _foldKernel = null; _foldFor = a; }
+        _foldKernel ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ExposureFold>(FoldKernel);
+        _foldKernel(splatCount, splatBuf.View, f);
+        await a.SynchronizeAsync();
+        return f;
+    }
+
+    static void FoldKernel(Index1D i, ArrayView1D<float, Stride1D.Dense> splats, ExposureFold f)
+    {
+        if (i >= f.Count) return;
+        long o = (long)i.X * SplatFormat.Floats + SplatFormat.OffColor;
+        const float C0 = 0.28209479177387814f;
+        float r = C0 * splats[o] + 0.5f, g = C0 * splats[o + 1] + 0.5f, b = C0 * splats[o + 2] + 0.5f;
+        float r2 = f.M00 * r + f.M01 * g + f.M02 * b + f.B0;
+        float g2 = f.M10 * r + f.M11 * g + f.M12 * b + f.B1;
+        float b2 = f.M20 * r + f.M21 * g + f.M22 * b + f.B2;
+        splats[o] = (r2 - 0.5f) / C0; splats[o + 1] = (g2 - 0.5f) / C0; splats[o + 2] = (b2 - 0.5f) / C0;
     }
 
     void DisposeExposure()

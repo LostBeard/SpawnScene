@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev.ILGPU;
 using SpawnScene.Models;
 using SpawnScene.Services;
 
@@ -47,6 +48,30 @@ public partial class Studio
             }
         Console.WriteLine($"[TrainerGate] exposure fit to gains 0.8/0.9/1.1, offsets +0.05/-0.03/+0.02: {Rows(e)} (worst error {worst:F4})");
         if (worst > 0.03f) { Console.WriteLine("[TrainerGate] FAIL exposure: did not recover the transform"); return false; }
+
+        // The fold: that transform moved into the scene's colours, the plain render (no exposure) must now BE the target.
+        // Gate scale: the rows are saved and restored around it.
+        var saved = await splatBuf.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
+        try
+        {
+            var fold = await trainer.FoldMeanExposureAsync(splatBuf, n, new[] { 0 });
+            trainer.ResetExposure(1);
+            var plain = await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar, readback: true);
+            double err = 0, before = 0;
+            for (int i = 0; i < plain.Length; i++) { err += Math.Abs(plain[i] - target[i]); before += Math.Abs(img[i] - target[i]); }
+            err /= plain.Length; before /= plain.Length;
+            Console.WriteLine($"[TrainerGate] exposure fold: plain render vs the transformed target, mean |error| {before:F4} before -> {err:F4} after");
+            if (fold == null || err > 0.01 || err > 0.25 * before)
+            {
+                Console.WriteLine("[TrainerGate] FAIL exposure: the folded scene does not render the photo's exposure");
+                return false;
+            }
+        }
+        finally
+        {
+            splatBuf.CopyFromCPU(saved);
+            await _gpuService.WebGPUAccelerator.SynchronizeAsync();
+        }
 
         var id = await FitAsync(img, 200);
         float drift = 0f;

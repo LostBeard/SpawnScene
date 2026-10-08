@@ -1818,7 +1818,7 @@ public class MultiViewGenerationService
         }
 
         // The depth-shell path unprojects each view's cascade depth map: a view SfM placed without one cannot take part.
-        posed.RemoveAll(i => poses.Depths[i] == null);
+        posed.RemoveAll(i => poses.Depths[i] == null || poses.DepthOnly.Contains(i));
         if (posed.Count == 0)
         {
             SetStatus("Error: no placed view has a depth map for the depth-shell init.");
@@ -2034,6 +2034,16 @@ public class MultiViewGenerationService
         public int ChunksRejected { get; set; }
         public int PosedCount => Cameras.Count(c => c != null);
 
+        /// <summary>
+        /// Views whose depth came from a REJECTED pass: its fold failed (the anchors disagreed), so its cameras are not
+        /// used, but each view's depth map is still that view's own camera depth, and DepthFusionInit scales every view to
+        /// the SfM points it sees by itself. Such a view enters SfM as a placeholder and seeds the depth fusion once placed.
+        /// Not for the depth-shell path (no frame scale). Hamamni Baths 2026-10-08: anchors 25/30/31 sat ~1% of the rig
+        /// apart, most passes were rejected and only 19 of 57 placed views had depth - walls with no seeds, blobs grown
+        /// to cover them.
+        /// </summary>
+        public HashSet<int> DepthOnly { get; } = new();
+
         public void Dispose()
         {
             foreach (var d in Depths) d?.Dispose();
@@ -2214,9 +2224,10 @@ public class MultiViewGenerationService
             if (!fitted)
             {
                 result.ChunksRejected++;
+                int keptDepths = AdoptChunkDepthsOnly(result, chunk, run);
                 Console.WriteLine(
                     $"[MultiView] chunk {ci} REJECTED: {fitLine}. Placing it anyway would put a " +
-                    "full cloud in the wrong part of the scene looking measured.");
+                    $"full cloud in the wrong part of the scene looking measured. Its depth maps kept for {keptDepths} view(s) (SfM places them).");
                 run.Dispose();
                 continue;
             }
@@ -2496,10 +2507,29 @@ public class MultiViewGenerationService
 
             if (slot < run.DepthResults.Count)
             {
+                into.Depths[g]?.Dispose();   // a depth-only map from a rejected pass, superseded by a folded one
+                into.DepthOnly.Remove(g);
                 into.Depths[g] = run.DepthResults[slot];
                 run.DepthResults[slot] = null!;   // ownership moved; the run no longer disposes it
             }
         }
+    }
+
+    /// <summary>A rejected pass: keep its new views' depth maps (not their cameras) - see ChunkedPoseResult.DepthOnly.</summary>
+    private static int AdoptChunkDepthsOnly(ChunkedPoseResult into, MultiViewChunk chunk,
+        DepthEstimationService.MultiViewDepthResult run)
+    {
+        int kept = 0;
+        for (int slot = chunk.AnchorCount; slot < chunk.Views.Length && slot < run.DepthResults.Count; slot++)
+        {
+            int g = chunk.Views[slot];
+            if (into.Cameras[g] != null || into.Depths[g] != null || run.DepthResults[slot] == null) continue;
+            into.Depths[g] = run.DepthResults[slot];
+            run.DepthResults[slot] = null!;   // ownership moved
+            into.DepthOnly.Add(g);
+            kept++;
+        }
+        return kept;
     }
 
     /// <summary>

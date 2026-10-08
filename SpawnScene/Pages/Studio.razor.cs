@@ -361,6 +361,10 @@ public partial class Studio : IAsyncDisposable
             bool disp = query.TryGetValue("disparity", out var ds) && ds is "1" or "true";
             await RunDepthMapAutotestAsync(img, dmPatches, disp);
         }
+        else if (mode == "inpaint-parity")
+        {
+            await RunInpaintParityAsync();
+        }
         else if (mode == "samples")
         {
             // The catalog's "try a sample" path: &name=<folder> into a new project, as the button does (Studio.Projects).

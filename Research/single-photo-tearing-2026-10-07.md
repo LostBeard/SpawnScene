@@ -65,6 +65,11 @@ the cabinet door, the range hood's edge and the tile line continue, the lamp sha
 `img/migan-kitchen-2026-10-07.png` (left: hole, right: MI-GAN). The pipeline export (`migan_pipeline_v2.onnx`) adds
 NonZero / GatherND / ScatterND (data-dependent shapes): use the plain net and crop around each hole ourselves.
 
+**MEASURED in the browser (autotest=inpaint-parity, 2026-10-07):** the float-I/O variant (tools/migan_float_io.py; hosted
+as LostBeard/spawnscene-models/migan_float.onnx with the MIT notice, fetched through the hub) runs on SpawnDev.ILGPU.ML
+(WebGPU) and matches onnxruntime to 3 decimals on 0..255 (hole centre 227.314 vs 227.314; red check: the hole differs
+from the input by 19.8 mean). Loads in 1.3 s, first 512x512 run 2.7 s including kernel compiles.
+
 Plan: OcclusionFill already knows WHERE the hidden layer goes (the far side of each depth edge, the band past the
 frame). Build the mask from it, inpaint the photo there (MI-GAN first), and colour the hidden layer from the inpainted
 image instead of the push-pull blur; its depth stays the far-side depth.

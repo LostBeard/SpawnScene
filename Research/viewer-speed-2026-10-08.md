@@ -54,3 +54,20 @@ harness flags. Open: a faster fp16 path (the blend is bandwidth: 8 bytes a pixel
 fewer fragments where it matters - the obb result says the GPU is not fragment-count-bound here - or a compute
 rasteriser like the trainer's tile renderer), and a check of GaussianSplats3D/Spark against the reference renderer at
 these poses (needs the gsplat environment back).
+
+## Follow-up: a faster path that keeps the fp16 picture (TJ: "if it would be an improvement it is worth looking into.
+## visual fidelity is very important. fast means nothing if it's ugly.")
+
+- **The trainer's tile rasteriser as the viewer:** no. Its forward pass (Truck 549K, 979x546, 09-24 profile) is
+  ~23 ms a frame - emit 6.5, sort 10.5 (tile x depth keys, millions of them), raster 6.0 - against ~4 ms for the
+  current viewer at 2.7x the pixels. A compute viewer would first need a sort several times faster than that one.
+- **Early termination in the hardware path:** draw front to back in K batches, marking opaque pixels (T < 1e-4, the
+  trainer's and the reference's stop) in the depth buffer between batches so later fragments die at the early depth
+  test. It would match the trainer MORE closely (the viewer now blends splats behind opaque pixels; the trainer does
+  not). `tools/viewer-bench/early_stop_sim.py` (1/4 resolution, the viewer's footprint rule) on the seven poses:
+  fragments still blended - ideal per-pixel stop 61-69%, K=8 72-80%, K=16 68-77%, K=32 65-74%. Train 7K is hazy (few
+  pixels reach T < 1e-4 early), so the ceiling is ~1.3-1.5x on blending, less after K extra full-screen passes.
+- **Where speed matters is not the RTX 4070** (already 3.7-5x over 60 Hz at 1600x900). It is the Quest browser and
+  laptop GPUs - and on a tile-based mobile GPU each pass break stores and reloads the tile memory, so K batches could
+  cost more than they save there. Next step: measure the headset (and an integrated GPU) at these poses before
+  building either.

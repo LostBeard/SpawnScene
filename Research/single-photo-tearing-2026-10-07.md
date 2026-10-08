@@ -55,8 +55,15 @@ depth in the band behind each depth edge, so the revealed background is plausibl
 
 | Model | Licence | Size | Notes |
 |---|---|---|---|
-| **MI-GAN** (Picsart, ICCV 2023) | MIT | ~7x smaller than LaMa | already runs in browsers (ONNX Runtime Web + WebGPU: inpaint-web) |
+| **MI-GAN** (Picsart, ICCV 2023) | MIT | ~7x smaller than LaMa | already runs in browsers (ONNX Runtime Web + WebGPU: inpaint-web). The author's HF repo `andraniksargsyan/migan` has `migan.onnx` (512x512 net) and `migan_pipeline_v2.onnx` (pre/post-processing for any image size inside the graph) |
 | LaMa (big-lama) | Apache-2.0 | ~200 MB | large masks (FFC), the standard object remover |
+
+**MEASURED 2026-10-07 (onnxruntime CPU, tools/migan_test.py):** the plain `migan.onnx` (opset 12; uint8 `image`
+[B,3,H,W] + uint8 `mask` [B,1,H,W], 255 = known, 0 = fill; ops Conv/LeakyRelu/Clip/Resize/Pad/Cast/Reshape/Transpose -
+no data-dependent shapes) on a 512 crop of the kitchen sample with a 256 px hole over the cabinets and a pendant lamp:
+the cabinet door, the range hood's edge and the tile line continue, the lamp shade is completed - see
+`img/migan-kitchen-2026-10-07.png` (left: hole, right: MI-GAN). The pipeline export (`migan_pipeline_v2.onnx`) adds
+NonZero / GatherND / ScatterND (data-dependent shapes): use the plain net and crop around each hole ourselves.
 
 Plan: OcclusionFill already knows WHERE the hidden layer goes (the far side of each depth edge, the band past the
 frame). Build the mask from it, inpaint the photo there (MI-GAN first), and colour the hidden layer from the inpainted

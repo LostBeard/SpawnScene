@@ -68,6 +68,19 @@ Bathroom pairs with it. **h2 TruckFull `&exposure=gains`: 24.00 / 0.8598** vs k2
 the phone room (+0.4 dB over the affine, the best Bathroom number), costs nothing on Truck, 0.2 dB PSNR (SSIM up) on
 Bicycle under the mean-exposure score.
 
+**Fair score (j chain, 2026-10-08; right half of each held-out photo, per-photo gains fitted on its left half - the
+reference's train_test_exp protocol, every run):**
+
+| run | options | held out (mean exposure) | right half as rendered | right half, gains fitted |
+|---|---|---|---|---|
+| j0 Bicycle | depthinit=4 | 25.14 / 0.7666 | 25.135 | 25.416 |
+| j1 Bicycle | depthinit=4 exposure=gains | 24.99 / 0.7683 | 24.959 | **25.575** |
+| j2 Bathroom | depthinit=4 | 16.88 / 0.7958 | 17.097 | 18.877 |
+| j3 Bathroom | depthinit=4 exposure=gains | pending | | |
+
+Bicycle's photos vary in exposure too (fitted gains 0.91-1.13), so the mean-exposure score penalised the run that
+modelled it: under the fair score gains-only WINS Bicycle (+0.16 dB, SSIM +0.0017).
+
 ### Depth supervision (PLANS 3b), built 2026-10-08, opt-in `&depthloss=X` (with `&depthinit`)
 
 L1 between the rendered inverse depth sum(w/z) and each photo's DAv3 depth scaled by DepthFusionInit (kept per view,

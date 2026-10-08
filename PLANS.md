@@ -51,13 +51,18 @@ held-out number and looks worse off-path does not ship.
 0. **MEASURED 10-07 late:** Bathroom `&depthinit=4 &exposure=1` held out 15.58 -> 18.27 dB, SSIM 0.709 -> 0.836 (g4) -
    make both the defaults once Bicycle (b0/b1, e1) and Truck (e2) show no loss. Single photo: `&edgesnap=1` +
    `&inpaint=1` (MI-GAN) make the hidden layers plausible - TJ to judge on the live site (URL flags work there).
-2. **Per-photo exposure** (done, opt-in `&exposure=1`, gate-verified; mean exposure folded into the scene): A/B on Bathroom; default-on if rooms gain and
-   benchmarks do not lose. Then the held-out exposure fit for fair scoring (the reference fits the left half).
+2. **Per-photo exposure** (opt-in, gate-verified). MEASURED 10-08: the full 3x4 affine costs fixed-exposure captures
+   0.2-0.6 dB (its offsets do not fold into the scene); `&exposure=gains` (per-channel gains only) wins the phone room
+   (h0 Bathroom 18.64 dB vs affine 18.23), is neutral on Truck (24.00 vs 24.07 none), -0.22 dB / SSIM up on Bicycle under
+   the mean-exposure score. Fair score (gains fitted on the left half, right half scored, every run) added; j0-j3 decide
+   the default with it.
 3. **Depth from DAv3 in training** (we compute it for posing and throw it away):
    a. Dense init: each photo's DAv3 depth aligned (scale/shift) to the SfM points it sees, back-projected on a grid,
       voxel-thinned - seeds on every surface a photo saw, not only where features matched.
    b. Inverse-depth L1 against the aligned depth, weight 1.0 -> 0.01 over training (the reference's `-d`). Indoor first.
-      **Built 2026-10-08** (`&depthloss=1` with `&depthinit`; gate-verified against finite differences). A/B d0/d1 queued.
+      **Built 2026-10-08** (`&depthloss=1` with `&depthinit`; gate-verified against finite differences). MEASURED: neutral
+      on Bathroom at 7K (d1 18.20 vs d0 18.23) - stays opt-in; i0/i1 test short schedules (a 1500-it run matched 7K).
+   a. is measured: Bathroom +1.3 dB, Bicycle neutral (b0r 25.17 vs b1 25.16) - default candidate for TJ.
 4. **Capture feedback:** after SfM, show which photos were dropped and why, and a coverage ring (headings with photos,
    as the pan views log). Fix the landscape-photo skip in the multi-view depth pass.
 5. **Anti-aliasing for the viewer:** Mip-Splatting 3D filter (`&mipfilter`) default-on if the in/out wander views

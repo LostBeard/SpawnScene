@@ -15,7 +15,7 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Truck (979) | 30K | 24.95 / 0.887, 0.89M, 25 min (c49) | - | 25.13 / 0.877 / 0.095, 3.79M (val_step29999.json) | - | see refs |
 | Truck (979) | 7K | 23.97 / 0.859 (t0, 10-08 defaults) | - | 23.83 / 0.848 / 0.144, 2.51M (truck val_step6999 - step 7K of the 30K run: NOT a 7K run) | - | see refs |
 | Bicycle (1237) | 7K-end | 25.06 / 0.766 (k1, 10-07 defaults) | 24.97 / 0.768 (m0, 10-08 defaults) | 21.29 / 0.552 (old bicycle7k on gsplat's own images_4_png: superseded by the clean-folder 23.76 below) | - | see refs |
-| Bicycle (1237, clean folder) | 7K-end | - | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
+| Bicycle (1237, clean folder) | 7K-end | **24.34 / 0.739** (par7k, 10-08 defaults; fair 24.89) | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
 | Garden (images_4) | 7K-end | - | - | 26.00 / 0.809 / 0.149, 3.62M | - | see refs |
 | Stump (images_4) | 7K-end | - | - | 25.03 / 0.682 / 0.304, 3.39M | - | see refs |
 | Room (images_2) | 7K-end | - | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |

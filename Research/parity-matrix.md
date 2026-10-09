@@ -167,6 +167,17 @@ EXIF spread measured: Bathroom 6.13 stops, SouthBuilding 3.06. au chain (after c
 
 Playroom (cand c0/c1): defaults 29.84 / 0.920, 0.84M; poslrsteps + gains off **29.98 / 0.923**, 0.58M (gsplat 29.43).
 
+**cand c1 = both changes (&poslrsteps=7000 &exposure=0), in-app held out, vs xp x0 defaults (same seeds, exact sizes):**
+
+| Scene | x0 defaults | c1 both | delta | gsplat (7K-end) | c1 vs gsplat |
+|---|---|---|---|---|---|
+| Train | 18.93 / 0.730 | 19.49 / 0.773, 0.46M | +0.56 | 20.42 / 0.771 | -0.93 (SSIM level) |
+| DrJohnson | 26.80 / 0.872 | 28.11 / 0.902, 1.00M | +1.31 | 28.28 / 0.889 | -0.17 (SSIM +0.013) |
+| Counter | 27.05 / 0.890 | 27.63 / 0.896, 0.48M | +0.58 | 27.62 / 0.889 | **+0.01** (SSIM +0.007) |
+| Kitchen (seed 2, pl2) | 27.08 / 0.895 | 28.65 / 0.916, 0.60M | +1.57 | 29.41 / 0.914 | -0.76 (SSIM +0.002) |
+| Playroom | 29.84 / 0.920 | 29.98 / 0.923, 0.58M | +0.14 | 29.43 | +0.55 |
+
+
 ### DrJohnson shown upside down (TJ, 2026-10-09) - fixed a510f48
 
 The cameras' mean up agreed 69.4% (pitched at ceilings and floors), under the 80% gravity gate, so DrJohnson (and Playroom,

@@ -33,6 +33,10 @@ bonsai), C:/Users/TJ/Downloads/tandt_db/... images (truck, train, drjohnson, pla
 manifests name. Flowers / treehill are not on disk. Queued 10-08 16:19: gsplat 7K-end on all 11 (after the Hamamni
 ablation chain), then SpawnScene GTPOSES on the same folders.
 
+**Photo streaming verified (2026-10-09, 3a96380):** Truck 7K with a 256 MiB budget kept 125 of 251 views on the GPU and
+streamed the rest from browser memory: held out 24.04 / 0.8601 at 29.9 it/s, vs all resident 24.04 / 0.8600 at 28.1 it/s
+- identical quality, no slowdown. A photo budget no longer shrinks the training resolution.
+
 **Resolution (2026-10-08):** the par7k chain passed &targetmb=1536 (the Truck protocol's photo budget); Kitchen, Bonsai and
 Room did not fit it and trained at 89-94% of the benchmark size - not like for like with gsplat. Counter (full size) is.
 Re-runs with a budget that fits queued after the add-back chain (tuvok-par7k-indoor.sh).

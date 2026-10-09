@@ -141,7 +141,16 @@ PSNR / SSIM / LPIPS-alex:
 The training views fit better too (Train supervised 20.09 -> 20.78, DrJohnson 29.03 -> 31.52): it was the underfitting.
 Fewer splats (positions settle, fewer cross the densify bar). The comment on PositionLrMaxSteps ("tying it to the run length
 ... held-out PSNR fell 1.5 dB", an old 8K measurement) does not hold on today's trainer. **Defaults question for TJ** (with
-the exposure gains): decay over the run's own iterations. Kitchen with both (pl2) and Counter (pl1) running.
+the exposure gains): decay over the run's own iterations.
+
+| Run | rescore PSNR / SSIM / LPIPS-alex | gsplat | gap |
+|---|---|---|---|
+| Kitchen seed 2, poslrsteps + gains off (pl2) | **28.66 / 0.908 / 0.124**, 0.60M | 29.37 / 0.913 / 0.117 | -0.71 (defaults: -2.27) |
+| Counter, poslrsteps (pl1) | 27.21 / 0.887 / 0.191, 0.48M (x0 27.05 / 0.881 / 0.197) | 27.60 / 0.888 / 0.189 | -0.39; SSIM / LPIPS level |
+
+The two stack on Kitchen (+1.10 then +0.46 = +1.56 over defaults). **cand chain** (after gs): Bathroom (phone, own SfM,
+fair score) b0 defaults / b1 poslrsteps / b2 both - the capture the gains were made default for - then both changes on
+Playroom (+ its baseline), Train, DrJohnson, Counter, Bonsai, Room, Bicycle, Truck, Garden, Stump: the full table for TJ.
 
 ### DrJohnson shown upside down (TJ, 2026-10-09) - fixed a510f48
 

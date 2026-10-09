@@ -152,6 +152,21 @@ The two stack on Kitchen (+1.10 then +0.46 = +1.56 over defaults). **cand chain*
 fair score) b0 defaults / b1 poslrsteps / b2 both - the capture the gains were made default for - then both changes on
 Playroom (+ its baseline), Train, DrJohnson, Counter, Bonsai, Room, Bicycle, Truck, Garden, Stump: the full table for TJ.
 
+### Candidate defaults on the phone capture (cand, 2026-10-09)
+
+| Bathroom (35 phone photos, own SfM) | splats | held out PSNR / SSIM | fair (gains fitted on left half, right half scored) |
+|---|---|---|---|
+| b0 defaults | 0.76M | 18.89 / 0.848 | 24.85 (w0 last night 24.82) |
+| b1 &poslrsteps=7000 | 0.72M | 18.98 / 0.846 | **24.94** |
+| b2 &poslrsteps=7000 &exposure=0 | 0.79M | **17.03 / 0.797** | **18.99** |
+
+Position decay over the run: safe here too (+0.09). **Gains off: -5.9 dB fair** - the photos' EXIF exposure spans 6.13 stops
+(1/60..1/30 s, ISO 61..~700, HDR merges). So gains cannot simply go; they must follow the capture. `&exposure=auto`
+(6ddaeb5): gains only when the photos' EXIF exposure spread >= 1/3 stop (no EXIF = off; the benchmark JPGs have none).
+EXIF spread measured: Bathroom 6.13 stops, SouthBuilding 3.06. au chain (after cand): Bathroom with auto must land on b1.
+
+Playroom (cand c0/c1): defaults 29.84 / 0.920, 0.84M; poslrsteps + gains off **29.98 / 0.923**, 0.58M (gsplat 29.43).
+
 ### DrJohnson shown upside down (TJ, 2026-10-09) - fixed a510f48
 
 The cameras' mean up agreed 69.4% (pitched at ceilings and floors), under the 80% gravity gate, so DrJohnson (and Playroom,

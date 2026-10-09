@@ -163,7 +163,9 @@ Playroom (+ its baseline), Train, DrJohnson, Counter, Bonsai, Room, Bicycle, Tru
 Position decay over the run: safe here too (+0.09). **Gains off: -5.9 dB fair** - the photos' EXIF exposure spans 6.13 stops
 (1/60..1/30 s, ISO 61..~700, HDR merges). So gains cannot simply go; they must follow the capture. `&exposure=auto`
 (6ddaeb5): gains only when the photos' EXIF exposure spread >= 1/3 stop (no EXIF = off; the benchmark JPGs have none).
-EXIF spread measured: Bathroom 6.13 stops, SouthBuilding 3.06. au chain (after cand): Bathroom with auto must land on b1.
+EXIF spread measured: Bathroom 6.13 stops, SouthBuilding 3.06. **au1 (Bathroom, poslrsteps + exposure=auto, build f4): the
+gate logged "35 of 35 photos carry EXIF exposure, spread 6.13 stops -> per-photo gains ON"; held out 19.02 / 0.846, fair
+24.63** - b1's configuration (18.98 / 24.94), difference = run noise (fair over 4 views).
 
 Playroom (cand c0/c1): defaults 29.84 / 0.920, 0.84M; poslrsteps + gains off **29.98 / 0.923**, 0.58M (gsplat 29.43).
 

@@ -46,7 +46,7 @@ Bathroom (phone, own SfM; fair = gains fitted on the left half of each held-out 
 | today | 18.89 / 0.848 | 24.85 |
 | position decay | 18.98 / 0.846 | 24.94 |
 | position decay + gains off | 17.03 / 0.797 | **18.99** |
-| position decay + &exposure=auto | (au run pending) | (must match 24.94) |
+| position decay + &exposure=auto | **19.02 / 0.846** | **24.63** - gains ON ("35 of 35 photos carry EXIF exposure, spread 6.13 stops"); the same configuration as the row above, so the difference is run noise (fair = 4 views) |
 
 ## Corrections made overnight (factual stats)
 

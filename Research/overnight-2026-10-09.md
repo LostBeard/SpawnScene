@@ -67,8 +67,9 @@ separately); odd image sizes (Bicycle even vs exact = smoother, not better); nea
 
 - Train (-0.92) and Kitchen (-0.76). Tried on top of both changes: near plane 0.05 (Train +0.03, DrJohnson 0), gsplat's
   opacity lr 0.05 (-0.09 / -0.25), carve off (Train +0.17 noise, Kitchen -0.31), random background off (Train +0.09 noise,
-  **Kitchen +0.33**). The random background is my default (I proposed it, TJ approved) for Bathroom's see-through holes,
-  which a held-out score cannot see - turning it off for benchmarks would be a trade, so it is an option, not a fix.
+  Kitchen seed 2 +0.33). The random background is my default (I proposed it, TJ approved): checked on 5 runs (rb) - off
+  vs on 0.00 / +0.04 / +0.09 / -0.11 / +0.33, within noise, Kitchen's two seeds disagree in sign. No benchmark cost; it
+  stays (Bathroom see-through halved, Hamamni -1.05 dB without it).
 - Kitchen's held-out views lose 7-16 dB to dark blobs in front of the camera on some seeds (smaller with gains off).
 - Stump: the position decay costs 0.28 there.
 - 30K comparisons, Brush, the video path (after parity).

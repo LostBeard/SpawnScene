@@ -174,6 +174,12 @@ costs it 0.33 (above its seed noise, x0 seeds 27.10 / 27.08). The random backgro
 it, TJ approved 10-08) for Bathroom's see-through (12.0% -> 5.4% of off-path pixels, held out neutral there); a held-out
 benchmark cannot see see-through, so dropping it would be a trade, not a fix. Option for TJ, not a recommendation.
 
+**rb (2026-10-09, TJ: "if you now don't think it is a good default, that is worth knowing"):** random background off vs on,
+on top of c1: Counter 27.63 vs 27.63 (0.00), Bonsai 29.81 vs 29.77 (+0.04), Train 19.58 vs 19.49 (+0.09), Kitchen seed 1
+28.50 vs 28.61 (**-0.11**), Kitchen seed 2 28.98 vs 28.65 (+0.33). All within noise and the two Kitchen seeds disagree in
+sign (off: 28.50 / 28.98 = ~0.5 dB seed spread on Kitchen at this level). **No benchmark cost; it stays a good default**
+(Bathroom see-through halved, Hamamni -1.05 dB without it). The ab2 +0.33 was one noisy seed.
+
 ### Candidate defaults on the phone capture (cand, 2026-10-09)
 
 | Bathroom (35 phone photos, own SfM) | splats | held out PSNR / SSIM | fair (gains fitted on left half, right half scored) |

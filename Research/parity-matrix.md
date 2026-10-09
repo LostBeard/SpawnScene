@@ -166,7 +166,30 @@ tools/rescore.py `renders` mode. Same GPU, nothing else running.
 | SpawnScene c1 (both candidate changes) | 27.62 / 0.888 / 0.191 / 0.296 | 0.48M | 462 s training (15.2 it/s) |
 
 Quality: three-way parity on Counter. **Speed: we are the slowest - 2.7x Brush, 1.7x gsplat** (browser WebGPU vs Brush's native
-wgpu). Brush on the other 10 scenes running.
+wgpu).
+
+**Three-way, 11 scenes, 7K** (shared scorer, PSNR / SSIM / LPIPS-alex; ours = c1, both candidate changes - NOT today's
+defaults; Kitchen ours = seed 1 rb r0). Brush wall time includes loading.
+
+| Scene | Brush v0.3.0 | gsplat 1.5.3 | SpawnScene c1 | best PSNR | Brush splats / wall |
+|---|---|---|---|---|---|
+| Bicycle | 24.00 / 0.677 / 0.323 | 23.75 / 0.640 / 0.367 | **24.43 / 0.716 / 0.256** | ours | 0.65M / 107 s |
+| Garden | 26.14 / 0.804 / 0.166 | 25.99 / 0.809 / 0.149 | **26.36 / 0.827 / 0.131** | ours | 0.97M / 133 s |
+| Stump | 25.30 / 0.694 / 0.300 | 25.00 / 0.682 / 0.304 | **25.88 / 0.736 / 0.225** | ours | 0.45M / 96 s |
+| Playroom | 29.51 / 0.900 / 0.206 | 29.47 / 0.897 / 0.199 | **29.97 / 0.906 / 0.192** | ours | 0.46M / 103 s |
+| Counter | 27.61 / 0.889 / 0.184 | 27.60 / 0.888 / 0.189 | 27.62 / 0.888 / 0.191 | tie | 0.39M / 172 s |
+| DrJohnson | 28.22 / 0.896 / 0.226 | **28.28** / 0.889 / 0.230 | 28.12 / 0.894 / 0.234 | gsplat (ours -0.16) | 0.97M / 125 s |
+| Room | **30.25** / 0.907 / 0.190 | 30.07 / 0.899 / 0.203 | 30.02 / 0.907 / 0.194 | Brush (ours -0.23) | 0.50M / 158 s |
+| Truck | **24.71** / 0.860 / 0.132 | 23.88 / 0.852 / 0.134 | 24.31 / 0.859 / 0.136 | Brush (ours -0.40) | 0.59M / 86 s |
+| Kitchen | 29.18 / 0.907 / 0.123 | **29.37** / 0.913 / 0.117 | 28.62 / 0.909 / 0.124 | gsplat (ours -0.75) | 0.40M / 178 s |
+| Bonsai | **30.47** / 0.929 / 0.147 | 30.15 / 0.926 / 0.151 | 29.76 / 0.925 / 0.158 | Brush (ours -0.71) | 0.59M / 173 s |
+| Train | **21.07** / 0.792 / 0.200 | 20.42 / 0.771 / 0.231 | 19.52 / 0.764 / 0.256 | Brush (ours -1.55) | 0.84M / 118 s |
+| **mean PSNR** | **26.95** | 26.73 | 26.78 | | |
+
+Brush is the stronger reference: best mean PSNR, best on 4 scenes, and 1.5-3 min per scene. We lead Bicycle, Garden, Stump
+and Playroom on all three metrics. The losses concentrate on Train (-1.55 vs Brush), Kitchen, Bonsai. Brush v0.3.0 also
+decays the SCALE lr over the run and grows "MCMC-like"; a source-level comparison is being written
+(Research/brush-vs-spawnscene-2026-10-09.md).
 
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)
 

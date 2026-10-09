@@ -48,6 +48,13 @@ Bathroom (phone, own SfM; fair = gains fitted on the left half of each held-out 
 | position decay + gains off | 17.03 / 0.797 | **18.99** |
 | position decay + &exposure=auto | **19.02 / 0.846** | **24.63** - gains ON ("35 of 35 photos carry EXIF exposure, spread 6.13 stops"); the same configuration as the row above, so the difference is run noise (fair = 4 views) |
 
+## Brush v0.3.0 (added 15:30)
+
+The third reference, same pixels / split / scorer, 11 scenes at 7K: **mean PSNR Brush 26.95, SpawnScene (both changes)
+26.78, gsplat 26.73.** We lead Bicycle, Garden, Stump, Playroom on every metric; tie Counter; trail Brush most on Train
+(-1.55), Bonsai (-0.71), Kitchen (-0.46; gsplat leads Kitchen). Brush takes 1.5-3 min a scene; we take 2.7x Brush on Counter
+(462 s training vs 172 s wall). Table in Research/parity-matrix.md.
+
 ## Corrections made overnight (factual stats)
 
 - **The par7k leads on Bicycle (+0.58), Garden (+0.57) and Stump (+1.70) were inflated.** Photos with an odd side were

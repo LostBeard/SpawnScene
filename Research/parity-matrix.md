@@ -219,7 +219,10 @@ per-step key-count readback.
 (default 462 s), 27.62 / 0.896 (same); profiled backward 51.1 ms (tree 47.1). The barriers were not the cost. What sits
 on every key's critical path in both versions is thread 0's write-out - 9 scattered global writes and two AbsGS
 compare-exchange loops - with 255 invocations waiting at the next barrier. sg2: thread 0 only parks each key's totals,
-the tile writes a 64-key batch out in parallel after it (one extra barrier per batch); gate + timing running.
+the tile writes a 64-key batch out in parallel after it (one extra barrier per batch): gate PASS, **455.3 s** (vs 462),
+27.63 / 0.896, backward 48.7 ms - noise-level. So neither the barriers nor the write-out: the per-key reduction itself
+(~55 shuffles per thread per key) for every key on every subgroup. sg3: skip it on subgroups no pixel of which the splat
+touches (`subgroupAny(hit)`, gsplat skips warps the same way); running.
 Counter: ~13.5 keys per splat (5.67M keys / 419K splats).
 
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)

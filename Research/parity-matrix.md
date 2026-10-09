@@ -15,7 +15,7 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Truck (979) | 30K | 24.95 / 0.887, 0.89M, 25 min (c49) | - | 25.13 / 0.877 / 0.095, 3.79M (val_step29999.json) | - | see refs |
 | Truck (979) | 7K | 23.97 / 0.859 (t0, 10-08 defaults) | - | 23.83 / 0.848 / 0.144, 2.51M (truck val_step6999 - step 7K of the 30K run: NOT a 7K run) | - | see refs |
 | Bicycle (1237) | 7K-end | 25.06 / 0.766 (k1, 10-07 defaults) | 24.97 / 0.768 (m0, 10-08 defaults) | 21.29 / 0.552 (old bicycle7k on gsplat's own images_4_png: superseded by the clean-folder 23.76 below) | - | see refs |
-| Bicycle (1237, clean folder) | 7K-end | **24.34 / 0.739** (par7k, 10-08 defaults; fair 24.89) | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
+| Bicycle (1237, clean folder) | 7K-end | 24.34 / 0.739 (par7k, 10-08 defaults; RESAMPLED to 1236 - flattered, see xp below; exact size 23.59 / 0.716) | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
 | Garden (images_4) | 7K-end | 26.57 / 0.855 (par7k) | - | 26.00 / 0.809 / 0.149, 3.62M | - | see refs |
 | Stump (images_4) | 7K-end | 26.73 / 0.788 (par7k) | - | 25.03 / 0.682 / 0.304, 3.39M | - | see refs |
 | Room (images_2) | 7K-end | 29.97 / 0.918 (par7kfull, 1556x1038) - gsplat +0.13 dB, ours SSIM +0.015 | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
@@ -159,6 +159,24 @@ xp results (defaults x0 vs &exposure=0 x1, same build f2, seed 1 unless noted):
 | Kitchen (seed 2, defaults) | 27.08 / 0.895, 0.80M | 27.87 / 0.894, 0.79M | **+0.79** | seed 1 (&absgrad=0, ex0/ex1): +1.41; gsplat 29.41 |
 | Room | 29.77 / 0.911, 0.83M | 29.99 / 0.911, 0.83M | +0.22 | gsplat 30.10 |
 | Bicycle | 23.59 / 0.716, 2.46M | 23.75 / 0.714, 2.42M | +0.16 | rescore 23.59 / 0.710 / 0.251 and 23.76 / 0.708 / 0.253; gsplat rescore 23.75 / 0.640 / 0.367 |
+
+| Truck | 24.06 / 0.860, 0.78M | 24.12 / 0.860, 0.78M | +0.06 | gsplat 23.87; 979 wide = always trained at its exact (odd) size: par7k 24.04, same |
+
+**xp verdict (gains off, same build, exact sizes):** better on 7 of 8 scenes, never worse beyond noise - Kitchen +1.41 (seed 1)
+/ +0.79 (seed 2), Bonsai +0.64, Counter +0.45, DrJohnson +0.27, Room +0.22, Bicycle +0.16, Truck +0.06, Train -0.03.
+For TJ (defaults): gains were made a default on 10-08 from the Bathroom phone capture (auto exposure, +5.4 dB fair there).
+Options: (a) off by default, on for captures that need it; (b) on only when the photos' EXIF exposure / ISO / aperture
+vary (the benchmark JPGs carry no EXIF; the Bathroom photo does); (c) gains regularised toward 1. Not changed.
+
+**🔴 The par7k numbers on Bicycle, Garden, Stump, Room, Bonsai and Kitchen were measured on RESAMPLED photos.** Those
+photos have an odd side (Bicycle 1237x822, Garden 1297x840, Stump 1245x825, Room 1557x1038, Bonsai 1559x1039, Kitchen
+1558x1039); before 8cc8f05 training rounded to even, so the target AND the in-app scoring photo were a smoothed resample,
+while gsplat scored against the originals. Resampling alone lifts a score: gsplat's own Bicycle renders 23.75 -> 23.99
+(+0.24) when render and photo are both resized to 1236; Kitchen +0.09. So the par7k leads on Bicycle (+0.58), Garden
+(+0.57) and Stump (+1.70) are flattered by an unknown part. Native scenes (Counter 1558x1038, Truck, Train, DrJohnson,
+Playroom) are unaffected - Counter's baseline is identical (27.05) before and after. At exact size: Bicycle 23.59 (gains
+on) / 23.75 (off) vs gsplat 23.75 = level on PSNR, ahead on SSIM (0.710 vs 0.640) and LPIPS (0.251 vs 0.367).
+Garden and Stump re-run at exact size queued (gs chain, after od).
 
 **Bicycle's baseline fell:** par7k defaults 24.34 / 0.739 (1236x822, resampled from 1237) -> x0 23.59 / 0.716 (exact
 1237x822 since 8cc8f05), same settings otherwise (targetmb 1536 vs 2560 - both resident). The shared scorer agrees (23.59),

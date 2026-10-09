@@ -83,6 +83,14 @@ splats - the count is not the whole gap. The rescore resized the photos 1558x103
 sizes (fixed 8cc8f05: exact photo size, runs from here on), so the rescore is slightly against us (in-app 27.89 scores
 against its own 1040-row target).
 
+**Gap anatomy, Kitchen dg1 vs gsplat** (tools/gap_anatomy.py: per held-out view, PSNR raw / after a per-image 3x4 colour
+fit / after blurring both): raw -1.61, **after the colour fit -0.80**, blur sigma 2 -2.14, sigma 6 -2.54. So half the gap is
+per-image colour (DSCF0864-0896 almost only colour: ours brighter and warmer, gsplat on the photo) and the rest is
+LARGE-AREA error, not fine detail (blurring widens it). DSCF0688 alone is -9.6 dB (27.76 vs 18.20): a dark blob in front
+of the camera, bottom right - a near-camera floater no training view rejects. We win 0704, 0712, 0808.
+Queued (tuvok-ex.sh, after dg): ex0 = dg1 at the exact photo size, ex1 = + &exposure=0 (per-photo gains: gsplat has none),
+both with &splatstats=1 (dark opaque splats near cameras).
+
 ## Phone / Commons captures (no ground-truth poses: own SfM only)
 
 | Capture | SpawnScene | gsplat on SpawnScene's poses | notes |

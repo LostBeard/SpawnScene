@@ -16,8 +16,8 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Truck (979) | 7K | 23.97 / 0.859 (t0, 10-08 defaults) | - | 23.83 / 0.848 / 0.144, 2.51M (truck val_step6999 - step 7K of the 30K run: NOT a 7K run) | - | see refs |
 | Bicycle (1237) | 7K-end | 25.06 / 0.766 (k1, 10-07 defaults) | 24.97 / 0.768 (m0, 10-08 defaults) | 21.29 / 0.552 (old bicycle7k on gsplat's own images_4_png: superseded by the clean-folder 23.76 below) | - | see refs |
 | Bicycle (1237, clean folder) | 7K-end | **24.34 / 0.739** (par7k, 10-08 defaults; fair 24.89) | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
-| Garden (images_4) | 7K-end | - | - | 26.00 / 0.809 / 0.149, 3.62M | - | see refs |
-| Stump (images_4) | 7K-end | - | - | 25.03 / 0.682 / 0.304, 3.39M | - | see refs |
+| Garden (images_4) | 7K-end | 26.57 / 0.855 (par7k) | - | 26.00 / 0.809 / 0.149, 3.62M | - | see refs |
+| Stump (images_4) | 7K-end | 26.73 / 0.788 (par7k) | - | 25.03 / 0.682 / 0.304, 3.39M | - | see refs |
 | Room (images_2) | 7K-end | - | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
 | Counter (images_2) | 7K-end | - | - | 27.62 / 0.889 / 0.192, 0.88M | - | see refs |
 | Kitchen (images_2) | 7K-end | - | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
@@ -32,6 +32,10 @@ Data: one clean folder per scene (junctions, nothing copied) at the gsplat scrat
 bonsai), C:/Users/TJ/Downloads/tandt_db/... images (truck, train, drjohnson, playroom) - the same files SpawnScene's
 manifests name. Flowers / treehill are not on disk. Queued 10-08 16:19: gsplat 7K-end on all 11 (after the Hamamni
 ablation chain), then SpawnScene GTPOSES on the same folders.
+
+**Caveat (2026-10-08):** each tool's numbers above are scored by its own code (our SSIM vs torchmetrics'); a single
+rescoring script over every tool's saved held-out renders is required before publishing (the dataset harness saves only 3
+held-out renders per scene today - needs a dump of all of them, like the sample path's &dumpheld).
 
 Reference numbers with sources: [parity-references-2026-10-08.md](parity-references-2026-10-08.md) (being written).
 

@@ -1102,6 +1102,110 @@ fn raster_backward(
 }
 ";
 
+
+    /// <summary>
+    /// <see cref="RasterBackward"/> with the per-key tile reduction done by subgroup operations (WebGPU <c>subgroups</c>):
+    /// each subgroup sums its pixels' gradients with <c>subgroupAdd</c>, one lane per subgroup parks the partial in a slot,
+    /// and thread 0 adds the (256 / subgroup size) partials - ONE workgroup barrier a key instead of the tree's nine.
+    /// The slots are double-buffered by key parity: thread 0 reads buffer k&amp;1 before it reaches key k-1's barrier, and no
+    /// thread writes that buffer again until key k-2. The backward + scatter were 56% of a Counter step (parity
+    /// 2026-10-09; Brush does a subgroup add per splat). Opt-in, <see cref="SplatTrainerGpu.UseSubgroupBackward"/>, and
+    /// only on a device created with the feature. Float sums in another order: last-bit differences only.
+    /// </summary>
+    public static string SubgroupBackward(string rasterBackward)
+    {
+        const string declOld = DeclOld, redOld = RedOld, tailOld = TailOld;
+        if (!rasterBackward.Contains(declOld) || !rasterBackward.Contains(redOld) || !rasterBackward.Contains(TailOld))
+            throw new InvalidOperationException("SubgroupBackward: RasterBackward changed - update the subgroup reduction");
+        return "enable subgroups;" + Environment.NewLine + rasterBackward
+            .Replace(declOld, DeclNew)
+            .Replace(redOld, RedNew)
+            .Replace(tailOld, TailNew);
+    }
+
+    const string DeclOld = @"var<workgroup> redA : array<vec4<f32>, 256>;   // dR, dG, dB, dOpacity
+var<workgroup> redB : array<vec4<f32>, 256>;   // dCentreX, dCentreY, dConicA, dConicB
+var<workgroup> redC : array<f32, 256>;         // dConicC
+var<workgroup> redAbs : array<vec2<f32>, 256>; // |dCentreX|, |dCentreY| per pixel
+//DEPTH: var<workgroup> redD : array<f32, 256>;   // dL/d(1/z) per pixel
+";
+    const string RedOld = @"        // Reduce this contribution across the tile's 256 pixels.
+        redA[li] = contrib;
+        redB[li] = geom;
+        redC[li] = geom_cc;
+        redAbs[li] = abs_c;
+//DEPTH:         redD[li] = contrib_d;
+        workgroupBarrier();
+        var stride = 128u;
+        loop {
+            if (stride == 0u) { break; }
+            if (li < stride) {
+                redA[li] = redA[li] + redA[li + stride];
+                redB[li] = redB[li] + redB[li + stride];
+                redC[li] = redC[li] + redC[li + stride];
+                // SUM of per-pixel |dCentre| (AbsGS). The earlier MAX dated from a pixel-unit,
+                // fixed-point bar (Truck 7K: 828 splits, 0 clones); with the reference's NDC scaling
+                // and gsplat's 8e-4 absgrad bar the sum is the published criterion.
+                redAbs[li] = redAbs[li] + redAbs[li + stride];
+//DEPTH:                 redD[li] = redD[li] + redD[li + stride];
+            }
+            workgroupBarrier();
+            stride = stride >> 1u;
+        }
+
+        if (li == 0u) {";
+    const string TailOld = @"            if (redAbs[0].x != 0.0) { densify_abs_add(splat * 2u, redAbs[0].x); }
+            if (redAbs[0].y != 0.0) { densify_abs_add(splat * 2u + 1u, redAbs[0].y); }
+        }
+        workgroupBarrier();
+    }
+        hi = lo;";
+    const string DeclNew = @"// Subgroup partials (SubgroupBackward): 2 buffers (key parity) x up to 64 subgroups (256 / the smallest size, 4).
+var<workgroup> sgA : array<vec4<f32>, 128>;   // dR, dG, dB, dOpacity
+var<workgroup> sgB : array<vec4<f32>, 128>;   // dCentreX, dCentreY, dConicA, dConicB
+var<workgroup> sgC : array<f32, 128>;         // dConicC
+var<workgroup> sgAbs : array<vec2<f32>, 128>; // sum |dCentreX|, |dCentreY|
+//DEPTH: var<workgroup> sgD : array<f32, 128>;  // dL/d(1/z)
+var<workgroup> sg_count : array<atomic<u32>, 2>;
+// Thread 0's totals, under the names the write-out below reads (only thread 0 touches them).
+var<workgroup> redA : array<vec4<f32>, 1>;
+var<workgroup> redB : array<vec4<f32>, 1>;
+var<workgroup> redC : array<f32, 1>;
+var<workgroup> redAbs : array<vec2<f32>, 1>;
+//DEPTH: var<workgroup> redD : array<f32, 1>;
+";
+    const string RedNew = @"        // Reduce this contribution across the tile's 256 pixels: within each subgroup in hardware, then the partials.
+        let rA = subgroupAdd(contrib);
+        let rB = subgroupAdd(geom);
+        let rC = subgroupAdd(geom_cc);
+        let rAbs = subgroupAdd(abs_c);
+//DEPTH:         let rD = subgroupAdd(contrib_d);
+        let par = k & 1u;
+        if (subgroupElect()) {
+            let slot = par * 64u + atomicAdd(&sg_count[par], 1u);
+            sgA[slot] = rA; sgB[slot] = rB; sgC[slot] = rC; sgAbs[slot] = rAbs;
+//DEPTH:             sgD[slot] = rD;
+        }
+        workgroupBarrier();
+
+        if (li == 0u) {
+            let n = atomicLoad(&sg_count[par]);
+            atomicStore(&sg_count[par], 0u);
+            var tA = vec4<f32>(0.0); var tB = vec4<f32>(0.0); var tC = 0.0; var tAbs = vec2<f32>(0.0);
+//DEPTH:             var tD = 0.0;
+            for (var j = 0u; j < n; j = j + 1u) {
+                let q = par * 64u + j;
+                tA = tA + sgA[q]; tB = tB + sgB[q]; tC = tC + sgC[q]; tAbs = tAbs + sgAbs[q];
+//DEPTH:                 tD = tD + sgD[q];
+            }
+            redA[0] = tA; redB[0] = tB; redC[0] = tC; redAbs[0] = tAbs;
+//DEPTH:             redD[0] = tD;";
+    const string TailNew = @"            if (redAbs[0].x != 0.0) { densify_abs_add(splat * 2u, redAbs[0].x); }
+            if (redAbs[0].y != 0.0) { densify_abs_add(splat * 2u + 1u, redAbs[0].y); }
+        }
+    }
+        hi = lo;";
+
     /// <summary>
     /// Pass 6: fold per-(tile, splat) gradients into per-splat totals.
     ///

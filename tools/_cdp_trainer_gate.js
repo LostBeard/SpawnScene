@@ -52,7 +52,7 @@ const get = u => new Promise((res, rej) =>
     await send('Runtime.enable');
     await send('Log.enable').catch(() => {});
     await send('Page.enable');
-    await send('Page.navigate', { url: `${APP}/studio?autotest=trainer-gate&cb=${Date.now()}` });
+    await send('Page.navigate', { url: `${APP}/studio?autotest=trainer-gate${process.env.EXTRA || ""}&cb=${Date.now()}` });
 
     const deadline = Date.now() + 240000;
     while (Date.now() < deadline) {

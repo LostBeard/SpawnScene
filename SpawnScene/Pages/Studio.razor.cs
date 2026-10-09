@@ -281,6 +281,8 @@ public partial class Studio : IAsyncDisposable
         // TRAINING views (Train supervised 20.09 vs gsplat's held-out 20.42) and a 7K run ends at 0.34x the start rate.
         if (query.TryGetValue("poslrsteps", out var plsq) && int.TryParse(plsq, out var plsv) && plsv > 0)
             PositionLrMaxSteps = plsv;
+        // &subgroups=1: the backward pass's tile reduction by subgroup operations (SplatTrainerGpu.UseSubgroupBackward).
+        if (query.TryGetValue("subgroups", out var subgQ)) SplatTrainerGpu.UseSubgroupBackward = subgQ is "1" or "true";
         // &nearplane=X: the trainer's near-plane cull in scene units (default 0.2; SplatTrainerGpu.NearPlane).
         if (query.TryGetValue("nearplane", out var npq) && float.TryParse(npq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var npv) && npv > 0f)

@@ -66,7 +66,8 @@ public sealed partial class SplatTrainerGpu
             return false;
         }
         _rasterForwardDepth ??= MakePipeline(SplatTrainerShaders.DepthVariant(SplatTrainerShaders.RasterForward), "raster_forward");
-        _rasterBackwardDepth ??= MakePipeline(SplatTrainerShaders.DepthVariant(SplatTrainerShaders.RasterBackward), "raster_backward");
+        _rasterBackwardDepth ??= MakePipeline(SplatTrainerShaders.DepthVariant(SubgroupBackwardActive
+            ? SplatTrainerShaders.SubgroupBackward(SplatTrainerShaders.RasterBackward) : SplatTrainerShaders.RasterBackward), "raster_backward");
         _scatterGradDepth ??= MakePipeline(SplatTrainerShaders.DepthVariant(SplatTrainerShaders.ScatterGradients), "scatter_gradients");
         _adamGeometryDepth ??= MakePipeline(SplatTrainerShaders.DepthVariant(SplatTrainerShaders.GeometryAdam), "adam_geometry");
         _invDepthL1 ??= MakePipeline(SplatTrainerShaders.InvDepthL1, "inv_depth_l1");

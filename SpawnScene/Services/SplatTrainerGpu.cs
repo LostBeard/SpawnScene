@@ -441,7 +441,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _emitKeys = MakePipeline(SplatTrainerShaders.EmitKeys, "emit_keys");
         _tileRanges = MakePipeline(SplatTrainerShaders.TileRanges, "tile_ranges");
         _rasterForward = MakePipeline(SplatTrainerShaders.RasterForward, "raster_forward");
-        _rasterBackward = MakePipeline(SplatTrainerShaders.RasterBackward, "raster_backward");
+        _rasterBackward = MakePipeline(BackwardSource(), "raster_backward");
         _scatterGrad = MakePipeline(SplatTrainerShaders.ScatterGradients, "scatter_gradients");
         _lossL1 = MakePipeline(SplatTrainerShaders.LossL1, "loss_l1");
         _lossReduce = MakePipeline(SplatTrainerShaders.LossReduce, "loss_reduce");
@@ -544,6 +544,29 @@ public sealed partial class SplatTrainerGpu : IDisposable
             "raster_backward, scatter_gradients, loss_l1, adam_step, init_logits, adam_geometry, " +
             "eval_sse, unpack_target, ssim_rows, ssim_reduce, ssim_win_grad, ssim_rows_bwd, " +
             "ssim_pix_bwd, grad_stats");
+    }
+
+    /// <summary>
+    /// <c>&amp;subgroups=1</c>: the backward pass reduces each key's tile gradients with subgroup operations
+    /// (<see cref="SplatTrainerShaders.SubgroupBackward"/>) when the device was created with WebGPU <c>subgroups</c> (SpawnDev.ILGPU
+    /// requests every feature the adapter offers). Read when the pipelines are built. Off by default until the TrainerGate and
+    /// an A/B pass.
+    /// </summary>
+    public static bool UseSubgroupBackward { get; set; }
+
+    /// <summary>Whether this trainer's backward runs the subgroup reduction (set when the pipelines are built).</summary>
+    public bool SubgroupBackwardActive { get; private set; }
+
+    /// <summary>The backward pass's WGSL: <see cref="SplatTrainerShaders.RasterBackward"/>, or its subgroup variant.</summary>
+    string BackwardSource()
+    {
+        bool has = _gpu.WebGPUAccelerator.NativeAccelerator.EnabledFeatures.Contains("subgroups");
+        SubgroupBackwardActive = UseSubgroupBackward && has;
+        if (UseSubgroupBackward)
+            Console.WriteLine(SubgroupBackwardActive
+                ? "[Trainer] backward: subgroup reduction"
+                : "[Trainer] backward: subgroups requested but the device has no 'subgroups' feature - tree reduction");
+        return SubgroupBackwardActive ? SplatTrainerShaders.SubgroupBackward(SplatTrainerShaders.RasterBackward) : SplatTrainerShaders.RasterBackward;
     }
 
     /// <summary>

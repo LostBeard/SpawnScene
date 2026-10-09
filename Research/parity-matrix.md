@@ -204,6 +204,13 @@ Research/brush-vs-spawnscene-2026-10-09.md: our position lr starts 17x Brush's o
 Neutral to worse everywhere: once the decay runs over the run's own length, a 4-17x lower start does not matter. Brush's
 Train lead is elsewhere - its growth (no clones, no opacity reset, image-preserving 10% weighted splits) is next.
 
+### No opacity reset (nr, 2026-10-09)
+
+Brush never resets opacity. c1 + subgroups with OPACITYRESET=0 vs sg4 (reset at 3000), same build: Train 19.39 / 0.771 vs
+19.50 / 0.773, Kitchen 28.47 / 0.916 vs 28.76 / 0.918, Bicycle 24.34 / 0.720 vs 24.42 / 0.721 - slightly worse on all three.
+The reset stays; Brush's no-reset works inside its whole growth scheme (image-preserving splits, prune-and-replace), not as
+a piece on its own. Ruled out so far for Brush's Train lead: position lr, near plane, opacity lr, opacity reset.
+
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 
 Final cycle (1 sync per phase, so slower than a real step: 641 s vs 462 s unprofiled): **108 ms/step = backward 47.1 +

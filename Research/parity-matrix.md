@@ -77,6 +77,11 @@ reference signal (&absgrad=0), dg2 AbsGS at 4e-4, on Kitchen, Train, DrJohnson.
 |---|---|---|---|---|---|
 | Kitchen | default (AbsGS 8e-4) | 0.73M | 27.34 / 0.909 | - (no dumps) | 29.37 / 0.913 / 0.117 / 0.184, 1.20M |
 | Kitchen | dg1 &absgrad=0 (2e-4) | 1.33M | 27.89 / 0.919 | 27.76 / 0.906 / 0.128 / 0.194 | |
+| Kitchen | dg2 &densifygrad=4e-4 (AbsGS) | 2.05M | 27.64 / 0.910 | 27.54 / 0.897 / 0.137 / 0.196 | |
+| Train | default | 0.60M | 18.98 | - | 20.42 / 0.771 / 0.231 / 0.310, 0.93M |
+| Train | dg1 &absgrad=0 | 0.86M | 19.01 / 0.728 | 19.04 / 0.719 / 0.305 / 0.360 | |
+
+More splats do not close the gap: Kitchen dg2 has 1.7x gsplat's count and scores lower than dg1; Train dg1 +0.03 dB.
 
 dg1 Kitchen: +0.55 dB from more splats (1.33M, now more than gsplat's 1.20M), still -1.61 dB behind gsplat with MORE
 splats - the count is not the whole gap. The rescore resized the photos 1558x1039 -> 1558x1040: training rounded to even
@@ -90,6 +95,14 @@ LARGE-AREA error, not fine detail (blurring widens it). DSCF0688 alone is -9.6 d
 of the camera, bottom right - a near-camera floater no training view rejects. We win 0704, 0712, 0808.
 Queued (tuvok-ex.sh, after dg): ex0 = dg1 at the exact photo size, ex1 = + &exposure=0 (per-photo gains: gsplat has none),
 both with &splatstats=1 (dark opaque splats near cameras).
+
+**Gap anatomy, Train dg1 vs gsplat:** raw -1.37, after the colour fit -1.08, blur 2 -1.31, blur 6 -1.18 - mostly NOT
+colour, concentrated in a few views: 00073 -6.4 (a near-camera handrail doubled and smeared; gsplat's crisp), 00001
+-5.0, 00049 -4.2, 00065 -3.8. **Near plane:** our trainer culls at 0.2 scene units (3DGS's rasteriser); gsplat at 0.01 in
+its normalised frame (~0.05 COLMAP units on these scenes, camera spread ~3.7). Share of the points in front of a camera
+nearer than 0.2: DrJohnson mean 4.9%, max 30%; Train 1.0% / 8.5%; Truck 0.5%; Bicycle 0.8%; Kitchen 0.04%, Counter 0.3%
+(so not Kitchen's cause). `&nearplane=X` added (4062502); np chain (after ex): Train and DrJohnson, np0 = dg1 settings,
+np1 = + nearplane 0.05.
 
 ## Phone / Commons captures (no ground-truth poses: own SfM only)
 

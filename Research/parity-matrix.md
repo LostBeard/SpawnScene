@@ -157,8 +157,11 @@ Playroom (+ its baseline), Train, DrJohnson, Counter, Bonsai, Room, Bicycle, Tru
 | Run | Train | DrJohnson |
 |---|---|---|
 | c1 (poslrsteps + gains off) | 19.49 / 0.773 | 28.11 / 0.902 |
-| tr1 = c1 + &nearplane=0.05 | 19.52 / 0.774 (+0.03, noise) | running |
-| tr2 = c1 + &opacitylr=0.05 | running | queued |
+| tr1 = c1 + &nearplane=0.05 | 19.52 / 0.774 (+0.03, noise) | 28.11 / 0.902 (0) |
+| tr2 = c1 + &opacitylr=0.05 | 19.40 / 0.767 (-0.09) | 27.86 / 0.898 (-0.25) |
+
+Neither helps once both changes are in. Next (ab2): the two extras gsplat lacks and that were never ablated on the
+benchmark separately - random background (&randombg=0) and floater carve (&carve=0) - on Train and Kitchen (seed 2).
 
 ### Candidate defaults on the phone capture (cand, 2026-10-09)
 

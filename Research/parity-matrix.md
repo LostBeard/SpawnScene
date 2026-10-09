@@ -114,6 +114,18 @@ within 0.05 (dg1 26.61, np0 26.66), so +0.2 is above its noise. Verdict: a small
 DrJohnson), not the main gap. Candidate default for TJ alongside the exposure question; scale-relative (gsplat's is in a
 normalised frame) before it could be one.
 
+### We UNDERFIT, not overfit (2026-10-09)
+
+Held-out gap vs distance to the nearest training camera (tools/gap_anatomy.py per view + COLMAP centres): the gap is
+LARGER for views next to a training camera - Train nearer half -1.49 / farther -1.15, DrJohnson -1.61 / -1.24, Kitchen
+(ex1) -1.16 / -0.56. And our score on the TRAINING views is at or below gsplat's on held-out ones: Kitchen supervised 29.35
+(gsplat held out 29.37), Train 20.09 (20.42), DrJohnson 29.03 (28.28). The optimiser fits the photos less well at a similar
+splat count. Checked equal to gsplat: Adam eps 1e-15 (all three Adam passes), betas, scale / rotation / colour / SH lrs, means
+lr x extent. Different: opacity lr 0.025 (gsplat 0.05; tested on Hamamni only) and **the position-lr decay: ours is measured
+against a fixed 30,000 (a 7K run ends at 0.34x), gsplat's 7K-end run decays over its own 7,000 to 0.01x** - our centres are
+still moving at a third of the start rate when the run ends. `&poslrsteps=N` added; pl chain (after xp): Train, DrJohnson,
+Kitchen (+ with &exposure=0), Counter at poslrsteps=7000 vs xp's x0.
+
 ### Per-photo exposure gains cost Kitchen 1.4 dB (ex1, 2026-10-09)
 
 | Kitchen (exact size, &absgrad=0, seed 1) | splats | in-app | rescore PSNR / SSIM / LPIPS-alex / vgg | gap to gsplat (raw / after colour fit) |

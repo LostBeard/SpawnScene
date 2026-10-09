@@ -191,6 +191,19 @@ and Playroom on all three metrics. The losses concentrate on Train (-1.55 vs Bru
 decays the SCALE lr over the run and grows "MCMC-like"; a source-level comparison is being written
 (Research/brush-vs-spawnscene-2026-10-09.md).
 
+### Brush's position lr does not transfer (lr, 2026-10-09)
+
+Research/brush-vs-spawnscene-2026-10-09.md: our position lr starts 17x Brush's on Train / Kitchen. On top of c1:
+
+| Run | Train | Kitchen (seed 1) | Bicycle (control) |
+|---|---|---|---|
+| c1 (our rate, decay over the run to 1%) | 19.49 / 0.773 | 28.61 / 0.917 | 24.42 / 0.722 |
+| Brush's ratio, to 5% (&poslr=0.058 / 0.35 Bicycle, &poslrdecay=0.05) | 19.34 / 0.760 | 28.60 / 0.910 | 24.21 / 0.706 |
+| bracket &poslr=0.25 &poslrdecay=0.05 | 19.57 / 0.771 | - | - |
+
+Neutral to worse everywhere: once the decay runs over the run's own length, a 4-17x lower start does not matter. Brush's
+Train lead is elsewhere - its growth (no clones, no opacity reset, image-preserving 10% weighted splits) is next.
+
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 
 Final cycle (1 sync per phase, so slower than a real step: 641 s vs 462 s unprofiled): **108 ms/step = backward 47.1 +

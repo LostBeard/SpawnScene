@@ -119,6 +119,7 @@ public sealed class GpuDensify : IDisposable
         public uint Seed;
         public float SplitScaleDivisor;
         public int HasTrainable;            // 1: the opacity reset skips splats outside the trainable volume
+        public int RevisedOpacity;          // 1: clone / split opacities 1 - sqrt(1 - a) (SplatDensityControl.RevisedOpacity)
     }
 
     /// <summary>
@@ -222,6 +223,7 @@ public sealed class GpuDensify : IDisposable
                 Seed = o.Seed,
                 SplitScaleDivisor = SplatDensityControl.SplitScaleDivisor,
                 HasTrainable = o.Trainable.HasValue ? 1 : 0,
+                RevisedOpacity = SplatDensityControl.RevisedOpacity ? 1 : 0,
             }, trainable);
 
         // Clones and splits from the totals: added = clones + 2 splits, and every split parent left the kept set.
@@ -325,6 +327,9 @@ public sealed class GpuDensify : IDisposable
         if (reset != 0) dst[d0 + 9] = XMath.Min(dst[d0 + 9], resetTo);
     }
 
+    /// <summary>Opacity a' with (1 - a')^2 = 1 - a: two such splats on one pixel composite to the parent's a.</summary>
+    static void ReviseOpacity(ArrayView<float> dst, long d0) => dst[d0 + 9] = 1f - XMath.Sqrt(XMath.Max(0f, 1f - dst[d0 + 9]));
+
     static void CompactKernel(Index1D i, ArrayView<float> packed, ArrayView<int> keep, ArrayView<int> add,
         ArrayView<int> keepDst, ArrayView<int> addDst, ArrayView<float> outPacked,
         ArrayView<int> adamSrc, ArrayView<int> featSrc, CompactParams p, SplatEditor.Volume trainable)
@@ -338,6 +343,8 @@ public sealed class GpuDensify : IDisposable
             int reset = p.ResetOpacity != 0
                 && (p.HasTrainable == 0 || SplatEditor.Inside(trainable, packed[so], packed[so + 1], packed[so + 2])) ? 1 : 0;
             CopyRow(packed, so, outPacked, (long)d * Floats, reset, p.OpacityResetTo);
+            // Cloned: the parent and its copy share the parent's coverage.
+            if (p.RevisedOpacity != 0 && add[i] == 1) ReviseOpacity(outPacked, (long)d * Floats);
             adamSrc[d] = i;
             featSrc[d] = i;
         }
@@ -348,6 +355,7 @@ public sealed class GpuDensify : IDisposable
         {
             // Clone: an exact copy; the optimiser separates them.
             CopyRow(packed, so, outPacked, (long)first * Floats, p.ResetOpacity, p.OpacityResetTo);
+            if (p.RevisedOpacity != 0) ReviseOpacity(outPacked, (long)first * Floats);
             adamSrc[first] = -1;
             featSrc[first] = i;
             return;
@@ -370,6 +378,7 @@ public sealed class GpuDensify : IDisposable
             int d = first + c;
             long dO = (long)d * Floats;
             CopyRow(packed, so, outPacked, dO, p.ResetOpacity, p.OpacityResetTo);
+            if (p.RevisedOpacity != 0) ReviseOpacity(outPacked, dO);
             float lx = Normal(p.Seed, i, c * 3 + 0) * sx;
             float ly = Normal(p.Seed, i, c * 3 + 1) * sy;
             float lz = Normal(p.Seed, i, c * 3 + 2) * sz;

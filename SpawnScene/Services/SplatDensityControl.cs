@@ -64,6 +64,15 @@ public static class SplatDensityControl
     public static float GrowthSelectFraction { get; set; } = 1f;
 
     /// <summary>
+    /// <c>&amp;revisedopacity=1</c>: a clone (and its parent) and both split children get opacity 1 - sqrt(1 - a), so
+    /// two of them on one pixel composite to the parent's a and a growth step barely changes the image (gsplat's
+    /// revised_opacity, from "Revising Densification in Gaussian Splatting"; Brush grows image-preservingly too). Today
+    /// each apply costs 0.08-0.21 dB supervised at once (DrJohnson / c1 apply probes; parity 2026-10-09). GPU path
+    /// (GpuDensify) only. Off by default.
+    /// </summary>
+    public static bool RevisedOpacity { get; set; }
+
+    /// <summary>
     /// A Gaussian is "large" when its biggest axis exceeds this fraction of the scene extent.
     /// Large ones split, small ones clone.
     /// </summary>

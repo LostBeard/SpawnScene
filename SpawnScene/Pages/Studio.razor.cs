@@ -272,6 +272,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("opacitylr", out var opLrQ) && float.TryParse(opLrQ, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var opLrV))
             TrainOpacityLr = Math.Max(0f, opLrV);
+        // &opacitycap=0: the opacity reset keeps its schedule but does not cap opacity (gsplat 1.5.3 never resets).
+        if (query.TryGetValue("opacitycap", out var opCapQ)) OpacityResetCaps = opCapQ is not ("0" or "false");
         // &projectrefine=0: no camera refinement in the project path (parity ablation; it is on for the user's scenes).
         if (query.TryGetValue("projectrefine", out var projRefQ)) ProjectRefinePoses = projRefQ is not ("0" or "false");
         // &randombgamp=A: the random background's width scale (default 0.5).

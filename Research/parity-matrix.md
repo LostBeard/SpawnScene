@@ -96,8 +96,14 @@ Sizes and placement match; OPACITY does not: our scene is mostly translucent spl
 3000 / 6000, so at 7K each has 1000 steps to regrow - at half the rate for us.
 
 o1 (defaults + &opacitylr=0.05): opacity median 0.12 -> 0.20, > 0.5 12% -> 31%, but held out WORSE: 18.37 / 0.695 (ours
-19.2-19.4). The rate is not the fix, and the opacity is still far from gsplat's. Line-by-line comparison of our opacity /
-density control with gsplat's DefaultStrategy in progress (Research/opacity-vs-gsplat-2026-10-08.md).
+19.2-19.4). The rate is not the fix, and the opacity is still far from gsplat's.
+
+**Found (Research/opacity-vs-gsplat-2026-10-08.md, verified):** gsplat 1.5.3's DefaultStrategy NEVER resets opacity -
+`if step % self.reset_every == 0 & step > 0:` parses as the chained comparison `(step % r == (0 & step)) and
+((0 & step) > 0)`, always false (checked in the installed package too). We reset once in a 7K run, at 3000, capping
+every splat at 0.01; 48-73% of our final splats are clones made after it from capped parents - a translucent scene.
+(So "both reset at 3000/6000" above is wrong for both: gsplat never, we once.) Test: `&opacitycap=0` keeps the schedule
+(the size prunes still switch on at 3000) but caps nothing - oc1 (defaults) / oc2 (extras off) running.
 
 No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
 by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.

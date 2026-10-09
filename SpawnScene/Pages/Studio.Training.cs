@@ -135,6 +135,14 @@ public partial class Studio
     /// code's; gsplat's default is 0.05. Parity 2026-10-08: on Hamamni our splats were mostly translucent (opacity median
     /// 0.12 vs gsplat 0.65) one opacity reset (6000) before the 7K end.</summary>
     public static float TrainOpacityLr { get; set; } = SplatOptimizer.DefaultOpacityLr;
+    /// <summary>
+    /// Whether the scheduled opacity reset actually caps opacity (&amp;opacitycap=0: no). gsplat 1.5.3's DefaultStrategy
+    /// never resets - `step % self.reset_every == 0 &amp; step &gt; 0` parses as a chained comparison that is always false
+    /// (verified 2026-10-08) - and on Hamamni its splats ended mostly opaque (median 0.65) where ours, cloned after our
+    /// 3000 reset from parents capped at 0.01, ended mostly translucent (median 0.12). The schedule still marks the reset,
+    /// so the size prunes switch on at the same step.
+    /// </summary>
+    public static bool OpacityResetCaps { get; set; } = true;
     /// <summary>Camera refinement in the project path (on; &amp;projectrefine=0 off - the parity ablation, 2026-10-08).</summary>
     public static bool ProjectRefinePoses { get; set; } = true;
     /// <summary>Diagnostic (&amp;refineposes=2): refine only the HELD-OUT cameras against the finished scene, not the
@@ -1298,7 +1306,7 @@ public partial class Studio
         int budget = Math.Min(MaxDensifiedSplats, _trainer!.MaxTrainableSplats(_trainer.KeysPerSplat));
         _gpuDensify ??= new GpuDensify(_gpuService.WebGPUAccelerator);
         var r = await _gpuDensify.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
-            new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity,
+            new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity && OpacityResetCaps,
                 Seed: (uint)(1234 + n), NoOp: !pruneOnly && (DensifyNoOp || !densify), Trainable: _trainer.TrainableVolume,
                 GrowOnlyInside: _trainer.GrowOnlyInside, PruneOnly: pruneOnly));
 
@@ -1342,7 +1350,7 @@ public partial class Studio
                 // The same step on a FRESH GpuDensify: this one was first launched in the coarse run, with no volume.
                 var fresh = new GpuDensify(a);
                 var r2 = await fresh.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
-                    new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity,
+                    new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity && OpacityResetCaps,
                         Seed: (uint)(1234 + n), NoOp: DensifyNoOp || !densify, Trainable: frozenBox));
                 int post2 = await _splatEditor.CountAsync(a, r2.Packed, r2.Count, SplatEditor.Volume.Rows(0, r2.Count))
                     - await _splatEditor.CountAsync(a, r2.Packed, r2.Count, frozenBox);
@@ -1376,7 +1384,7 @@ public partial class Studio
         (MemoryBuffer1D<float, Stride1D.Dense> packed, int n)? result;
         try
         {
-            result = await InstallGrownSetAsync(r.Packed, n, r.Count, resetOpacity, "Densify", r.ToString(),
+            result = await InstallGrownSetAsync(r.Packed, n, r.Count, resetOpacity && OpacityResetCaps, "Densify", r.ToString(),
                 (prior, grown, zeroSlot) => _trainer.CarryOptimizerRowsAsync(prior, grown, r.AdamSources, r.FeatureSources, zeroSlot));
         }
         finally

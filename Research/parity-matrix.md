@@ -23,9 +23,9 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Kitchen (images_2) | 7K-end | 27.63 / 0.909 (par7k; NOT like for like: trained at 1470x980, photos 1558x1039 - re-run queued) | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
 | Bonsai (images_2) | 7K-end | 29.50 / 0.941 (par7k; NOT like for like: trained at 1438x958 - re-run queued) | - | 30.18 / 0.928 / 0.156, 1.23M | - | see refs |
 | Truck (979, clean folder) | 7K-end | 24.04 / 0.860 (par7k) | - | 23.87 / 0.853 / 0.134, 2.06M | - | see refs |
-| Train (979) | 7K-end | - | - | 20.41 / 0.771 / 0.231, 0.93M | - | see refs |
-| DrJohnson | 7K-end | - | - | 28.29 / 0.890 / 0.235, 2.10M | - | see refs |
-| Playroom | 7K-end | - | - | 29.43 / 0.899 / 0.203, 1.31M | - | see refs |
+| Train (979) | 7K-end | 18.98 / 0.731 (par7k) - **gsplat +1.43 dB** | - | 20.41 / 0.771 / 0.231, 0.93M | - | see refs |
+| DrJohnson | 7K-end | 26.99 / 0.873 (par7k) - **gsplat +1.30 dB** | - | 28.29 / 0.890 / 0.235, 2.10M | - | see refs |
+| Playroom | 7K-end | 29.73 / 0.919 (par7k) | - | 29.43 / 0.899 / 0.203, 1.31M | - | see refs |
 
 Data: one clean folder per scene (junctions, nothing copied) at the gsplat scratch `gs/parity/<scene>/` = `sparse/0` +
 `images/` -> F:/Downloads/mipnerf360/<scene>/images_4 (bicycle, garden, stump) or images_2 (room, counter, kitchen,
@@ -45,6 +45,14 @@ self-scored rows are comparable; LPIPS (new) also favours gsplat on Hamamni. The
 render with &dumpheld=1 (it saved only 3 before), for LPIPS on every scene.
 
 Reference numbers with sources: [parity-references-2026-10-08.md](parity-references-2026-10-08.md) (being written).
+
+### First pass, SpawnScene (10-08 defaults, COLMAP poses, 7K-end) vs gsplat 1.5.3 default - PSNR delta (ours - gsplat)
+
+Bicycle +0.58, Garden +0.57, Stump +1.70, Truck +0.17, Playroom +0.30 | Counter -0.57 (SSIM equal), **Train -1.43,
+DrJohnson -1.30** | Room / Kitchen / Bonsai trained below benchmark size (re-runs queued; Kitchen read -1.78, Bonsai
+-0.68). SSIM higher than gsplat on 7 of 8 like-for-like scenes. We trail on the indoor Mip-NeRF scenes and on Train /
+DrJohnson; the Hamamni finding (our splats far more translucent; gsplat never resets opacity) is the lead to test on
+them.
 
 ## Phone / Commons captures (no ground-truth poses: own SfM only)
 

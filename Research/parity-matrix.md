@@ -133,6 +133,23 @@ floaters for us.
 them (oc1 18.06): one of them interacts with an uncapped opacity (and also holds opacity down: oc1 0.17 vs oc2 0.35).
 Queued after the 11-scene chain: ab1-ab6 = oc2 with ONE extra back on each, ab7 = oc2 + opacity lr 0.05.
 
+**Add-back (no opacity cap; one extra back on each; base oc2 20.19 / 0.703):**
+
+| run | back on | held out PSNR / SSIM | fair | opacity p50 | splats |
+|---|---|---|---|---|---|
+| ab1 | depthinit | 19.46 / 0.707 | 19.61 | 0.26 | 2.54M |
+| ab2 | projectrefine | 18.43 / 0.651 | 19.97 | 0.31 | 1.80M |
+| ab3 | absgrad | 18.57 / 0.675 | 18.15 | 0.17 | 2.13M |
+| ab4 | carve | 19.92 / 0.697 | 19.47 | 0.29 | 1.02M |
+| ab5 | randombg | 18.52 / 0.687 | 18.66 | 0.39 | 1.94M |
+| ab6 | exposure | 18.77 / 0.713 | 21.74 | 0.35 | 2.24M |
+| ab7 | opacity lr 0.05 | 19.75 / 0.700 | 19.41 | 0.42 | 2.09M |
+
+On Hamamni with the cap off, no extra beats the plain trainer on held-out PSNR (identical runs differ ~0.4 dB here, so
+carve and the opacity rate are within noise; exposure trades raw PSNR for the fair score, as designed). One capture,
+though, and these defaults won elsewhere: nc1 / nc2 (cap off alone / cap off + extras off) on Train, DrJohnson, Counter
+and Bicycle are queued (_runs/tuvok-nc.sh).
+
 No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
 by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.
 

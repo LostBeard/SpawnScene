@@ -107,7 +107,12 @@ every splat at 0.01; 48-73% of our final splats are clones made after it from ca
 
 oc1 (defaults, no cap): opacity median 0.17, > 0.5 23% (from 0.12 / 12%) but held out WORSE, 18.06 / 0.688 (033: 15.42).
 The cap is not the whole story: without it our opacity stays far from gsplat's 0.65, and the reset was also clearing
-floaters for us. oc2 (extras off, no cap) running.
+floaters for us.
+
+**oc2 (all six extras off + no cap): 20.19 / 0.703, photo 033 25.44 - our best Hamamni**, opacity median 0.35, 41% > 0.5
+(gsplat 0.65 / 53%). The gap to gsplat is now 1.2 dB (was 2.2). Removing the cap helps without our extras and hurts with
+them (oc1 18.06): one of them interacts with an uncapped opacity (and also holds opacity down: oc1 0.17 vs oc2 0.35).
+Queued after the 11-scene chain: ab1-ab6 = oc2 with ONE extra back on each, ab7 = oc2 + opacity lr 0.05.
 
 No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
 by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.

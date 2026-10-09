@@ -211,6 +211,19 @@ Brush never resets opacity. c1 + subgroups with OPACITYRESET=0 vs sg4 (reset at 
 The reset stays; Brush's no-reset works inside its whole growth scheme (image-preserving splits, prune-and-replace), not as
 a piece on its own. Ruled out so far for Brush's Train lead: position lr, near plane, opacity lr, opacity reset.
 
+### Revised opacity on growth (ro, 2026-10-09)
+
+`&revisedopacity=1`: clone (and parent) / split children get opacity 1 - sqrt(1 - a), so a growth step does not brighten the
+image (gsplat revised_opacity; Brush grows image-preservingly). On top of c1 + subgroups vs sg4:
+
+| Scene | before | revised opacity | delta |
+|---|---|---|---|
+| Train | 19.50 / 0.773, 0.46M | **19.82 / 0.779**, 0.42M | **+0.32** (Train's same-settings runs agree within 0.03) |
+| Kitchen (seed 1) | 28.76 / 0.918, 0.59M | 28.69 / 0.918, 0.53M | -0.07 |
+| Bicycle | 24.42 / 0.721, 1.95M | 24.49 / 0.724, 1.90M | +0.07 |
+
+The first lever that moves Train toward Brush (21.07). Fewer splats. ro2 = the other 8 scenes.
+
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 
 Final cycle (1 sync per phase, so slower than a real step: 641 s vs 462 s unprofiled): **108 ms/step = backward 47.1 +

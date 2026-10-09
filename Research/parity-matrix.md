@@ -204,6 +204,13 @@ Playroom) are unaffected - Counter's baseline is identical (27.05) before and af
 on) / 23.75 (off) vs gsplat 23.75 = level on PSNR, ahead on SSIM (0.710 vs 0.640) and LPIPS (0.251 vs 0.367).
 Garden and Stump re-run at exact size queued (gs chain, after od).
 
+**od result (Bicycle, 2026-10-09):** even MAXDIM=1236 (trains 1236x820, resampled) vs exact 1237x822, two seeds each -
+seeds agree within 0.06, so the difference is systematic. In-app (each scored against its own training-size photo) even 25.00
+/ 24.96 vs exact 23.59 / 23.53; shared scorer resizing the PHOTO to the render 24.40 / 24.35 vs 23.59 / 23.53. Scored the way
+gsplat is - our render resized UP to the native photo - even **23.89 / 0.696** vs exact **23.59 / 0.710** (gsplat 23.75 /
+0.640): the resampled run is smoother (+0.30 PSNR on Bicycle's grass, -0.014 SSIM), not better. No odd-size bug; exact size
+stays (it is gsplat's protocol). The old "+0.58 Bicycle lead" was mostly scoring against a smoothed photo.
+
 **Bicycle's baseline fell:** par7k defaults 24.34 / 0.739 (1236x822, resampled from 1237) -> x0 23.59 / 0.716 (exact
 1237x822 since 8cc8f05), same settings otherwise (targetmb 1536 vs 2560 - both resident). The shared scorer agrees (23.59),
 so not a scoring bug; no shader indexes pixels in pairs. Odd size or seed noise: od chain (after pl) = Bicycle at

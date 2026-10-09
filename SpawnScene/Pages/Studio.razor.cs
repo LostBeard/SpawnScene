@@ -276,6 +276,11 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("opacitycap", out var opCapQ)) OpacityResetCaps = opCapQ is not ("0" or "false");
         // &projectrefine=0: no camera refinement in the project path (parity ablation; it is on for the user's scenes).
         if (query.TryGetValue("projectrefine", out var projRefQ)) ProjectRefinePoses = projRefQ is not ("0" or "false");
+        // &poslrsteps=N: steps the position-lr decay (100x) is measured against (default 30,000 = 3DGS's
+        // position_lr_max_steps; gsplat's 7K-end run decays over its own 7,000). Parity 2026-10-09: we underfit the
+        // TRAINING views (Train supervised 20.09 vs gsplat's held-out 20.42) and a 7K run ends at 0.34x the start rate.
+        if (query.TryGetValue("poslrsteps", out var plsq) && int.TryParse(plsq, out var plsv) && plsv > 0)
+            PositionLrMaxSteps = plsv;
         // &nearplane=X: the trainer's near-plane cull in scene units (default 0.2; SplatTrainerGpu.NearPlane).
         if (query.TryGetValue("nearplane", out var npq) && float.TryParse(npq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var npv) && npv > 0f)

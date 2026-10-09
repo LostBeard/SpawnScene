@@ -89,7 +89,20 @@ reference signal (&absgrad=0), dg2 AbsGS at 4e-4, on Kitchen, Train, DrJohnson.
 More splats do not close the gap: Kitchen dg2 has 1.7x gsplat's count and scores lower than dg1; Train dg1 +0.03 dB,
 dg2 -0.50; DrJohnson dg1 -0.38, dg2 (3.02M) -2.39. On DrJohnson held out falls steadily as splats grow (1.44M 26.99,
 1.91M 26.61, 3.02M 24.60) while gsplat reaches 28.28 with 2.10M: our extra splats fit the training photos without
-generalising - placement (floaters / wrong depth), not too few splats. **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
+generalising - placement (floaters / wrong depth), not too few splats.
+
+### Kitchen at the exact photo size; near-camera blobs (ex0, 2026-10-09)
+
+ex0 (dg1 settings, exact 1558x1039, same rescore with no resize): 1.41M splats, **27.11 / 0.896 / LPIPS 0.137** vs dg1's
+27.76 (scored against a resized photo). Resampling is NOT the 0.65 dB: resizing gsplat's render and photo alike moves it
+only 29.37 -> 29.46 (a one-row MISALIGNMENT costs 1.6 dB). Per view ex0 matches dg1 within ~0.3 dB except a few
+catastrophic views: **DSCF0720 -15.9, DSCF0680 -12.3, DSCF0688 -7.0 vs gsplat** (dg1: 0688 -9.6, 0680 -3.8, 0720 -4.3)
+= large dark smooth blobs right in front of the held-out camera, over the table. They move between runs and cost Kitchen
+~0.9 dB of mean alone; gsplat has none. Splats no training view removes: inside the 0.2 near plane of the training
+cameras next to them, or outside their frustums. **The biggest single lever found so far.** fl chain (after bm): Kitchen,
+two seeds (&shuffleseed) at near plane 0.2 and 0.05, with &splatstats now on the dataset path counting opaque splats
+within 0.1 spreads of held-out vs supervised cameras (b-commit after fa71d15).
+ **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
 
 **Gap anatomy, DrJohnson dg1 vs gsplat:** raw -1.67, after the colour fit -1.53, blur 2 -1.72, blur 6 -1.64: not colour,
 large-area. IMG_6392 -5.6 (a barely-seen ceiling: both trainers smear it, ours leaves a black hole where T stays open);

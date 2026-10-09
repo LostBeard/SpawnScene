@@ -276,6 +276,10 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("opacitycap", out var opCapQ)) OpacityResetCaps = opCapQ is not ("0" or "false");
         // &projectrefine=0: no camera refinement in the project path (parity ablation; it is on for the user's scenes).
         if (query.TryGetValue("projectrefine", out var projRefQ)) ProjectRefinePoses = projRefQ is not ("0" or "false");
+        // &nearplane=X: the trainer's near-plane cull in scene units (default 0.2; SplatTrainerGpu.NearPlane).
+        if (query.TryGetValue("nearplane", out var npq) && float.TryParse(npq,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var npv) && npv > 0f)
+            SplatTrainerGpu.NearPlane = npv;
         // &randombgamp=A: the random background's width scale (default 0.5).
         if (query.TryGetValue("randombgamp", out var rbaq) && float.TryParse(rbaq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var rbav))

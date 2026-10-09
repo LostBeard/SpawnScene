@@ -546,8 +546,22 @@ public sealed partial class SplatTrainerGpu : IDisposable
             "ssim_pix_bwd, grad_stats");
     }
 
+    /// <summary>
+    /// The trainer's near-plane cull in scene units (WGSL NEAR_PLANE, default 0.2 = the original 3DGS rasteriser's).
+    /// gsplat culls at 0.01 in its NORMALISED frame (cameras within a unit sphere), about 0.05 of a COLMAP benchmark scene's
+    /// units: Train's handrail (held out 00073, -6.4 dB) and up to 30% of a DrJohnson camera's points sit inside 0.2
+    /// (parity, 2026-10-09). `&amp;nearplane=X` (harness A/B). Read when the pipelines are built (<see cref="Initialize"/>).
+    /// The CPU oracle (SplatGeometryGradients.MinDepth) keeps 0.2: the TrainerGate runs at the default.
+    /// </summary>
+    public static float NearPlane { get; set; } = 0.2f;
+
     GPUComputePipeline MakePipeline(string wgsl, string entry)
     {
+        if (NearPlane != 0.2f)
+        {
+            var lit = NearPlane.ToString("0.0#########", System.Globalization.CultureInfo.InvariantCulture);
+            wgsl = wgsl.Replace("const NEAR_PLANE : f32 = 0.2;", $"const NEAR_PLANE : f32 = {lit};");
+        }
         using var module = _device!.CreateShaderModule(new GPUShaderModuleDescriptor { Code = wgsl });
         return _device.CreateComputePipeline(new GPUComputePipelineDescriptor
         {

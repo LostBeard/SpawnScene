@@ -126,6 +126,23 @@ against a fixed 30,000 (a 7K run ends at 0.34x), gsplat's 7K-end run decays over
 still moving at a third of the start rate when the run ends. `&poslrsteps=N` added; pl chain (after xp): Train, DrJohnson,
 Kitchen (+ with &exposure=0), Counter at poslrsteps=7000 vs xp's x0.
 
+### Position-lr decay over the run's own length: +0.6 to +1.1 dB (pl, 2026-10-09)
+
+&poslrsteps=7000 (positions decay 100x over the 7K run, as gsplat's 7K-end does) vs x0 (defaults: decay against a fixed
+30K, a 7K run ends at 0.34x), same seeds; build f3 vs f2 (only the option and the up fix differ). Shared scorer
+PSNR / SSIM / LPIPS-alex:
+
+| Scene | x0 defaults | pl1 poslrsteps=7000 | delta | gsplat | gap now |
+|---|---|---|---|---|---|
+| Train | 18.97 / 0.721 / 0.308, 0.60M | **19.54 / 0.769 / 0.249**, 0.47M | +0.57 / +0.047 / -0.059 | 20.42 / 0.771 / 0.231 | -0.88 (was -1.45) |
+| DrJohnson | 26.81 / 0.865 / 0.286, 1.44M | **27.92 / 0.893 / 0.236**, 1.00M | +1.11 / +0.028 / -0.050 | 28.28 / 0.889 / 0.230 | -0.36, SSIM ahead |
+| Kitchen (seed 2) | 27.10 / 0.887 / 0.146, 0.80M | **28.20 / 0.911 / 0.124**, 0.60M | +1.10 / +0.024 / -0.022 | 29.37 / 0.913 / 0.117 | -1.17 (gains still on) |
+
+The training views fit better too (Train supervised 20.09 -> 20.78, DrJohnson 29.03 -> 31.52): it was the underfitting.
+Fewer splats (positions settle, fewer cross the densify bar). The comment on PositionLrMaxSteps ("tying it to the run length
+... held-out PSNR fell 1.5 dB", an old 8K measurement) does not hold on today's trainer. **Defaults question for TJ** (with
+the exposure gains): decay over the run's own iterations. Kitchen with both (pl2) and Counter (pl1) running.
+
 ### DrJohnson shown upside down (TJ, 2026-10-09) - fixed a510f48
 
 The cameras' mean up agreed 69.4% (pitched at ceilings and floors), under the 80% gravity gate, so DrJohnson (and Playroom,

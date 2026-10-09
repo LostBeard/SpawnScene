@@ -163,6 +163,16 @@ Playroom (+ its baseline), Train, DrJohnson, Counter, Bonsai, Room, Bicycle, Tru
 Neither helps once both changes are in. Next (ab2): the two extras gsplat lacks and that were never ablated on the
 benchmark separately - random background (&randombg=0) and floater carve (&carve=0) - on Train and Kitchen (seed 2).
 
+| ab2 (on top of c1) | Train | Kitchen (seed 2) |
+|---|---|---|
+| c1 | 19.49 / 0.773, 0.46M | 28.65 / 0.916, 0.60M |
+| a1 &randombg=0 | 19.58 / 0.774 (+0.09) | **28.98 / 0.919 (+0.33)**, 0.62M |
+| a2 &carve=0 | 19.66 / 0.777 (+0.17) | running |
+
+Train's deltas are inside its run noise (~0.2). Kitchen's +0.33 is above its seed noise (x0 seeds 27.10 / 27.08) - but the
+random background is a TJ default for a reason (Bathroom see-through 12.0% -> 5.4% off the photo path, held-out neutral
+there), so dropping it would be a trade, not a fix; a held-out benchmark does not see see-through.
+
 ### Candidate defaults on the phone capture (cand, 2026-10-09)
 
 | Bathroom (35 phone photos, own SfM) | splats | held out PSNR / SSIM | fair (gains fitted on left half, right half scored) |

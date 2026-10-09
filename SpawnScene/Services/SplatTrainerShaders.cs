@@ -1114,13 +1114,13 @@ fn raster_backward(
     /// </summary>
     public static string SubgroupBackward(string rasterBackward)
     {
-        const string declOld = DeclOld, redOld = RedOld, tailOld = TailOld;
-        if (!rasterBackward.Contains(declOld) || !rasterBackward.Contains(redOld) || !rasterBackward.Contains(TailOld))
+        // The span from the reduction to the end of the key loop is replaced whole (thread 0's write-out moves after it).
+        int a = rasterBackward.IndexOf(RedOld, StringComparison.Ordinal);
+        int b = rasterBackward.IndexOf(TailOld, StringComparison.Ordinal);
+        if (!rasterBackward.Contains(DeclOld) || a < 0 || b < a)
             throw new InvalidOperationException("SubgroupBackward: RasterBackward changed - update the subgroup reduction");
-        return "enable subgroups;" + Environment.NewLine + rasterBackward
-            .Replace(declOld, DeclNew)
-            .Replace(redOld, RedNew)
-            .Replace(tailOld, TailNew);
+        string body = rasterBackward.Substring(0, a) + SpanNew + rasterBackward.Substring(b + TailOld.Length);
+        return "enable subgroups;" + Environment.NewLine + body.Replace(DeclOld, DeclNew);
     }
 
     const string DeclOld = @"var<workgroup> redA : array<vec4<f32>, 256>;   // dR, dG, dB, dOpacity
@@ -1160,21 +1160,7 @@ var<workgroup> redAbs : array<vec2<f32>, 256>; // |dCentreX|, |dCentreY| per pix
         workgroupBarrier();
     }
         hi = lo;";
-    const string DeclNew = @"// Subgroup partials (SubgroupBackward): 2 buffers (key parity) x up to 64 subgroups (256 / the smallest size, 4).
-var<workgroup> sgA : array<vec4<f32>, 128>;   // dR, dG, dB, dOpacity
-var<workgroup> sgB : array<vec4<f32>, 128>;   // dCentreX, dCentreY, dConicA, dConicB
-var<workgroup> sgC : array<f32, 128>;         // dConicC
-var<workgroup> sgAbs : array<vec2<f32>, 128>; // sum |dCentreX|, |dCentreY|
-//DEPTH: var<workgroup> sgD : array<f32, 128>;  // dL/d(1/z)
-var<workgroup> sg_count : array<atomic<u32>, 2>;
-// Thread 0's totals, under the names the write-out below reads (only thread 0 touches them).
-var<workgroup> redA : array<vec4<f32>, 1>;
-var<workgroup> redB : array<vec4<f32>, 1>;
-var<workgroup> redC : array<f32, 1>;
-var<workgroup> redAbs : array<vec2<f32>, 1>;
-//DEPTH: var<workgroup> redD : array<f32, 1>;
-";
-    const string RedNew = @"        // Reduce this contribution across the tile's 256 pixels: within each subgroup in hardware, then the partials.
+    const string SpanNew = @"        // Reduce this contribution across the tile's 256 pixels: within each subgroup in hardware, then the partials.
         let rA = subgroupAdd(contrib);
         let rB = subgroupAdd(geom);
         let rC = subgroupAdd(geom_cc);
@@ -1188,6 +1174,8 @@ var<workgroup> redAbs : array<vec2<f32>, 1>;
         }
         workgroupBarrier();
 
+        // Thread 0 only parks the key's totals; the global writes and AbsGS atomics happen after the batch, one key an
+        // invocation - they used to sit on every key's critical path with 255 invocations waiting.
         if (li == 0u) {
             let n = atomicLoad(&sg_count[par]);
             atomicStore(&sg_count[par], 0u);
@@ -1198,14 +1186,44 @@ var<workgroup> redAbs : array<vec2<f32>, 1>;
                 tA = tA + sgA[q]; tB = tB + sgB[q]; tC = tC + sgC[q]; tAbs = tAbs + sgAbs[q];
 //DEPTH:                 tD = tD + sgD[q];
             }
-            redA[0] = tA; redB[0] = tB; redC[0] = tC; redAbs[0] = tAbs;
-//DEPTH:             redD[0] = tD;";
-    const string TailNew = @"            if (redAbs[0].x != 0.0) { densify_abs_add(splat * 2u, redAbs[0].x); }
-            if (redAbs[0].y != 0.0) { densify_abs_add(splat * 2u + 1u, redAbs[0].y); }
+            bA[s] = tA; bB[s] = tB; bC[s] = tC; bAbs[s] = tAbs;
+//DEPTH:             bD[s] = tD;
         }
     }
+        // The batch's totals out in parallel.
+        workgroupBarrier();
+        if (li < count) {
+            let kk = lo + li;
+            let b3 = kk * 3u;
+            grad_a[b3 + 0u] = bA[li].x;
+            grad_a[b3 + 1u] = bA[li].y;
+            grad_a[b3 + 2u] = bA[li].z;
+            grad_b[b3 + 0u] = bA[li].w;
+            grad_b[b3 + 1u] = bB[li].x;
+            grad_b[b3 + 2u] = bB[li].y;
+            grad_c[b3 + 0u] = bB[li].z;
+            grad_c[b3 + 1u] = bB[li].w;
+            grad_c[b3 + 2u] = bC[li];
+//DEPTH:             depth_io[2u * u32(u.viewport.x) * u32(u.viewport.y) + kk] = bD[li];
+            let splat = values[kk];
+            if (bAbs[li].x != 0.0) { densify_abs_add(splat * 2u, bAbs[li].x); }
+            if (bAbs[li].y != 0.0) { densify_abs_add(splat * 2u + 1u, bAbs[li].y); }
+        }
         hi = lo;";
-
+    const string DeclNew = @"// Subgroup partials (SubgroupBackward): 2 buffers (key parity) x up to 64 subgroups (256 / the smallest size, 4).
+var<workgroup> sgA : array<vec4<f32>, 128>;   // dR, dG, dB, dOpacity
+var<workgroup> sgB : array<vec4<f32>, 128>;   // dCentreX, dCentreY, dConicA, dConicB
+var<workgroup> sgC : array<f32, 128>;         // dConicC
+var<workgroup> sgAbs : array<vec2<f32>, 128>; // sum |dCentreX|, |dCentreY|
+//DEPTH: var<workgroup> sgD : array<f32, 128>;  // dL/d(1/z)
+var<workgroup> sg_count : array<atomic<u32>, 2>;
+// One batch's per-key totals (thread 0 fills them key by key), written out by the whole tile after the batch.
+var<workgroup> bA : array<vec4<f32>, 64>;
+var<workgroup> bB : array<vec4<f32>, 64>;
+var<workgroup> bC : array<f32, 64>;
+var<workgroup> bAbs : array<vec2<f32>, 64>;
+//DEPTH: var<workgroup> bD : array<f32, 64>;
+";
     /// <summary>
     /// Pass 6: fold per-(tile, splat) gradients into per-splat totals.
     ///

@@ -215,6 +215,13 @@ atomics (Research/brush-vs-spawnscene-2026-10-09.md). Needs the WebGPU `subgroup
 without it (or with other sizes: Intel iGPU, Quest) keep the current path. Then tighter tile boxes and dropping the
 per-step key-count readback.
 
+**Subgroup reduction alone does not help (sg, 2026-10-09, fb19719, &subgroups=1, TrainerGate PASS):** Counter c1 468.6 s
+(default 462 s), 27.62 / 0.896 (same); profiled backward 51.1 ms (tree 47.1). The barriers were not the cost. What sits
+on every key's critical path in both versions is thread 0's write-out - 9 scattered global writes and two AbsGS
+compare-exchange loops - with 255 invocations waiting at the next barrier. sg2: thread 0 only parks each key's totals,
+the tile writes a 64-key batch out in parallel after it (one extra barrier per batch); gate + timing running.
+Counter: ~13.5 keys per splat (5.67M keys / 419K splats).
+
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)
 
 | Run | Train | DrJohnson |

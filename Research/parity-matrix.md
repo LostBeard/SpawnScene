@@ -191,6 +191,15 @@ and Playroom on all three metrics. The losses concentrate on Train (-1.55 vs Bru
 decays the SCALE lr over the run and grows "MCMC-like"; a source-level comparison is being written
 (Research/brush-vs-spawnscene-2026-10-09.md).
 
+### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
+
+Final cycle (1 sync per phase, so slower than a real step: 641 s vs 462 s unprofiled): **108 ms/step = backward 47.1 +
+scatter 13.0** (56%), prev 6.4, ranges+raster 6.8, emit+count 6.3, loss+ssim 5.3, sort 5.2, clear 4.2, sh 4.0, adam 3.7,
+geometry 3.2, loss read 1.1. Brush's whole 7K run averages under 24.6 ms a step. The backward pass is the speed gap: we do a
+256-thread tree reduction per key (~9 barriers) plus a separate scatter pass; Brush does one subgroup add per splat and
+atomics (Research/brush-vs-spawnscene-2026-10-09.md). Needs the WebGPU `subgroups` feature - availability on this Chrome
+to be checked when the GPU is free. Then tighter tile boxes and dropping the per-step key-count readback.
+
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)
 
 | Run | Train | DrJohnson |

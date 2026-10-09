@@ -152,6 +152,22 @@ The two stack on Kitchen (+1.10 then +0.46 = +1.56 over defaults). **cand chain*
 fair score) b0 defaults / b1 poslrsteps / b2 both - the capture the gains were made default for - then both changes on
 Playroom (+ its baseline), Train, DrJohnson, Counter, Bonsai, Room, Bicycle, Truck, Garden, Stump: the full table for TJ.
 
+### Brush v0.3.0 (2026-10-09)
+
+Official Windows release (sha256 b68e3e9c...), `brush_app.exe <parity folder> --total-steps 7000 --eval-split-every 8
+--eval-every 7000 --eval-save-to-disk` - the same pixels (parity/<scene>/images = the benchmark JPGs), the same split (file
+name order, every 8th), position lr decaying over the 7K run (= gsplat's 7K-end). Renders at the photo's exact size, scored by
+tools/rescore.py `renders` mode. Same GPU, nothing else running.
+
+| Counter 7K | PSNR / SSIM / LPIPS-alex / vgg | splats | time |
+|---|---|---|---|
+| Brush v0.3.0 | 27.61 / 0.889 / **0.184** / 0.293 | 0.39M | **172 s wall** (incl. load) |
+| gsplat 1.5.3 | 27.60 / 0.888 / 0.189 / 0.295 | 0.88M | 266 s training |
+| SpawnScene c1 (both candidate changes) | 27.62 / 0.888 / 0.191 / 0.296 | 0.48M | 462 s training (15.2 it/s) |
+
+Quality: three-way parity on Counter. **Speed: we are the slowest - 2.7x Brush, 1.7x gsplat** (browser WebGPU vs Brush's native
+wgpu). Brush on the other 10 scenes running.
+
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)
 
 | Run | Train | DrJohnson |

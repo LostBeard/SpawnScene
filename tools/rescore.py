@@ -5,6 +5,8 @@ LPIPS backbone). Run with the gsplat env's python (torch + torchmetrics):
   gsplat:     python rescore.py gsplat <renders dir>                (val_stepN_XXXX.png = photo | render side by side)
   SpawnScene: python rescore.py spawnscene <shots dir> <scene tag prefix> <images dir>
               (<prefix>__held-<photo>-trainer.png, scored against <images dir>/<photo>.*)
+  Brush:      python rescore.py renders <renders dir> <images dir>
+              (<photo>.png per held-out view - brush_app --eval-save-to-disk's eval_<iter>/ - against <images dir>/<photo>.*)
 
 Prints one line per image and the mean.
 """
@@ -43,6 +45,18 @@ def main():
             a = np.asarray(Image.open(f).convert("RGB"))
             w = a.shape[1] // 2
             pairs.append((os.path.basename(f), a[:, :w], a[:, w:]))
+    elif mode == "renders":
+        renders, images = sys.argv[2], sys.argv[3]
+        names = {os.path.splitext(n)[0]: n for n in os.listdir(images)}
+        for f in sorted(glob.glob(os.path.join(renders, "*.png"))):
+            stem = os.path.splitext(os.path.basename(f))[0]
+            if stem not in names:
+                print("no photo for", stem); continue
+            gt = Image.open(os.path.join(images, names[stem])).convert("RGB")
+            im = Image.open(f).convert("RGB")
+            if im.size != gt.size:
+                sys.exit(f"{stem}: render {im.size} vs photo {gt.size} - a different resolution is a different benchmark")
+            pairs.append((stem, np.asarray(gt), np.asarray(im)))
     else:
         shots, prefix, images = sys.argv[2], sys.argv[3], sys.argv[4]
         names = {os.path.splitext(n)[0]: n for n in os.listdir(images)}

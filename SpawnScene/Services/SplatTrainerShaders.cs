@@ -1120,7 +1120,7 @@ fn raster_backward(
         if (!rasterBackward.Contains(DeclOld) || a < 0 || b < a)
             throw new InvalidOperationException("SubgroupBackward: RasterBackward changed - update the subgroup reduction");
         string body = rasterBackward.Substring(0, a) + SpanNew + rasterBackward.Substring(b + TailOld.Length);
-        return "enable subgroups;" + Environment.NewLine + body.Replace(DeclOld, DeclNew);
+        return "enable subgroups;" + Environment.NewLine + "diagnostic(off, subgroup_uniformity);" + Environment.NewLine + body.Replace(DeclOld, DeclNew);
     }
 
     const string DeclOld = @"var<workgroup> redA : array<vec4<f32>, 256>;   // dR, dG, dB, dOpacity
@@ -1161,16 +1161,21 @@ var<workgroup> redAbs : array<vec2<f32>, 256>; // |dCentreX|, |dCentreY| per pix
     }
         hi = lo;";
     const string SpanNew = @"        // Reduce this contribution across the tile's 256 pixels: within each subgroup in hardware, then the partials.
-        let rA = subgroupAdd(contrib);
-        let rB = subgroupAdd(geom);
-        let rC = subgroupAdd(geom_cc);
-        let rAbs = subgroupAdd(abs_c);
-//DEPTH:         let rD = subgroupAdd(contrib_d);
+        // A subgroup none of whose pixels this splat touches has nothing to add: skip its reduction (gsplat skips such
+        // warps the same way). Most keys cover a fraction of a 16x16 tile. subgroupAny is uniform within the subgroup,
+        // which is all the subgroup operations below need (diagnostic(off, subgroup_uniformity) at the top).
         let par = k & 1u;
-        if (subgroupElect()) {
-            let slot = par * 64u + atomicAdd(&sg_count[par], 1u);
-            sgA[slot] = rA; sgB[slot] = rB; sgC[slot] = rC; sgAbs[slot] = rAbs;
-//DEPTH:             sgD[slot] = rD;
+        if (subgroupAny(hit)) {
+            let rA = subgroupAdd(contrib);
+            let rB = subgroupAdd(geom);
+            let rC = subgroupAdd(geom_cc);
+            let rAbs = subgroupAdd(abs_c);
+//DEPTH:             let rD = subgroupAdd(contrib_d);
+            if (subgroupElect()) {
+                let slot = par * 64u + atomicAdd(&sg_count[par], 1u);
+                sgA[slot] = rA; sgB[slot] = rB; sgC[slot] = rC; sgAbs[slot] = rAbs;
+//DEPTH:                 sgD[slot] = rD;
+            }
         }
         workgroupBarrier();
 

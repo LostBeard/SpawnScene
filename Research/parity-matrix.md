@@ -103,6 +103,13 @@ cameras next to them, or outside their frustums. **The biggest single lever foun
 two seeds (&shuffleseed) at near plane 0.2 and 0.05, with &splatstats now on the dataset path counting opaque splats
 within 0.1 spreads of held-out vs supervised cameras (b-commit after fa71d15).
 
+### Near plane 0.05 vs 0.2 (np, 2026-10-09; dg1 settings, same build)
+
+Train: np0 (0.2) 18.78 / 0.724, np1 (0.05) 19.08 / 0.728 (rescore 18.81 -> 19.10). The worst views do NOT move (00073
+handrail -6.35 -> -6.62, 00001 -5.00 -> -5.09, 00049 -4.16 -> -4.25): the +0.3 is spread over ordinary views, at the
+noise of one run (np0 vs dg1, same settings, other build: 18.78 vs 19.01). **The near plane is not Train's near-camera
+failure.** DrJohnson: np0 26.66 / 0.868 (np1 running).
+
 ### Per-photo exposure gains cost Kitchen 1.4 dB (ex1, 2026-10-09)
 
 | Kitchen (exact size, &absgrad=0, seed 1) | splats | in-app | rescore PSNR / SSIM / LPIPS-alex / vgg | gap to gsplat (raw / after colour fit) |

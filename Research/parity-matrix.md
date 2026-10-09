@@ -94,6 +94,9 @@ IMG_6292 -4.8: the whole view is softer, the radiator's fins wavy streaks where 
 read separately, Studio.Projects K[0]/K[4]; 795.1 / 796.1 at import size); no pose refinement on the dataset path; posLr
 matches gsplat's (1.6e-4 x extent 7.196). gsplat's own splats are needles too (DrJohnson 7K: anisotropy median 7.3, p90
 32, 40% > 10; opacity median 0.185). &splatstats now logs anisotropy (np runs report ours).
+Densify mechanics match gsplat's: split above 0.01 x scene extent (SplatDensityControl.PercentDense; gsplat grow_scale3d
+0.01 x scene_scale), children / 1.6; clones dominate (~35K clones to ~1K splits a step past 1K iterations); each apply
+costs ~0.5 dB supervised at once (DrJohnson apply probe) and recovers. SH schedule matches (degree +1 per 1000 to 3).
 
 dg1 Kitchen: +0.55 dB from more splats (1.33M, now more than gsplat's 1.20M), still -1.61 dB behind gsplat with MORE
 splats - the count is not the whole gap. The rescore resized the photos 1558x1039 -> 1558x1040: training rounded to even

@@ -144,4 +144,8 @@ public sealed class TrainingView
     /// (<see cref="CameraParams.TrainingSize"/>).
     /// </summary>
     public int SourceLongestSide { get; init; }
+
+    /// <summary>Shortest side of the photograph itself, 0 when unknown: with <see cref="SourceLongestSide"/> it lets
+    /// training at the photo's own size use EXACTLY that size (<see cref="CameraParams.TrainingSize"/>).</summary>
+    public int SourceShortestSide { get; init; }
 }

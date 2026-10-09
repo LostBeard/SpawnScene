@@ -403,10 +403,13 @@ public partial class Studio
             // The photos' own size caps training, not the cameras' import size (TrainingSize may scale up). The stack shares
             // one size, so the smallest photo sets it.
             int sourceLongest = views.Min(v => v.SourceLongestSide);
+            // Exact photo size only when every photo has it (one stack size); else 0 = the even-rounded fit.
+            int sourceShortest = views.All(v => v.SourceLongestSide == sourceLongest)
+                && views.Select(v => v.SourceShortestSide).Distinct().Count() == 1 ? views[0].SourceShortestSide : 0;
             // The photo budget never shrinks the photos (TJ 2026-10-08: "there is no reason to cut corners"): views past it
             // stream from browser memory (TrainingTargets). Only maxTrainDimension / the photos' own size set the resolution.
             var (tw, th, shrunk) = TrainingTimeEstimate.TrainingSize(w, h, sourceLongest, maxTrainDimension, views.Count,
-                long.MaxValue);
+                long.MaxValue, sourceShortest);
             if (shrunk)
             {
                 var (fw, fh) = views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest);

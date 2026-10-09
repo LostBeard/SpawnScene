@@ -27,10 +27,10 @@ public static class TrainingTimeEstimate
     /// Returns the size and whether the budget shrank it.
     /// </summary>
     public static (int Width, int Height, bool Shrunk) TrainingSize(int width, int height, int sourceLongestSide,
-        int maxDimension, int viewCount, long targetStackBytes)
+        int maxDimension, int viewCount, long targetStackBytes, int sourceShortestSide = 0)
     {
         long Bytes(int w, int h) => (long)viewCount * w * h * sizeof(uint);
-        var (tw, th) = CameraParams.TrainingSize(width, height, maxDimension, sourceLongestSide);
+        var (tw, th) = CameraParams.TrainingSize(width, height, maxDimension, sourceLongestSide, sourceShortestSide);
         if (Bytes(tw, th) <= targetStackBytes) return (tw, th, false);
         // Bytes grow with the square of the longest side, so the fitting side is one square root away. This replaced 3/4
         // steps down from the SETTING, which landed wherever the steps fell: TruckFull's 251 views at 1600 px (photos 979)

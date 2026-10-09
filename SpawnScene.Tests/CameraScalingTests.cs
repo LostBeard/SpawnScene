@@ -179,4 +179,20 @@ public class CameraScalingTests
         Assert.That(imported.TrainingSize(1600, 0), Is.EqualTo((768, 1024)), "unknown photo size: the camera is the ceiling");
         Assert.That(imported.TrainingSize(1600, 1024), Is.EqualTo((768, 1024)), "photo no larger than the camera");
     }
+
+    /// <summary>
+    /// At the photo's own size, training uses EXACTLY that size (parity, 2026-10-09): the even rounding stretched Mip-NeRF
+    /// 360 Kitchen's 1558x1039 photos to 1558x1040, so the target was resampled and every render was a row off the photo
+    /// it was scored against. A photo whose aspect is not the camera's still gets the rounded fit.
+    /// </summary>
+    [Test]
+    public void TrainingSize_AtThePhotoSize_IsThePhotoSize()
+    {
+        Assert.That(CameraParams.TrainingSize(1024, 683, 1600, 1558, 1039), Is.EqualTo((1558, 1039)), "Kitchen");
+        Assert.That(CameraParams.TrainingSize(1024, 683, 1600, 1557, 1038), Is.EqualTo((1557, 1038)), "Room");
+        Assert.That(CameraParams.TrainingSize(683, 1024, 1600, 1558, 1039), Is.EqualTo((1039, 1558)), "portrait");
+        Assert.That(CameraParams.TrainingSize(1024, 683, 1600, 1558), Is.EqualTo((1558, 1040)), "short side unknown: rounded");
+        Assert.That(CameraParams.TrainingSize(1024, 683, 1200, 1558, 1039), Is.EqualTo((1200, 800)), "below the photo: rounded");
+        Assert.That(CameraParams.TrainingSize(1024, 683, 1600, 1558, 900), Is.EqualTo((1558, 1040)), "other aspect: rounded");
+    }
 }

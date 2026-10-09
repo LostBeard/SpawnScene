@@ -495,9 +495,11 @@ public partial class Studio
         TrainingTimeEstimate.Duration? trainTime = null;
         if (photos.Count >= 2)
         {
-            var (tw, th, shrunk) = TrainingTimeEstimate.TrainingSize(photos[0].Width, photos[0].Height,
-                photos.Min(p => Math.Max(p.Width, p.Height)), s.TrainMaxDimension, photos.Count, budgetTargets);
-            sizeNote = $" These {photos.Count} photos train at {tw}x{th}" + (shrunk ? ", smaller to fit the GPU memory budget." : ".");
+            // The photo budget no longer shrinks training (photos past it stream, TrainingTargets): the trainer's own rule.
+            var (tw, th, _) = TrainingTimeEstimate.TrainingSize(photos[0].Width, photos[0].Height,
+                photos.Min(p => Math.Max(p.Width, p.Height)), s.TrainMaxDimension, photos.Count, long.MaxValue,
+                Math.Min(photos[0].Width, photos[0].Height));
+            sizeNote = $" These {photos.Count} photos train at {tw}x{th}.";
             if (s.TrainIterations > 0)
                 trainTime = TrainingTimeEstimate.Estimate(TrainMarks, s.TrainIterations, TrainingTimeEstimate.Megapixels(tw, th));
         }

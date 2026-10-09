@@ -418,6 +418,7 @@ public partial class Studio
                 QuarterTurns = turns,
                 UsedForSupervision = supervise,
                 SourceLongestSide = Math.Max(images[i].SourceWidth, images[i].SourceHeight),
+                SourceShortestSide = Math.Min(images[i].SourceWidth, images[i].SourceHeight),
             });
             scene.TrainingCameras.Add(cam);
         }

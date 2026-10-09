@@ -96,7 +96,8 @@ public class CameraParams
         TrainingSize(Width, Height, maxDimension, sourceLongestSide);
 
     /// <summary><see cref="TrainingSize(int, int)"/> for a <paramref name="width"/> x <paramref name="height"/> view.</summary>
-    public static (int Width, int Height) TrainingSize(int width, int height, int maxDimension, int sourceLongestSide)
+    public static (int Width, int Height) TrainingSize(int width, int height, int maxDimension, int sourceLongestSide,
+        int sourceShortestSide = 0)
     {
         // The photo's own size is the ceiling, not this camera's: cameras are made at the IMPORT size (1024 on the longest
         // edge) while training reloads its targets from the photo. FitWithin alone never upscales, so a 1600 px training
@@ -105,6 +106,17 @@ public class CameraParams
         int ceiling = sourceLongestSide > 0 ? sourceLongestSide : longest;
         int target = Math.Min(maxDimension, ceiling);
         if (target == longest) return (width, height);
+        // At the photo's own size, train at EXACTLY that size: rounding to even stretched Mip-NeRF 360 Kitchen's
+        // 1558x1039 photos to 1558x1040 (Room 1557 -> 1556, Bonsai 1559 -> 1560), a resampled target and renders a pixel
+        // off the photos they are scored against (parity, 2026-10-09). Odd sizes train (TruckFull at 979x546). Only when
+        // the photo has this camera's aspect ratio (a cropped or sideways photo falls through to the rounding).
+        if (target == sourceLongestSide && sourceShortestSide > 0)
+        {
+            int shortest = Math.Min(width, height);
+            float expected = (float)shortest * target / longest;
+            if (MathF.Abs(sourceShortestSide - expected) <= 1.5f)
+                return width >= height ? (target, sourceShortestSide) : (sourceShortestSide, target);
+        }
         float s = (float)target / longest;
         int w = Math.Max(2, (int)MathF.Round(width * s / 2f) * 2);
         int h = Math.Max(2, (int)MathF.Round(height * s / 2f) * 2);

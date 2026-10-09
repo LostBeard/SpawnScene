@@ -157,6 +157,14 @@ xp results (defaults x0 vs &exposure=0 x1, same build f2, seed 1 unless noted):
 | Counter | 27.05 / 0.890, 0.61M | 27.50 / 0.890, 0.61M | **+0.45** | gsplat 27.62: gap -0.57 -> -0.12 |
 | Bonsai | 29.23 / 0.931, 0.61M | 29.87 / 0.932, 0.61M | **+0.64** | gsplat 30.18: gap -0.95 -> -0.31 |
 | Kitchen (seed 2, defaults) | 27.08 / 0.895, 0.80M | 27.87 / 0.894, 0.79M | **+0.79** | seed 1 (&absgrad=0, ex0/ex1): +1.41; gsplat 29.41 |
+| Room | 29.77 / 0.911, 0.83M | 29.99 / 0.911, 0.83M | +0.22 | gsplat 30.10 |
+| Bicycle | 23.59 / 0.716, 2.46M | 23.75 / 0.714, 2.42M | +0.16 | rescore 23.59 / 0.710 / 0.251 and 23.76 / 0.708 / 0.253; gsplat rescore 23.75 / 0.640 / 0.367 |
+
+**Bicycle's baseline fell:** par7k defaults 24.34 / 0.739 (1236x822, resampled from 1237) -> x0 23.59 / 0.716 (exact
+1237x822 since 8cc8f05), same settings otherwise (targetmb 1536 vs 2560 - both resident). The shared scorer agrees (23.59),
+so not a scoring bug; no shader indexes pixels in pairs. Odd size or seed noise: od chain (after pl) = Bicycle at
+MAXDIM=1236 (the old even fit) seeds 1 and 2, exact seed 2. If even wins on both seeds, the exact-size change is reverted
+(or the odd-size path fixed) before anything else builds on it.
  **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
 
 **Gap anatomy, DrJohnson dg1 vs gsplat:** raw -1.67, after the colour fit -1.53, blur 2 -1.72, blur 6 -1.64: not colour,

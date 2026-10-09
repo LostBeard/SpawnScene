@@ -108,7 +108,11 @@ within 0.1 spreads of held-out vs supervised cameras (b-commit after fa71d15).
 Train: np0 (0.2) 18.78 / 0.724, np1 (0.05) 19.08 / 0.728 (rescore 18.81 -> 19.10). The worst views do NOT move (00073
 handrail -6.35 -> -6.62, 00001 -5.00 -> -5.09, 00049 -4.16 -> -4.25): the +0.3 is spread over ordinary views, at the
 noise of one run (np0 vs dg1, same settings, other build: 18.78 vs 19.01). **The near plane is not Train's near-camera
-failure.** DrJohnson: np0 26.66 / 0.868 (np1 running).
+failure.** DrJohnson: np0 26.66 / 0.868, np1 26.86 / 0.869 (rescore gap to gsplat -1.62 -> -1.42); here the near views
+DO move: IMG_6392 (ceiling) -4.93 -> -3.14, IMG_6313 -3.20 -> -2.16, 6292 -4.95 -> -4.55. Same-settings DrJohnson runs agree
+within 0.05 (dg1 26.61, np0 26.66), so +0.2 is above its noise. Verdict: a small consistent help (+0.3 Train, +0.2
+DrJohnson), not the main gap. Candidate default for TJ alongside the exposure question; scale-relative (gsplat's is in a
+normalised frame) before it could be one.
 
 ### Per-photo exposure gains cost Kitchen 1.4 dB (ex1, 2026-10-09)
 

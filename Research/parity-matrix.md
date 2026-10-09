@@ -18,11 +18,11 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Bicycle (1237, clean folder) | 7K-end | **24.34 / 0.739** (par7k, 10-08 defaults; fair 24.89) | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
 | Garden (images_4) | 7K-end | 26.57 / 0.855 (par7k) | - | 26.00 / 0.809 / 0.149, 3.62M | - | see refs |
 | Stump (images_4) | 7K-end | 26.73 / 0.788 (par7k) | - | 25.03 / 0.682 / 0.304, 3.39M | - | see refs |
-| Room (images_2) | 7K-end | 30.25 / 0.926 (par7k) | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
+| Room (images_2) | 7K-end | 30.25 / 0.926 (par7k; NOT like for like: trained at 1392x930, photos 1557 wide - re-run queued) | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
 | Counter (images_2) | 7K-end | 27.05 / 0.890 (par7k) - **gsplat +0.57 dB PSNR**, SSIM equal | - | 27.62 / 0.889 / 0.192, 0.88M | - | see refs |
-| Kitchen (images_2) | 7K-end | - | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
-| Bonsai (images_2) | 7K-end | - | - | 30.18 / 0.928 / 0.156, 1.23M | - | see refs |
-| Truck (979, clean folder) | 7K-end | - | - | 23.87 / 0.853 / 0.134, 2.06M | - | see refs |
+| Kitchen (images_2) | 7K-end | 27.63 / 0.909 (par7k; NOT like for like: trained at 1470x980, photos 1558x1039 - re-run queued) | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
+| Bonsai (images_2) | 7K-end | 29.50 / 0.941 (par7k; NOT like for like: trained at 1438x958 - re-run queued) | - | 30.18 / 0.928 / 0.156, 1.23M | - | see refs |
+| Truck (979, clean folder) | 7K-end | 24.04 / 0.860 (par7k) | - | 23.87 / 0.853 / 0.134, 2.06M | - | see refs |
 | Train (979) | 7K-end | - | - | 20.41 / 0.771 / 0.231, 0.93M | - | see refs |
 | DrJohnson | 7K-end | - | - | 28.29 / 0.890 / 0.235, 2.10M | - | see refs |
 | Playroom | 7K-end | - | - | 29.43 / 0.899 / 0.203, 1.31M | - | see refs |
@@ -32,6 +32,10 @@ Data: one clean folder per scene (junctions, nothing copied) at the gsplat scrat
 bonsai), C:/Users/TJ/Downloads/tandt_db/... images (truck, train, drjohnson, playroom) - the same files SpawnScene's
 manifests name. Flowers / treehill are not on disk. Queued 10-08 16:19: gsplat 7K-end on all 11 (after the Hamamni
 ablation chain), then SpawnScene GTPOSES on the same folders.
+
+**Resolution (2026-10-08):** the par7k chain passed &targetmb=1536 (the Truck protocol's photo budget); Kitchen, Bonsai and
+Room did not fit it and trained at 89-94% of the benchmark size - not like for like with gsplat. Counter (full size) is.
+Re-runs with a budget that fits queued after the add-back chain (tuvok-par7k-indoor.sh).
 
 **Scoring (2026-10-08):** each tool's numbers above are scored by its own code. One scorer for all: tools/rescore.py
 (torchmetrics PSNR / SSIM / LPIPS-alex / LPIPS-vgg, run in the gsplat env, on the CPU while the GPU trains). Checked on

@@ -84,9 +84,12 @@ reference signal (&absgrad=0), dg2 AbsGS at 4e-4, on Kitchen, Train, DrJohnson.
 | Train | dg2 &densifygrad=4e-4 | 1.31M | 18.48 / 0.721 | - | |
 | DrJohnson | default | 1.44M | 26.99 | - | 28.28 / 0.889 / 0.230 / 0.363, 2.10M |
 | DrJohnson | dg1 &absgrad=0 | 1.91M | 26.61 / 0.868 | 26.61 / 0.861 / 0.283 / 0.399 | |
+| DrJohnson | dg2 &densifygrad=4e-4 | 3.02M | 24.60 / 0.841 | - | |
 
 More splats do not close the gap: Kitchen dg2 has 1.7x gsplat's count and scores lower than dg1; Train dg1 +0.03 dB,
-dg2 -0.50; DrJohnson dg1 -0.38. **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
+dg2 -0.50; DrJohnson dg1 -0.38, dg2 (3.02M) -2.39. On DrJohnson held out falls steadily as splats grow (1.44M 26.99,
+1.91M 26.61, 3.02M 24.60) while gsplat reaches 28.28 with 2.10M: our extra splats fit the training photos without
+generalising - placement (floaters / wrong depth), not too few splats. **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
 
 **Gap anatomy, DrJohnson dg1 vs gsplat:** raw -1.67, after the colour fit -1.53, blur 2 -1.72, blur 6 -1.64: not colour,
 large-area. IMG_6392 -5.6 (a barely-seen ceiling: both trainers smear it, ours leaves a black hole where T stays open);

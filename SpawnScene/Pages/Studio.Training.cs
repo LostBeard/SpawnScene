@@ -403,8 +403,10 @@ public partial class Studio
             // The photos' own size caps training, not the cameras' import size (TrainingSize may scale up). The stack shares
             // one size, so the smallest photo sets it.
             int sourceLongest = views.Min(v => v.SourceLongestSide);
+            // The photo budget never shrinks the photos (TJ 2026-10-08: "there is no reason to cut corners"): views past it
+            // stream from browser memory (TrainingTargets). Only maxTrainDimension / the photos' own size set the resolution.
             var (tw, th, shrunk) = TrainingTimeEstimate.TrainingSize(w, h, sourceLongest, maxTrainDimension, views.Count,
-                MaxTargetStackBytes);
+                long.MaxValue);
             if (shrunk)
             {
                 var (fw, fh) = views[0].Camera.TrainingSize(maxTrainDimension, sourceLongest);
@@ -450,14 +452,25 @@ public partial class Studio
             // bytes against twelve, so the same budget supervises three times as many views,
             // and views are the scarce resource: the reference trains drjohnson on roughly 230
             // images while we were using 33.
-            using var targets = accel.Allocate1D<uint>((long)views.Count * w * h);
+            // When they do not all fit MaxTargetStackBytes, the GPU holds as many as fit and the rest stream from browser
+            // memory (TrainingTargets, through SplatTrainerGpu.StreamedTargets): never a smaller resolution.
+            long viewBytes = (long)w * h * sizeof(uint);
+            int residentSlots = (int)Math.Min(views.Count, Math.Max(4L, MaxTargetStackBytes / Math.Max(1L, viewBytes)));
+            bool streamed = residentSlots < views.Count;
+            using var streamStore = streamed ? new TrainingTargets(accel, _trainer, views.Count, residentSlots, (long)w * h) : null;
+            using var residentStack = streamed ? null : accel.Allocate1D<uint>((long)views.Count * w * h);
+            var targets = streamStore?.Buffer ?? residentStack!;
+            _trainer.StreamedTargets = streamStore;
+            if (streamed)
+                Console.WriteLine($"[Train] {views.Count} views at {w}x{h} need {(long)views.Count * viewBytes / (1024 * 1024)} MiB; " +
+                    $"{residentSlots} stay on the GPU ({MaxTargetStackBytes / (1024 * 1024)} MiB budget), the rest stream from browser memory");
 
             var loadStart = DateTime.UtcNow;
             for (int i = 0; i < views.Count; i++)
             {
                 bool ok = await LoadTargetAsync(
                     views[i].ImageName, views[i].FromProjectStore, views[i].QuarterTurns,
-                    w, h, targets, i);
+                    w, h, targets, i, streamStore);
                 if (!ok)
                 {
                     Console.WriteLine($"[Train] FAIL: could not load target {views[i].ImageName}");
@@ -1859,7 +1872,7 @@ public partial class Studio
     /// </summary>
     private async Task<bool> LoadTargetAsync(
         string url, bool fromProjectStore, int quarterTurns, int w, int h,
-        MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex)
+        MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex, TrainingTargets? streamStore = null)
     {
         try
         {
@@ -1939,7 +1952,9 @@ public partial class Studio
             // and a kernel expands them into the float stack.
             using var pixels = new Uint8Array(
                 dataArray.Buffer, dataArray.ByteOffset, dataArray.Length);
-            _trainer!.UploadTargetFrom(stack, viewIndex, pixels);
+            // Streamed: keep the pixels in browser memory; the view uploads into a GPU slot when it is used.
+            if (streamStore != null) streamStore.Store(viewIndex, pixels);
+            else _trainer!.UploadTargetFrom(stack, viewIndex, pixels);
             return true;
         }
         catch (Exception ex)

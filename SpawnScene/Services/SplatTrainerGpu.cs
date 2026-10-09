@@ -982,8 +982,16 @@ public sealed partial class SplatTrainerGpu : IDisposable
         return await _target!.CopyToHostAsync<float>(0, (long)_width * _height * 3);
     }
 
+    /// <summary>
+    /// The streamed photo store when the views do not all fit the GPU target budget (TrainingTargets): a stack that IS its
+    /// buffer is indexed by view and resolved to a resident slot here, so every reader (training step, evaluation,
+    /// held-out scores, exposure fit) streams without knowing. Null: the stack holds every view at its own index.
+    /// </summary>
+    public TrainingTargets? StreamedTargets { get; set; }
+
     public void SetTargetFrom(MemoryBuffer1D<uint, Stride1D.Dense> stack, int viewIndex)
     {
+        if (StreamedTargets is { } st && ReferenceEquals(stack, st.Buffer)) viewIndex = st.Slot(viewIndex);
         long pixels = (long)_width * _height;
         long off = (long)viewIndex * pixels;
         if (off + pixels > stack.Length)

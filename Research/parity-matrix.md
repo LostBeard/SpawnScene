@@ -58,6 +58,18 @@ size: resolution was not the cause - Kitchen 27.63 at 94% size, 27.34 at full). 
 DrJohnson; the Hamamni finding (our splats far more translucent; gsplat never resets opacity) is the lead to test on
 them.
 
+### No opacity cap does not transfer (nc, 2026-10-09)
+
+Train: defaults 18.98 / nc1 (cap off) 18.78 / nc2 (cap off + extras off) 19.13; DrJohnson: 26.99 / 26.29 / 25.93 (gsplat
+20.41 / 28.29). Hamamni's best setting does not close the benchmark losses.
+
+### Splat counts: we end with 38-71% of gsplat's on every scene
+
+Kitchen 0.73M vs 1.20M (61%), Train 0.60M vs 0.93M (65%), DrJohnson 1.44M vs 2.10M (69%), Counter 0.61M vs 0.88M (69%),
+Bicycle 2.30M vs 3.24M (71%), Truck 0.78M vs 2.06M (38%). AbsGS at 8e-4 (+ the carve) was tuned on Bicycle / Truck, where
+fewer splats cost nothing; the losses are the detailed indoor / Train / DrJohnson scenes. Queued (tuvok-dg.sh): dg1 the
+reference signal (&absgrad=0), dg2 AbsGS at 4e-4, on Kitchen, Train, DrJohnson.
+
 ## Phone / Commons captures (no ground-truth poses: own SfM only)
 
 | Capture | SpawnScene | gsplat on SpawnScene's poses | notes |

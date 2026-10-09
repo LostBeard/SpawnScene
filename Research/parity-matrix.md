@@ -228,7 +228,18 @@ touches (`subgroupAny(hit)`, gsplat skips warps the same way).
 (profiled run 27.63 / 0.896; default 27.63 / 0.896). Profiled step: backward 48.7 -> **19.7 ms**, scatter 13.2 -> 6.0.
 TrainerGate PASS (subgroup path x5). Now at gsplat's speed on Counter (266 s training); Brush 172 s wall. The cost was
 reducing every key over every subgroup; most subgroups of a 16x16 tile never see a given splat. sg4 (Train, Kitchen, Bicycle)
-checks quality and time on more scenes (c1 times: Train 268.5 s, Kitchen 441.0 s, Bicycle 475.7 s).
+checks quality and time on more scenes:
+
+| 7K, c1 settings | default backward | &subgroups=1 | speed-up | quality default -> subgroups | gsplat training | Brush wall (incl. load) |
+|---|---|---|---|---|---|---|
+| Counter | 462 s | **271 s** | 1.70x | 27.63 / 0.896 -> 27.59 / 0.896 | 266 s | 172 s |
+| Train | 268.5 s | **155.9 s** | 1.72x | 19.49 / 0.773 -> 19.50 / 0.773 | 146 s | 118 s |
+| Kitchen (seed 1) | 441.0 s | **274.0 s** | 1.61x | 28.61 / 0.917 -> 28.76 / 0.918 | 307 s | 178 s |
+| Bicycle | 475.7 s | **266.0 s** | 1.79x | 24.42 / 0.722 -> 24.42 / 0.721 | 318 s | 107 s |
+
+Quality unchanged (within noise) on all four; 1.6-1.8x faster. **We now match or beat gsplat's training time** (faster on
+Kitchen and Bicycle, within 10 s on Counter / Train) with fewer splats; Brush is still 1.3-2.5x faster on wall time. A third
+candidate default for TJ (opt-in until then; devices without 'subgroups' keep the tree path).
 Counter: ~13.5 keys per splat (5.67M keys / 419K splats).
 
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)

@@ -1,4 +1,4 @@
-# Overnight 2026-10-09: parity vs gsplat - two default changes for TJ
+# Overnight 2026-10-09: parity vs gsplat and Brush - three default changes for TJ
 
 Protocol (Research/parity-matrix.md): COLMAP poses, every 8th photo held out, 7K iterations with the schedule ending at 7K
 for both tools, photos at their exact size, in-app held-out PSNR / SSIM (the shared scorer, tools/rescore.py, agrees within
@@ -6,7 +6,7 @@ for both tools, photos at their exact size, in-app held-out PSNR / SSIM (the sha
 
 ## The decision
 
-Two changes, measured on 10 benchmark scenes and TJ's Bathroom phone capture. **Neither is a default yet.**
+Three changes (two quality, one speed), measured on the benchmark scenes and TJ's Bathroom phone capture. **None is a default yet.**
 
 1. **Position learning rate decays over the run's own length** (`&poslrsteps=<iterations>`, today a fixed 30,000: a 7K run
    ends at 0.34x its starting rate, gsplat's at 0.01x). We were UNDERFITTING: our score on the training photos was at or
@@ -14,6 +14,11 @@ Two changes, measured on 10 benchmark scenes and TJ's Bathroom phone capture. **
 2. **Per-photo exposure gains only when the photos' EXIF exposure varies** (`&exposure=auto`, 6ddaeb5; today gains are always
    on). On fixed-exposure captures gains only add freedom that costs held-out quality; on a phone's auto exposure they are
    essential (Bathroom: 6.1 stops of EXIF spread, gains worth 5.9 dB).
+
+3. **Subgroup backward** (`&subgroups=1`, added 18:40): the backward pass reduces each key's gradients with WebGPU subgroup
+   operations and skips subgroups the splat does not touch. **1.6-1.8x faster training with unchanged quality** on Counter
+   (462 -> 271 s), Train (268 -> 156 s), Kitchen (441 -> 274 s), Bicycle (476 -> 266 s) - now as fast as gsplat (CUDA) or
+   faster; Brush still 1.3-2.5x faster. TrainerGate PASS. Devices without the `subgroups` feature keep today's path.
 
 ## Results (held out PSNR / SSIM; x0 = today's defaults, c1 = both changes with gains off = what auto does on these JPGs)
 

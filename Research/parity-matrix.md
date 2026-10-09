@@ -102,6 +102,21 @@ catastrophic views: **DSCF0720 -15.9, DSCF0680 -12.3, DSCF0688 -7.0 vs gsplat** 
 cameras next to them, or outside their frustums. **The biggest single lever found so far.** fl chain (after bm): Kitchen,
 two seeds (&shuffleseed) at near plane 0.2 and 0.05, with &splatstats now on the dataset path counting opaque splats
 within 0.1 spreads of held-out vs supervised cameras (b-commit after fa71d15).
+
+### Per-photo exposure gains cost Kitchen 1.4 dB (ex1, 2026-10-09)
+
+| Kitchen (exact size, &absgrad=0, seed 1) | splats | in-app | rescore PSNR / SSIM / LPIPS-alex / vgg | gap to gsplat (raw / after colour fit) |
+|---|---|---|---|---|
+| ex0 gains ON (default) | 1.41M | 27.10 / 0.905 | 27.11 / 0.896 / 0.137 / 0.201 | -2.26 / -1.39 |
+| ex1 &exposure=0 | 1.41M | 28.51 / 0.912 | **28.52 / 0.904 / 0.128 / 0.193** | **-0.85 / -0.85** |
+| gsplat | 1.20M | | 29.37 / 0.913 / 0.117 / 0.184 | |
+
+Gains off: +1.41 dB and the colour part of the gap is GONE (the colour fit no longer helps). The worst blob views shrink
+too (0720 -15.9 -> -4.9, 0680 -12.3 -> -4.9; one seed each, the blobs move between runs). Gains became a default on 10-08
+from the Bathroom phone capture (auto exposure: fair score +5.4 dB there); Mip-NeRF 360 is fixed exposure, and held-out
+views get the folded MEAN gain. A defaults question for TJ, not changed: xp chain (after np) = defaults vs &exposure=0
+on Train, DrJohnson, Counter, Bonsai, Kitchen (seed 2), Room, Bicycle, Truck, same build. bm/fl dropped (bm conflated
+three extras; fl's near-camera stats ride along in xp).
  **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
 
 **Gap anatomy, DrJohnson dg1 vs gsplat:** raw -1.67, after the colour fit -1.53, blur 2 -1.72, blur 6 -1.64: not colour,

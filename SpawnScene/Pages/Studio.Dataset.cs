@@ -388,6 +388,15 @@ public partial class Studio
         // These used to print "READY-FOR-CAPTURE gtpose-N" with only SetPose (the viewer kept its own
         // FOV) and the harness regex only knew "free-", so not one of them was ever saved.
         var viewIdx = Enumerable.Range(0, scene.TrainingViews.Count).ToList();
+        // &dumpheld=1: the trainer's render of EVERY held-out view (held-<photo>-trainer.png), for rescoring every tool's
+        // renders with one script (tools/rescore.py; parity 2026-10-08) - the picks below are only three of them.
+        if (DumpHeldOption)
+            foreach (int i in viewIdx.Where(i => !scene.TrainingViews[i].UsedForSupervision))
+            {
+                var hv = scene.TrainingViews[i];
+                await StashTrainerRenderAsync($"held-{System.IO.Path.GetFileNameWithoutExtension(hv.ImageName)}", hv.Camera);
+                await Task.Delay(1500);   // the harness polls every 500 ms
+            }
         var picks = new List<(string Kind, int Index)>();
         foreach (var (kind, sel) in new[] { ("sup", true), ("held", false) })
         {

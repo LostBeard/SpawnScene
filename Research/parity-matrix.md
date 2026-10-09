@@ -33,9 +33,12 @@ bonsai), C:/Users/TJ/Downloads/tandt_db/... images (truck, train, drjohnson, pla
 manifests name. Flowers / treehill are not on disk. Queued 10-08 16:19: gsplat 7K-end on all 11 (after the Hamamni
 ablation chain), then SpawnScene GTPOSES on the same folders.
 
-**Caveat (2026-10-08):** each tool's numbers above are scored by its own code (our SSIM vs torchmetrics'); a single
-rescoring script over every tool's saved held-out renders is required before publishing (the dataset harness saves only 3
-held-out renders per scene today - needs a dump of all of them, like the sample path's &dumpheld).
+**Scoring (2026-10-08):** each tool's numbers above are scored by its own code. One scorer for all: tools/rescore.py
+(torchmetrics PSNR / SSIM / LPIPS-alex / LPIPS-vgg, run in the gsplat env, on the CPU while the GPU trains). Checked on
+Hamamni: gsplat own 21.41 / 0.732 -> rescored 21.37 / 0.731 / alex 0.467 / vgg 0.541; SpawnScene oc2 own 20.19 / 0.703
+-> rescored 20.15 / 0.699 / alex 0.528 / vgg 0.551. Our scorer agrees with torchmetrics to 0.04 dB / 0.004 SSIM, so the
+self-scored rows are comparable; LPIPS (new) also favours gsplat on Hamamni. The dataset path now dumps every held-out
+render with &dumpheld=1 (it saved only 3 before), for LPIPS on every scene.
 
 Reference numbers with sources: [parity-references-2026-10-08.md](parity-references-2026-10-08.md) (being written).
 

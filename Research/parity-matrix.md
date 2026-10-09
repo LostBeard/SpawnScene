@@ -128,6 +128,12 @@ from the Bathroom phone capture (auto exposure: fair score +5.4 dB there); Mip-N
 views get the folded MEAN gain. A defaults question for TJ, not changed: xp chain (after np) = defaults vs &exposure=0
 on Train, DrJohnson, Counter, Bonsai, Kitchen (seed 2), Room, Bicycle, Truck, same build. bm/fl dropped (bm conflated
 three extras; fl's near-camera stats ride along in xp).
+
+xp results (defaults x0 vs &exposure=0 x1, same build f2, seed 1 unless noted):
+
+| Scene | x0 gains on | x1 gains off | delta | notes |
+|---|---|---|---|---|
+| Train | 18.93 / 0.730, 0.60M | 18.90 / 0.725, 0.59M | -0.03 | no effect; stats gsplat-like (opacity median 0.20, anisotropy median 6.2, 32% > 10); 34 opaque splats near held-out cameras only |
  **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
 
 **Gap anatomy, DrJohnson dg1 vs gsplat:** raw -1.67, after the colour fit -1.53, blur 2 -1.72, blur 6 -1.64: not colour,

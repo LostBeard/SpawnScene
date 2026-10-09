@@ -211,6 +211,10 @@ gsplat is - our render resized UP to the native photo - even **23.89 / 0.696** v
 0.640): the resampled run is smoother (+0.30 PSNR on Bicycle's grass, -0.014 SSIM), not better. No odd-size bug; exact size
 stays (it is gsplat's protocol). The old "+0.58 Bicycle lead" was mostly scoring against a smoothed photo.
 
+**gs (exact size):** Garden x0 (gains on) 26.01 / 0.842, 1.90M; x1 (gains off) **26.41 / 0.842** (+0.40); gsplat 26.00 /
+0.809. par7k's 26.57 (resampled to 1296) was flattered: at exact size Garden is level on PSNR with defaults, +0.41 with
+gains off, SSIM +0.033 ahead either way. Stump running.
+
 **Bicycle's baseline fell:** par7k defaults 24.34 / 0.739 (1236x822, resampled from 1237) -> x0 23.59 / 0.716 (exact
 1237x822 since 8cc8f05), same settings otherwise (targetmb 1536 vs 2560 - both resident). The shared scorer agrees (23.59),
 so not a scoring bug; no shader indexes pixels in pairs. Odd size or seed noise: od chain (after pl) = Bicycle at

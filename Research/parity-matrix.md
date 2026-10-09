@@ -152,6 +152,14 @@ The two stack on Kitchen (+1.10 then +0.46 = +1.56 over defaults). **cand chain*
 fair score) b0 defaults / b1 poslrsteps / b2 both - the capture the gains were made default for - then both changes on
 Playroom (+ its baseline), Train, DrJohnson, Counter, Bonsai, Room, Bicycle, Truck, Garden, Stump: the full table for TJ.
 
+### Train gap follow-ups on top of both changes (tr, 2026-10-09)
+
+| Run | Train | DrJohnson |
+|---|---|---|
+| c1 (poslrsteps + gains off) | 19.49 / 0.773 | 28.11 / 0.902 |
+| tr1 = c1 + &nearplane=0.05 | 19.52 / 0.774 (+0.03, noise) | running |
+| tr2 = c1 + &opacitylr=0.05 | running | queued |
+
 ### Candidate defaults on the phone capture (cand, 2026-10-09)
 
 | Bathroom (35 phone photos, own SfM) | splats | held out PSNR / SSIM | fair (gains fitted on left half, right half scored) |

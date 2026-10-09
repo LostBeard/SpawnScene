@@ -71,6 +71,18 @@ Bicycle 2.30M vs 3.24M (71%), Truck 0.78M vs 2.06M (38%). AbsGS at 8e-4 (+ the c
 fewer splats cost nothing; the losses are the detailed indoor / Train / DrJohnson scenes. Queued (tuvok-dg.sh): dg1 the
 reference signal (&absgrad=0), dg2 AbsGS at 4e-4, on Kitchen, Train, DrJohnson.
 
+### Densify threshold (dg, 2026-10-09; one scorer = tools/rescore.py on the held-out dumps)
+
+| Scene | run | splats | ours (in-app) | rescore PSNR / SSIM / LPIPS-alex / vgg | gsplat rescore |
+|---|---|---|---|---|---|
+| Kitchen | default (AbsGS 8e-4) | 0.73M | 27.34 / 0.909 | - (no dumps) | 29.37 / 0.913 / 0.117 / 0.184, 1.20M |
+| Kitchen | dg1 &absgrad=0 (2e-4) | 1.33M | 27.89 / 0.919 | 27.76 / 0.906 / 0.128 / 0.194 | |
+
+dg1 Kitchen: +0.55 dB from more splats (1.33M, now more than gsplat's 1.20M), still -1.61 dB behind gsplat with MORE
+splats - the count is not the whole gap. The rescore resized the photos 1558x1039 -> 1558x1040: training rounded to even
+sizes (fixed 8cc8f05: exact photo size, runs from here on), so the rescore is slightly against us (in-app 27.89 scores
+against its own 1040-row target).
+
 ## Phone / Commons captures (no ground-truth poses: own SfM only)
 
 | Capture | SpawnScene | gsplat on SpawnScene's poses | notes |

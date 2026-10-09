@@ -105,6 +105,10 @@ every splat at 0.01; 48-73% of our final splats are clones made after it from ca
 (So "both reset at 3000/6000" above is wrong for both: gsplat never, we once.) Test: `&opacitycap=0` keeps the schedule
 (the size prunes still switch on at 3000) but caps nothing - oc1 (defaults) / oc2 (extras off) running.
 
+oc1 (defaults, no cap): opacity median 0.17, > 0.5 23% (from 0.12 / 12%) but held out WORSE, 18.06 / 0.688 (033: 15.42).
+The cap is not the whole story: without it our opacity stays far from gsplat's 0.65, and the reset was also clearing
+floaters for us. oc2 (extras off, no cap) running.
+
 No single default explains the 2.2 dB: depth init and random background are worth ~1 dB each here; the others move it
 by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's setup) pending.
 

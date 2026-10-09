@@ -50,6 +50,23 @@ public partial class Studio
             var s = (float[])a.Clone(); Array.Sort(s);
             return string.Join(" ", q.Select(x => $"p{x * 100:0}={s[(int)Math.Min(s.Length - 1, x * (s.Length - 1))]:G3}"));
         }
+        // Opaque splats right at a camera (parity 2026-10-09: Kitchen's held-out DSCF0680/0720 lost 12-16 dB to dark blobs
+        // in front of the camera that no training view removed). Nearest camera held out vs supervised, and how close.
+        var views = scene.TrainingViews;
+        var heldCams = views.Where(v => !v.UsedForSupervision).Select(v => v.Camera.Position).ToArray();
+        var supCams = views.Where(v => v.UsedForSupervision).Select(v => v.Camera.Position).ToArray();
+        int nearHeld = 0, nearSup = 0, nearHeldOnly = 0;
+        if (heldCams.Length > 0 && supCams.Length > 0)
+            for (int i = 0; i < n; i++)
+            {
+                if (opac[i] <= 0.5f || dist[i] >= 0.1f) continue;
+                int o = i * SplatFormat.Floats;
+                var p = new Vector3(rows[o], rows[o + 1], rows[o + 2]);
+                float dh = heldCams.Min(c => (p - c).Length()) / spread, ds = supCams.Min(c => (p - c).Length()) / spread;
+                if (dh < 0.1f) nearHeld++;
+                if (ds < 0.1f) nearSup++;
+                if (dh < 0.1f && ds >= 0.1f) nearHeldOnly++;
+            }
         int dark = 0, darkNear = 0;
         for (int i = 0; i < n; i++)
             if (lum[i] < 0.2f && opac[i] > 0.5f) { dark++; if (dist[i] < 0.5f) darkNear++; }
@@ -58,6 +75,8 @@ public partial class Studio
         Console.WriteLine($"[Stats] size (largest axis) {P(size, 0.5, 0.9, 0.99, 0.999)}");
         Console.WriteLine($"[Stats] anisotropy (largest / smallest axis) {P(aniso, 0.5, 0.9, 0.99)}; > 10: {aniso.Count(v => v > 10f) / (float)n:P1}");
         Console.WriteLine($"[Stats] distance to nearest camera {P(dist, 0.01, 0.05, 0.5)}; < 0.25: {dist.Count(v => v < 0.25f) / (float)n:P2}, < 0.5: {dist.Count(v => v < 0.5f) / (float)n:P2}");
+        Console.WriteLine($"[Stats] opaque (> 0.5) within 0.1 spreads of a camera: held out {nearHeld:N0}, supervised {nearSup:N0}, " +
+            $"held out only {nearHeldOnly:N0} ({heldCams.Length} held-out, {supCams.Length} supervised cameras)");
         Console.WriteLine($"[Stats] dark opaque (luma < 0.2, opacity > 0.5): {dark / (float)n:P2}, of them within 0.5 spreads of a camera: {darkNear:N0}");
     }
 }

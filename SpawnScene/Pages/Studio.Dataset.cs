@@ -388,6 +388,8 @@ public partial class Studio
         // These used to print "READY-FOR-CAPTURE gtpose-N" with only SetPose (the viewer kept its own
         // FOV) and the harness regex only knew "free-", so not one of them was ever saved.
         var viewIdx = Enumerable.Range(0, scene.TrainingViews.Count).ToList();
+        // &splatstats=1 on the dataset path too (was project-only: the parity runs logged nothing, 2026-10-09).
+        if (SplatStatsOption) await LogSplatStatsAsync(scene);
         // &dumpheld=1: the trainer's render of EVERY held-out view (held-<photo>-trainer.png), for rescoring every tool's
         // renders with one script (tools/rescore.py; parity 2026-10-08) - the picks below are only three of them.
         if (DumpHeldOption)

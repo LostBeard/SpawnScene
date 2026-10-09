@@ -126,6 +126,13 @@ against a fixed 30,000 (a 7K run ends at 0.34x), gsplat's 7K-end run decays over
 still moving at a third of the start rate when the run ends. `&poslrsteps=N` added; pl chain (after xp): Train, DrJohnson,
 Kitchen (+ with &exposure=0), Counter at poslrsteps=7000 vs xp's x0.
 
+### DrJohnson shown upside down (TJ, 2026-10-09) - fixed a510f48
+
+The cameras' mean up agreed 69.4% (pitched at ceilings and floors), under the 80% gravity gate, so DrJohnson (and Playroom,
+55.9%) stayed in COLMAP's frame. Now 50-80% is accepted when the right axes' plane normal agrees within 15 deg and the rig
+is not a rolled orbit (TempleRing). Camera-set measurements per scene in the commit. Training is a rigid turn of cameras and
+splats together, so scores are unaffected up to float noise; pl's DrJohnson runs (build f3) are the first in the new frame.
+
 ### Per-photo exposure gains cost Kitchen 1.4 dB (ex1, 2026-10-09)
 
 | Kitchen (exact size, &absgrad=0, seed 1) | splats | in-app | rescore PSNR / SSIM / LPIPS-alex / vgg | gap to gsplat (raw / after colour fit) |

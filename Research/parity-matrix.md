@@ -222,7 +222,13 @@ compare-exchange loops - with 255 invocations waiting at the next barrier. sg2: 
 the tile writes a 64-key batch out in parallel after it (one extra barrier per batch): gate PASS, **455.3 s** (vs 462),
 27.63 / 0.896, backward 48.7 ms - noise-level. So neither the barriers nor the write-out: the per-key reduction itself
 (~55 shuffles per thread per key) for every key on every subgroup. sg3: skip it on subgroups no pixel of which the splat
-touches (`subgroupAny(hit)`, gsplat skips warps the same way); running.
+touches (`subgroupAny(hit)`, gsplat skips warps the same way).
+
+**sg3 = the speed fix: Counter c1 + &subgroups=1 trains in 271.3 s (25.8 it/s) vs 462 s - 1.70x faster**, 27.59 / 0.896
+(profiled run 27.63 / 0.896; default 27.63 / 0.896). Profiled step: backward 48.7 -> **19.7 ms**, scatter 13.2 -> 6.0.
+TrainerGate PASS (subgroup path x5). Now at gsplat's speed on Counter (266 s training); Brush 172 s wall. The cost was
+reducing every key over every subgroup; most subgroups of a 16x16 tile never see a given splat. sg4 (Train, Kitchen, Bicycle)
+checks quality and time on more scenes (c1 times: Train 268.5 s, Kitchen 441.0 s, Bicycle 475.7 s).
 Counter: ~13.5 keys per splat (5.67M keys / 419K splats).
 
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)

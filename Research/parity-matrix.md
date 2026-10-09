@@ -213,7 +213,8 @@ stays (it is gsplat's protocol). The old "+0.58 Bicycle lead" was mostly scoring
 
 **gs (exact size):** Garden x0 (gains on) 26.01 / 0.842, 1.90M; x1 (gains off) **26.41 / 0.842** (+0.40); gsplat 26.00 /
 0.809. par7k's 26.57 (resampled to 1296) was flattered: at exact size Garden is level on PSNR with defaults, +0.41 with
-gains off, SSIM +0.033 ahead either way. Stump running.
+gains off, SSIM +0.033 ahead either way. Stump x0 **25.97 / 0.760**, 1.76M; x1 26.16 / 0.761 (+0.19); gsplat 25.03 / 0.682:
+a real lead of +0.94 (par7k claimed +1.70 on resampled photos). Gains off: better on 8 of 9 scenes (Train level).
 
 **Bicycle's baseline fell:** par7k defaults 24.34 / 0.739 (1236x822, resampled from 1237) -> x0 23.59 / 0.716 (exact
 1237x822 since 8cc8f05), same settings otherwise (targetmb 1536 vs 2560 - both resident). The shared scorer agrees (23.59),

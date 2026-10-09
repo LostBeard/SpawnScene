@@ -31,7 +31,9 @@ def main():
     spread = np.sqrt(((cams - cams.mean(0)) ** 2).sum(1).mean())
     pos = np.stack([v["x"], v["y"], v["z"]], 1)
     opac = 1 / (1 + np.exp(-v["opacity"]))
-    size = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1)).max(1) / spread
+    axes = np.exp(np.stack([v["scale_0"], v["scale_1"], v["scale_2"]], 1))
+    size = axes.max(1) / spread
+    aniso = axes.max(1) / np.maximum(axes.min(1), 1e-12)
     rgb = 0.5 + 0.28209479 * np.stack([v["f_dc_0"], v["f_dc_1"], v["f_dc_2"]], 1)
     lum = rgb @ np.array([0.299, 0.587, 0.114])
     dist = np.full(len(pos), np.inf)
@@ -43,6 +45,7 @@ def main():
     print(f"[Stats] {n:,} splats, camera spread {spread:.4g} (sizes and distances below are in spreads)")
     print(f"[Stats] opacity {pc(opac, (0.1, 0.5, 0.9))}; > 0.5: {(opac > 0.5).mean():.1%}")
     print(f"[Stats] size (largest axis) {pc(size, (0.5, 0.9, 0.99, 0.999))}")
+    print(f"[Stats] anisotropy (largest / smallest axis) {pc(aniso, (0.5, 0.9, 0.99))}; > 10: {(aniso > 10).mean():.1%}")
     print(f"[Stats] distance to nearest camera {pc(dist, (0.01, 0.05, 0.5))}; < 0.25: {(dist < 0.25).mean():.2%}, < 0.5: {(dist < 0.5).mean():.2%}")
     dark = (lum < 0.2) & (opac > 0.5)
     print(f"[Stats] dark opaque (luma < 0.2, opacity > 0.5): {dark.mean():.2%}, of them within 0.5 spreads of a camera: {(dark & (dist < 0.5)).sum():,}")

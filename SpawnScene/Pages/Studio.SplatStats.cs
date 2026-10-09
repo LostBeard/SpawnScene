@@ -28,7 +28,7 @@ public partial class Studio
         var mean = cams.Aggregate(Vector3.Zero, (a, b) => a + b) / cams.Length;
         float spread = MathF.Sqrt(cams.Average(c => (c - mean).LengthSquared()));
         bool shDc = _gpuRenderer.ColoursAreShDc;
-        var opac = new float[n]; var size = new float[n]; var dist = new float[n]; var lum = new float[n];
+        var opac = new float[n]; var size = new float[n]; var aniso = new float[n]; var dist = new float[n]; var lum = new float[n];
         for (int i = 0; i < n; i++)
         {
             int o = i * SplatFormat.Floats;
@@ -38,6 +38,9 @@ public partial class Studio
             lum[i] = 0.299f * r + 0.587f * g + 0.114f * b;
             opac[i] = rows[o + SplatFormat.OffOpacity];
             size[i] = MathF.Max(rows[o + 6], MathF.Max(rows[o + 7], rows[o + 8])) / spread;
+            // Largest / smallest axis: needles smear thin repeated structure (DrJohnson's radiator, parity 2026-10-09).
+            aniso[i] = MathF.Max(rows[o + 6], MathF.Max(rows[o + 7], rows[o + 8]))
+                / MathF.Max(1e-12f, MathF.Min(rows[o + 6], MathF.Min(rows[o + 7], rows[o + 8])));
             float best = float.MaxValue;
             foreach (var c in cams) best = MathF.Min(best, (p - c).LengthSquared());
             dist[i] = MathF.Sqrt(best) / spread;
@@ -53,6 +56,7 @@ public partial class Studio
         Console.WriteLine($"[Stats] {n:N0} splats, camera spread {spread:G4} (sizes and distances below are in spreads)");
         Console.WriteLine($"[Stats] opacity {P(opac, 0.1, 0.5, 0.9)}; > 0.5: {opac.Count(v => v > 0.5f) / (float)n:P1}");
         Console.WriteLine($"[Stats] size (largest axis) {P(size, 0.5, 0.9, 0.99, 0.999)}");
+        Console.WriteLine($"[Stats] anisotropy (largest / smallest axis) {P(aniso, 0.5, 0.9, 0.99)}; > 10: {aniso.Count(v => v > 10f) / (float)n:P1}");
         Console.WriteLine($"[Stats] distance to nearest camera {P(dist, 0.01, 0.05, 0.5)}; < 0.25: {dist.Count(v => v < 0.25f) / (float)n:P2}, < 0.5: {dist.Count(v => v < 0.5f) / (float)n:P2}");
         Console.WriteLine($"[Stats] dark opaque (luma < 0.2, opacity > 0.5): {dark / (float)n:P2}, of them within 0.5 spreads of a camera: {darkNear:N0}");
     }

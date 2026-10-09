@@ -81,7 +81,19 @@ reference signal (&absgrad=0), dg2 AbsGS at 4e-4, on Kitchen, Train, DrJohnson.
 | Train | default | 0.60M | 18.98 | - | 20.42 / 0.771 / 0.231 / 0.310, 0.93M |
 | Train | dg1 &absgrad=0 | 0.86M | 19.01 / 0.728 | 19.04 / 0.719 / 0.305 / 0.360 | |
 
-More splats do not close the gap: Kitchen dg2 has 1.7x gsplat's count and scores lower than dg1; Train dg1 +0.03 dB.
+| Train | dg2 &densifygrad=4e-4 | 1.31M | 18.48 / 0.721 | - | |
+| DrJohnson | default | 1.44M | 26.99 | - | 28.28 / 0.889 / 0.230 / 0.363, 2.10M |
+| DrJohnson | dg1 &absgrad=0 | 1.91M | 26.61 / 0.868 | 26.61 / 0.861 / 0.283 / 0.399 | |
+
+More splats do not close the gap: Kitchen dg2 has 1.7x gsplat's count and scores lower than dg1; Train dg1 +0.03 dB,
+dg2 -0.50; DrJohnson dg1 -0.38. **The densify threshold is not the lever; the default (AbsGS 8e-4) stays.**
+
+**Gap anatomy, DrJohnson dg1 vs gsplat:** raw -1.67, after the colour fit -1.53, blur 2 -1.72, blur 6 -1.64: not colour,
+large-area. IMG_6392 -5.6 (a barely-seen ceiling: both trainers smear it, ours leaves a black hole where T stays open);
+IMG_6292 -4.8: the whole view is softer, the radiator's fins wavy streaks where gsplat's are clean. Not intrinsics (fx/fy
+read separately, Studio.Projects K[0]/K[4]; 795.1 / 796.1 at import size); no pose refinement on the dataset path; posLr
+matches gsplat's (1.6e-4 x extent 7.196). gsplat's own splats are needles too (DrJohnson 7K: anisotropy median 7.3, p90
+32, 40% > 10; opacity median 0.185). &splatstats now logs anisotropy (np runs report ours).
 
 dg1 Kitchen: +0.55 dB from more splats (1.33M, now more than gsplat's 1.20M), still -1.61 dB behind gsplat with MORE
 splats - the count is not the whole gap. The rescore resized the photos 1558x1039 -> 1558x1040: training rounded to even

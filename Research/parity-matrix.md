@@ -61,7 +61,8 @@ them.
 ### No opacity cap does not transfer (nc, 2026-10-09)
 
 Train: defaults 18.98 / nc1 (cap off) 18.78 / nc2 (cap off + extras off) 19.13; DrJohnson: 26.99 / 26.29 / 25.93 (gsplat
-20.41 / 28.29). Hamamni's best setting does not close the benchmark losses.
+20.41 / 28.29); Counter 27.05 / 27.01 / 27.35 (gsplat 27.62); Bicycle 24.34 / 24.27 / 24.03 (SSIM 0.739 -> 0.699 with the extras off: they earn their place there). Hamamni's best
+setting does not close the benchmark losses - moves within ~0.3 dB either way, and the extras help Bicycle.
 
 ### Splat counts: we end with 38-71% of gsplat's on every scene
 

@@ -167,11 +167,12 @@ benchmark separately - random background (&randombg=0) and floater carve (&carve
 |---|---|---|
 | c1 | 19.49 / 0.773, 0.46M | 28.65 / 0.916, 0.60M |
 | a1 &randombg=0 | 19.58 / 0.774 (+0.09) | **28.98 / 0.919 (+0.33)**, 0.62M |
-| a2 &carve=0 | 19.66 / 0.777 (+0.17) | running |
+| a2 &carve=0 | 19.66 / 0.777 (+0.17) | 28.34 / 0.912 (-0.31), 0.63M |
 
-Train's deltas are inside its run noise (~0.2). Kitchen's +0.33 is above its seed noise (x0 seeds 27.10 / 27.08) - but the
-random background is a TJ default for a reason (Bathroom see-through 12.0% -> 5.4% off the photo path, held-out neutral
-there), so dropping it would be a trade, not a fix; a held-out benchmark does not see see-through.
+Train's deltas are inside its run noise (~0.2). Kitchen: the carve earns its place (off = -0.31); the random background
+costs it 0.33 (above its seed noise, x0 seeds 27.10 / 27.08). The random background is my default (Tuvok proposed and built
+it, TJ approved 10-08) for Bathroom's see-through (12.0% -> 5.4% of off-path pixels, held out neutral there); a held-out
+benchmark cannot see see-through, so dropping it would be a trade, not a fix. Option for TJ, not a recommendation.
 
 ### Candidate defaults on the phone capture (cand, 2026-10-09)
 

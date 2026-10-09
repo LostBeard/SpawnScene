@@ -61,6 +61,8 @@ def main():
         r = score(gt, im)
         rows.append(r)
         print(f"{name}: PSNR {r[0]:.2f} SSIM {r[1]:.4f} LPIPS-alex {r[2]:.3f} LPIPS-vgg {r[3]:.3f}")
+    if not rows:
+        sys.exit("nothing to score: no renders matched (for SpawnScene: was the run made with &dumpheld=1 on a build that has it?)")
     m = np.mean(rows, 0)
     print(f"MEAN over {len(rows)}: PSNR {m[0]:.2f} SSIM {m[1]:.4f} LPIPS-alex {m[2]:.3f} LPIPS-vgg {m[3]:.3f}")
 

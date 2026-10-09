@@ -18,10 +18,10 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Bicycle (1237, clean folder) | 7K-end | **24.34 / 0.739** (par7k, 10-08 defaults; fair 24.89) | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
 | Garden (images_4) | 7K-end | 26.57 / 0.855 (par7k) | - | 26.00 / 0.809 / 0.149, 3.62M | - | see refs |
 | Stump (images_4) | 7K-end | 26.73 / 0.788 (par7k) | - | 25.03 / 0.682 / 0.304, 3.39M | - | see refs |
-| Room (images_2) | 7K-end | 30.25 / 0.926 (par7k; NOT like for like: trained at 1392x930, photos 1557 wide - re-run queued) | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
+| Room (images_2) | 7K-end | 29.97 / 0.918 (par7kfull, 1556x1038) - gsplat +0.13 dB, ours SSIM +0.015 | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
 | Counter (images_2) | 7K-end | 27.05 / 0.890 (par7k) - **gsplat +0.57 dB PSNR**, SSIM equal | - | 27.62 / 0.889 / 0.192, 0.88M | - | see refs |
-| Kitchen (images_2) | 7K-end | 27.63 / 0.909 (par7k; NOT like for like: trained at 1470x980, photos 1558x1039 - re-run queued) | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
-| Bonsai (images_2) | 7K-end | 29.50 / 0.941 (par7k; NOT like for like: trained at 1438x958 - re-run queued) | - | 30.18 / 0.928 / 0.156, 1.23M | - | see refs |
+| Kitchen (images_2) | 7K-end | 27.34 / 0.909 (par7kfull, 1558x1040) - **gsplat +2.07 dB** | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
+| Bonsai (images_2) | 7K-end | 29.65 / 0.942 (par7kfull, 1560x1038) - gsplat +0.53 dB, ours SSIM +0.014 | - | 30.18 / 0.928 / 0.156, 1.23M | - | see refs |
 | Truck (979, clean folder) | 7K-end | 24.04 / 0.860 (par7k) | - | 23.87 / 0.853 / 0.134, 2.06M | - | see refs |
 | Train (979) | 7K-end | 18.98 / 0.731 (par7k) - **gsplat +1.43 dB** | - | 20.41 / 0.771 / 0.231, 0.93M | - | see refs |
 | DrJohnson | 7K-end | 26.99 / 0.873 (par7k) - **gsplat +1.30 dB** | - | 28.29 / 0.890 / 0.235, 2.10M | - | see refs |
@@ -48,9 +48,9 @@ Reference numbers with sources: [parity-references-2026-10-08.md](parity-referen
 
 ### First pass, SpawnScene (10-08 defaults, COLMAP poses, 7K-end) vs gsplat 1.5.3 default - PSNR delta (ours - gsplat)
 
-Bicycle +0.58, Garden +0.57, Stump +1.70, Truck +0.17, Playroom +0.30 | Counter -0.57 (SSIM equal), **Train -1.43,
-DrJohnson -1.30** | Room / Kitchen / Bonsai trained below benchmark size (re-runs queued; Kitchen read -1.78, Bonsai
--0.68). SSIM higher than gsplat on 7 of 8 like-for-like scenes. We trail on the indoor Mip-NeRF scenes and on Train /
+Bicycle +0.58, Garden +0.57, Stump +1.70, Truck +0.17, Playroom +0.30 | Room -0.13, Bonsai -0.53, Counter -0.57 (SSIM
+equal or higher on all three), **Train -1.43, DrJohnson -1.30, Kitchen -2.07** (Room / Kitchen / Bonsai re-run at full
+size: resolution was not the cause - Kitchen 27.63 at 94% size, 27.34 at full). SSIM higher than gsplat on 7 of 8 like-for-like scenes. We trail on the indoor Mip-NeRF scenes and on Train /
 DrJohnson; the Hamamni finding (our splats far more translucent; gsplat never resets opacity) is the lead to test on
 them.
 

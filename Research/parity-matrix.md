@@ -18,8 +18,8 @@ script (LPIPS/SSIM implementations differ). Held-out PSNR / SSIM / LPIPS; splats
 | Bicycle (1237, clean folder) | 7K-end | **24.34 / 0.739** (par7k, 10-08 defaults; fair 24.89) | - | 23.76 / 0.641 / 0.368, 3.24M (parity7k) | - | see refs |
 | Garden (images_4) | 7K-end | 26.57 / 0.855 (par7k) | - | 26.00 / 0.809 / 0.149, 3.62M | - | see refs |
 | Stump (images_4) | 7K-end | 26.73 / 0.788 (par7k) | - | 25.03 / 0.682 / 0.304, 3.39M | - | see refs |
-| Room (images_2) | 7K-end | - | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
-| Counter (images_2) | 7K-end | - | - | 27.62 / 0.889 / 0.192, 0.88M | - | see refs |
+| Room (images_2) | 7K-end | 30.25 / 0.926 (par7k) | - | 30.10 / 0.903 / 0.207, 1.03M | - | see refs |
+| Counter (images_2) | 7K-end | 27.05 / 0.890 (par7k) - **gsplat +0.57 dB PSNR**, SSIM equal | - | 27.62 / 0.889 / 0.192, 0.88M | - | see refs |
 | Kitchen (images_2) | 7K-end | - | - | 29.41 / 0.914 / 0.118, 1.20M | - | see refs |
 | Bonsai (images_2) | 7K-end | - | - | 30.18 / 0.928 / 0.156, 1.23M | - | see refs |
 | Truck (979, clean folder) | 7K-end | - | - | 23.87 / 0.853 / 0.134, 2.06M | - | see refs |

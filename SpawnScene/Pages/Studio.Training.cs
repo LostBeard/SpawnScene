@@ -106,6 +106,35 @@ public partial class Studio
     /// fixed-exposure captures 0.2-0.6 dB), =gains the default.</remarks>
     public static bool ExposureOption { get; set; } = true;
 
+    /// <summary>
+    /// <c>&amp;exposure=auto</c>: per-photo gains only when the photos' EXIF exposure VARIES (ImportedImage.ExposureStops spread
+    /// >= <see cref="ExposureAutoMinStops"/>). Parity 2026-10-09: gains off is better on 8 of 9 fixed-exposure benchmark scenes
+    /// (Kitchen +0.79 / +1.41, Bonsai +0.64, Counter +0.45, Garden +0.40 ...; their JPGs carry no EXIF) but costs TJ's
+    /// Bathroom 5.9 dB fair (auto exposure, 6.1 stops of EXIF spread). No EXIF = no gains.
+    /// </summary>
+    public static bool ExposureAutoOption { get; set; }
+
+    /// <summary>The EXIF exposure spread (stops) at which <see cref="ExposureAutoOption"/> turns gains on: a third of a stop,
+    /// the smallest step a camera's auto exposure takes.</summary>
+    public const float ExposureAutoMinStops = 1f / 3f;
+
+    /// <summary>Whether this run's photos' EXIF exposure varies (null: not read - the dataset path, or no photos).</summary>
+    bool? _photoExposureVaries;
+
+    /// <summary>Per-photo gains in this run: <see cref="ExposureOption"/>, gated by EXIF under <see cref="ExposureAutoOption"/>.</summary>
+    bool UseExposureGains => ExposureOption && (!ExposureAutoOption || _photoExposureVaries == true);
+
+    /// <summary>Set <see cref="_photoExposureVaries"/> from the photos' EXIF and say what it means.</summary>
+    void DecideExposureFromExif(IReadOnlyList<ImportedImage> images)
+    {
+        var stops = images.Where(i => i.ExposureStops.HasValue).Select(i => i.ExposureStops!.Value).ToList();
+        _photoExposureVaries = stops.Count >= 2 && stops.Max() - stops.Min() >= ExposureAutoMinStops;
+        if (ExposureAutoOption)
+            Console.WriteLine($"[Train] exposure auto: {stops.Count} of {images.Count} photos carry EXIF exposure" +
+                (stops.Count >= 2 ? $", spread {stops.Max() - stops.Min():F2} stops" : "") +
+                $" -> per-photo gains {(_photoExposureVaries == true ? "ON" : "OFF")}");
+    }
+
     /// <summary><c>&amp;exposure=gains</c>: per-photo exposure as per-channel gains only (SplatTrainerGpu.ExposureGainsOnly).</summary>
     public static bool ExposureGainsOnlyOption { get; set; } = true;
 
@@ -580,7 +609,7 @@ public partial class Studio
                 poseSpread = Math.Max(1e-6f, views.Max(v => System.Numerics.Vector3.Distance(v.Camera.Position, centroid)));
                 Console.WriteLine($"[Train] refining camera poses: rotation {PoseLrRotation:G3} rad, translation {PoseLrTranslation:G3} x spread {poseSpread:F3} per update, decaying to 10%");
             }
-            if (ExposureOption)
+            if (UseExposureGains)
             {
                 _trainer.ResetExposure(views.Count);
                 _trainer.ExposureGainsOnly = ExposureGainsOnlyOption;
@@ -733,10 +762,10 @@ public partial class Studio
                 // cost no CPU-GPU round trip; NaN = not read this step.
                 bool readLoss = it < supervised.Count || it % supervised.Count == supervised.Count - 1
                     || it == iterations - 1;
-                if (ExposureOption) _trainer.ExposureLr = TrainingSchedule.ExponentialLr(0.01f, 0.001f, it, iterations);
+                if (UseExposureGains) _trainer.ExposureLr = TrainingSchedule.ExponentialLr(0.01f, 0.001f, it, iterations);
                 float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, opacityLr: TrainOpacityLr, geometry: geo,
                     readLoss: readLoss, poseSlot: poseAdam != null && geo != null && !RefineTestPosesOnly ? vi : -1,
-                    exposureSlot: ExposureOption ? vi : -1);
+                    exposureSlot: UseExposureGains ? vi : -1);
 
                 // How much of the gradient survives the fixed-point atomic? Gradients cross it
                 // as scaled integers, and dL/d(pixel) is 1/(3*W*H) - about 1e-6 at this
@@ -1014,7 +1043,7 @@ public partial class Studio
                 Console.WriteLine($"[Train] held-out poses refined against the frozen scene: {refined} views x {PoseTestIterations} steps");
             }
 
-            if (ExposureOption)
+            if (UseExposureGains)
             {
                 await ReportExposureAsync(views, supervised);
                 if (await _trainer.FoldMeanExposureAsync(packed, n, supervised) is { } fold)

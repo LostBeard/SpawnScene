@@ -685,12 +685,15 @@ public partial class Studio
 
                 // EXIF lives in the first APP1 segment (<= 64 KB); only a prefix crosses into .NET for it.
                 ExifReader.ExifFocalLength? exifFocal = null;
+                float? exposureStops = null;
                 try
                 {
                     using var head = file.Slice(0, 256 * 1024);
                     using var headBuf = await head.ArrayBuffer();
                     using var headBytes = new Uint8Array(headBuf);
-                    exifFocal = ExifReader.ExtractFocalLength(headBytes.ReadBytes());
+                    var headData = headBytes.ReadBytes();
+                    exifFocal = ExifReader.ExtractFocalLength(headData);
+                    exposureStops = ExifReader.ExtractExposure(headData)?.Stops;
                 }
                 catch (Exception ex) { Console.WriteLine($"[Studio] {source.FileName}: no EXIF ({ex.Message})"); }
 
@@ -719,8 +722,10 @@ public partial class Studio
                     SourceWidth = srcW,
                     SourceHeight = srcH,
                     EstimatedCamera = camera,
+                    ExposureStops = exposureStops,
                 });
             }
+            DecideExposureFromExif(images);
 
             if (images.Count < 2)
             {

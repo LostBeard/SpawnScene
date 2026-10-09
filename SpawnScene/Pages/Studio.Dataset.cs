@@ -108,6 +108,9 @@ public partial class Studio
         Console.WriteLine(
             $"[Dataset] starting name={datasetName} train={trainIters} geom={optimiseGeometry} " +
             $"maxDim={maxTrainDimension} poses={posePreference} patches={depthPatchesPerSide}");
+        // The dataset path reads no EXIF (the benchmark sets carry none): &exposure=auto means no gains here.
+        _photoExposureVaries = null;
+        if (ExposureAutoOption) Console.WriteLine("[Train] exposure auto: dataset path, no EXIF read -> per-photo gains OFF");
         if (forUi)
             SetUiStatus($"Loading {datasetName}…");
         try

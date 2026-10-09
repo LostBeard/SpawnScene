@@ -133,6 +133,9 @@ public class ImportedImage
     /// The photo's own size before the import resize (<see cref="DecodeMaxEdge"/>), 0 when unknown. Training reloads its
     /// targets from the source at its own resolution, so this - not <see cref="Width"/> - is the most detail it can use.
     /// </summary>
+    /// <summary>EXIF exposure in ISO-normalised stops (ExifReader.ExifExposure.Stops), null when the photo has none.</summary>
+    public float? ExposureStops { get; set; }
+
     public int SourceWidth { get; set; }
 
     /// <summary>See <see cref="SourceWidth"/>.</summary>

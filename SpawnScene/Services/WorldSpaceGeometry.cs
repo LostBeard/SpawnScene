@@ -380,9 +380,53 @@ public static class WorldSpaceGeometry
 
         var mean = sum / n;
         confidence = mean.Length();
-        if (confidence < MinUpAgreement) return false;
+        if (confidence >= MinUpAgreement)
+        {
+            up = Vector3.Normalize(mean);
+            return true;
+        }
+        // Below MinUpAgreement: an indoor capture pitches the camera at ceilings and floors, so the ups fan out while their
+        // mean still points at gravity - DrJohnson 0.694 and Playroom 0.559 were left in COLMAP's frame and shown upside
+        // down (TJ 2026-10-09). Accept the mean when a second, independent estimate agrees with it and the rig is not a
+        // rolled orbit. Measured on the camera sets (Research/parity-matrix.md):
+        //   right axes' plane normal (people rarely roll) within 15 deg of the mean up: all 11 benchmark scenes 0.1-5.6 deg;
+        //   rolled orbit = forward axes coplanar (min/mid eigenvalue < 0.15) with the plane's normal > 45 deg from the mean
+        //   up: TempleRing 0.042 at ~90 deg; real scenes with coplanar forwards (Train 0.048, Truck 0.112) at 1.6 / 4.2 deg.
+        if (confidence < MinUpAgreementSecondary) return false;
+        var meanUp = Vector3.Normalize(mean);
+        var cams = cameras.Where(c => c.Up.LengthSquared() > 1e-12f && c.Forward.LengthSquared() > 1e-12f).ToList();
+        if (!TryPlaneNormal(cams.Select(c => c.Right), out var rightNormal, out _)) return false;
+        if (MathF.Abs(Vector3.Dot(rightNormal, meanUp)) < MathF.Cos(15f * MathF.PI / 180f)) return false;
+        if (TryPlaneNormal(cams.Select(c => Vector3.Normalize(c.Forward)), out var fwdNormal, out float fwdFlat)
+            && fwdFlat < 0.15f && MathF.Abs(Vector3.Dot(fwdNormal, meanUp)) < MathF.Cos(45f * MathF.PI / 180f))
+            return false;
+        up = meanUp;
+        return true;
+    }
 
-        up = Vector3.Normalize(mean);
+    /// <summary>The second gate's floor on the mean up's agreement (TempleRing 0.491 stays refused on it too).</summary>
+    public const float MinUpAgreementSecondary = 0.5f;
+
+    /// <summary>The normal of the plane the unit vectors lie closest to (smallest eigenvector of sum v v^T) and how flat
+    /// they are (smallest / middle eigenvalue: 0 = exactly coplanar).</summary>
+    static bool TryPlaneNormal(IEnumerable<Vector3> vectors, out Vector3 normal, out float flatness)
+    {
+        normal = Vector3.UnitY; flatness = 1f;
+        var m = new double[9];
+        int n = 0;
+        foreach (var v in vectors)
+        {
+            double x = v.X, y = v.Y, z = v.Z;
+            m[0] += x * x; m[1] += x * y; m[2] += x * z; m[4] += y * y; m[5] += y * z; m[8] += z * z;
+            n++;
+        }
+        if (n < 3) return false;
+        m[3] = m[1]; m[6] = m[2]; m[7] = m[5];
+        var (vals, vecs) = FivePoint.Jacobi(m, 3);
+        var order = new[] { 0, 1, 2 }.OrderBy(i => vals[i]).ToArray();
+        int k = order[0];
+        normal = Vector3.Normalize(new Vector3((float)vecs[k], (float)vecs[3 + k], (float)vecs[6 + k]));
+        flatness = (float)(vals[k] / Math.Max(1e-12, vals[order[1]]));
         return true;
     }
 

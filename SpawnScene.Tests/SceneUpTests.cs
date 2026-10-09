@@ -175,4 +175,40 @@ public class SceneUpTests
         Assert.That(WorldSpaceGeometry.TryEstimateSceneUp(cams, out _, out float conf), Is.True);
         Assert.That(conf, Is.GreaterThan(WorldSpaceGeometry.MinUpAgreement));
     }
+
+    static List<CameraParams>? RealCameras(string dataset, string file = "poses.par")
+    {
+        string path = Path.GetFullPath(Path.Combine(TestContext.CurrentContext.TestDirectory,
+            "..", "..", "..", "..", "SpawnScene", "wwwroot", "datasets", dataset, file));
+        if (!File.Exists(path)) return null;
+        return WorldSpaceGeometry.ParseMiddleburyParams(File.ReadAllText(path), 1000, 1000).Select(e => e.camera).ToList();
+    }
+
+    /// <summary>
+    /// Indoor captures pitch the camera at ceilings and floors, so their ups fan out below MinUpAgreement while the mean
+    /// still points at gravity: DrJohnson (0.694) and Playroom (0.559) were left in COLMAP's frame and shown upside down
+    /// (TJ 2026-10-09). The real COLMAP cameras. The rolled orbit (TempleRing, 0.491) stays refused, and a capture already
+    /// accepted (Train, 0.989) gets the same up as before.
+    /// </summary>
+    [TestCase("DrJohnsonFull", true)]
+    [TestCase("PlayroomFull", true)]
+    [TestCase("TrainFull", true)]
+    [TestCase("Kitchen360", true)]
+    public void RealCaptures_GetAnUp(string dataset, bool expected)
+    {
+        var cams = RealCameras(dataset);
+        if (cams == null) Assert.Ignore($"{dataset} is not in this checkout");
+        Assert.That(WorldSpaceGeometry.TryEstimateSceneUp(cams!, out var up, out float conf), Is.EqualTo(expected), $"agreement {conf:F3}");
+        // Up must be what the cameras call up: most of them see it within 60 degrees of their own.
+        float within = cams!.Count(c => Vector3.Dot(Vector3.Normalize(c.Up), up) > 0.5f) / (float)cams!.Count;
+        Assert.That(within, Is.GreaterThan(0.6f), $"{within:P0} of the cameras within 60 deg of the estimate");
+    }
+
+    [Test]
+    public void RealTempleRing_StaysRefused()
+    {
+        var cams = RealCameras("TempleRing", "templeR_par.txt");
+        if (cams == null) Assert.Ignore("TempleRing is not in this checkout");
+        Assert.That(WorldSpaceGeometry.TryEstimateSceneUp(cams!, out _, out float conf), Is.False, $"agreement {conf:F3}");
+    }
 }

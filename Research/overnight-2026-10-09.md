@@ -4,7 +4,19 @@ Protocol (Research/parity-matrix.md): COLMAP poses, every 8th photo held out, 7K
 for both tools, photos at their exact size, in-app held-out PSNR / SSIM (the shared scorer, tools/rescore.py, agrees within
 0.04 dB / 0.004 - checked on every scene where it was run). gsplat 1.5.3 default strategy, same folders.
 
-## The decision
+## Status (10-10 00:35): the four are DEFAULTS in code (13cd973), verified, NOT deployed
+
+TJ (10-09): "the current defaults are the current defaults because you set them. if you now think the defaults should change
+and you are sure, then change them." Changed: position lr decay over the run, `&exposure=auto` (no-EXIF photos keep the
+gains; dataset path: video sets on, still benchmark sets off), subgroup backward, revised opacity. Verified with NO flags
+(build f11): TrainerGate PASS (subgroup path); Kitchen 29.06 / 0.918 (262 s), Train 19.81 / 0.779 (156 s), Bicycle 24.51 /
+0.724 (271 s) - gains off by the auto rule; Bathroom 18.89 / 0.849, fair 24.89 - gains on (EXIF 6.13 stops). Every log shows
+the subgroup backward. Deploying to spawnscene.com is TJ's call.
+
+Not made defaults: &minviews (Room -0.37), &camerabubble (does not hit the blob), &nearplane (+0.2-0.3, not scale-relative
+yet), no opacity reset (worse), Brush's position lr (neutral to worse), opacity lr 0.05 (worse).
+
+## The decision (as proposed)
 
 Four changes (three quality, one speed), measured on the benchmark scenes and TJ's Bathroom phone capture. **None is a default yet.**
 

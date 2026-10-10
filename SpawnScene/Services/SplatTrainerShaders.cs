@@ -311,24 +311,29 @@ fn emit_keys(
     splat_colour[i * 3u + 1u] = p.colour.y;
     splat_colour[i * 3u + 2u] = p.colour.z;
 
-    // Tile footprint. TIGHT (SplatTrainerGpu.TightTiles): the raster skips a pixel where opacity x weight < 1/255, i.e.
-    // outside Mahalanobis^2 = 2 ln(255 opacity) - so the box of THAT ellipse per axis (k sqrt(Sxx), k sqrt(Syy), k capped at
-    // the 3-sigma of p.extent) holds every pixel that can be hit: only keys whose every pixel was skipped are dropped.
+    let lo = vec2<i32>(floor((p.centre - p.extent) / f32(TILE)));
+    let hi = vec2<i32>(floor((p.centre + p.extent) / f32(TILE)));
+    var x0 = max(lo.x, 0);
+    var y0 = max(lo.y, 0);
+    var x1 = min(hi.x, i32(u.tiles.x) - 1);
+    var y1 = min(hi.y, i32(u.tiles.y) - 1);
+    if (x1 < x0 || y1 < y0) { return; }
+    // On screen by the 3-sigma square: densify's frustum denominator counts it (gsplat), painting or not (TrainerGate).
+    screen_radius[i] = p.extent.x;
+    // Keys: TIGHT (SplatTrainerGpu.TightTiles) bins only the tiles of the opacity-aware, per-axis footprint. The raster skips a
+    // pixel where opacity x weight < 1/255, i.e. outside Mahalanobis^2 = 2 ln(255 opacity), so the box of THAT ellipse (k
+    // sqrt(Sxx), k sqrt(Syy), k capped at the 3 sigma) holds every pixel that can be hit: only keys that paint nothing go.
     // Sigma from the conic: Sxx = conic.z / det(conic), Syy = conic.x / det(conic).
-    var ext = p.extent;
 //TIGHT:    let det_c = p.conic.x * p.conic.z - p.conic.y * p.conic.y;
 //TIGHT:    let k2 = 2.0 * log(max(255.0 * p.opacity, 1e-30));
 //TIGHT:    if (k2 <= 0.0 || det_c <= 0.0) { return; }
 //TIGHT:    let kk = min(SIGMA_CUTOFF, sqrt(k2));
-//TIGHT:    ext = min(p.extent, vec2<f32>(kk * sqrt(p.conic.z / det_c), kk * sqrt(p.conic.x / det_c)));
-    let lo = vec2<i32>(floor((p.centre - ext) / f32(TILE)));
-    let hi = vec2<i32>(floor((p.centre + ext) / f32(TILE)));
-    let x0 = max(lo.x, 0);
-    let y0 = max(lo.y, 0);
-    let x1 = min(hi.x, i32(u.tiles.x) - 1);
-    let y1 = min(hi.y, i32(u.tiles.y) - 1);
-    if (x1 < x0 || y1 < y0) { return; }
-    screen_radius[i] = p.extent.x;
+//TIGHT:    let ext = min(p.extent, vec2<f32>(kk * sqrt(p.conic.z / det_c), kk * sqrt(p.conic.x / det_c)));
+//TIGHT:    let tlo = vec2<i32>(floor((p.centre - ext) / f32(TILE)));
+//TIGHT:    let thi = vec2<i32>(floor((p.centre + ext) / f32(TILE)));
+//TIGHT:    x0 = max(tlo.x, 0); y0 = max(tlo.y, 0);
+//TIGHT:    x1 = min(thi.x, i32(u.tiles.x) - 1); y1 = min(thi.y, i32(u.tiles.y) - 1);
+//TIGHT:    if (x1 < x0 || y1 < y0) { return; }
 
     let n = u32((x1 - x0 + 1) * (y1 - y0 + 1));
     // Always count demand (host reports overflow from counter > capacity), but only WRITE

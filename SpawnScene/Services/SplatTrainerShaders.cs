@@ -1148,38 +1148,13 @@ fn raster_backward(
     public static string FusedScatterBackward(string rasterBackward)
     {
         string s = SubgroupBackward(rasterBackward);
-        // No per-key barrier (gsplat / Brush): each subgroup that the splat touches reduces its own pixels and one lane adds
-        // the partial straight into the per-splat totals - the tile combines in global memory, not in shared slots behind a
-        // workgroup barrier on EVERY key. The only barrier left is per 64-key batch, before the shared splat cache reloads.
-        // GPU timestamps (parity 2026-10-10): raster_backward 14.15 ms of 23.4 timed, 7x the forward.
-        foreach (var (old, nu) in new[] { (FuseBindOld, FuseBindNew), (FuseZeroOld, ""), (SpanNew, FusedSpan) })
+        foreach (var (old, nu) in new[] { (FuseBindOld, FuseBindNew), (FuseZeroOld, ""), (FuseOutOld, FuseOutNew) })
         {
             if (!s.Contains(old)) throw new InvalidOperationException("FusedScatterBackward: RasterBackward changed - update the fusion");
             s = s.Replace(old, nu);
         }
         return s;
     }
-
-    const string FusedSpan = @"        // Reduce within each subgroup the splat touches; one lane adds the partial into the per-splat totals (no barrier).
-        if (subgroupAny(hit)) {
-            let rA = subgroupAdd(contrib);
-            let rB = subgroupAdd(geom);
-            let rC = subgroupAdd(geom_cc);
-            let rAbs = subgroupAdd(abs_c);
-            if (subgroupElect()) {
-                let splat = values[k];
-                let o9 = splat * 9u;
-                grad_add(o9 + 0u, rA.x); grad_add(o9 + 1u, rA.y); grad_add(o9 + 2u, rA.z);
-                grad_add(o9 + 3u, rA.w); grad_add(o9 + 4u, rB.x); grad_add(o9 + 5u, rB.y);
-                grad_add(o9 + 6u, rB.z); grad_add(o9 + 7u, rB.w); grad_add(o9 + 8u, rC);
-                if (rAbs.x != 0.0) { densify_abs_add(splat * 2u, rAbs.x); }
-                if (rAbs.y != 0.0) { densify_abs_add(splat * 2u + 1u, rAbs.y); }
-            }
-        }
-    }
-        // The shared splat cache (sb_*) is reloaded by the next batch: every invocation must be done reading it.
-        workgroupBarrier();
-        hi = lo;";
     const string FuseBindOld = @"@group(0) @binding(7) var<storage, read_write> grad_a : array<f32>;   // dR, dG, dB
 @group(0) @binding(8) var<storage, read_write> grad_b : array<f32>;   // dOpacity, dCentre.x, dCentre.y
 @group(0) @binding(9) var<storage, read_write> grad_c : array<f32>;   // dConic a, b, c

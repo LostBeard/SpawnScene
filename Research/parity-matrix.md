@@ -256,7 +256,12 @@ vs gsplat: 00001 -5.2 (a colour fit recovers most) and 00073 -4.7 (the handrail)
 space) added. cb (on top of all four): Kitchen 0.05 -> 29.13 / 0.919 (no catastrophic view, worst -1.49), 0.1 -> 28.81 with a
 blob on DSCF0688 (-12.96) although it removed MORE splats (up to 892 a carve); Room 0.1 30.27 (ro 30.21), Bicycle 0.1 24.49
 (ro 24.49). The bubble is harmless but does NOT target the blob (the clean 0.05 run = seed luck): the blob is not at a
-camera centre. `&blobpick=1` (diagnostic) picks the splats painting held-out views 4+ dB under the median; bp chain running.
+camera centre. `&blobpick=1` (diagnostic) picks the splats painting held-out views 4+ dB under the median. bp (all four
+changes, blobpick): Kitchen seed 1 **28.95**, seed 2 **29.18** (gsplat 29.37) - no catastrophic view in either; the flagged views
+are hard for every tool (DSCF0656 23-24, gsplat 24.33) and DSCF0688 (23.7 vs gsplat 27.8) is distant background through the
+windows (picked splats 10-23 units deep, in frame of only 32-52 of 244 photos), not a blob. Kitchen with all four changes so
+far: 28.69 (blob run), 28.95, 29.18, 29.13 (bubble 0.05) - typically -0.2..-0.4 vs gsplat, with an occasional blob. Seeds 3-5
+with blobpick running to catch one.
 
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 

@@ -1,4 +1,4 @@
-# Overnight 2026-10-09: parity vs gsplat and Brush - three default changes for TJ
+# Overnight 2026-10-09: parity vs gsplat and Brush - four default changes for TJ
 
 Protocol (Research/parity-matrix.md): COLMAP poses, every 8th photo held out, 7K iterations with the schedule ending at 7K
 for both tools, photos at their exact size, in-app held-out PSNR / SSIM (the shared scorer, tools/rescore.py, agrees within
@@ -6,7 +6,7 @@ for both tools, photos at their exact size, in-app held-out PSNR / SSIM (the sha
 
 ## The decision
 
-Three changes (two quality, one speed), measured on the benchmark scenes and TJ's Bathroom phone capture. **None is a default yet.**
+Four changes (three quality, one speed), measured on the benchmark scenes and TJ's Bathroom phone capture. **None is a default yet.** Revised opacity has not been run on the Bathroom phone capture yet.
 
 1. **Position learning rate decays over the run's own length** (`&poslrsteps=<iterations>`, today a fixed 30,000: a 7K run
    ends at 0.34x its starting rate, gsplat's at 0.01x). We were UNDERFITTING: our score on the training photos was at or
@@ -19,6 +19,13 @@ Three changes (two quality, one speed), measured on the benchmark scenes and TJ'
    operations and skips subgroups the splat does not touch. **1.6-1.8x faster training with unchanged quality** on Counter
    (462 -> 271 s), Train (268 -> 156 s), Kitchen (441 -> 274 s), Bicycle (476 -> 266 s) - now as fast as gsplat (CUDA) or
    faster; Brush still 1.3-2.5x faster. TrainerGate PASS. Devices without the `subgroups` feature keep today's path.
+
+4. **Revised opacity on growth** (`&revisedopacity=1`, added 21:00): a clone and its parent, and both split children, get
+   opacity 1 - sqrt(1 - a), so a growth step does not brighten the image (gsplat's revised_opacity). Better on 10 of 11
+   scenes (DrJohnson +0.69, Train +0.32, Playroom +0.24, Truck +0.22, ...; Kitchen -0.07), fewer splats.
+
+**With all four: mean PSNR 26.98 vs Brush 26.95 and gsplat 26.73; SSIM 0.851 vs 0.841 / 0.833; LPIPS 0.190 vs 0.200 / 0.207;
+best PSNR on 6 of 11 scenes** (table in Research/parity-matrix.md). Still behind on Train, Kitchen, Bonsai.
 
 ## Results (held out PSNR / SSIM; x0 = today's defaults, c1 = both changes with gains off = what auto does on these JPGs)
 

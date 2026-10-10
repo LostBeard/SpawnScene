@@ -222,7 +222,30 @@ image (gsplat revised_opacity; Brush grows image-preservingly). On top of c1 + s
 | Kitchen (seed 1) | 28.76 / 0.918, 0.59M | 28.69 / 0.918, 0.53M | -0.07 |
 | Bicycle | 24.42 / 0.721, 1.95M | 24.49 / 0.724, 1.90M | +0.07 |
 
-The first lever that moves Train toward Brush (21.07). Fewer splats. ro2 = the other 8 scenes.
+The first lever that moves Train toward Brush (21.07). Fewer splats. ro2, the other 8 scenes (vs cand c1): Counter 27.67 (+0.04),
+Bonsai 29.90 (+0.13), **DrJohnson 28.80 (+0.69)**, Room 30.21 (+0.18), Truck 24.52 (+0.22), Garden 26.41 (+0.06), Stump 26.03
+(+0.15), Playroom 30.22 (+0.24) - **better on 10 of 11** (Kitchen -0.07, noise).
+
+**Three-way with all four candidate changes** (&poslrsteps=7000 &exposure=0 &subgroups=1 &revisedopacity=1; shared scorer,
+PSNR / SSIM / LPIPS-alex; Brush / gsplat rows from the three-way table above):
+
+| Scene | Brush v0.3.0 | gsplat 1.5.3 | SpawnScene (4 changes) | best PSNR |
+|---|---|---|---|---|
+| Bicycle | 24.00 / 0.677 / 0.323 | 23.75 / 0.640 / 0.367 | **24.50 / 0.717 / 0.261** | ours |
+| Garden | 26.14 / 0.804 / 0.166 | 25.99 / 0.809 / 0.149 | **26.42 / 0.826 / 0.136** | ours |
+| Stump | 25.30 / 0.694 / 0.300 | 25.00 / 0.682 / 0.304 | **26.04 / 0.740 / 0.227** | ours |
+| Playroom | 29.51 / 0.900 / 0.206 | 29.47 / 0.897 / 0.199 | **30.22 / 0.909 / 0.188** | ours |
+| DrJohnson | 28.22 / 0.896 / 0.226 | 28.28 / 0.889 / 0.230 | **28.80 / 0.901 / 0.219** | ours |
+| Counter | 27.61 / 0.889 / 0.184 | 27.60 / 0.888 / 0.189 | **27.67** / 0.888 / 0.192 | ours (tie) |
+| Room | **30.25** / 0.907 / 0.190 | 30.07 / 0.899 / 0.203 | 30.21 / 0.908 / 0.196 | Brush (-0.04) |
+| Truck | **24.71** / 0.860 / 0.132 | 23.88 / 0.852 / 0.134 | 24.53 / 0.862 / 0.134 | Brush (-0.18) |
+| Bonsai | **30.47** / 0.929 / 0.147 | 30.15 / 0.926 / 0.151 | 29.90 / 0.926 / 0.158 | Brush (-0.57) |
+| Kitchen | 29.18 / 0.907 / 0.123 | **29.37** / 0.913 / 0.117 | 28.69 / 0.910 / 0.124 | gsplat (-0.68) |
+| Train | **21.07** / 0.792 / 0.200 | 20.42 / 0.771 / 0.231 | 19.85 / 0.770 / 0.251 | Brush (-1.22) |
+| **mean** | 26.95 / 0.841 / 0.200 | 26.73 / 0.833 / 0.207 | **26.98 / 0.851 / 0.190** | |
+
+**Level with Brush on mean PSNR (+0.03), ahead of both on mean SSIM and LPIPS, best PSNR on 6 of 11.** Training time 2.5-4.5 min
+a scene (subgroups) vs Brush 1.5-3 min wall. Still behind: Train (-1.22 vs Brush), Kitchen (-0.68 vs gsplat), Bonsai (-0.57).
 
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 

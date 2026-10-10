@@ -311,6 +311,17 @@ Kitchen and Bicycle, within 10 s on Counter / Train) with fewer splats; Brush is
 candidate default for TJ (opt-in until then; devices without 'subgroups' keep the tree path).
 Counter: ~13.5 keys per splat (5.67M keys / 419K splats).
 
+### Brush's schedule pieces on top of the new defaults (bs, 2026-10-10)
+
+| Run | Train | Kitchen (seed 1) | Bicycle |
+|---|---|---|---|
+| new defaults (dv) | 19.81 / 0.779 | 29.06 / 0.918 | 24.51 / 0.724 |
+| s1 &shramp=0 (all SH bands from step 0) | 19.93 / 0.781 (+0.12) | 28.96 / 0.918 (-0.10) | 24.57 / 0.725 (+0.06) |
+| s2 &scalelr=0.01&scalelrend=0.006 | **20.07 / 0.786 (+0.26)** | **29.59 / 0.921 (+0.53)** | **24.68 / 0.735 (+0.17)** |
+
+The log-scale lr at Brush's 0.01 decaying to 0.006 (ours: a flat 0.005) wins all three - Kitchen now above gsplat (29.37)
+and Brush (29.18). SH-from-0 is mixed: dropped. sl chain: s2 on the other 8 scenes + Bathroom.
+
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 
 Final cycle (profiled, one sync per phase): backward 19.3, ranges+raster 6.8, prev 6.3, emit+count 6.3, scatter 5.8, sort 5.4,

@@ -345,6 +345,12 @@ Small and mixed (+0.03..+0.12, Kitchen -0.13 at 0.41): not a default, not Brush'
 position lr (rate and end), near plane, opacity lr (0.01 and 0.05), opacity reset, SH from step 0, initial size. Left:
 Brush's growth scheme as a whole (10% weighted-random image-preserving splits, prune-and-replace) - a GpuDensify change.
 
+### Brush growth v1 (&growth=brush, 2026-10-10; Research/brush-growth-port-plan-2026-10-10.md)
+
+Train, on top of the five defaults (20.11 / 0.787, 0.42M): g1 refine every 200, 10% selected, our bar: 19.84 / 0.770, 0.22M;
+g2 + bar 2e-4: 19.92 / 0.788, 0.50M; g3 every 100, 20%: 20.03 / 0.780, 0.30M. Not better yet; growth amount matters more than
+the selection (Brush ends Train at 0.84M). bg2: g4 100 / 0.2 / 2e-4, g5 100 / 0.4 / 2e-4, g6 100 / 0.3 / 1e-4.
+
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 
 Final cycle (profiled, one sync per phase): backward 19.3, ranges+raster 6.8, prev 6.3, emit+count 6.3, scatter 5.8, sort 5.4,

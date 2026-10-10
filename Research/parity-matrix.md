@@ -371,6 +371,22 @@ the GPU overlaps it). Stays opt-in (its use: not allocating per-key gradient buf
 -> 188 s - larger splats cover more tiles. Kept: +0.03..+0.53 dB on all 11 scenes and Bathroom (quality first, TJ). Brush is
 still faster (Counter 172 s wall incl. load).
 
+### Tight tile footprints - DEFAULT (tt, 2026-10-10)
+
+emit_keys bins each splat into the per-axis box of the ellipse where opacity x weight >= 1/255 (the raster's own cutoff),
+capped at the old 3-sigma square; the on-screen test for densify stays the square. Exact: TrainerGate PASS (the first try
+failed the gate's densify frustum denominator - 15 of 240 faint splats lost their on-screen count - fixed before the timing).
+
+| 7K, five defaults | peak keys | training | held out |
+|---|---|---|---|
+| Counter, 3-sigma square | 7.61M (412K splats) | 316.2 s | 27.79 / 0.898 |
+| Counter, tight | **3.06M** (382K) | **239.0 s** | 27.78 / 0.898 |
+| Train, 3-sigma square | 4.88M (409K) | 191.6 s | 20.16 / 0.786 |
+| Train, tight | **1.79M** (449K) | **149.5 s** | 20.10 / 0.787 |
+
+Keys -60%, ~1.3x faster, same quality (differences = run-to-run nondeterminism of float atomics). Made the default (the sixth).
+Recovers the scale-lr default's time cost (Counter 266 s before it, 239 s now). Brush: 172 s wall incl. load.
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

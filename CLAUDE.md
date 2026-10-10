@@ -211,6 +211,9 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   5. (2026-10-10) Log-scale lr 0.01 decaying to 0.006 over the run (Brush's; was a flat 0.005): better on all 11 benchmark
      scenes (+0.03..+0.53) and Bathroom (fair 25.15). With all five, in-app mean PSNR 27.26 (Brush 26.95, gsplat 26.73).
      `&scalelr=0.005&scalelrend=0` = old.
+  6. (2026-10-10) Tight tile footprints (SplatTrainerGpu.TightTiles): emit_keys bins a splat into the per-axis box of the
+     ellipse where opacity x weight >= 1/255 (capped at the 3-sigma square) - exact, TrainerGate PASS; keys -60%, training
+     ~1.3x faster (Counter 316 -> 239 s, Train 192 -> 150 s). `&tighttiles=0` off.
   Diagnostics: `&blobpick=1` (splats painting bad held-out views), `&splatstats=1` (dataset path too), tools/gap_anatomy.py.
   Opt-ins: `&minviews=N`, `&camerabubble=X`, `&nearplane=X`.
 - **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):

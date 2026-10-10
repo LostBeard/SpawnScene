@@ -594,9 +594,11 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// &amp;tighttiles=1: emit_keys bins a splat into the tiles of its opacity-aware, per-axis footprint (the box of the
     /// ellipse where opacity x weight >= 1/255, at most the 3-sigma square) - the raster skips every pixel outside it, so
     /// only keys that paint nothing are dropped. Long thin and faint splats cover far fewer tiles. Read when the pipelines
-    /// are built.
+    /// are built. DEFAULT since 2026-10-10: TrainerGate PASS (render and every gradient exact; the on-screen test that
+    /// densify's frustum denominator counts stays the 3-sigma square); Counter 7K keys 7.61M -> 3.06M, 316 -> 239 s, 27.79
+    /// -> 27.78; Train 4.88M -> 1.79M, 192 -> 150 s, 20.16 -> 20.10 (run-to-run noise). &amp;tighttiles=0 = the 3-sigma square.
     /// </summary>
-    public static bool TightTiles { get; set; }
+    public static bool TightTiles { get; set; } = true;
 
     GPUComputePipeline MakePipeline(string wgsl, string entry)
     {

@@ -283,6 +283,8 @@ public partial class Studio : IAsyncDisposable
             PositionLrMaxSteps = plsv;
         // &blobpick=1: pick the splats painting badly-scored held-out views (Studio.BlobPick).
         if (query.TryGetValue("blobpick", out var bpq)) BlobPickOption = bpq is "1" or "true";
+        // &minviews=N: remove splats in frame of fewer than N supervised photos at every carve (Studio.CameraBubble).
+        if (query.TryGetValue("minviews", out var mvq) && int.TryParse(mvq, out var mvi)) MinViewsSupport = Math.Max(0, mvi);
         // &camerabubble=X: remove splats within X camera-spreads of a supervised camera at every carve (Studio.CameraBubble).
         if (query.TryGetValue("camerabubble", out var cbq) && float.TryParse(cbq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cbv))

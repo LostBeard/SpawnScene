@@ -300,6 +300,13 @@ public partial class Studio
     /// <summary>&amp;shramp=0: train every SH band from step 0 (Brush) instead of one degree per 1000 iterations (default on).</summary>
     public static bool ShDegreeRamp { get; set; } = true;
 
+    /// <summary>
+    /// &amp;shmax=N: never train above SH degree N (default 3). Diagnostic, 2026-10-10: Train's held-out gap to Brush (-0.85)
+    /// is bright blobs and white wisps in the SKY of novel views - view-dependent colour extrapolating past the narrow cone
+    /// of directions the far sky splats were seen from is one suspect.
+    /// </summary>
+    public static int ShMaxDegree { get; set; } = 3;
+
     /// <summary>&amp;cputimes=1 (diagnostic): per cycle, CPU encode ms per training step vs the loop's wall ms per step.</summary>
     public static bool CpuTimesOption { get; set; }
 
@@ -767,7 +774,7 @@ public partial class Studio
                 int scheduleTotal = _scheduleTotal > 0 ? _scheduleTotal : iterations;
                 // A block continues the coarse model's SH schedule: restarted at degree 0, the frozen context would
                 // render without the bands it learned.
-                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(ShDegreeRamp ? g : 1 << 20);
+                _trainer.ActiveShDegree = Math.Min(ShMaxDegree, SphericalHarmonics.DegreeForIteration(ShDegreeRamp ? g : 1 << 20));
                 if (it == 0 || it == 1000 || it == 2000 || it == 3000)
                     Console.WriteLine($"[Train] SH degree -> {_trainer.ActiveShDegree} at iter {it}");
 

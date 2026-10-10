@@ -456,6 +456,20 @@ would save little; it is off the list. Serial GPU-idle time left: densify (resiz
 
 Running total since the morning's defaults: Counter 239 -> 197 s, Train 148.5 -> 121 s. Brush v0.3.0 Counter ~172 s.
 
+### Train vs Brush: the gap is the SKY (ga, 2026-10-10)
+
+tools/gap_anatomy.py now reads Brush's eval renders (`--eval-save-to-disk`, render alone as <stem>.png). Train on today's
+defaults with &dumpheld=1 (20.19 in-app, 121 s) vs Brush v0.3.0's eval_7000 (_runs/tuvok-ga-anatomy-vs-brush.txt): mean raw
+21.07 vs 20.22 = **-0.85**; after the per-image colour fit -0.86 (not colour); blurred sigma 2 -1.03, sigma 6 -1.15 (LARGE-AREA,
+not detail). Worst: 00081 -3.41, 00049 -3.10, 00001 -2.93, 00065 -2.45, 00241 -2.37. Photo / Brush / ours strips: **our sky
+has bright white-yellow blobs and white wisps** (00001: a blown-out patch over the right hills; 00049 / 00081: white haze
+by the trees), Brush's is smooth blue. Random background is not it on Train (a1 &randombg=0 +0.09, noise). Suspect: SH
+extrapolation on far sky splats seen from a narrow cone of directions. sh chain: &shmax=0 / 1.
+**sh: NOT SH.** &shmax=N (new, caps the trained degree): degree 0 19.83 / 0.778 (gap to Brush -1.22), degree 1 19.98 / 0.781
+(-1.07), degree 3 (ga) 20.19 / 0.787 (-0.85) - view dependence HELPS Train, and at degree 0 the blown-out sky patch on 00001 is
+still there. The blobs are view-independent bright splats in front of the hills/sky: geometry or opacity, not colour
+extrapolation. Next: identify them (&blobpick / splat dump: depth, size, opacity, how many training views see them) and
+compare with what Brush prunes (centres > 10x the 90th-percentile bounds, relocation of the faint ones).
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

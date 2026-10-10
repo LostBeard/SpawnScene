@@ -6,6 +6,9 @@ tool's render against the photo:
 A gap that shrinks after the affine fit is colour; one that shrinks after blurring is detail.
 
   python tools/gap_anatomy.py <gsplat renders dir> <shots dir> <scene tag prefix> <images dir>
+  python tools/gap_anatomy.py <Brush eval_N dir>   <shots dir> <scene tag prefix> <images dir>
+
+Brush (--eval-save-to-disk) writes the render alone as <photo stem>.png; the photo then comes from the images dir.
 
 The gsplat renders (val_stepN_XXXX.png, photo | render) are in sorted held-out order, the same order as the sorted photo
 names every 8th (llffhold=8) - checked by the photo halves matching.
@@ -36,6 +39,12 @@ def main():
     gdir, shots, prefix, images = sys.argv[1:5]
     gs = sorted(glob.glob(os.path.join(gdir, "val_step*_*.png")))
     names = sorted(os.listdir(images))[::8]
+    brush = not gs
+    if brush:
+        gs = [os.path.join(gdir, os.path.splitext(n)[0] + ".png") for n in names]
+        missing = [f for f in gs if not os.path.exists(f)]
+        if missing:
+            sys.exit(f"{len(missing)} of {len(gs)} Brush renders missing, e.g. {missing[0]}")
     if len(gs) != len(names):
         sys.exit(f"{len(gs)} gsplat renders vs {len(names)} held-out photos")
     rows = []
@@ -45,8 +54,14 @@ def main():
         if not os.path.exists(ours_f):
             print("no render of ours for", stem); continue
         a = np.asarray(Image.open(f).convert("RGB")) / 255.0
-        w = a.shape[1] // 2
-        photo, g = a[:, :w], a[:, w:]
+        if brush:
+            g = a
+            photo = np.asarray(Image.open(os.path.join(images, name)).convert("RGB")) / 255.0
+            if photo.shape[:2] != g.shape[:2]:
+                sys.exit(f"{stem}: Brush render {g.shape[1]}x{g.shape[0]} vs photo {photo.shape[1]}x{photo.shape[0]}")
+        else:
+            w = a.shape[1] // 2
+            photo, g = a[:, :w], a[:, w:]
         o = np.asarray(Image.open(ours_f).convert("RGB")) / 255.0
         # A run that trained at another size (SpawnScene before 8cc8f05 rounded to even: 1558x1039 -> 1040) trained
         # against the photo RESIZED to it, so its render is scored against that (as tools/rescore.py does).

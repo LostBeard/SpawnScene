@@ -288,6 +288,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("scalelrend", out var sleq) && float.TryParse(sleq, System.Globalization.NumberStyles.Float, inv, out var slev))
             ScaleLrEnd = Math.Max(0f, slev);
         if (query.TryGetValue("shramp", out var shrq)) ShDegreeRamp = shrq is not ("0" or "false");
+        // &shmax=N: cap the trained SH degree (Studio.Training ShMaxDegree).
+        if (query.TryGetValue("shmax", out var shMaxQ) && int.TryParse(shMaxQ, out var shMax)) ShMaxDegree = Math.Clamp(shMax, 0, 3);
         // &videoframes=N: frames taken from a picked video (Studio.Projects VideoFrameCount; default 120).
         if (query.TryGetValue("videoframes", out var vfq) && int.TryParse(vfq, out var vfn)) { VideoFrameCount = Math.Max(2, vfn); VideoFrameCountGiven = true; }
         // &growth=brush: Brush v0.3.0 growth (SplatDensityControl.BrushGrowth; pair with DENSIFYFRAC / &densifyfrac).

@@ -281,6 +281,8 @@ public partial class Studio : IAsyncDisposable
         // TRAINING views (Train supervised 20.09 vs gsplat's held-out 20.42) and a 7K run ends at 0.34x the start rate.
         if (query.TryGetValue("poslrsteps", out var plsq) && int.TryParse(plsq, out var plsv) && plsv > 0)
             PositionLrMaxSteps = plsv;
+        // &blobpick=1: pick the splats painting badly-scored held-out views (Studio.BlobPick).
+        if (query.TryGetValue("blobpick", out var bpq)) BlobPickOption = bpq is "1" or "true";
         // &camerabubble=X: remove splats within X camera-spreads of a supervised camera at every carve (Studio.CameraBubble).
         if (query.TryGetValue("camerabubble", out var cbq) && float.TryParse(cbq,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cbv))

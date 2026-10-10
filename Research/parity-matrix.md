@@ -361,6 +361,16 @@ growth alone, Brush growth v1 (any amount: PSNR saturates ~20.4 even at 2.9M spl
 the max-over-views growth signal, opacity-weighted relocation of pruned splats, low-opacity mean noise and its tiny opacity /
 scale losses - together (they are one scheme). Parked: the other 10 scenes are at or past parity.
 
+### Fused scatter (fs, 2026-10-10) and the scale-lr default's time cost
+
+`&fusescatter=1` (scatter folded into the subgroup backward; TrainerGate PASS): Counter 308.1 s vs 312.3 s, 27.83 vs 27.81;
+Train 189.9 s vs 188.1 s, 20.17 vs 20.08 - neutral (the profiled 5.8 ms of scatter was mostly the per-phase sync; unprofiled
+the GPU overlaps it). Stays opt-in (its use: not allocating per-key gradient buffers, ~250 MB at 7M keys, for larger scenes).
+
+**The 10-10 scale-lr default costs ~18% training time**: Counter 266 s (ro, 425K splats) -> 312-317 s (407K), Train 156 s
+-> 188 s - larger splats cover more tiles. Kept: +0.03..+0.53 dB on all 11 scenes and Bathroom (quality first, TJ). Brush is
+still faster (Counter 172 s wall incl. load).
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

@@ -267,7 +267,11 @@ with blobpick: 29.14 / 28.97 / 29.14 (five seeds: 28.95-29.18, mean 29.08 = -0.2
 grey) 0.22-0.26 units in front of the held-out camera (just past the 0.2 near plane), 0.07-0.09 spreads from the nearest
 supervised camera, **in frame of only 2 of the 244 supervised photos**. Under-constrained: two photos used them to darken a
 frame corner and no other view ever checked them. `&minviews=N` (removes splats in frame of fewer than N supervised photos at
-every carve) added; mv chain: minviews=3 on Kitchen seeds 1 / 4, Train, Bicycle, Room.
+every carve) added. mv (minviews=3 on top of all four): Kitchen seed 1 28.88 (28.95 without), seed 4 28.99 (28.97; the DSCF0688
+blob GONE, but DSCF0720 fell to 23.6 instead), Train 19.83 (19.82), Bicycle 24.43 (24.49), **Room 29.84 (30.21: -0.37)** - it
+removes up to ~5,700 splats a carve, and in a room real surfaces near the cameras are in frame of few photos too. Not a default;
+stays opt-in. Removing the blob's splats alone does not lift Kitchen's mean - the trainer then fails another view. The blob is a
+symptom of under-constrained regions near the camera path; a fix has to constrain them, not delete them.
 
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 

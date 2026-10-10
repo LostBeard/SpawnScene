@@ -673,6 +673,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// </summary>
     public async Task ResizeAsync(int width, int height, int splatCount, int keysPerSplat = 8)
     {
+        ClearBindCache();
         var accel = _gpu.WebGPUAccelerator;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var stages = new List<string>();
@@ -2404,13 +2405,86 @@ public sealed partial class SplatTrainerGpu : IDisposable
         using var enc = _device!.CreateCommandEncoder();
         using var pass = enc.BeginComputePass();
         pass.SetPipeline(pipeline);
-        using var layout = pipeline.GetBindGroupLayout(0);
-        using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor { Layout = layout, Entries = entries });
-        pass.SetBindGroup(0, bg);
+        if (CacheBindGroups)
+        {
+            pass.SetBindGroup(0, CachedBindGroup(pipeline, entries));
+        }
+        else
+        {
+            using var layout = pipeline.GetBindGroupLayout(0);
+            using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor { Layout = layout, Entries = entries });
+            pass.SetBindGroup(0, bg);
+        }
         pass.DispatchWorkgroups((uint)Math.Max(1, wgX), (uint)Math.Max(1, wgY), 1);
         pass.End();
         using var cmd = enc.Finish();
         RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
+    }
+
+    /// <summary>
+    /// &amp;bgcache=1: reuse one bind group per (pipeline, bound buffers) instead of a GetBindGroupLayout + CreateBindGroup
+    /// (JS interop) every dispatch. Parity 2026-10-10: ~16 ms of a training step is fixed per-dispatch CPU / interop / submit
+    /// cost, the gap to Brush (native wgpu). Buffers are keyed by object identity (GetGPUBuffer returns the buffer's stored
+    /// GPUBuffer); a reallocation is a new object and a new key. Cleared on resize and when it grows past
+    /// <see cref="BindCacheMax"/> (temporary buffers would otherwise pile up). Dropping a bind group the GPU still uses is
+    /// safe: WebGPU keeps it alive until the work completes.
+    /// </summary>
+    public static bool CacheBindGroups { get; set; }
+
+    const int BindCacheMax = 256;
+    readonly Dictionary<BindKey, GPUBindGroup> _bindCache = new();
+
+    sealed class BindKey : IEquatable<BindKey>
+    {
+        readonly object _pipeline;
+        readonly uint[] _bindings;
+        readonly object?[] _buffers;
+        readonly int _hash;
+
+        public BindKey(object pipeline, GPUBindGroupEntry[] entries)
+        {
+            _pipeline = pipeline;
+            _bindings = new uint[entries.Length];
+            _buffers = new object?[entries.Length];
+            var h = new HashCode();
+            h.Add(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(pipeline));
+            for (int i = 0; i < entries.Length; i++)
+            {
+                _bindings[i] = entries[i].Binding;
+                var res = entries[i].Resource?.Value; _buffers[i] = (res as GPUBufferBinding)?.Buffer ?? res;
+                h.Add(_bindings[i]);
+                h.Add(_buffers[i] is null ? 0 : System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(_buffers[i]!));
+            }
+            _hash = h.ToHashCode();
+        }
+
+        public bool Equals(BindKey? o)
+        {
+            if (o is null || !ReferenceEquals(_pipeline, o._pipeline) || _bindings.Length != o._bindings.Length) return false;
+            for (int i = 0; i < _bindings.Length; i++)
+                if (_bindings[i] != o._bindings[i] || !ReferenceEquals(_buffers[i], o._buffers[i])) return false;
+            return true;
+        }
+
+        public override bool Equals(object? obj) => Equals(obj as BindKey);
+        public override int GetHashCode() => _hash;
+    }
+
+    GPUBindGroup CachedBindGroup(GPUComputePipeline pipeline, GPUBindGroupEntry[] entries)
+    {
+        var key = new BindKey(pipeline, entries);
+        if (_bindCache.TryGetValue(key, out var bg)) return bg;
+        if (_bindCache.Count >= BindCacheMax) ClearBindCache();
+        using var layout = pipeline.GetBindGroupLayout(0);
+        bg = _device!.CreateBindGroup(new GPUBindGroupDescriptor { Layout = layout, Entries = entries });
+        _bindCache[key] = bg;
+        return bg;
+    }
+
+    void ClearBindCache()
+    {
+        foreach (var bg in _bindCache.Values) bg.Dispose();
+        _bindCache.Clear();
     }
 
     void WriteU32x4(GPUBuffer buf, uint x, uint y, uint z, uint w)

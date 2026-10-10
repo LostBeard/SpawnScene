@@ -400,6 +400,12 @@ Plan, in order: (1) cache bind groups per pipeline + buffer set, invalidated on 
 step can be ONE encoder / ONE submit (today queue.writeBuffer between passes would land before batched passes - unsafe to
 batch as is); (3) drop the readback (indirect dispatch for the sort) so the CPU encodes step N+1 while the GPU runs step N.
 
+**Correction (bc, same day):** (1) did nothing - `&bgcache=1` (bind groups cached per pipeline + buffers, TrainerGate PASS):
+Counter 240.1 s vs 240.3 s, Train 146.0 vs 145.9. The "~16 ms fixed CPU overhead" reading was a guess: the two scenes have
+similar SPLAT counts, so per-splat passes (emit, Adam, SH, geometry, clears) also look "fixed" across them, and the
+sync-per-phase profile cannot tell work from waiting. Measuring instead: `&gputimes=1` (per-pass WebGPU timestamps, no
+waits); gt chain on Counter and Train. Stays opt-in: &bgcache.
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

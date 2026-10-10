@@ -326,6 +326,11 @@ Bonsai 29.93 (+0.03), DrJohnson 29.14 (+0.34), Room **30.69** (+0.48), Truck 24.
 DEFAULT 2026-10-10.** In-app mean over the 11 benchmark scenes with all five defaults: **27.26** (Brush 26.95, gsplat 26.73,
 shared scorer); best PSNR on 9 of 11 (behind Brush on Train 20.07 vs 21.07 and Bonsai 29.93 vs 30.47; Truck 24.68 vs 24.71).
 
+### Brush's opacity lr 0.01 (ol, 2026-10-10)
+
+On top of the five defaults: Train 20.17 / 0.781 (20.11 / 0.787: neutral), Bonsai **29.02** (29.93: **-0.91**), Bicycle:
+`Pack-at-upload complete: 1,743,570 splats PSNR 14.39 -> 24.42 dB, SSIM 0.2749 -> 0.7156` (24.68). Ours (0.025) stays - 0.05 (tr2) and 0.01 both worse.
+
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 
 Final cycle (profiled, one sync per phase): backward 19.3, ranges+raster 6.8, prev 6.3, emit+count 6.3, scatter 5.8, sort 5.4,

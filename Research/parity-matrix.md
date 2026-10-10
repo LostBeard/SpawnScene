@@ -261,7 +261,13 @@ changes, blobpick): Kitchen seed 1 **28.95**, seed 2 **29.18** (gsplat 29.37) - 
 are hard for every tool (DSCF0656 23-24, gsplat 24.33) and DSCF0688 (23.7 vs gsplat 27.8) is distant background through the
 windows (picked splats 10-23 units deep, in frame of only 32-52 of 244 photos), not a blob. Kitchen with all four changes so
 far: 28.69 (blob run), 28.95, 29.18, 29.13 (bubble 0.05) - typically -0.2..-0.4 vs gsplat, with an occasional blob. Seeds 3-5
-with blobpick running to catch one.
+with blobpick: 29.14 / 28.97 / 29.14 (five seeds: 28.95-29.18, mean 29.08 = -0.29 vs gsplat).
+
+**The blob, identified (bp seed 4, DSCF0688 21.6 dB vs gsplat 27.8):** two dark splats (#516251, #523275; SH DC ~-1.4 = ~0.1
+grey) 0.22-0.26 units in front of the held-out camera (just past the 0.2 near plane), 0.07-0.09 spreads from the nearest
+supervised camera, **in frame of only 2 of the 244 supervised photos**. Under-constrained: two photos used them to darken a
+frame corner and no other view ever checked them. `&minviews=N` (removes splats in frame of fewer than N supervised photos at
+every carve) added; mv chain: minviews=3 on Kitchen seeds 1 / 4, Train, Bicycle, Room.
 
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 

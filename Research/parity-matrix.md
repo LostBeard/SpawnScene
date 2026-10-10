@@ -528,6 +528,15 @@ bar, 10% of them grown by multinomial sampling on the max. `&growmax=1` switches
 max / visible count favours THINLY seen splats (one strong view, few views), so it grows the far sky more, not less.
 Brush's growth scheme is now ruled out piece by piece (v1 selection + this signal). Left from Brush: relocation of pruned
 splats onto opaque ones (the count never drops), and its near-transparent mean noise ((1 - opacity)^100: < 0.02 only).
+
+**rl: Brush relocation (&relocate=1, with &growth=brush) - neutral.** A second GpuDensify pass re-places the pruned count on
+survivors drawn by opacity (exponential race, Brush's symmetric grow), and the first pass grows the pruned count fewer
+(Brush grow_count = round(T x frac) - pruned); source maps composed for the Adam / SH carry. Train: r0 = &growth=brush
+every 100, 20%, bar 2e-4 on today's defaults **20.27 / 0.808** (anatomy -0.77), 1.16M splats, 166 s; r1 = r0 + relocate
+20.26 / 0.809 (-0.79), 1.18M, 170 s. Our densify prunes only 35-454 splats a step here, so there is little to relocate.
+Brush's growth scheme is now ported whole (selection v1, signal gm, relocation rl); none closes Train alone. r0's config
+does beat today's defaults on Train (20.27 / 0.808 vs 20.10-20.19 / 0.787) at 2.6x the splats and 1.37x the time - an
+11-scene run decides whether it is a default candidate.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

@@ -290,6 +290,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("shramp", out var shrq)) ShDegreeRamp = shrq is not ("0" or "false");
         // &shelllog=1: far-shell growth at every densify, by densify vs between (Studio.Training ShellLogOption).
         if (query.TryGetValue("shelllog", out var shellLogQ)) ShellLogOption = shellLogQ is "1" or "true";
+        // &relocate=1: with &growth=brush, pruned splats are relocated onto survivors drawn by opacity (Studio.Training RelocateOption).
+        if (query.TryGetValue("relocate", out var relocateQ)) RelocateOption = relocateQ is "1" or "true";
         // &growmax=1: densify on the max over views of the screen gradient (SplatTrainerGpu.MaxViewGrad, Brush).
         if (query.TryGetValue("growmax", out var growMaxQ)) SplatTrainerGpu.MaxViewGrad = growMaxQ is "1" or "true";
         // &fargrow=R: no clone / split past R camera spreads (Studio.Training FarGrowSpreads).

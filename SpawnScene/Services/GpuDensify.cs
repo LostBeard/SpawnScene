@@ -47,6 +47,7 @@ public sealed class GpuDensify : IDisposable
     readonly Action<Index1D, ArrayView<float>, ArrayView<int>, ArrayView<int>, ArrayView<int>, ArrayView<int>,
         ArrayView<float>, ArrayView<int>, ArrayView<int>, CompactParams, SplatEditor.Volume> _compact;
     readonly Scan<int, Stride1D.Dense, Stride1D.Dense> _scan;
+    readonly Action<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>> _compose;
 
     public GpuDensify(Accelerator accelerator)
     {
@@ -61,6 +62,25 @@ public sealed class GpuDensify : IDisposable
         _compact = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<int>, ArrayView<int>,
             ArrayView<int>, ArrayView<int>, ArrayView<float>, ArrayView<int>, ArrayView<int>, CompactParams, SplatEditor.Volume>(CompactKernel);
         _scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Exclusive);
+        _compose = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(ComposeKernel);
+    }
+
+    /// <summary>
+    /// Chain two passes' source maps: <paramref name="second"/> indexes the first pass's output, <paramref name="first"/>
+    /// the original rows; the result maps the second pass's output to the original rows (-1 stays -1).
+    /// </summary>
+    public MemoryBuffer1D<int, Stride1D.Dense> ComposeSources(MemoryBuffer1D<int, Stride1D.Dense> second, int count,
+        MemoryBuffer1D<int, Stride1D.Dense> first)
+    {
+        var outMap = _accel.Allocate1D<int>(Math.Max(1, count));
+        _compose((Index1D)count, second.View, first.View, outMap.View);
+        return outMap;
+    }
+
+    static void ComposeKernel(Index1D i, ArrayView<int> second, ArrayView<int> first, ArrayView<int> composed)
+    {
+        int k = second[i];
+        composed[i] = k < 0 ? -1 : first[k];
     }
 
     /// <summary>What to decide with. Mirrors the arguments and statics of <see cref="SplatDensityControl.Decide"/>.</summary>
@@ -76,7 +96,9 @@ public sealed class GpuDensify : IDisposable
         bool PruneOnly = false,
         System.Numerics.Vector3 FarCentre = default,
         float FarRadius = 0f,
-        float FarGrowRadius = 0f);
+        float FarGrowRadius = 0f,
+        int RelocateCount = 0,
+        bool SubtractPruned = false);
 
     /// <summary>
     /// The grown set. <see cref="Packed"/>, <see cref="AdamSources"/> and <see cref="FeatureSources"/> are owned
@@ -109,6 +131,7 @@ public sealed class GpuDensify : IDisposable
         public float FarX, FarY, FarZ;      // &farprune: prune a centre farther than FarRadius from here (0 = off)
         public float FarRadius;
         public float FarGrowRadius;         // &fargrow: a centre farther than this from (FarX, FarY, FarZ) never grows (0 = off)
+        public int Relocate;                // 1: Brush relocation pass - every splat is a candidate, raced on opacity, no prune
     }
 
     public struct SelectParams
@@ -167,6 +190,7 @@ public sealed class GpuDensify : IDisposable
             FarX = o.FarCentre.X, FarY = o.FarCentre.Y, FarZ = o.FarCentre.Z,
             FarRadius = o.FarRadius,
             FarGrowRadius = o.FarGrowRadius,
+            Relocate = o.RelocateCount > 0 ? 1 : 0,
         };
         // The trainable volume is its own kernel parameter, as SplatEditor's kernels take it (nested in the params
         // struct it is the only such layout in the app); an unused one is the identity, never read (HasTrainable 0).
@@ -184,6 +208,10 @@ public sealed class GpuDensify : IDisposable
         int budget = Math.Max(0, o.MaxSplats - n);
         float frac = Math.Clamp(SplatDensityControl.GrowthSelectFraction, 0f, 1f);
         long allowed = Math.Min(budget, frac >= 0.999f ? wanted : (long)MathF.Ceiling(wanted * frac));
+        // Brush (train.rs): grow_count = round(candidates x fraction) - pruned_count - the pruned are relocated instead.
+        if (o.SubtractPruned) allowed = Math.Max(0, allowed - (c[PruneFaint] + c[PruneBig]));
+        // The relocation pass takes exactly the pruned count (the first pass already made room for it).
+        if (o.RelocateCount > 0) allowed = Math.Min(o.RelocateCount, wanted);
 
         int cutoff = -1, remaining = 0;
         if (wanted > allowed)
@@ -238,7 +266,7 @@ public sealed class GpuDensify : IDisposable
                 SplitScaleDivisor = SplatDensityControl.SplitScaleDivisor,
                 HasTrainable = o.Trainable.HasValue ? 1 : 0,
                 RevisedOpacity = SplatDensityControl.RevisedOpacity ? 1 : 0,
-                BrushGrowth = SplatDensityControl.BrushGrowth ? 1 : 0,
+                BrushGrowth = SplatDensityControl.BrushGrowth || o.RelocateCount > 0 ? 1 : 0,
             }, trainable);
 
         // Clones and splits from the totals: added = clones + 2 splits, and every split parent left the kept set.
@@ -269,15 +297,25 @@ public sealed class GpuDensify : IDisposable
         float opacity = packed[o + 9];
         float s0 = packed[o + 6], s1 = packed[o + 7], s2 = packed[o + 8];
         float maxScale = XMath.Max(s0, XMath.Max(s1, s2));
-        float gradSum = stats[2 * i];
-        float vis = stats[2 * i + 1];
+        // The relocation pass runs on the first pass's output, whose rows no longer match the stats: it reads none.
+        float gradSum = p.Relocate != 0 ? 0f : stats[2 * i];
+        float vis = p.Relocate != 0 ? 0f : stats[2 * i + 1];
         float avg = vis > 0f ? gradSum / vis : 0f;
         if (vis > 0f) Atomic.Add(ref counters[VisibleSlot], 1);
 
         int a = Keep;
         int b = 0;
         bool frozen = p.HasTrainable != 0 && !SplatEditor.Inside(trainable, packed[o], packed[o + 1], packed[o + 2]);
-        if (p.NoOp == 0 && !frozen)
+        if (p.Relocate != 0 && !frozen)
+        {
+            // Brush relocation: survivors drawn by opacity (multinomial without replacement = top k of w / Exp(1)).
+            a = CloneCandidate;
+            uint h = Hash(p.Seed ^ Hash((uint)i.X * 2246822519u + 0x27d4eb2fu));
+            float u = (h + 1f) * (1f / 4294967297f);
+            b = GradientBin(XMath.Max(opacity, 1e-6f) / XMath.Max(-XMath.Log(u), 1e-12f), 1e-6f);
+            Atomic.Add(ref hist[b], 1);
+        }
+        else if (p.NoOp == 0 && !frozen)
         {
             // Same order as the host: prune first, a splat being removed is never densified.
             float fx = packed[o] - p.FarX, fy = packed[o + 1] - p.FarY, fz = packed[o + 2] - p.FarZ;

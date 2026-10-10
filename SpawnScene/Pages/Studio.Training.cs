@@ -321,6 +321,13 @@ public partial class Studio
     /// its gradient (views disagree about it) and keeps being cloned. Pruning it (&amp;farprune) cost 0.1-0.2 dB. 0 = off.
     /// </summary>
     public static float FarGrowSpreads { get; set; }
+
+    /// <summary>
+    /// &amp;relocate=1 (with &amp;growth=brush): Brush's relocation (train.rs) - the splats a densify prunes are replaced by
+    /// copies of survivors drawn by opacity (the same symmetric grow), so pruning never lowers the count, and growth is
+    /// cut by the pruned count (grow_count = round(candidates x fraction) - pruned). A second GpuDensify pass.
+    /// </summary>
+    public static bool RelocateOption { get; set; }
     float _farGrowRadius;
 
     System.Numerics.Vector3 _farPruneCentre;
@@ -1514,7 +1521,22 @@ public partial class Studio
                 Seed: (uint)(1234 + n), NoOp: !pruneOnly && (DensifyNoOp || !densify), Trainable: _trainer.TrainableVolume,
                 GrowOnlyInside: _trainer.GrowOnlyInside, PruneOnly: pruneOnly,
                 FarCentre: _farPruneCentre, FarRadius: _trainer.TrainableVolume == null ? _farPruneRadius : 0f,
-                FarGrowRadius: _trainer.TrainableVolume == null ? _farGrowRadius : 0f));
+                FarGrowRadius: _trainer.TrainableVolume == null ? _farGrowRadius : 0f,
+                SubtractPruned: RelocateOption && SplatDensityControl.BrushGrowth && !pruneOnly && _trainer.TrainableVolume == null));
+        if (RelocateOption && SplatDensityControl.BrushGrowth && !pruneOnly && _trainer.TrainableVolume == null
+            && r.PrunedFaint + r.PrunedBig > 0)
+        {
+            int pruned = r.PrunedFaint + r.PrunedBig;
+            var r2 = await _gpuDensify.RunAsync(r.Packed.View, r.Count, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
+                new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, false, Seed: (uint)(4321 + n), RelocateCount: pruned));
+            var adam = _gpuDensify.ComposeSources(r2.AdamSources, r2.Count, r.AdamSources);
+            var feat = _gpuDensify.ComposeSources(r2.FeatureSources, r2.Count, r.FeatureSources);
+            await _gpuService.WebGPUAccelerator.SynchronizeAsync();
+            Console.WriteLine($"[Densify] relocated {r2.Count - r.Count:N0} of {pruned:N0} pruned onto survivors drawn by opacity");
+            r.Packed.Dispose(); r.AdamSources.Dispose(); r.FeatureSources.Dispose();
+            r2.AdamSources.Dispose(); r2.FeatureSources.Dispose();
+            r = r with { Packed = r2.Packed, Count = r2.Count, AdamSources = adam, FeatureSources = feat, Cloned = r.Cloned + (r2.Count - r.Count) };
+        }
 
         // Always report, including - especially including - when the answer is "nothing".
         Console.WriteLine(

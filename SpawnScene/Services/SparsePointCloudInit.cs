@@ -79,6 +79,10 @@ public static class SparsePointCloudInit
     /// start at the Adam MaxScale ceiling and the scene is blobby before the first step.
     /// Pass the training MaxScale (or densify split size) when known; 0 = no cap.
     /// </summary>
+    /// <summary>&amp;initscale=X: multiply every initial splat size (default 1). Brush v0.3.0's initial splats are 2.2-2.8x
+    /// smaller than ours (Research/brush-vs-spawnscene-2026-10-09.md).</summary>
+    public static float ScaleMultiplier { get; set; } = 1f;
+
     public static float[] BuildPacked(PointCloud cloud, float maxScale = 0f)
     {
         int n = cloud.Count;
@@ -102,7 +106,7 @@ public static class SparsePointCloudInit
             int o = i * SplatFormat.Floats;
             var p = cloud.Positions[i];
             var c = i < cloud.Colors.Length ? cloud.Colors[i] : new Vector3(0.5f);
-            float s = MathF.Min(spacing[i], cap);
+            float s = MathF.Min(spacing[i], cap) * ScaleMultiplier;
 
             packed[o + SplatFormat.OffPos] = p.X;
             packed[o + SplatFormat.OffPos + 1] = p.Y;

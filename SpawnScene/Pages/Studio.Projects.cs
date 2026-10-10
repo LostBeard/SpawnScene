@@ -1262,10 +1262,17 @@ public partial class Studio
             BuildProjectDetailUI();
             Console.WriteLine($"[Studio] Error loading images: {ex}");
         }
+        finally { _fileSelectedDone?.TrySetResult(true); }
     }
+
+    /// <summary>Set by the video project autotest; OnFileSelected completes it when the picked files are stored.</summary>
+    TaskCompletionSource<bool>? _fileSelectedDone;
 
     /// <summary>Frames taken from a picked video (<c>&amp;videoframes=N</c>, default 120).</summary>
     public static int VideoFrameCount { get; set; } = 120;
+
+    /// <summary>True when <c>&amp;videoframes</c> was given (the video autotest otherwise takes the manifest count).</summary>
+    public static bool VideoFrameCountGiven { get; set; }
 
     /// <summary>
     /// A picked video becomes <see cref="VideoFrameCount"/> sharp, evenly spaced frames, each saved as an ordinary

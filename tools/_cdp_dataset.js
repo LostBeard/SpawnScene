@@ -97,6 +97,7 @@ const closeTab = (id) => new Promise(res =>
     let pendingColmap = false;   // [Dataset] COLMAP-EXPORT: our SfM as COLMAP text on window.__colmapExport (Studio.ColmapExport)
     const pendingTrainer = [];   // view-<k>: the trainer's own render of that pose, on #trainerdump
     const pendingPhoto = [];     // view-<k>: the photograph when it is a video frame (in memory), on #photodump
+    let pendingPick = null;      // [Dataset] PICK-FILE <selector>|<path under SpawnScene/wwwroot>: a user's file pick (video autotest)
     ws.on('message', raw => {
       const m = JSON.parse(raw.toString());
       if (m.id && pend.has(m.id)) pend.get(m.id)(m);
@@ -118,6 +119,8 @@ const closeTab = (id) => new Promise(res =>
         if (/\[Dataset\] COLMAP-EXPORT \d+ cameras/.test(s)) pendingColmap = true;
         const trainerRender = s.match(/\[Dataset\] TRAINER-RENDER (\S+)/);
         if (trainerRender) pendingTrainer.push(trainerRender[1]);
+        const pick = s.match(/\[Dataset\] PICK-FILE (.+)\|(\S+)/);
+        if (pick) pendingPick = { selector: pick[1], file: pick[2] };
         const photoDump = s.match(/\[Dataset\] PHOTO-DUMP (\S+)/);
         if (photoDump) pendingPhoto.push(photoDump[1]);
         if (free) { pendingFree.push(free[1]); }
@@ -156,6 +159,20 @@ const closeTab = (id) => new Promise(res =>
     let shot = false;
     while (Date.now() < deadline && !done && !failed) {
       await new Promise(r => setTimeout(r, 500));
+      if (pendingPick) {
+        // The browser's own file-pick event (as tools/_cdp_edit.js SPAWNSCENE_EDIT_PICK): Chrome sets the File's type from
+        // the extension, so the app's video/* gate is exercised too (Research/video-path-audit-2026-10-08.md).
+        const { selector, file } = pendingPick;
+        pendingPick = null;
+        const full = path.resolve(__dirname, '..', 'SpawnScene', 'wwwroot', file);
+        const doc = await send('DOM.getDocument', { depth: -1 });
+        const q = await send('DOM.querySelector', { nodeId: doc.result.root.nodeId, selector });
+        if (!q.result || !q.result.nodeId) console.log(`[harness] PICK-FILE: no element for ${selector}`);
+        else {
+          await send('DOM.setFileInputFiles', { nodeId: q.result.nodeId, files: [full] });
+          console.log(`[harness] picked ${full} into ${selector}`);
+        }
+      }
       if (pendingColmap) {
         pendingColmap = false;
         const r = await send('Runtime.evaluate', { expression: "JSON.stringify(window.__colmapExport)", returnByValue: true });

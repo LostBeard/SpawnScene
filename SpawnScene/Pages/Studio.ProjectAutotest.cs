@@ -32,7 +32,16 @@ public partial class Studio
             var manifest = await _importService.TryLoadManifestAsync(datasetName);
             List<string> allNames;
             string imageDir;
-            if (manifest != null && manifest.Images.Count >= 2 && string.IsNullOrEmpty(manifest.Video))
+            // A video manifest goes through the USER path: the harness picks the file into the real <input type=file>
+            // (CDP DOM.setFileInputFiles fires its change event), OnFileSelected -> AddVideoSourcesAsync -> OPFS
+            // (Research/video-path-audit-2026-10-08.md, TJ 2026-10-08: "we say we support video ... never seen a test").
+            string? video = manifest != null && !string.IsNullOrEmpty(manifest.Video) ? manifest.Video : null;
+            if (video != null)
+            {
+                allNames = new List<string>();
+                imageDir = "";
+            }
+            else if (manifest != null && manifest.Images.Count >= 2)
             {
                 allNames = manifest.Images;
                 imageDir = $"datasets/{datasetName}/{manifest.ImageDir}";
@@ -55,7 +64,27 @@ public partial class Studio
                 $"autotest {datasetName} {DateTime.Now:MMdd-HHmmss}",
                 new ProjectSettings { TrainIterations = trainIters, TrainMaxSplats = maxSplats, TrainMaxDimension = trainRes });
             var t0 = DateTime.UtcNow;
-            foreach (var name in names)
+            if (video != null)
+            {
+                if (!VideoFrameCountGiven && manifest!.VideoFrames > 0) VideoFrameCount = manifest.VideoFrames;
+                _projects = await _projectService.ListProjectsAsync();
+                _activeProject = _projects.First(p => p.Id == project.Id);
+                _state = StudioState.ProjectDetail;
+                BuildProjectDetailUI();
+                _fileSelectedDone = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                Console.WriteLine($"[Dataset] PICK-FILE input[type=file][accept^=\"image/*\"]|datasets/{datasetName}/{video}");
+                var picked = await Task.WhenAny(_fileSelectedDone.Task, Task.Delay(TimeSpan.FromMinutes(30)));
+                _fileSelectedDone = null;
+                _projects = await _projectService.ListProjectsAsync();
+                var stored = _projects.First(p => p.Id == project.Id);
+                if (picked is not Task<bool> || stored.Sources.Count < 2)
+                {
+                    Console.WriteLine($"[Dataset] FAIL: the picked video gave {stored.Sources.Count} frames");
+                    return;
+                }
+                names = stored.Sources.Select(s => s.FileName).ToList();
+            }
+            foreach (var name in video != null ? Enumerable.Empty<string>() : names)
             {
                 var bytes = await _http.GetByteArrayAsync($"{imageDir}/{name}");
                 // Real size, as the file picker records it; the bitmap's pixels are never read here.

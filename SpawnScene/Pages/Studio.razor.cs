@@ -288,6 +288,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("scalelrend", out var sleq) && float.TryParse(sleq, System.Globalization.NumberStyles.Float, inv, out var slev))
             ScaleLrEnd = Math.Max(0f, slev);
         if (query.TryGetValue("shramp", out var shrq)) ShDegreeRamp = shrq is not ("0" or "false");
+        // &videoframes=N: frames taken from a picked video (Studio.Projects VideoFrameCount; default 120).
+        if (query.TryGetValue("videoframes", out var vfq) && int.TryParse(vfq, out var vfn)) { VideoFrameCount = Math.Max(2, vfn); VideoFrameCountGiven = true; }
         // &growth=brush: Brush v0.3.0 growth (SplatDensityControl.BrushGrowth; pair with DENSIFYFRAC / &densifyfrac).
         if (query.TryGetValue("growth", out var grq)) SplatDensityControl.BrushGrowth = grq == "brush";
         // &initscale=X: initial splat size multiplier (SparsePointCloudInit.ScaleMultiplier).

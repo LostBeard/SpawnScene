@@ -133,21 +133,17 @@ public partial class Studio
                     });
             }
 
-            // The whole card opens the project (a transparent button over it). GameUI fires OnClick on EVERY button under the
-            // pointer - nothing consumes a click - so a Delete press also opened the project, and the Delete handler then
-            // armed "Confirm delete" behind the project page; on the browser again the card's handler cleared it before
-            // Delete's ran, so the confirm never deleted (TJ 2026-10-10). The card ignores a click that is on its Delete.
-            // (Delete updates after the card, so its IsHovered here is the previous frame's - the pointer was on it then.)
+            // The whole card opens the project (a transparent button over it). Delete sits on top of it: GameUI 1.0.0 gives a
+            // click only to the topmost element under the pointer (before it, a Delete press also opened the project and the
+            // card's handler cancelled "Confirm delete" - TJ 2026-10-10).
             var p = project;
-            UIButton? deleteButton = null;
-            card.AddChild(new CardHitButton
+            card.AddChild(new UIButton
             {
                 X = 0, Y = 0, Width = cardW, Height = cardH, Text = "",
                 NormalColor = Color.Transparent, HoverColor = Color.FromArgb(28, 255, 255, 255),
                 PressedColor = Color.FromArgb(50, 255, 255, 255),
                 OnClick = () =>
                 {
-                    if (deleteButton is { IsHovered: true }) return;
                     _pendingDeleteProjectId = null;
                     OnOpenProject(p);
                 },
@@ -167,7 +163,7 @@ public partial class Studio
             });
 
             bool confirming = _pendingDeleteProjectId == project.Id;
-            deleteButton = card.AddChild(new UIButton
+            card.AddChild(new UIButton
             {
                 X = cardW - (confirming ? 132 : 76), Y = thumbH + 30, Width = confirming ? 120 : 64, Height = 28,
                 Text = confirming ? "Confirm delete" : "Delete", FontSize = FontSize.Caption,
@@ -181,22 +177,4 @@ public partial class Studio
         }
     }
 
-    /// <summary>
-    /// The card-wide open button: a hover tint and a focus ring, never an opaque fill. GameUI 0.1.0-rc.6's UIButton draws
-    /// its hover ring as a FILLED rect under the button, so this translucent button turned the whole card solid cyan on
-    /// hover and hid the thumbnail (2026-10-10). Fixed in GameUI (a ring); drop this once SpawnScene is on that release.
-    /// </summary>
-    private sealed class CardHitButton : UIButton
-    {
-        public override void Draw(UIRenderer renderer)
-        {
-            if (!Visible) return;
-            var b = ScreenBounds;
-            var theme = UITheme.Current;
-            Color tint = IsPressed ? PressedColor : IsHovered ? HoverColor : NormalColor;
-            if (tint.A > 0) renderer.DrawRoundedRect(b.X, b.Y, b.Width, b.Height, theme.ButtonCornerRadius, tint);
-            if (Enabled && (IsHovered || IsPressed) && theme.FocusBorderWidth > 0)
-                renderer.DrawRoundedRing(b.X, b.Y, b.Width, b.Height, theme.ButtonCornerRadius, theme.FocusBorderWidth, theme.FocusBorder);
-        }
-    }
 }

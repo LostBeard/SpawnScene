@@ -305,6 +305,10 @@ public partial class Studio : IAsyncDisposable
             CameraBubbleSpread = Math.Max(0f, cbv);
         // &revisedopacity=1: clone / split opacities 1 - sqrt(1 - a) (SplatDensityControl.RevisedOpacity).
         if (query.TryGetValue("revisedopacity", out var revOpQ)) SplatDensityControl.RevisedOpacity = revOpQ is "1" or "true";
+        // &densifyprobe=1: score 3 views before/after every densify apply (Studio.Training DensifyProbeOption).
+        if (query.TryGetValue("densifyprobe", out var densifyProbeQ)) DensifyProbeOption = densifyProbeQ is "1" or "true";
+        // &cputimes=1: CPU encode ms per training step vs loop wall ms (Studio.Training CpuTimesOption).
+        if (query.TryGetValue("cputimes", out var cpuTimesQ)) CpuTimesOption = cpuTimesQ is "1" or "true";
         // &gputimes=1: GPU timestamps per training pass (SplatTrainerGpu.GpuTimes).
         if (query.TryGetValue("gputimes", out var gpuTimesQ)) SplatTrainerGpu.GpuTimes = gpuTimesQ is "1" or "true";
         // &bgcache=1: reuse bind groups across dispatches (SplatTrainerGpu.CacheBindGroups).

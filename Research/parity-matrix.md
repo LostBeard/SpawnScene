@@ -442,6 +442,20 @@ GPU peak = CPU count). A/B, same publish, back to back:
 Brush v0.3.0 on Counter: ~172 s wall (earlier); we were 239, now 200. Next: batch the small per-step passes (one encoder,
 per-pass uniform slots) - the CPU encode cost still bounds the step where the GPU work is short.
 
+**ct / ct2 (2026-10-10, &cputimes=1, after &deferkeys):** Counter late (cycle 21): CPU encode 4.3 ms/step (TrainStepAsync on
+steps without a loss read), yield 1.1, loop 32.8 ms/step; densify 2.8 ms/step amortised with the GPU idle (of it the apply
+probe 1.2); waiting at densify for the queued GPU work 11.8 ms/step. **The step is GPU-paced now** - batching the small passes
+would save little; it is off the list. Serial GPU-idle time left: densify (resize, carry, uploads, syncs, ~160 ms an event).
+
+**dp: densify apply probe off by default** (log-only forensic: 3 views scored before + after every apply; `&densifyprobe=1`):
+
+| Scene | probe (old) | no probe (new default) | held out PSNR / SSIM |
+|---|---|---|---|
+| Counter | 204.4 s | **197.3 s, -3.5%** | 27.80 / 0.8976 -> 27.78 / 0.8976 |
+| Train | 127.9 s | **121.1 s, -5.3%** | 20.14 / 0.7863 -> 20.11 / 0.7863 |
+
+Running total since the morning's defaults: Counter 239 -> 197 s, Train 148.5 -> 121 s. Brush v0.3.0 Counter ~172 s.
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

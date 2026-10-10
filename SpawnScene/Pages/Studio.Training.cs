@@ -300,6 +300,19 @@ public partial class Studio
     /// <summary>&amp;shramp=0: train every SH band from step 0 (Brush) instead of one degree per 1000 iterations (default on).</summary>
     public static bool ShDegreeRamp { get; set; } = true;
 
+    /// <summary>&amp;cputimes=1 (diagnostic): per cycle, CPU encode ms per training step vs the loop's wall ms per step.</summary>
+    public static bool CpuTimesOption { get; set; }
+
+    /// <summary>
+    /// &amp;densifyprobe=1 (diagnostic): score 3 supervised views before and after every densify apply and log both - a large
+    /// drop is the APPLY path (remap, re-init, re-upload), not the plan. Off by default since 2026-10-10: 6 renders + scores
+    /// per densify, ~1.2 ms per training step amortised with the GPU idle (Counter &amp;cputimes), for a log line.
+    /// </summary>
+    public static bool DensifyProbeOption { get; set; }
+
+    /// <summary>&amp;cputimes: ms spent in the densify apply probe (ProbeViewsAsync before + after) since the last cycle line.</summary>
+    double _probeMs;
+
     /// <summary>
     /// Train the supervised views in a fresh random order every epoch, as the reference does
     /// (<see cref="TrainingSchedule.ShuffleEpoch"/>), instead of file order. <c>&amp;shuffleviews=0</c> for file order.
@@ -735,8 +748,13 @@ public partial class Studio
             double firstCycle = double.NaN, lastCycle = double.NaN;
             int itersDone = iterations;
             long lastReportTicks = 0, lastPreviewTicks = 0;
+            // &cputimes=1: CPU ms inside TrainStepAsync on steps that do not read the loss (no wait in them since
+            // &deferkeys, so this is the encode cost), the loop's wall ms per step, and the yield's ms per step.
+            // Encode close to wall = CPU-bound (batch the passes); well under = GPU-bound.
+            double cpuStepMs = 0, cpuDelayMs = 0, cpuDensifyMs = 0, cpuDrainMs = 0; int cpuSteps = 0, cpuIters = 0; long cpuLoopStart = 0;
             for (int it = 0; it < iterations; it++)
             {
+                if (CpuTimesOption && cpuLoopStart == 0) cpuLoopStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 if (_trainStopRequested)
                 {
                     itersDone = it;
@@ -792,9 +810,15 @@ public partial class Studio
                 bool readLoss = it < supervised.Count || it % supervised.Count == supervised.Count - 1
                     || it == iterations - 1;
                 if (UseExposureGains) _trainer.ExposureLr = TrainingSchedule.ExponentialLr(0.01f, 0.001f, it, iterations);
+                long stepT0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 float loss = await _trainer.TrainStepAsync(packed, n, cam, near, far, opacityLr: TrainOpacityLr, geometry: geo,
                     readLoss: readLoss, poseSlot: poseAdam != null && geo != null && !RefineTestPosesOnly ? vi : -1,
                     exposureSlot: UseExposureGains ? vi : -1);
+                if (CpuTimesOption && !readLoss)
+                {
+                    cpuStepMs += System.Diagnostics.Stopwatch.GetElapsedTime(stepT0).TotalMilliseconds;
+                    cpuSteps++;
+                }
 
                 // How much of the gradient survives the fixed-point atomic? Gradients cross it
                 // as scaled integers, and dL/d(pixel) is 1/(3*W*H) - about 1e-6 at this
@@ -911,11 +935,20 @@ public partial class Studio
                         // re-fitting from post-scatter quanta at 25% target fought that and left
                         // conic live at ~0.1% (MEASURED truck7k-initcap). Densify only grows
                         // the model; scales stay where the last step put them.
+                        if (CpuTimesOption)
+                        {
+                            // The CPU runs ahead of the GPU between sync points: drain first, so densify is timed alone.
+                            long drain0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                            await accel.SynchronizeAsync();
+                            cpuDrainMs += System.Diagnostics.Stopwatch.GetElapsedTime(drain0).TotalMilliseconds;
+                        }
+                        long dens0 = System.Diagnostics.Stopwatch.GetTimestamp();
                         var grown = McmcOption
                             ? await McmcStepAsync(packed, n, (uint)(4321 + g))
                             : await DensifyAsync(
                                 packed, n, rigRadius, densifying, resetOpacity,
-                                (views, targets, box, supervised));
+                                DensifyProbeOption ? (views, targets, box, supervised) : null);
+                        if (CpuTimesOption) cpuDensifyMs += System.Diagnostics.Stopwatch.GetElapsedTime(dens0).TotalMilliseconds;
                         if (grown != null)
                         {
                             (packed, n) = grown.Value;
@@ -970,6 +1003,15 @@ public partial class Studio
                             Console.WriteLine($"[Train] cycle {cycle,4} phases: {_trainer.TakePhaseProfile()}");
                         if (SplatTrainerGpu.GpuTimes)
                             Console.WriteLine($"[Train] cycle {cycle,4} gpu: {_trainer.TakeGpuTimes()}");
+                        if (CpuTimesOption && cpuIters > 0)
+                        {
+                            double loopMs = System.Diagnostics.Stopwatch.GetElapsedTime(cpuLoopStart).TotalMilliseconds / cpuIters;
+                            Console.WriteLine($"[Train] cycle {cycle,4} cpu: TrainStepAsync {cpuStepMs / Math.Max(1, cpuSteps):F2} ms " +
+                                $"(steps without a loss read), loop {loopMs:F2} ms/step, yield {cpuDelayMs / cpuIters:F2} ms/step, " +
+                                $"densify {cpuDensifyMs / cpuIters:F2} ms/step (of it the apply probe {_probeMs / cpuIters:F2}), drained before densify {cpuDrainMs / cpuIters:F2} ms/step");
+                            cpuStepMs = cpuDelayMs = cpuDensifyMs = cpuDrainMs = _probeMs = 0; cpuSteps = cpuIters = 0;
+                            cpuLoopStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                        }
                     }
 
                     // Held-out PSNR DURING the run, not only at the ends.
@@ -1016,7 +1058,13 @@ public partial class Studio
 
                 // Yield to the browser. A tight await loop still starves rAF on some drivers,
                 // and a starved page is a lost device.
-                if (it % 4 == 3) await Task.Delay(1);
+                if (it % 4 == 3)
+                {
+                    long d0 = System.Diagnostics.Stopwatch.GetTimestamp();
+                    await Task.Delay(1);
+                    if (CpuTimesOption) cpuDelayMs += System.Diagnostics.Stopwatch.GetElapsedTime(d0).TotalMilliseconds;
+                }
+                if (CpuTimesOption) cpuIters++;
             }
             double total = (DateTime.UtcNow - start).TotalSeconds;
             // Depth supervision is a training loss only: held-out refinement and scoring below run without it.
@@ -1458,10 +1506,12 @@ public partial class Studio
         // Score a few supervised views on either side of the apply. A clone renders as the same
         // Gaussian twice and a split as two smaller ones, so the image should barely move; a
         // large drop here is the APPLY path (remap, re-init, re-upload), not the plan.
+        long probe0 = System.Diagnostics.Stopwatch.GetTimestamp();
         string before = probe != null
             ? await ProbeViewsAsync(_trainer, packed, n, probe.Value.views, probe.Value.targets,
                 probe.Value.box, probe.Value.supervised)
             : "";
+        _probeMs += System.Diagnostics.Stopwatch.GetElapsedTime(probe0).TotalMilliseconds;
         (MemoryBuffer1D<float, Stride1D.Dense> packed, int n)? result;
         try
         {
@@ -1475,8 +1525,10 @@ public partial class Studio
         }
         if (probe != null && result != null)
         {
+            long probe1 = System.Diagnostics.Stopwatch.GetTimestamp();
             string after = await ProbeViewsAsync(_trainer, result.Value.packed, result.Value.n,
                 probe.Value.views, probe.Value.targets, probe.Value.box, probe.Value.supervised);
+            _probeMs += System.Diagnostics.Stopwatch.GetElapsedTime(probe1).TotalMilliseconds;
             Console.WriteLine($"[Densify] apply probe (supervised PSNR): before {before} -> after {after}" +
                 (DensifyNoOp ? " [NO-OP plan]" : ""));
         }

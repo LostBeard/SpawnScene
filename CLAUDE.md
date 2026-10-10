@@ -218,6 +218,9 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
      longer reads the emit counter back - the radix sort sizes itself from it on the GPU (GpuRadixSort.SortIndirect), ranges
      and scatter read a GPU-written count, demand peaks on the GPU and overflow is caught at the next sync. Exact (TrainerGate
      PASS, render bit-identical); Counter 239 -> 200 s, Train 148.5 -> 127.5 s, same scores. `&deferkeys=0` off.
+  8. (2026-10-10) No densify apply probe (Studio.Training DensifyProbeOption): the 3-view before/after score at every
+     densify was a log-only forensic costing ~1.2 ms a step with the GPU idle; Counter 204 -> 197 s, Train 128 -> 121 s,
+     same scores. `&densifyprobe=1` brings it back. Diagnostic: `&cputimes=1` (encode vs wall vs densify per step).
   Diagnostics: `&blobpick=1` (splats painting bad held-out views), `&splatstats=1` (dataset path too), tools/gap_anatomy.py.
   Opt-ins: `&minviews=N`, `&camerabubble=X`, `&nearplane=X`.
 - **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):

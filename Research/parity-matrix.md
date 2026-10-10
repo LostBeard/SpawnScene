@@ -512,6 +512,22 @@ colour fit ours is **23.00 vs Brush 22.80 (+0.20)**, and the in-app fair score (
 scored on the right) is 22.56 vs 21.54 without gains. With gains the CONTENT beats Brush's; the model's mean exposure just is
 not each held-out photo's, and the raw benchmark scores that. Gains stay off for stills (the default). The far shell is the
 same with gains on (7.1% past 16 spreads, op50 0.35): exposure disagreement is not what grows it.
+
+**gm: Brush's growth signal (&growmax=1) - NOT the answer.** Brush v0.3.0 source (stats.rs / train.rs, fetched at the tag):
+refine_weight_norm = max over views of the per-view screen-gradient norm, candidates where max / visible count > 2e-4-ish
+bar, 10% of them grown by multinomial sampling on the max. `&growmax=1` switches densify_accum from the sum to that max
+(densify still divides by the visible count, as Brush's above_threshold does). Train:
+
+| run | PSNR / SSIM | splats | past 16 spreads | anatomy gap to Brush |
+|---|---|---|---|---|
+| defaults (sum, bar 8e-4) | 20.10-20.19 / 0.787 | 0.44M | 6.7% | -0.85 |
+| m1 max, bar 8e-4 | 19.93 / 0.762 | 0.19M | 2.6% | -1.14 |
+| m2 max, bar 2e-4 | 20.13 / 0.782 | 0.37M | **9.0%** | -0.92 |
+| m3 max + &growth=brush (20%, bar 2e-4) | 20.02 / 0.776 | 0.26M | 5.6% | -1.04 |
+
+max / visible count favours THINLY seen splats (one strong view, few views), so it grows the far sky more, not less.
+Brush's growth scheme is now ruled out piece by piece (v1 selection + this signal). Left from Brush: relocation of pruned
+splats onto opaque ones (the count never drops), and its near-transparent mean noise ((1 - opacity)^100: < 0.02 only).
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

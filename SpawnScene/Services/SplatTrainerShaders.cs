@@ -1893,7 +1893,10 @@ fn densify_accum(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wo
         f = clamp(r * r, 0.0, 1.0);
     }
 
-    accum[i * 2u] = accum[i * 2u] + f * sqrt(gx * gx + gy * gy);
+    // &growmax (dims.w bit 4): Brush's refine weight - the MAX over views of this norm (stats.rs max_pair), still divided
+    // by the visible count when densify reads it (above_threshold). Default: the sum (the reference's average).
+    if ((dims.w & 4u) != 0u) { accum[i * 2u] = max(accum[i * 2u], f * sqrt(gx * gx + gy * gy)); }
+    else { accum[i * 2u] = accum[i * 2u] + f * sqrt(gx * gx + gy * gy); }
     accum[i * 2u + 1u] = accum[i * 2u + 1u] + 1.0;
 }
 ";

@@ -609,6 +609,13 @@ public sealed partial class SplatTrainerGpu : IDisposable
     public static bool TightTiles { get; set; } = true;
 
     /// <summary>
+    /// &amp;growmax=1: the densify signal is the MAX over views of a splat's per-view screen-gradient norm (Brush v0.3.0
+    /// stats.rs: refine_weight_norm = max_pair; above_threshold divides it by the visible count), not the sum. Parity
+    /// 2026-10-10: Train's far sky shell grows only by densify; Brush selects growth on this signal.
+    /// </summary>
+    public static bool MaxViewGrad { get; set; }
+
+    /// <summary>
     /// &amp;deferkeys=1: a training step that does not read its loss never waits for its key count. The step used to read
     /// the 4-byte emit counter back before sorting, which drains the GPU every step; then the GPU idled while the CPU
     /// encoded sort, raster, loss and SSIM (gputimes, Counter late: 35.7 ms wall, 24.1 ms of GPU passes incl. the sort).
@@ -1642,7 +1649,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     public void AccumulateDensifyStats(int splatCount, MemoryBuffer1D<float, Stride1D.Dense>? splats = null, CameraParams? cam = null)
     {
         WriteU32x4(_dimsBuf!, (uint)splatCount, (uint)_width, (uint)_height,
-            (DensifyDenominatorFrustum ? 1u : 0u) | (AbsGrad ? 2u : 0u));
+            (DensifyDenominatorFrustum ? 1u : 0u) | (AbsGrad ? 2u : 0u) | (MaxViewGrad ? 4u : 0u));
         // Pixel-GS depth scaling needs this step's camera and the splat positions; without them (the gates) it is off.
         bool depthScale = PixelGsDepthGamma > 0f && PixelGsRadius > 0f && splats != null && cam != null;
         _densifyDepthCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor

@@ -1051,7 +1051,8 @@ public partial class Studio
                         $"offsets {fold.B0:+0.000;-0.000}/{fold.B1:+0.000;-0.000}/{fold.B2:+0.000;-0.000}) - the viewer shows the average photo's exposure");
             }
 
-            if (await FloaterCensusAsync(packed, n, views, targets, box, w, h))
+            int bubbled = await CameraBubbleAsync(packed, n, views, supervised, "end");
+            if (await FloaterCensusAsync(packed, n, views, targets, box, w, h) || bubbled > 0)
             {
                 // The end carve only zeroes opacity. Nothing densifies after it, so without this the scene was SAVED with
                 // them: Bathroom 7K kept 113,942 of 705,744 splats (16%) at opacity 0 - file size and draw cost for nothing.
@@ -1136,6 +1137,7 @@ public partial class Studio
             await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, CarveFrontMargin);
         }
         var r = await _trainer.ClassifyFloatersAsync(packed, n, CarveFloaterShare, minWeight: 1f, carve: true);
+        await CameraBubbleAsync(packed, n, views, supervised, $"iter {iter}");
         Console.WriteLine($"[Floaters] iter {iter}: carved {r.Floaters:N0} of {n:N0} " +
             $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s, {r.FloaterWeight / Math.Max(1e-9, r.WeightByFront.Sum()):P2} of the weight)");
     }

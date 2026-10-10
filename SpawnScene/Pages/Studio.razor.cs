@@ -281,6 +281,10 @@ public partial class Studio : IAsyncDisposable
         // TRAINING views (Train supervised 20.09 vs gsplat's held-out 20.42) and a 7K run ends at 0.34x the start rate.
         if (query.TryGetValue("poslrsteps", out var plsq) && int.TryParse(plsq, out var plsv) && plsv > 0)
             PositionLrMaxSteps = plsv;
+        // &camerabubble=X: remove splats within X camera-spreads of a supervised camera at every carve (Studio.CameraBubble).
+        if (query.TryGetValue("camerabubble", out var cbq) && float.TryParse(cbq,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var cbv))
+            CameraBubbleSpread = Math.Max(0f, cbv);
         // &revisedopacity=1: clone / split opacities 1 - sqrt(1 - a) (SplatDensityControl.RevisedOpacity).
         if (query.TryGetValue("revisedopacity", out var revOpQ)) SplatDensityControl.RevisedOpacity = revOpQ is "1" or "true";
         // &subgroups=1: the backward pass's tile reduction by subgroup operations (SplatTrainerGpu.UseSubgroupBackward).

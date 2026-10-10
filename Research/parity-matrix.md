@@ -415,7 +415,10 @@ waits); gt chain on Counter and Train. Stays opt-in: &bgcache.
 
 The backward is ~60% of the timed GPU work and 7x the forward (gsplat ~2-3x): the per-key workgroup barrier. The second
 target is the ~11-12 ms outside the timed passes. nb: barrier-free fused backward (each touched subgroup adds its partial
-to the per-splat totals with atomics, the gsplat / Brush structure).
+to the per-splat totals with atomics, the gsplat / Brush structure). **Result: slower - reverted.** Gate PASS, but Counter raster_backward
+23.13 ms (14.15 + scatter 1.70 before), 313.5 s vs 254.6 s: WebGPU has no float atomicAdd, so every add is a compare-exchange
+retry loop, and 9 of them per touched SUBGROUP per key (vs per key per tile) contend more than the barriers cost. gsplat /
+Brush have native float atomics (CUDA, Vulkan / DX12 via SPIR-V). The per-key barrier structure stays.
 
 ### Video source, user path (2026-10-10)
 

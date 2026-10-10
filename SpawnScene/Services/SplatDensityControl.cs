@@ -67,10 +67,12 @@ public static class SplatDensityControl
     /// <c>&amp;revisedopacity=1</c>: a clone (and its parent) and both split children get opacity 1 - sqrt(1 - a), so
     /// two of them on one pixel composite to the parent's a and a growth step barely changes the image (gsplat's
     /// revised_opacity, from "Revising Densification in Gaussian Splatting"; Brush grows image-preservingly too). Today
-    /// each apply costs 0.08-0.21 dB supervised at once (DrJohnson / c1 apply probes; parity 2026-10-09). GPU path
-    /// (GpuDensify) only. Off by default.
+    /// each apply costs 0.08-0.21 dB supervised at once (DrJohnson / c1 apply probes; parity 2026-10-09). GpuDensify and
+    /// the host oracle (Decide / Apply). DEFAULT since 2026-10-09 (Tuvok; TJ: "if you are sure, change them"): better on 10
+    /// of 11 benchmark scenes at 7K (DrJohnson +0.69, Train +0.32, Playroom +0.24, Truck +0.22 ...; Kitchen -0.07), fewer
+    /// splats, Bathroom fair 24.97 (24.85 before). &amp;revisedopacity=0 restores full-opacity copies.
     /// </summary>
-    public static bool RevisedOpacity { get; set; }
+    public static bool RevisedOpacity { get; set; } = true;
 
     /// <summary>
     /// A Gaussian is "large" when its biggest axis exceeds this fraction of the scene extent.
@@ -168,6 +170,10 @@ public static class SplatDensityControl
         /// survivor map). Missing entries mean "no parent" (zero the rest bands).
         /// </summary>
         public List<int> AddParent { get; } = new();
+
+        /// <summary>Kept splats whose opacity <see cref="Apply(IReadOnlyList{Splat}, Plan, out int[], out int[])"/> revises:
+        /// cloned parents under <see cref="RevisedOpacity"/> (they share their coverage with the copy).</summary>
+        public HashSet<int> ReviseKept { get; } = new();
 
         public int Cloned { get; set; }
         public int Split { get; set; }
@@ -282,9 +288,9 @@ public static class SplatDensityControl
                 // the parent's OWN distribution. Offsetting along a fixed axis instead would
                 // bias every split in the scene the same way.
                 if (plan.Add.Count + 2 > budget) continue;
-                plan.Add.Add(Child(s, sampleUnitNormal));
+                plan.Add.Add(Revised(Child(s, sampleUnitNormal)));
                 plan.AddParent.Add(i);
-                plan.Add.Add(Child(s, sampleUnitNormal));
+                plan.Add.Add(Revised(Child(s, sampleUnitNormal)));
                 plan.AddParent.Add(i);
                 plan.Remove.Add(i);
                 plan.Split++;
@@ -295,8 +301,9 @@ public static class SplatDensityControl
                 // the optimiser separates them - placing it by hand would be guessing at the
                 // direction the loss is already telling us about.
                 if (plan.Add.Count >= budget) continue;
-                plan.Add.Add(s);
+                plan.Add.Add(Revised(s));
                 plan.AddParent.Add(i);
+                if (RevisedOpacity) plan.ReviseKept.Add(i);
                 plan.Cloned++;
             }
         }
@@ -307,6 +314,14 @@ public static class SplatDensityControl
     /// One child of a split: displaced by a draw from the parent's ellipsoid, rotated into
     /// world space, and shrunk.
     /// </summary>
+    /// <summary><paramref name="s"/> with opacity 1 - sqrt(1 - a) under <see cref="RevisedOpacity"/> (else unchanged); GpuDensify's
+    /// ReviseOpacity.</summary>
+    static Splat Revised(Splat s)
+    {
+        if (RevisedOpacity) s.Opacity = 1f - MathF.Sqrt(MathF.Max(0f, 1f - s.Opacity));
+        return s;
+    }
+
     static Splat Child(in Splat parent, Func<float> sampleUnitNormal)
     {
         float lx = sampleUnitNormal() * parent.ScaleX;
@@ -364,7 +379,7 @@ public static class SplatDensityControl
         var adam = new List<int>(result.Capacity);
         var feat = new List<int>(result.Capacity);
         for (int i = 0; i < splats.Count; i++)
-            if (!drop.Contains(i)) { result.Add(splats[i]); adam.Add(i); feat.Add(i); }
+            if (!drop.Contains(i)) { result.Add(plan.ReviseKept.Contains(i) ? Revised(splats[i]) : splats[i]); adam.Add(i); feat.Add(i); }
         for (int a = 0; a < plan.Add.Count; a++)
         {
             result.Add(plan.Add[a]);

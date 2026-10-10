@@ -549,10 +549,12 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// <summary>
     /// <c>&amp;subgroups=1</c>: the backward pass reduces each key's tile gradients with subgroup operations
     /// (<see cref="SplatTrainerShaders.SubgroupBackward"/>) when the device was created with WebGPU <c>subgroups</c> (SpawnDev.ILGPU
-    /// requests every feature the adapter offers). Read when the pipelines are built. Off by default until the TrainerGate and
-    /// an A/B pass.
+    /// requests every feature the adapter offers). Read when the pipelines are built. DEFAULT since 2026-10-09: TrainerGate
+    /// PASS, quality unchanged and 1.6-1.8x faster training on Counter / Train / Kitchen / Bicycle (RTX 4000-series, Chrome 151,
+    /// subgroup size 32 - the only hardware it has been verified on). Devices without the feature keep the tree reduction;
+    /// &amp;subgroups=0 forces it.
     /// </summary>
-    public static bool UseSubgroupBackward { get; set; }
+    public static bool UseSubgroupBackward { get; set; } = true;
 
     /// <summary>Whether this trainer's backward runs the subgroup reduction (set when the pipelines are built).</summary>
     public bool SubgroupBackwardActive { get; private set; }

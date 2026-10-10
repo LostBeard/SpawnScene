@@ -110,9 +110,12 @@ public partial class Studio
     /// <c>&amp;exposure=auto</c>: per-photo gains only when the photos' EXIF exposure VARIES (ImportedImage.ExposureStops spread
     /// >= <see cref="ExposureAutoMinStops"/>). Parity 2026-10-09: gains off is better on 8 of 9 fixed-exposure benchmark scenes
     /// (Kitchen +0.79 / +1.41, Bonsai +0.64, Counter +0.45, Garden +0.40 ...; their JPGs carry no EXIF) but costs TJ's
-    /// Bathroom 5.9 dB fair (auto exposure, 6.1 stops of EXIF spread). No EXIF = no gains.
+    /// Bathroom 5.9 dB fair (auto exposure, 6.1 stops of EXIF spread). DEFAULT since 2026-10-09. Photos without EXIF keep
+    /// gains ON (wrongly off costs an auto-exposure capture ~6 dB, wrongly on costs a fixed one 0.3-1.4): only EXIF that
+    /// shows a constant exposure turns them off. The dataset path reads no EXIF: its still-image benchmark sets (fixed
+    /// exposure, EXIF stripped) train without gains, its video sets with them. &amp;exposure=gains forces them on, =0 off.
     /// </summary>
-    public static bool ExposureAutoOption { get; set; }
+    public static bool ExposureAutoOption { get; set; } = true;
 
     /// <summary>The EXIF exposure spread (stops) at which <see cref="ExposureAutoOption"/> turns gains on: a third of a stop,
     /// the smallest step a camera's auto exposure takes.</summary>
@@ -128,10 +131,11 @@ public partial class Studio
     void DecideExposureFromExif(IReadOnlyList<ImportedImage> images)
     {
         var stops = images.Where(i => i.ExposureStops.HasValue).Select(i => i.ExposureStops!.Value).ToList();
-        _photoExposureVaries = stops.Count >= 2 && stops.Max() - stops.Min() >= ExposureAutoMinStops;
+        // Unknown (fewer than two photos with EXIF exposure) keeps the gains: see ExposureAutoOption.
+        _photoExposureVaries = stops.Count < 2 || stops.Max() - stops.Min() >= ExposureAutoMinStops;
         if (ExposureAutoOption)
             Console.WriteLine($"[Train] exposure auto: {stops.Count} of {images.Count} photos carry EXIF exposure" +
-                (stops.Count >= 2 ? $", spread {stops.Max() - stops.Min():F2} stops" : "") +
+                (stops.Count >= 2 ? $", spread {stops.Max() - stops.Min():F2} stops" : " (unknown: keep the gains)") +
                 $" -> per-photo gains {(_photoExposureVaries == true ? "ON" : "OFF")}");
     }
 
@@ -272,7 +276,14 @@ public partial class Studio
     /// decay. Against a fixed 30,000 an 8,000-step run ends around 0.46x its starting rate,
     /// which is the schedule the published numbers come from.
     /// </summary>
-    public static int PositionLrMaxSteps { get; set; } = 30_000;
+    ///
+    /// SUPERSEDED 2026-10-09 (parity): 0 = the run's own schedule length, the DEFAULT (gsplat's 7K-end decays over its own
+    /// 7,000). Against a fixed 30,000 a 7K run ended at 0.34x and UNDERFIT - our score on the training photos sat at or
+    /// below gsplat's on held-out ones. Decay over the run: Train +0.57, DrJohnson +1.11, Kitchen +1.10, Bicycle +0.67
+    /// (with gains off), Counter +0.13; Stump -0.28, Bonsai -0.10, Garden -0.06; Bathroom fair 24.94 (24.85). The 1.5 dB
+    /// loss above was measured on a trainer since fixed in many places. &amp;poslrsteps=30000 restores the fixed length.
+    /// </summary>
+    public static int PositionLrMaxSteps { get; set; }
 
     /// <summary>
     /// Train the supervised views in a fresh random order every epoch, as the reference does
@@ -735,7 +746,7 @@ public partial class Studio
                     {
                         PositionLr = TrainingSchedule.ExponentialLr(
                             positionLrInit, positionLrInit * PositionLrDecay,
-                            g, PositionLrMaxSteps),
+                            g, PositionLrMaxSteps > 0 ? PositionLrMaxSteps : scheduleTotal),
                     };
 
                 // Slot in `supervised` for this iteration: file order, or a fresh permutation per epoch

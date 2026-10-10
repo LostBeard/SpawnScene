@@ -111,14 +111,22 @@ public class GpuDensifyTests
             Assert.That(r.PrunedBig, Is.EqualTo(plan.PrunedTooBig), "size prunes");
             if (afterReset) Assert.That(r.PrunedBig, Is.GreaterThan(0), "the size prune must be exercised");
 
-            // Survivors: identical rows, identical order, identical source maps.
+            // Revised opacity (SplatDensityControl.RevisedOpacity, the default): copies and cloned parents carry 1 - sqrt(1 - a).
+            static float Rev(float a) => SplatDensityControl.RevisedOpacity ? 1f - MathF.Sqrt(MathF.Max(0f, 1f - a)) : a;
+
+            // Survivors: identical rows (a cloned parent's opacity revised), identical order, identical source maps.
             int kept = cpu.Count - plan.Add.Count;
             for (int i = 0; i < kept; i++)
             {
                 Assert.That(adam[i], Is.EqualTo(cpuAdam[i]), $"survivor {i} adam source");
                 Assert.That(feat[i], Is.EqualTo(cpuFeat[i]), $"survivor {i} feature source");
                 for (int k = 0; k < F; k++)
-                    Assert.That(g[i * F + k], Is.EqualTo(packed[cpuAdam[i] * F + k]), $"survivor {i} float {k}");
+                {
+                    float want = packed[cpuAdam[i] * F + k];
+                    if (k == 9 && plan.ReviseKept.Contains(cpuAdam[i])) want = Rev(want);
+                    Assert.That(g[i * F + k], Is.EqualTo(want).Within(1e-6f), $"survivor {i} float {k}");
+                    if (k == 9) Assert.That(g[i * F + k], Is.EqualTo(cpu[i].Opacity).Within(1e-6f), $"survivor {i} opacity = host oracle");
+                }
             }
 
             // Added: same parents (as a multiset), fresh Adam, and each row is what its kind must be.
@@ -137,7 +145,8 @@ public class GpuDensifyTests
                 for (int k = 3; k < F; k++)
                 {
                     if (k is 6 or 7 or 8) continue;
-                    Assert.That(g[o + k], Is.EqualTo(packed[po + k]), $"added {j} feature {k}");
+                    float want = k == 9 ? Rev(packed[po + k]) : packed[po + k];
+                    Assert.That(g[o + k], Is.EqualTo(want).Within(1e-6f), $"added {j} feature {k}");
                 }
                 for (int k = 6; k <= 8; k++)
                 {

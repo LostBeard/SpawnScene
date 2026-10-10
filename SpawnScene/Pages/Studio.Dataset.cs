@@ -110,7 +110,6 @@ public partial class Studio
             $"maxDim={maxTrainDimension} poses={posePreference} patches={depthPatchesPerSide}");
         // The dataset path reads no EXIF (the benchmark sets carry none): &exposure=auto means no gains here.
         _photoExposureVaries = null;
-        if (ExposureAutoOption) Console.WriteLine("[Train] exposure auto: dataset path, no EXIF read -> per-photo gains OFF");
         if (forUi)
             SetUiStatus($"Loading {datasetName}…");
         try
@@ -124,6 +123,12 @@ public partial class Studio
             _importService.SkipPairMatching = useGroundTruthPoses;
             await _importService.LoadSampleDatasetAsync(datasetName);
             var images = _importService.Images.ToList();
+            // &exposure=auto on the dataset path: no EXIF is read. Video sets keep per-photo gains (a video camera's exposure
+            // drifts); still-image benchmark sets (fixed exposure, EXIF stripped) train without (ExposureAutoOption).
+            _photoExposureVaries = images.Any(im => im.SourceUrl.StartsWith(VideoFrameStore.Prefix, StringComparison.Ordinal));
+            if (ExposureAutoOption)
+                Console.WriteLine($"[Train] exposure auto: dataset path, {(_photoExposureVaries == true ? "video frames" : "still images, no EXIF read")}" +
+                    $" -> per-photo gains {(_photoExposureVaries == true ? "ON" : "OFF")}");
             if (images.Count < 2)
             {
                 Console.WriteLine($"[Dataset] FAIL: {datasetName} gave {images.Count} image(s)");

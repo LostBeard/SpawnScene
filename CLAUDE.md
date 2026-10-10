@@ -193,6 +193,23 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   pixels, held out 18.82 dB (black 18.45-18.69); Truck neutral; Bicycle -0.04 fair. [0, 1] (the reference's) darkens
   scenes where T stays > 0 (Bicycle -0.37 dB). `&randombg=0` black, `=1` [0, 1], `&randombgamp=A`. Scoring, the
   census, held-out pose refinement and the TrainerGate stay over black (the gate's background stage = FD-verified).
+- **Parity defaults (2026-10-09, Tuvok; TJ: "if you are sure, change them")** - measured on 11 benchmark scenes at 7K vs
+  gsplat 1.5.3 and Brush v0.3.0 with one scorer (tools/rescore.py) plus the Bathroom phone capture; Research/parity-matrix.md,
+  Research/overnight-2026-10-09.md. With all four: mean PSNR 26.98 vs Brush 26.95 / gsplat 26.73, SSIM 0.851 vs 0.841 / 0.833,
+  LPIPS 0.190 vs 0.200 / 0.207; Bathroom fair 24.97 (24.85 before).
+  1. Position lr decays 100x over the run's OWN length (`PositionLrMaxSteps` 0 = schedule length; was a fixed 30,000 that left
+     a 7K run at 0.34x and underfitting). `&poslrsteps=30000` = old.
+  2. `&exposure=auto` (ExposureAutoOption): per-photo gains only when the photos' EXIF exposure varies by >= 1/3 stop, or the
+     photos carry no EXIF (unknown keeps gains); the dataset path (no EXIF read) uses gains for video sets only. Gains off was
+     better on 8 of 9 fixed-exposure scenes (up to +1.4 dB), gains on are worth 5.9 dB fair on Bathroom (6.1 stops of EXIF
+     spread). `&exposure=gains` forces on, `=0` off.
+  3. Subgroup backward (SplatTrainerGpu.UseSubgroupBackward; SplatTrainerShaders.SubgroupBackward): WebGPU `subgroups`
+     reduction that skips subgroups a splat does not touch - 1.6-1.8x faster training, same quality, TrainerGate PASS.
+     Verified only on RTX 4000-series / Chrome 151 (subgroup size 32); no-feature devices keep the tree. `&subgroups=0` off.
+  4. Revised opacity (SplatDensityControl.RevisedOpacity; GpuDensify + host oracle): clone + parent and split children get
+     1 - sqrt(1 - a). Better on 10 of 11. `&revisedopacity=0` off.
+  Diagnostics: `&blobpick=1` (splats painting bad held-out views), `&splatstats=1` (dataset path too), tools/gap_anatomy.py.
+  Opt-ins: `&minviews=N`, `&camerabubble=X`, `&nearplane=X`.
 - **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):
   `exposure=1` per-photo 3x4 affine exposure, the photos' mean folded into the scene at the end (TrainerGate exposure
   case); `depthinit=N` seeds from the photos' DAv3 depth where two views agree, coloured from the device decode

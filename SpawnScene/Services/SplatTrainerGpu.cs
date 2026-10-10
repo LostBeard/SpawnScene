@@ -590,8 +590,17 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// </summary>
     public static float NearPlane { get; set; } = 0.2f;
 
+    /// <summary>
+    /// &amp;tighttiles=1: emit_keys bins a splat into the tiles of its opacity-aware, per-axis footprint (the box of the
+    /// ellipse where opacity x weight >= 1/255, at most the 3-sigma square) - the raster skips every pixel outside it, so
+    /// only keys that paint nothing are dropped. Long thin and faint splats cover far fewer tiles. Read when the pipelines
+    /// are built.
+    /// </summary>
+    public static bool TightTiles { get; set; }
+
     GPUComputePipeline MakePipeline(string wgsl, string entry)
     {
+        if (TightTiles) wgsl = wgsl.Replace("//TIGHT: ", "").Replace("//TIGHT:", "");
         if (NearPlane != 0.2f)
         {
             var lit = NearPlane.ToString("0.0#########", System.Globalization.CultureInfo.InvariantCulture);

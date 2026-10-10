@@ -4,6 +4,14 @@ Protocol (Research/parity-matrix.md): COLMAP poses, every 8th photo held out, 7K
 for both tools, photos at their exact size, in-app held-out PSNR / SSIM (the shared scorer, tools/rescore.py, agrees within
 0.04 dB / 0.004 - checked on every scene where it was run). gsplat 1.5.3 default strategy, same folders.
 
+## DEPLOYED 10-10 10:54 (336762b, run 38060769917): six new defaults live on spawnscene.com
+
+TJ 10-10: "defaults are your decision as you are the one running the tests ... quality and correctness is more important
+than speed but speed is important". Shipped: position-lr decay over the run, exposure=auto, subgroup backward, revised
+opacity, Brush's scale-lr schedule, tight tile footprints. Verified with no flags locally (Counter 3.03M keys, 239 s,
+27.80) and LIVE (Hamamni sample through the hub, Generate 7000: subgroup backward, scaleLr 0.01, gains on - the sample's
+photos carry no EXIF - 157.4 s vs 353 s on 10-08, 1.41M splats, DONE).
+
 ## Status (10-10 00:35): the four are DEFAULTS in code (13cd973), verified, NOT deployed
 
 TJ (10-09): "the current defaults are the current defaults because you set them. if you now think the defaults should change

@@ -285,12 +285,17 @@ public partial class Studio
     /// </summary>
     public static int PositionLrMaxSteps { get; set; }
 
-    /// <summary>&amp;scalelr=X: the log-scale learning rate at the start (default 0.005, the reference's). Brush v0.3.0 starts at
-    /// 0.01 (Research/brush-vs-spawnscene-2026-10-09.md).</summary>
-    public static float ScaleLrStart { get; set; } = 0.005f;
+    /// <summary>
+    /// &amp;scalelr=X: the log-scale learning rate at the start. DEFAULT 0.01 decaying to <see cref="ScaleLrEnd"/> 0.006 over
+    /// the run since 2026-10-10 (Brush v0.3.0's schedule; was the reference's flat 0.005). Measured on top of the 10-09
+    /// defaults, 7K: better on all 11 benchmark scenes (Kitchen +0.53, Room +0.48, DrJohnson +0.34, Playroom +0.28, Train
+    /// +0.26, Garden +0.22, Bicycle +0.17, Truck +0.16, Counter +0.13, Stump +0.10, Bonsai +0.03) and Bathroom (held out
+    /// 18.89 -> 19.22, fair 24.89 -> 25.15). &amp;scalelr=0.005&amp;scalelrend=0 restores the flat rate.
+    /// </summary>
+    public static float ScaleLrStart { get; set; } = 0.01f;
 
-    /// <summary>&amp;scalelrend=Y: decay the log-scale rate to Y over the run (0 = flat, the default; Brush 0.006).</summary>
-    public static float ScaleLrEnd { get; set; }
+    /// <summary>&amp;scalelrend=Y: the log-scale rate decays to Y over the run (default 0.006; 0 = flat at <see cref="ScaleLrStart"/>).</summary>
+    public static float ScaleLrEnd { get; set; } = 0.006f;
 
     /// <summary>&amp;shramp=0: train every SH band from step 0 (Brush) instead of one degree per 1000 iterations (default on).</summary>
     public static bool ShDegreeRamp { get; set; } = true;

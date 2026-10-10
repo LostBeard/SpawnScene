@@ -320,7 +320,11 @@ Counter: ~13.5 keys per splat (5.67M keys / 419K splats).
 | s2 &scalelr=0.01&scalelrend=0.006 | **20.07 / 0.786 (+0.26)** | **29.59 / 0.921 (+0.53)** | **24.68 / 0.735 (+0.17)** |
 
 The log-scale lr at Brush's 0.01 decaying to 0.006 (ours: a flat 0.005) wins all three - Kitchen now above gsplat (29.37)
-and Brush (29.18). SH-from-0 is mixed: dropped. sl chain: s2 on the other 8 scenes + Bathroom.
+and Brush (29.18). SH-from-0 is mixed: dropped. sl (s2 on the rest, vs ro2 = the same settings): Counter 27.80 (+0.13),
+Bonsai 29.93 (+0.03), DrJohnson 29.14 (+0.34), Room **30.69** (+0.48), Truck 24.68 (+0.16), Garden 26.63 (+0.22), Stump 26.13
+(+0.10), Playroom 30.50 (+0.28); Bathroom held out 19.22 / 0.859 (18.89), fair 25.15 (24.89). **Better on all 12 - made the
+DEFAULT 2026-10-10.** In-app mean over the 11 benchmark scenes with all five defaults: **27.26** (Brush 26.95, gsplat 26.73,
+shared scorer); best PSNR on 9 of 11 (behind Brush on Train 20.07 vs 21.07 and Bonsai 29.93 vs 30.47; Truck 24.68 vs 24.71).
 
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 

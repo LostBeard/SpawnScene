@@ -13,6 +13,10 @@ gains; dataset path: video sets on, still benchmark sets off), subgroup backward
 0.724 (271 s) - gains off by the auto rule; Bathroom 18.89 / 0.849, fair 24.89 - gains on (EXIF 6.13 stops). Every log shows
 the subgroup backward. Deploying to spawnscene.com is TJ's call.
 
+**10-10 03:25: a fifth default** - the log-scale lr 0.01 decaying to 0.006 (Brush's; was a flat 0.005): better on all 11
+benchmark scenes (+0.03..+0.53) and Bathroom (fair 25.15). In-app mean PSNR with all five: **27.26** vs Brush 26.95 / gsplat
+26.73; behind only on Train (-1.0 vs Brush), Bonsai (-0.54) and Truck (-0.03).
+
 Not made defaults: &minviews (Room -0.37), &camerabubble (does not hit the blob), &nearplane (+0.2-0.3, not scale-relative
 yet), no opacity reset (worse), Brush's position lr (neutral to worse), opacity lr 0.05 (worse).
 

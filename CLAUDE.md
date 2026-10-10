@@ -208,6 +208,9 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
      Verified only on RTX 4000-series / Chrome 151 (subgroup size 32); no-feature devices keep the tree. `&subgroups=0` off.
   4. Revised opacity (SplatDensityControl.RevisedOpacity; GpuDensify + host oracle): clone + parent and split children get
      1 - sqrt(1 - a). Better on 10 of 11. `&revisedopacity=0` off.
+  5. (2026-10-10) Log-scale lr 0.01 decaying to 0.006 over the run (Brush's; was a flat 0.005): better on all 11 benchmark
+     scenes (+0.03..+0.53) and Bathroom (fair 25.15). With all five, in-app mean PSNR 27.26 (Brush 26.95, gsplat 26.73).
+     `&scalelr=0.005&scalelrend=0` = old.
   Diagnostics: `&blobpick=1` (splats painting bad held-out views), `&splatstats=1` (dataset path too), tools/gap_anatomy.py.
   Opt-ins: `&minviews=N`, `&camerabubble=X`, `&nearplane=X`.
 - **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):

@@ -285,6 +285,16 @@ public partial class Studio
     /// </summary>
     public static int PositionLrMaxSteps { get; set; }
 
+    /// <summary>&amp;scalelr=X: the log-scale learning rate at the start (default 0.005, the reference's). Brush v0.3.0 starts at
+    /// 0.01 (Research/brush-vs-spawnscene-2026-10-09.md).</summary>
+    public static float ScaleLrStart { get; set; } = 0.005f;
+
+    /// <summary>&amp;scalelrend=Y: decay the log-scale rate to Y over the run (0 = flat, the default; Brush 0.006).</summary>
+    public static float ScaleLrEnd { get; set; }
+
+    /// <summary>&amp;shramp=0: train every SH band from step 0 (Brush) instead of one degree per 1000 iterations (default on).</summary>
+    public static bool ShDegreeRamp { get; set; } = true;
+
     /// <summary>
     /// Train the supervised views in a fresh random order every epoch, as the reference does
     /// (<see cref="TrainingSchedule.ShuffleEpoch"/>), instead of file order. <c>&amp;shuffleviews=0</c> for file order.
@@ -555,7 +565,7 @@ public partial class Studio
                 // 0.1*rigRadius - and MaxScaleFraction is that same 0.1 (see its doc for why not 0.05).
                 geo = new SplatTrainerGpu.GeometryStep(
                     PositionLr: positionLrInit,
-                    LogScaleLr: 0.005f,
+                    LogScaleLr: ScaleLrStart,
                     RotationLr: 0.001f,
                     MinScale: 1e-6f,
                     MaxScale: MaxScaleFraction * MathF.Max(rigRadius, 1e-3f));
@@ -734,7 +744,7 @@ public partial class Studio
                 int scheduleTotal = _scheduleTotal > 0 ? _scheduleTotal : iterations;
                 // A block continues the coarse model's SH schedule: restarted at degree 0, the frozen context would
                 // render without the bands it learned.
-                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(g);
+                _trainer.ActiveShDegree = SphericalHarmonics.DegreeForIteration(ShDegreeRamp ? g : 1 << 20);
                 if (it == 0 || it == 1000 || it == 2000 || it == 3000)
                     Console.WriteLine($"[Train] SH degree -> {_trainer.ActiveShDegree} at iter {it}");
 
@@ -747,6 +757,9 @@ public partial class Studio
                         PositionLr = TrainingSchedule.ExponentialLr(
                             positionLrInit, positionLrInit * PositionLrDecay,
                             g, PositionLrMaxSteps > 0 ? PositionLrMaxSteps : scheduleTotal),
+                        // &scalelrend: the log-scale rate decays over the run too (Brush v0.3.0: 0.01 -> 0.006).
+                        LogScaleLr = ScaleLrEnd > 0f
+                            ? TrainingSchedule.ExponentialLr(ScaleLrStart, ScaleLrEnd, g, scheduleTotal) : g0.LogScaleLr,
                     };
 
                 // Slot in `supervised` for this iteration: file order, or a fresh permutation per epoch

@@ -559,6 +559,13 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// <summary>Whether this trainer's backward runs the subgroup reduction (set when the pipelines are built).</summary>
     public bool SubgroupBackwardActive { get; private set; }
 
+    /// <summary>&amp;fusescatter=1: with the subgroup backward, add gradients into the per-splat totals inside the backward
+    /// (<see cref="SplatTrainerShaders.FusedScatterBackward"/>) and skip the scatter pass. Read when the pipelines are built.</summary>
+    public static bool FuseScatter { get; set; }
+
+    /// <summary>Whether the (non-depth) backward has the scatter folded in.</summary>
+    public bool FusedScatterActive { get; private set; }
+
     /// <summary>The backward pass's WGSL: <see cref="SplatTrainerShaders.RasterBackward"/>, or its subgroup variant.</summary>
     string BackwardSource()
     {
@@ -568,7 +575,10 @@ public sealed partial class SplatTrainerGpu : IDisposable
             Console.WriteLine(SubgroupBackwardActive
                 ? "[Trainer] backward: subgroup reduction"
                 : "[Trainer] backward: subgroups requested but the device has no 'subgroups' feature - tree reduction");
-        return SubgroupBackwardActive ? SplatTrainerShaders.SubgroupBackward(SplatTrainerShaders.RasterBackward) : SplatTrainerShaders.RasterBackward;
+        FusedScatterActive = SubgroupBackwardActive && FuseScatter;
+        if (FusedScatterActive) Console.WriteLine("[Trainer] backward: scatter folded into the backward");
+        return FusedScatterActive ? SplatTrainerShaders.FusedScatterBackward(SplatTrainerShaders.RasterBackward)
+            : SubgroupBackwardActive ? SplatTrainerShaders.SubgroupBackward(SplatTrainerShaders.RasterBackward) : SplatTrainerShaders.RasterBackward;
     }
 
     /// <summary>
@@ -2157,30 +2167,45 @@ public sealed partial class SplatTrainerGpu : IDisposable
         // densify_abs is filled HERE with peak per-pixel |dCentre| (AbsGS). Clear first so a
         // previous view cannot leak into densify_accum after this step.
         _densifyAbs!.MemSetToZero();
+        // Fused (non-depth, FusedScatterActive): the backward adds into the per-splat totals itself, so they are cleared
+        // first and the scatter pass below is skipped.
+        bool fused = FusedScatterActive && !depthOn;
+        if (fused) _gradFixed!.MemSetToZero();
         accel.FlushPendingCommands();
         // grad_per_key is written for every key this frame, so stale values cannot leak in.
-        var backwardEntries = new List<GPUBindGroupEntry>
-        {
-            Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _ranges!.GetGPUBuffer()!),
-            Buf(3, _values!.GetGPUBuffer()!), Buf(4, _outFinalT!.GetGPUBuffer()!),
-            Buf(5, _outEnd!.GetGPUBuffer()!), Buf(6, _dLdPix!.GetGPUBuffer()!),
-            Buf(7, _gradKeyA!.GetGPUBuffer()!), Buf(8, _gradKeyB!.GetGPUBuffer()!),
-            Buf(9, _gradKeyC!.GetGPUBuffer()!),
-            Buf(10, _densifyAbs!.GetGPUBuffer()!),
-            Buf(11, _splatColour!.GetGPUBuffer()!),
-        };
+        var backwardEntries = fused
+            ? new List<GPUBindGroupEntry>
+            {
+                Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _ranges!.GetGPUBuffer()!),
+                Buf(3, _values!.GetGPUBuffer()!), Buf(4, _outFinalT!.GetGPUBuffer()!),
+                Buf(5, _outEnd!.GetGPUBuffer()!), Buf(6, _dLdPix!.GetGPUBuffer()!),
+                Buf(7, _gradFixed!.GetGPUBuffer()!),
+                Buf(10, _densifyAbs!.GetGPUBuffer()!),
+                Buf(11, _splatColour!.GetGPUBuffer()!),
+            }
+            : new List<GPUBindGroupEntry>
+            {
+                Buf(0, _uniformBuf!), Buf(1, splatGpu), Buf(2, _ranges!.GetGPUBuffer()!),
+                Buf(3, _values!.GetGPUBuffer()!), Buf(4, _outFinalT!.GetGPUBuffer()!),
+                Buf(5, _outEnd!.GetGPUBuffer()!), Buf(6, _dLdPix!.GetGPUBuffer()!),
+                Buf(7, _gradKeyA!.GetGPUBuffer()!), Buf(8, _gradKeyB!.GetGPUBuffer()!),
+                Buf(9, _gradKeyC!.GetGPUBuffer()!),
+                Buf(10, _densifyAbs!.GetGPUBuffer()!),
+                Buf(11, _splatColour!.GetGPUBuffer()!),
+            };
         if (depthOn) backwardEntries.Add(Buf(15, _depthIo!.GetGPUBuffer()!));
         Dispatch(depthOn ? _rasterBackwardDepth! : _rasterBackward!, _tilesX, _tilesY, backwardEntries.ToArray());
 
         await PhaseAsync("backward");
         // Cleared here, not at the top of the step: the census and densify accum read the
         // completed step's totals after TrainStepAsync returns.
-        _gradFixed!.MemSetToZero();
+        if (!fused) _gradFixed!.MemSetToZero();
         if (depthOn) _gradInvz!.MemSetToZero();
         accel.FlushPendingCommands();
 
         // ── Scatter per-key gradients into per-splat totals (f32 CAS add) ──
-        if (depthOn)
+        if (fused) { }
+        else if (depthOn)
         {
             // counts.y = where the per-key dL/d(1/z) start in depth_io.
             WriteU32x4(_countBuf!, (uint)LastKeyCount, (uint)(2L * pixels), 0u, 0u);

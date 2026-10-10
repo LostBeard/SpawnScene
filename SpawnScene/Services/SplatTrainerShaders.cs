@@ -1123,6 +1123,65 @@ fn raster_backward(
         return "enable subgroups;" + Environment.NewLine + "diagnostic(off, subgroup_uniformity);" + Environment.NewLine + body.Replace(DeclOld, DeclNew);
     }
 
+
+    /// <summary>
+    /// <see cref="SubgroupBackward"/> with the scatter pass folded in (<c>&amp;fusescatter=1</c>): the end-of-batch write-out
+    /// adds each key's nine gradients straight into the per-splat totals (f32 compare-exchange, the scatter's rules: zero
+    /// and non-finite skipped, same slots) instead of writing per-key buffers for a second pass to read. Binding 7 is the
+    /// totals; 8 and 9 are gone. Not for the depth-supervised build (it keeps per-key dL/d(1/z) and the scatter).
+    /// </summary>
+    public static string FusedScatterBackward(string rasterBackward)
+    {
+        string s = SubgroupBackward(rasterBackward);
+        foreach (var (old, nu) in new[] { (FuseBindOld, FuseBindNew), (FuseZeroOld, ""), (FuseOutOld, FuseOutNew) })
+        {
+            if (!s.Contains(old)) throw new InvalidOperationException("FusedScatterBackward: RasterBackward changed - update the fusion");
+            s = s.Replace(old, nu);
+        }
+        return s;
+    }
+    const string FuseBindOld = @"@group(0) @binding(7) var<storage, read_write> grad_a : array<f32>;   // dR, dG, dB
+@group(0) @binding(8) var<storage, read_write> grad_b : array<f32>;   // dOpacity, dCentre.x, dCentre.y
+@group(0) @binding(9) var<storage, read_write> grad_c : array<f32>;   // dConic a, b, c
+";
+    const string FuseBindNew = @"@group(0) @binding(7) var<storage, read_write> grad_fixed : array<atomic<u32>>; // f32 bits, 9 per splat (FusedScatterBackward)
+const FINITE_MAX : f32 = 3.0e38;
+fn grad_add(idx : u32, v : f32) {
+    if (v == 0.0 || !(abs(v) <= FINITE_MAX)) { return; }
+    var old = atomicLoad(&grad_fixed[idx]);
+    loop {
+        let r = atomicCompareExchangeWeak(&grad_fixed[idx], old, bitcast<u32>(bitcast<f32>(old) + v));
+        if (r.exchanged) { break; }
+        old = r.old_value;
+    }
+}
+";
+    const string FuseZeroOld = @"    for (var z = tile_end + li; z < range.y; z = z + 256u) {
+        grad_a[z * 3u + 0u] = 0.0; grad_a[z * 3u + 1u] = 0.0; grad_a[z * 3u + 2u] = 0.0;
+        grad_b[z * 3u + 0u] = 0.0; grad_b[z * 3u + 1u] = 0.0; grad_b[z * 3u + 2u] = 0.0;
+        grad_c[z * 3u + 0u] = 0.0; grad_c[z * 3u + 1u] = 0.0; grad_c[z * 3u + 2u] = 0.0;
+//DEPTH:         depth_io[2u * u32(u.viewport.x) * u32(u.viewport.y) + z] = 0.0;
+    }
+";
+    const string FuseOutOld = @"            let kk = lo + li;
+            let b3 = kk * 3u;
+            grad_a[b3 + 0u] = bA[li].x;
+            grad_a[b3 + 1u] = bA[li].y;
+            grad_a[b3 + 2u] = bA[li].z;
+            grad_b[b3 + 0u] = bA[li].w;
+            grad_b[b3 + 1u] = bB[li].x;
+            grad_b[b3 + 2u] = bB[li].y;
+            grad_c[b3 + 0u] = bB[li].z;
+            grad_c[b3 + 1u] = bB[li].w;
+            grad_c[b3 + 2u] = bC[li];
+";
+    const string FuseOutNew = @"            let kk = lo + li;
+            let o9 = values[kk] * 9u;
+            grad_add(o9 + 0u, bA[li].x); grad_add(o9 + 1u, bA[li].y); grad_add(o9 + 2u, bA[li].z);
+            grad_add(o9 + 3u, bA[li].w); grad_add(o9 + 4u, bB[li].x); grad_add(o9 + 5u, bB[li].y);
+            grad_add(o9 + 6u, bB[li].z); grad_add(o9 + 7u, bB[li].w); grad_add(o9 + 8u, bC[li]);
+";
+
     const string DeclOld = @"var<workgroup> redA : array<vec4<f32>, 256>;   // dR, dG, dB, dOpacity
 var<workgroup> redB : array<vec4<f32>, 256>;   // dCentreX, dCentreY, dConicA, dConicB
 var<workgroup> redC : array<f32, 256>;         // dConicC

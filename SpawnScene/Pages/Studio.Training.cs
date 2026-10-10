@@ -307,6 +307,17 @@ public partial class Studio
     /// </summary>
     public static int ShMaxDegree { get; set; } = 3;
 
+    /// <summary>
+    /// &amp;farprune=R: every densify prunes splats centred more than R camera spreads (RMS distance of the supervised
+    /// cameras from their centroid) from that centroid. Parity 2026-10-10: Train keeps 6.7% of its splats past 16 spreads
+    /// (bright, opacity median 0.37 - the sky blobs of held-out views), Brush none; Brush prunes centres far outside its
+    /// bounds (train.rs). 0 = off.
+    /// </summary>
+    public static float FarPruneSpreads { get; set; }
+
+    System.Numerics.Vector3 _farPruneCentre;
+    float _farPruneRadius;
+
     /// <summary>&amp;cputimes=1 (diagnostic): per cycle, CPU encode ms per training step vs the loop's wall ms per step.</summary>
     public static bool CpuTimesOption { get; set; }
 
@@ -574,6 +585,14 @@ public partial class Studio
             if (rigViews.Count == 0) rigViews = views.ToList();
             float rigRadius = TrainingSchedule.CamerasExtent(rigViews.Select(v => v.Camera.Position).ToList());
             if (rigRadius <= 0f) rigRadius = MathF.Max(box.Diagonal, 1e-3f);
+            {
+                var rig = rigViews.Select(v => v.Camera.Position).ToArray();
+                _farPruneCentre = rig.Aggregate(System.Numerics.Vector3.Zero, (a, b) => a + b) / rig.Length;
+                float rigSpread = MathF.Sqrt(rig.Average(c => (c - _farPruneCentre).LengthSquared()));
+                _farPruneRadius = FarPruneSpreads > 0f ? FarPruneSpreads * rigSpread : 0f;
+                if (_farPruneRadius > 0f)
+                    Console.WriteLine($"[Train] far prune: splats past {FarPruneSpreads:G3} camera spreads ({_farPruneRadius:F2} units) at each densify");
+            }
             _trainer.PixelGsRadius = rigRadius;   // Pixel-GS's radius is exactly this: 1.1 x the cameras' extent
             if (SplatTrainerGpu.PixelGsDepthGamma > 0f)
                 Console.WriteLine($"[Train] Pixel-GS depth scaling: gamma {SplatTrainerGpu.PixelGsDepthGamma}, radius {rigRadius:F3}");
@@ -1444,7 +1463,8 @@ public partial class Studio
         var r = await _gpuDensify.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
             new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity && OpacityResetCaps,
                 Seed: (uint)(1234 + n), NoOp: !pruneOnly && (DensifyNoOp || !densify), Trainable: _trainer.TrainableVolume,
-                GrowOnlyInside: _trainer.GrowOnlyInside, PruneOnly: pruneOnly));
+                GrowOnlyInside: _trainer.GrowOnlyInside, PruneOnly: pruneOnly,
+                FarCentre: _farPruneCentre, FarRadius: _trainer.TrainableVolume == null ? _farPruneRadius : 0f));
 
         // Always report, including - especially including - when the answer is "nothing".
         Console.WriteLine(

@@ -470,6 +470,32 @@ extrapolation on far sky splats seen from a narrow cone of directions. sh chain:
 still there. The blobs are view-independent bright splats in front of the hills/sky: geometry or opacity, not colour
 extrapolation. Next: identify them (&blobpick / splat dump: depth, size, opacity, how many training views see them) and
 compare with what Brush prunes (centres > 10x the 90th-percentile bounds, relocation of the faint ones).
+
+**bk (&blobpick, &blobpickviews=00001,00049,00081 on a 12x8 grid):** the heaviest splats in 00001's blown-out patch are
+bright (SH DC up to 2.5 = saturated white), FAR (depth 8-15) and thinly seen (in frame of 51-59 of 263 photos); the clean
+sky on the left is painted by splats at depth 2-3 that 137-178 photos see. 00081's sky has splats at depth ~72.
+
+**ss (&splatstats radial shells, ours vs Brush's export_7000.ply via tools/splat_stats.py --colmap; same frame, camera
+spread 3.878 in both):**
+
+| shell (camera spreads from their centroid) | ours (440K) | Brush (845K) |
+|---|---|---|
+| 0-1 | 62.2%, op50 0.22 | 76.2%, op50 0.16 |
+| 4-8 | 6.0%, op50 0.23, 3,303 bright-opaque | 3.0%, op50 0.11, 802 |
+| 8-16 | 3.0%, op50 0.27, 3,039 | 0.6%, op50 0.08, 236 |
+| **16+** | **6.7%, op50 0.37, 82% bright, 14,087 bright-opaque** | **none** |
+
+The COLMAP init has 1.7% of its points past 16 spreads (3,113); densification grows that shell ~10x (29K). Brush keeps
+nothing past 16 (its prune of centres far outside the bounds). `&farprune=R` (new, opt-in): every densify prunes centres
+past R spreads from the camera centroid. fp chain: R = 16, 8.
+
+**fp: far prune REJECTED.** Train (in-app PSNR / SSIM; anatomy gap to Brush): R=16 20.02 / 0.778 (-1.04), 156 s; R=8 19.95 /
+0.775 (-1.10), 136 s; defaults 20.10-20.19 / 0.787 (-0.85), 121 s. Pruning the far shell empties it (stats: 0 past R) but the
+score drops and the run slows: the sky then has to be painted by nearer splats. So the far shell is not wrong to exist -
+Brush also has a sky, painted by FAINT far splats (op50 0.08 at 8-16) and bright near ones (1-2 spreads: 41% bright).
+Ours is OPAQUE and bright far out (op50 0.37 past 16). Next suspects: what keeps Brush's far splats faint (its growth
+signal max-over-views, which grows less where few views agree; opacity regularisation; position lr x median size keeping
+centres from drifting outward) - measure the shells over training to see when ours grows (init 1.7% -> 6.7%).
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

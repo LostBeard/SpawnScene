@@ -18,6 +18,13 @@ public partial class Studio
     /// </summary>
     public static bool BlobPickOption { get; set; }
 
+    /// <summary>
+    /// &amp;blobpickviews=00001,00049: pick these held-out views (photo stems) instead of the ones 4 dB under the median, on a
+    /// finer 12x8 grid. 2026-10-10: Train's held-out views lose 2-3.4 dB to Brush to bright blobs in the sky - not 4 dB
+    /// under our own median, so the default rule never looked at them.
+    /// </summary>
+    public static string[]? BlobPickViews { get; set; }
+
     private async Task BlobPickAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
         IReadOnlyList<int> supervised, MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box)
     {
@@ -35,7 +42,10 @@ public partial class Studio
         if (held.Count == 0) return;
         var sorted = held.Select(x => x.Psnr).OrderBy(x => x).ToArray();
         float median = sorted[sorted.Length / 2];
-        var bad = held.Where(x => x.Psnr < median - 4f).OrderBy(x => x.Psnr).Take(3).ToList();
+        var bad = BlobPickViews is { Length: > 0 } named
+            ? held.Where(x => named.Contains(System.IO.Path.GetFileNameWithoutExtension(views[x.View].ImageName))).ToList()
+            : held.Where(x => x.Psnr < median - 4f).OrderBy(x => x.Psnr).Take(3).ToList();
+        int gridX = BlobPickViews is { Length: > 0 } ? 12 : 6, gridY = BlobPickViews is { Length: > 0 } ? 8 : 4;
         Console.WriteLine($"[Blob] held-out median {median:F2} dB; {bad.Count} view(s) more than 4 dB under it: " +
             string.Join(", ", bad.Select(b => $"{System.IO.Path.GetFileNameWithoutExtension(views[b.View].ImageName)} {b.Psnr:F2}")));
         var sup = supervised.Select(vi => views[vi].Camera.ScaledTo(w, h)).ToList();
@@ -48,10 +58,10 @@ public partial class Studio
             var cam = views[vi].Camera.ScaledTo(w, h);
             var (near, far) = SplatBounds.DepthRangeFor(box, cam);
             string tag = System.IO.Path.GetFileNameWithoutExtension(views[vi].ImageName);
-            for (int gy = 0; gy < 4; gy++)
-                for (int gx = 0; gx < 6; gx++)
+            for (int gy = 0; gy < gridY; gy++)
+                for (int gx = 0; gx < gridX; gx++)
                 {
-                    int x = (int)((gx + 0.5f) * w / 6f), y = (int)((gy + 0.5f) * h / 4f);
+                    int x = (int)((gx + 0.5f) * w / gridX), y = (int)((gy + 0.5f) * h / gridY);
                     var hits = await _trainer.PickPixelAsync(packed, n, cam, near, far, x, y, minWeight: 0.1f);
                     foreach (var hit in hits.Take(2))
                     {

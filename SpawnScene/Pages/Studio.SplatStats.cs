@@ -78,5 +78,25 @@ public partial class Studio
         Console.WriteLine($"[Stats] opaque (> 0.5) within 0.1 spreads of a camera: held out {nearHeld:N0}, supervised {nearSup:N0}, " +
             $"held out only {nearHeldOnly:N0} ({heldCams.Length} held-out, {supCams.Length} supervised cameras)");
         Console.WriteLine($"[Stats] dark opaque (luma < 0.2, opacity > 0.5): {dark / (float)n:P2}, of them within 0.5 spreads of a camera: {darkNear:N0}");
+        // Radial: distance from the camera centroid in spreads (parity 2026-10-10: Train's held-out sky blobs are bright, far,
+        // thinly-seen splats). Per shell: share, median opacity, bright (luma > 0.9) and bright opaque (also > 0.3).
+        float[] edges = { 0, 1, 2, 4, 8, 16, float.PositiveInfinity };
+        var shells = new List<string>();
+        for (int e = 0; e + 1 < edges.Length; e++)
+        {
+            var idx = new List<int>();
+            for (int i = 0; i < n; i++)
+            {
+                int o = i * SplatFormat.Floats;
+                float r = (new Vector3(rows[o], rows[o + 1], rows[o + 2]) - mean).Length() / spread;
+                if (r >= edges[e] && r < edges[e + 1]) idx.Add(i);
+            }
+            string range = $"{edges[e]:G}-{(float.IsInfinity(edges[e + 1]) ? "inf" : edges[e + 1].ToString("G"))}";
+            if (idx.Count == 0) { shells.Add($"{range}: 0"); continue; }
+            var op = idx.Select(i => opac[i]).OrderBy(v => v).ToArray();
+            shells.Add($"{range}: {idx.Count / (float)n:P2} op50 {op[op.Length / 2]:F2} bright {idx.Count(i => lum[i] > 0.9f) / (float)idx.Count:P1} " +
+                $"bright-opaque {idx.Count(i => lum[i] > 0.9f && opac[i] > 0.3f):N0}");
+        }
+        Console.WriteLine("[Stats] radial (spreads from the camera centroid) " + string.Join(" | ", shells));
     }
 }

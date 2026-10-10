@@ -73,7 +73,9 @@ public sealed class GpuDensify : IDisposable
         bool NoOp = false,
         SplatEditor.Volume? Trainable = null,
         SplatEditor.Volume? GrowOnlyInside = null,
-        bool PruneOnly = false);
+        bool PruneOnly = false,
+        System.Numerics.Vector3 FarCentre = default,
+        float FarRadius = 0f);
 
     /// <summary>
     /// The grown set. <see cref="Packed"/>, <see cref="AdamSources"/> and <see cref="FeatureSources"/> are owned
@@ -103,6 +105,8 @@ public sealed class GpuDensify : IDisposable
         public int PruneOnly;               // 1: drop the faint (opacity under MinOpacity) and nothing else - a compaction
         public int BrushGrowth;             // 1: every candidate grows one copy, picked by a weighted race (SplatDensityControl.BrushGrowth)
         public uint Seed;
+        public float FarX, FarY, FarZ;      // &farprune: prune a centre farther than FarRadius from here (0 = off)
+        public float FarRadius;
     }
 
     public struct SelectParams
@@ -158,6 +162,8 @@ public sealed class GpuDensify : IDisposable
             PruneOnly = o.PruneOnly ? 1 : 0,
             BrushGrowth = SplatDensityControl.BrushGrowth ? 1 : 0,
             Seed = o.Seed,
+            FarX = o.FarCentre.X, FarY = o.FarCentre.Y, FarZ = o.FarCentre.Z,
+            FarRadius = o.FarRadius,
         };
         // The trainable volume is its own kernel parameter, as SplatEditor's kernels take it (nested in the params
         // struct it is the only such layout in the app); an unused one is the identity, never read (HasTrainable 0).
@@ -271,7 +277,10 @@ public sealed class GpuDensify : IDisposable
         if (p.NoOp == 0 && !frozen)
         {
             // Same order as the host: prune first, a splat being removed is never densified.
+            float fx = packed[o] - p.FarX, fy = packed[o + 1] - p.FarY, fz = packed[o + 2] - p.FarZ;
             if (opacity < p.MinOpacity) a = PruneFaint;
+            // &farprune: a centre far outside the camera rig (counted with the bloated).
+            else if (p.FarRadius > 0f && fx * fx + fy * fy + fz * fz > p.FarRadius * p.FarRadius) a = PruneBig;
             else if (p.PruneOnly == 0 && p.AfterReset != 0 && (maxScale > p.MaxWorldSize || maxRadius[i] > p.MaxScreenRadiusPx)) a = PruneBig;
             // A partitioned block grows only in the cell it keeps: a clone in its overlap margin is trained and then
             // dropped at the merge - 330K of a 500K block budget went there (TruckFull 2x2, 2026-10-05).

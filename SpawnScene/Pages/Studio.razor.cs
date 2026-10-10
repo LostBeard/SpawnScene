@@ -288,6 +288,10 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("scalelrend", out var sleq) && float.TryParse(sleq, System.Globalization.NumberStyles.Float, inv, out var slev))
             ScaleLrEnd = Math.Max(0f, slev);
         if (query.TryGetValue("shramp", out var shrq)) ShDegreeRamp = shrq is not ("0" or "false");
+        // &farprune=R: prune splats past R camera spreads at each densify (Studio.Training FarPruneSpreads).
+        if (query.TryGetValue("farprune", out var farPruneQ) && float.TryParse(farPruneQ,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var farPrune))
+            FarPruneSpreads = farPrune;
         // &shmax=N: cap the trained SH degree (Studio.Training ShMaxDegree).
         if (query.TryGetValue("shmax", out var shMaxQ) && int.TryParse(shMaxQ, out var shMax)) ShMaxDegree = Math.Clamp(shMax, 0, 3);
         // &videoframes=N: frames taken from a picked video (Studio.Projects VideoFrameCount; default 120).
@@ -299,6 +303,9 @@ public partial class Studio : IAsyncDisposable
             SparsePointCloudInit.ScaleMultiplier = isv;
         // &blobpick=1: pick the splats painting badly-scored held-out views (Studio.BlobPick).
         if (query.TryGetValue("blobpick", out var bpq)) BlobPickOption = bpq is "1" or "true";
+        // &blobpickviews=a,b: the held-out views (photo stems) blobpick examines, on a 12x8 grid.
+        if (query.TryGetValue("blobpickviews", out var bpvq))
+            BlobPickViews = bpvq.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         // &minviews=N: remove splats in frame of fewer than N supervised photos at every carve (Studio.CameraBubble).
         if (query.TryGetValue("minviews", out var mvq) && int.TryParse(mvq, out var mvi)) MinViewsSupport = Math.Max(0, mvi);
         // &camerabubble=X: remove splats within X camera-spreads of a supervised camera at every carve (Studio.CameraBubble).

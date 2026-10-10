@@ -315,8 +315,41 @@ public partial class Studio
     /// </summary>
     public static float FarPruneSpreads { get; set; }
 
+    /// <summary>
+    /// &amp;fargrow=R: splats centred past R camera spreads are never cloned or split (they stay). &amp;shelllog on Train:
+    /// the far shell grows almost only BY DENSIFY (+29K past 16 spreads over the run, -4 by drift) - the far sky keeps
+    /// its gradient (views disagree about it) and keeps being cloned. Pruning it (&amp;farprune) cost 0.1-0.2 dB. 0 = off.
+    /// </summary>
+    public static float FarGrowSpreads { get; set; }
+    float _farGrowRadius;
+
     System.Numerics.Vector3 _farPruneCentre;
-    float _farPruneRadius;
+    float _farPruneRadius, _rigSpread;
+
+    /// <summary>
+    /// &amp;shelllog=1 (diagnostic): at every densify, splats past 8 and 16 camera spreads before and after the apply, so
+    /// the far shell's growth splits into "made by densify" (clone / split there) and "between densifies" (centres moving
+    /// out). Parity 2026-10-10: Train ends with 6.7% past 16 spreads (opacity median 0.37), the init has 1.7%, Brush none.
+    /// CPU transfer: the packed buffer twice per densify - a diagnostic, never a default.
+    /// </summary>
+    public static bool ShellLogOption { get; set; }
+    int _shellLastAfter16 = -1, _shellLastAfter8 = -1, _shellDensifies;
+    long _shellByDensify16, _shellBetween16, _shellByDensify8, _shellBetween8;
+
+    async Task<(int Far8, int Far16, int Far16Opaque)> CountShellsAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n)
+    {
+        var rows = await packed.CopyToHostAsync<float>(0, (long)n * SplatFormat.Floats);
+        float r8 = 8f * _rigSpread, r16 = 16f * _rigSpread;
+        int far8 = 0, far16 = 0, opaque16 = 0;
+        for (int i = 0; i < n; i++)
+        {
+            int o = i * SplatFormat.Floats;
+            float d = (new System.Numerics.Vector3(rows[o], rows[o + 1], rows[o + 2]) - _farPruneCentre).Length();
+            if (d > r8) far8++;
+            if (d > r16) { far16++; if (rows[o + SplatFormat.OffOpacity] > 0.3f) opaque16++; }
+        }
+        return (far8, far16, opaque16);
+    }
 
     /// <summary>&amp;cputimes=1 (diagnostic): per cycle, CPU encode ms per training step vs the loop's wall ms per step.</summary>
     public static bool CpuTimesOption { get; set; }
@@ -589,7 +622,13 @@ public partial class Studio
                 var rig = rigViews.Select(v => v.Camera.Position).ToArray();
                 _farPruneCentre = rig.Aggregate(System.Numerics.Vector3.Zero, (a, b) => a + b) / rig.Length;
                 float rigSpread = MathF.Sqrt(rig.Average(c => (c - _farPruneCentre).LengthSquared()));
+                _rigSpread = rigSpread;
+                _shellLastAfter16 = _shellLastAfter8 = -1; _shellDensifies = 0;
+                _shellByDensify16 = _shellBetween16 = _shellByDensify8 = _shellBetween8 = 0;
                 _farPruneRadius = FarPruneSpreads > 0f ? FarPruneSpreads * rigSpread : 0f;
+                _farGrowRadius = FarGrowSpreads > 0f ? FarGrowSpreads * rigSpread : 0f;
+                if (_farGrowRadius > 0f)
+                    Console.WriteLine($"[Train] far grow: no clone / split past {FarGrowSpreads:G3} camera spreads ({_farGrowRadius:F2} units)");
                 if (_farPruneRadius > 0f)
                     Console.WriteLine($"[Train] far prune: splats past {FarPruneSpreads:G3} camera spreads ({_farPruneRadius:F2} units) at each densify");
             }
@@ -1460,11 +1499,22 @@ public partial class Studio
         // splats on Truck (MEASURED 2026-09-24). Only counters and an 8 KiB histogram cross now.
         int budget = Math.Min(MaxDensifiedSplats, _trainer!.MaxTrainableSplats(_trainer.KeysPerSplat));
         _gpuDensify ??= new GpuDensify(_gpuService.WebGPUAccelerator);
+        (int Far8, int Far16, int Far16Opaque) shellBefore = default;
+        if (ShellLogOption && !pruneOnly && _rigSpread > 0f)
+        {
+            shellBefore = await CountShellsAsync(packed, n);
+            if (_shellLastAfter16 >= 0)
+            {
+                _shellBetween16 += shellBefore.Far16 - _shellLastAfter16;
+                _shellBetween8 += shellBefore.Far8 - _shellLastAfter8;
+            }
+        }
         var r = await _gpuDensify.RunAsync(packed.View, n, _trainer.DensifyStatsView, _trainer.MaxRadiusView,
             new GpuDensify.Options(sceneExtent, _hadOpacityReset, budget, resetOpacity && OpacityResetCaps,
                 Seed: (uint)(1234 + n), NoOp: !pruneOnly && (DensifyNoOp || !densify), Trainable: _trainer.TrainableVolume,
                 GrowOnlyInside: _trainer.GrowOnlyInside, PruneOnly: pruneOnly,
-                FarCentre: _farPruneCentre, FarRadius: _trainer.TrainableVolume == null ? _farPruneRadius : 0f));
+                FarCentre: _farPruneCentre, FarRadius: _trainer.TrainableVolume == null ? _farPruneRadius : 0f,
+                FarGrowRadius: _trainer.TrainableVolume == null ? _farGrowRadius : 0f));
 
         // Always report, including - especially including - when the answer is "nothing".
         Console.WriteLine(
@@ -1558,6 +1608,20 @@ public partial class Studio
             _probeMs += System.Diagnostics.Stopwatch.GetElapsedTime(probe1).TotalMilliseconds;
             Console.WriteLine($"[Densify] apply probe (supervised PSNR): before {before} -> after {after}" +
                 (DensifyNoOp ? " [NO-OP plan]" : ""));
+        }
+        if (ShellLogOption && !pruneOnly && _rigSpread > 0f)
+        {
+            var (packedAfter, nAfter) = result ?? (packed, n);
+            var after = await CountShellsAsync(packedAfter, nAfter);
+            _shellByDensify16 += after.Far16 - shellBefore.Far16;
+            _shellByDensify8 += after.Far8 - shellBefore.Far8;
+            _shellLastAfter16 = after.Far16; _shellLastAfter8 = after.Far8;
+            _shellDensifies++;
+            if (_shellDensifies % 5 == 1)
+                Console.WriteLine($"[Shell] densify {_shellDensifies}: past 16 spreads {shellBefore.Far16:N0} -> {after.Far16:N0} " +
+                    $"(opacity > 0.3: {after.Far16Opaque:N0}), past 8 {shellBefore.Far8:N0} -> {after.Far8:N0} of {nAfter:N0}; " +
+                    $"so far past 16: +{_shellByDensify16:N0} by densify, {_shellBetween16:+#;-#;0} between; past 8: " +
+                    $"+{_shellByDensify8:N0} by densify, {_shellBetween8:+#;-#;0} between");
         }
         return result;
     }

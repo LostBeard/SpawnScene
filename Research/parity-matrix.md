@@ -496,6 +496,22 @@ Brush also has a sky, painted by FAINT far splats (op50 0.08 at 8-16) and bright
 Ours is OPAQUE and bright far out (op50 0.37 past 16). Next suspects: what keeps Brush's far splats faint (its growth
 signal max-over-views, which grows less where few views agree; opacity regularisation; position lr x median size keeping
 centres from drifting outward) - measure the shells over training to see when ours grows (init 1.7% -> 6.7%).
+
+**sl (&shelllog=1: splats past 8 / 16 spreads before and after every densify):** the far shell grows ONLY by densify -
+past 16 spreads 3,103 at the first densify -> 32,125 at the end, **+29,026 made by densify, -4 between densifies** (no drift
+outward); past 8 +40,942 / +1. The opacity reset at 3000 drops the opaque ones (> 0.3) to 132; five densifies later they are
+back at 9,546. The far sky keeps its gradient (the views disagree about it: haze in some, blue in others) and keeps being
+cloned. `&fargrow=R` (new, opt-in): centres past R spreads are kept but never cloned or split. fg chain: R = 16, 8.
+
+**fg: far-grow limit REJECTED.** R=16 20.11 / 0.783 (anatomy -0.94; shell past 16 down to 0.6% but its splats go OPAQUE, op50
+0.90), R=8 19.99 / 0.780 (-1.06); defaults 20.10-20.19 / 0.787 (-0.85). Where far splats may live is not the lever: the sky
+has to be painted, and pruning or freezing the far shell only moves the error.
+
+**ex2: per-photo gains on Train (&exposure=1, all defaults):** raw 19.49 / 0.784 (anatomy -1.54) - but after the per-image
+colour fit ours is **23.00 vs Brush 22.80 (+0.20)**, and the in-app fair score (gains fitted on each held-out view's left half,
+scored on the right) is 22.56 vs 21.54 without gains. With gains the CONTENT beats Brush's; the model's mean exposure just is
+not each held-out photo's, and the raw benchmark scores that. Gains stay off for stills (the default). The far shell is the
+same with gains on (7.1% past 16 spreads, op50 0.35): exposure disagreement is not what grows it.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

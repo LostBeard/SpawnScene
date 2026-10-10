@@ -75,7 +75,8 @@ public sealed class GpuDensify : IDisposable
         SplatEditor.Volume? GrowOnlyInside = null,
         bool PruneOnly = false,
         System.Numerics.Vector3 FarCentre = default,
-        float FarRadius = 0f);
+        float FarRadius = 0f,
+        float FarGrowRadius = 0f);
 
     /// <summary>
     /// The grown set. <see cref="Packed"/>, <see cref="AdamSources"/> and <see cref="FeatureSources"/> are owned
@@ -107,6 +108,7 @@ public sealed class GpuDensify : IDisposable
         public uint Seed;
         public float FarX, FarY, FarZ;      // &farprune: prune a centre farther than FarRadius from here (0 = off)
         public float FarRadius;
+        public float FarGrowRadius;         // &fargrow: a centre farther than this from (FarX, FarY, FarZ) never grows (0 = off)
     }
 
     public struct SelectParams
@@ -164,6 +166,7 @@ public sealed class GpuDensify : IDisposable
             Seed = o.Seed,
             FarX = o.FarCentre.X, FarY = o.FarCentre.Y, FarZ = o.FarCentre.Z,
             FarRadius = o.FarRadius,
+            FarGrowRadius = o.FarGrowRadius,
         };
         // The trainable volume is its own kernel parameter, as SplatEditor's kernels take it (nested in the params
         // struct it is the only such layout in the app); an unused one is the identity, never read (HasTrainable 0).
@@ -285,7 +288,8 @@ public sealed class GpuDensify : IDisposable
             // A partitioned block grows only in the cell it keeps: a clone in its overlap margin is trained and then
             // dropped at the merge - 330K of a 500K block budget went there (TruckFull 2x2, 2026-10-05).
             else if (p.PruneOnly == 0 && avg >= p.GradientThreshold
-                && (p.HasGrowVolume == 0 || SplatEditor.Inside(grow, packed[o], packed[o + 1], packed[o + 2])))
+                && (p.HasGrowVolume == 0 || SplatEditor.Inside(grow, packed[o], packed[o + 1], packed[o + 2]))
+                && (p.FarGrowRadius <= 0f || fx * fx + fy * fy + fz * fz <= p.FarGrowRadius * p.FarGrowRadius))
             {
                 if (p.BrushGrowth != 0)
                 {

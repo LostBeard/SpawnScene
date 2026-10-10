@@ -288,6 +288,12 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("scalelrend", out var sleq) && float.TryParse(sleq, System.Globalization.NumberStyles.Float, inv, out var slev))
             ScaleLrEnd = Math.Max(0f, slev);
         if (query.TryGetValue("shramp", out var shrq)) ShDegreeRamp = shrq is not ("0" or "false");
+        // &shelllog=1: far-shell growth at every densify, by densify vs between (Studio.Training ShellLogOption).
+        if (query.TryGetValue("shelllog", out var shellLogQ)) ShellLogOption = shellLogQ is "1" or "true";
+        // &fargrow=R: no clone / split past R camera spreads (Studio.Training FarGrowSpreads).
+        if (query.TryGetValue("fargrow", out var farGrowQ) && float.TryParse(farGrowQ,
+                System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var farGrow))
+            FarGrowSpreads = farGrow;
         // &farprune=R: prune splats past R camera spreads at each densify (Studio.Training FarPruneSpreads).
         if (query.TryGetValue("farprune", out var farPruneQ) && float.TryParse(farPruneQ,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var farPrune))

@@ -101,6 +101,8 @@ public sealed class GpuDensify : IDisposable
         public int HasTrainable;            // 1: splats outside the trainable volume are frozen context - kept as they are
         public int HasGrowVolume;           // 1: only splats inside the grow volume are cloned or split
         public int PruneOnly;               // 1: drop the faint (opacity under MinOpacity) and nothing else - a compaction
+        public int BrushGrowth;             // 1: every candidate grows one copy, picked by a weighted race (SplatDensityControl.BrushGrowth)
+        public uint Seed;
     }
 
     public struct SelectParams
@@ -120,6 +122,7 @@ public sealed class GpuDensify : IDisposable
         public float SplitScaleDivisor;
         public int HasTrainable;            // 1: the opacity reset skips splats outside the trainable volume
         public int RevisedOpacity;          // 1: clone / split opacities 1 - sqrt(1 - a) (SplatDensityControl.RevisedOpacity)
+        public int BrushGrowth;             // 1: a grow = parent at -sample and copy at +sample, both scale / sqrt 2, revised opacity
     }
 
     /// <summary>
@@ -153,6 +156,8 @@ public sealed class GpuDensify : IDisposable
             HasTrainable = o.Trainable.HasValue ? 1 : 0,
             HasGrowVolume = o.GrowOnlyInside.HasValue ? 1 : 0,
             PruneOnly = o.PruneOnly ? 1 : 0,
+            BrushGrowth = SplatDensityControl.BrushGrowth ? 1 : 0,
+            Seed = o.Seed,
         };
         // The trainable volume is its own kernel parameter, as SplatEditor's kernels take it (nested in the params
         // struct it is the only such layout in the app); an unused one is the identity, never read (HasTrainable 0).
@@ -224,6 +229,7 @@ public sealed class GpuDensify : IDisposable
                 SplitScaleDivisor = SplatDensityControl.SplitScaleDivisor,
                 HasTrainable = o.Trainable.HasValue ? 1 : 0,
                 RevisedOpacity = SplatDensityControl.RevisedOpacity ? 1 : 0,
+                BrushGrowth = SplatDensityControl.BrushGrowth ? 1 : 0,
             }, trainable);
 
         // Clones and splits from the totals: added = clones + 2 splits, and every split parent left the kept set.
@@ -272,9 +278,23 @@ public sealed class GpuDensify : IDisposable
             else if (p.PruneOnly == 0 && avg >= p.GradientThreshold
                 && (p.HasGrowVolume == 0 || SplatEditor.Inside(grow, packed[o], packed[o + 1], packed[o + 2])))
             {
-                a = maxScale > p.SizeSplit ? SplitCandidate : CloneCandidate;
-                b = GradientBin(avg, p.GradientThreshold);
-                Atomic.Add(ref hist[b], a == SplitCandidate ? 2 : 1);
+                if (p.BrushGrowth != 0)
+                {
+                    // Brush: one operation for every candidate, chosen by weighted sampling without replacement. The top k
+                    // of w / E (E ~ Exp(1)) is exactly that sample (exponential race); the bins already take the top k.
+                    a = CloneCandidate;
+                    uint h = Hash(p.Seed ^ Hash((uint)i.X * 2654435761u + 0x5bd1e995u));
+                    float u = (h + 1f) * (1f / 4294967297f);   // (0, 1)
+                    float e = -XMath.Log(u);
+                    b = GradientBin(avg / XMath.Max(e, 1e-12f), p.GradientThreshold);
+                    Atomic.Add(ref hist[b], 1);
+                }
+                else
+                {
+                    a = maxScale > p.SizeSplit ? SplitCandidate : CloneCandidate;
+                    b = GradientBin(avg, p.GradientThreshold);
+                    Atomic.Add(ref hist[b], a == SplitCandidate ? 2 : 1);
+                }
             }
         }
         action[i] = a;
@@ -327,6 +347,30 @@ public sealed class GpuDensify : IDisposable
         if (reset != 0) dst[d0 + 9] = XMath.Min(dst[d0 + 9], resetTo);
     }
 
+    /// <summary>
+    /// Brush v0.3.0's refine (train.rs refine_splats): sample = rotation x N(0, 0.5) x scale, the parent goes to -sample and the
+    /// copy to +sample (<paramref name="sign"/>), both log-scales - ln(sqrt 2). The same sample for both: one draw per parent.
+    /// </summary>
+    static void BrushOffset(ArrayView<float> src, long so, ArrayView<float> dst, long d0, uint seed, Index1D i, float sign)
+    {
+        float qx = src[so + 10], qy = src[so + 11], qz = src[so + 12], qw = src[so + 13];
+        float len = XMath.Sqrt(qx * qx + qy * qy + qz * qz + qw * qw);
+        if (len > 1e-20f) { qx /= len; qy /= len; qz /= len; qw /= len; }
+        else { qx = 0f; qy = 0f; qz = 0f; qw = 1f; }
+        float xx = qx * qx, yy = qy * qy, zz = qz * qz, xy = qx * qy, xz = qx * qz, yz = qy * qz;
+        float wx = qw * qx, wy = qw * qy, wz = qw * qz;
+        float sx = src[so + 6], sy = src[so + 7], sz = src[so + 8];
+        float lx = 0.5f * Normal(seed, i, 6) * sx, ly = 0.5f * Normal(seed, i, 7) * sy, lz = 0.5f * Normal(seed, i, 8) * sz;
+        float dx = (1f - 2f * (yy + zz)) * lx + 2f * (xy - wz) * ly + 2f * (xz + wy) * lz;
+        float dy = 2f * (xy + wz) * lx + (1f - 2f * (xx + zz)) * ly + 2f * (yz - wx) * lz;
+        float dz = 2f * (xz - wy) * lx + 2f * (yz + wx) * ly + (1f - 2f * (xx + yy)) * lz;
+        dst[d0 + 0] = src[so + 0] + sign * dx;
+        dst[d0 + 1] = src[so + 1] + sign * dy;
+        dst[d0 + 2] = src[so + 2] + sign * dz;
+        const float InvSqrt2 = 0.70710678f;
+        dst[d0 + 6] = sx * InvSqrt2; dst[d0 + 7] = sy * InvSqrt2; dst[d0 + 8] = sz * InvSqrt2;
+    }
+
     /// <summary>Opacity a' with (1 - a')^2 = 1 - a: two such splats on one pixel composite to the parent's a.</summary>
     static void ReviseOpacity(ArrayView<float> dst, long d0) => dst[d0 + 9] = 1f - XMath.Sqrt(XMath.Max(0f, 1f - dst[d0 + 9]));
 
@@ -345,6 +389,8 @@ public sealed class GpuDensify : IDisposable
             CopyRow(packed, so, outPacked, (long)d * Floats, reset, p.OpacityResetTo);
             // Cloned: the parent and its copy share the parent's coverage.
             if (p.RevisedOpacity != 0 && add[i] == 1) ReviseOpacity(outPacked, (long)d * Floats);
+            // Brush growth: the parent moves to -sample (its copy to +sample below), both shrink by sqrt 2.
+            if (p.BrushGrowth != 0 && add[i] == 1) BrushOffset(packed, so, outPacked, (long)d * Floats, p.Seed, i, -1f);
             adamSrc[d] = i;
             featSrc[d] = i;
         }
@@ -356,6 +402,7 @@ public sealed class GpuDensify : IDisposable
             // Clone: an exact copy; the optimiser separates them.
             CopyRow(packed, so, outPacked, (long)first * Floats, p.ResetOpacity, p.OpacityResetTo);
             if (p.RevisedOpacity != 0) ReviseOpacity(outPacked, (long)first * Floats);
+            if (p.BrushGrowth != 0) BrushOffset(packed, so, outPacked, (long)first * Floats, p.Seed, i, 1f);
             adamSrc[first] = -1;
             featSrc[first] = i;
             return;

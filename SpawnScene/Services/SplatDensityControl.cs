@@ -75,6 +75,16 @@ public static class SplatDensityControl
     public static bool RevisedOpacity { get; set; } = true;
 
     /// <summary>
+    /// &amp;growth=brush (A/B, off by default): Brush v0.3.0 growth (Research/brush-growth-port-plan-2026-10-10.md, v1) -
+    /// every candidate is one operation (no clone / split distinction), chosen by weighted sampling without replacement
+    /// (an exponential race on the averaged gradient, GpuDensify) at <see cref="GrowthSelectFraction"/> of the candidates,
+    /// and a grow moves the parent to -sample and its copy to +sample (rotation x N(0, 0.5) x scale), both scale / sqrt 2,
+    /// both revised opacity. Not in v1: replacing pruned splats, the max-over-views signal, low-opacity mean noise.
+    /// GPU path only (the host oracle does not mirror it).
+    /// </summary>
+    public static bool BrushGrowth { get; set; }
+
+    /// <summary>
     /// A Gaussian is "large" when its biggest axis exceeds this fraction of the scene extent.
     /// Large ones split, small ones clone.
     /// </summary>

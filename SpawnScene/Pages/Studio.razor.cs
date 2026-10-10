@@ -288,6 +288,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("scalelrend", out var sleq) && float.TryParse(sleq, System.Globalization.NumberStyles.Float, inv, out var slev))
             ScaleLrEnd = Math.Max(0f, slev);
         if (query.TryGetValue("shramp", out var shrq)) ShDegreeRamp = shrq is not ("0" or "false");
+        // &growth=brush: Brush v0.3.0 growth (SplatDensityControl.BrushGrowth; pair with DENSIFYFRAC / &densifyfrac).
+        if (query.TryGetValue("growth", out var grq)) SplatDensityControl.BrushGrowth = grq == "brush";
         // &initscale=X: initial splat size multiplier (SparsePointCloudInit.ScaleMultiplier).
         if (query.TryGetValue("initscale", out var isq) && float.TryParse(isq, System.Globalization.NumberStyles.Float, inv, out var isv) && isv > 0f)
             SparsePointCloudInit.ScaleMultiplier = isv;

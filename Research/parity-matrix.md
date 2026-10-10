@@ -246,6 +246,8 @@ PSNR / SSIM / LPIPS-alex; Brush / gsplat rows from the three-way table above):
 
 **Level with Brush on mean PSNR (+0.03), ahead of both on mean SSIM and LPIPS, best PSNR on 6 of 11.** Training time 2.5-4.5 min
 a scene (subgroups) vs Brush 1.5-3 min wall. Still behind: Train (-1.22 vs Brush), Kitchen (-0.68 vs gsplat), Bonsai (-0.57).
+Bathroom (phone, own SfM) with all four (`&exposure=auto` -> gains ON, 6.13 stops): held out 18.82 / 0.849, fair 24.97 (today's
+defaults 18.89 / 24.85) - safe on the capture the gains exist for.
 
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 

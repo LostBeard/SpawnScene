@@ -6,7 +6,7 @@ for both tools, photos at their exact size, in-app held-out PSNR / SSIM (the sha
 
 ## The decision
 
-Four changes (three quality, one speed), measured on the benchmark scenes and TJ's Bathroom phone capture. **None is a default yet.** Revised opacity has not been run on the Bathroom phone capture yet.
+Four changes (three quality, one speed), measured on the benchmark scenes and TJ's Bathroom phone capture. **None is a default yet.**
 
 1. **Position learning rate decays over the run's own length** (`&poslrsteps=<iterations>`, today a fixed 30,000: a 7K run
    ends at 0.34x its starting rate, gsplat's at 0.01x). We were UNDERFITTING: our score on the training photos was at or
@@ -59,6 +59,7 @@ Bathroom (phone, own SfM; fair = gains fitted on the left half of each held-out 
 | position decay | 18.98 / 0.846 | 24.94 |
 | position decay + gains off | 17.03 / 0.797 | **18.99** |
 | position decay + &exposure=auto | **19.02 / 0.846** | **24.63** - gains ON ("35 of 35 photos carry EXIF exposure, spread 6.13 stops"); the same configuration as the row above, so the difference is run noise (fair = 4 views) |
+| **all four changes** (+ subgroups + revised opacity) | **18.82 / 0.849** | **24.97** - gains ON from EXIF; within noise of today's defaults (24.85): safe on the phone capture |
 
 ## Brush v0.3.0 (added 15:30)
 

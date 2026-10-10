@@ -406,17 +406,6 @@ similar SPLAT counts, so per-splat passes (emit, Adam, SH, geometry, clears) als
 sync-per-phase profile cannot tell work from waiting. Measuring instead: `&gputimes=1` (per-pass WebGPU timestamps, no
 waits); gt chain on Counter and Train. Stays opt-in: &bgcache.
 
-**Measured (gt, &gputimes=1, deployed defaults, late in training):**
-
-| | wall ms/step | timed GPU ms | raster_backward | raster_forward | scatter | SSIM (4 passes) | untimed (ILGPU sort + memsets + idle) |
-|---|---|---|---|---|---|---|---|
-| Counter (1.62 MP) | ~36 | 23.4 | **14.15** | 2.07 | 1.70 | ~2.5 | ~12.6 |
-| Train (0.53 MP) | ~23 | 12.2 | **7.22** | 1.09 | 0.66 | ~0.7 | ~11 |
-
-The backward is ~60% of the timed GPU work and 7x the forward (gsplat ~2-3x): the per-key workgroup barrier. The second
-target is the ~11-12 ms outside the timed passes. nb: barrier-free fused backward (each touched subgroup adds its partial
-to the per-splat totals with atomics, the gsplat / Brush structure).
-
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

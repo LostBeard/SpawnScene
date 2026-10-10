@@ -387,6 +387,19 @@ failed the gate's densify frustum denominator - 15 of 240 faint splats lost thei
 Keys -60%, ~1.3x faster, same quality (differences = run-to-run nondeterminism of float atomics). Made the default (the sixth).
 Recovers the scale-lr default's time cost (Counter 266 s before it, 239 s now). Brush: 172 s wall incl. load.
 
+### Speed: the gap to Brush is per-step FIXED cost (2026-10-10)
+
+Deployed defaults, profiled Counter (sync per phase): prev 6.0, clear 4.2, emit+count 6.2, sort 4.8, ranges+raster 5.1,
+loss+ssim 4.8, backward 17.3, scatter 6.1, adam 3.6, sh 3.8, geometry 3.5, loss read 1.3 - barely moved although tight tiles
+cut the keys 60%. Real (unprofiled) steps: Train 0.53 MP ~22 ms, Counter 1.62 MP ~34 ms -> **~16 ms a step is fixed,
+independent of pixels** (+ ~11 ms / MP). Brush's whole Counter step is ~25 ms. Cause: every pass is its own command
+encoder + compute pass + GetBindGroupLayout + CreateBindGroup + submit (10+ JS interop calls and a queue submit each,
+SplatTrainerGpu.Dispatch / DispatchLinear and the emit / raster sites), 20-30 a step, plus the per-step key-count readback
+that drains the GPU. Native wgpu (Brush) pays almost none of that.
+Plan, in order: (1) cache bind groups per pipeline + buffer set, invalidated on resize; (2) per-pass uniform slots so a
+step can be ONE encoder / ONE submit (today queue.writeBuffer between passes would land before batched passes - unsafe to
+batch as is); (3) drop the readback (indirect dispatch for the sort) so the CPU encodes step N+1 while the GPU runs step N.
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

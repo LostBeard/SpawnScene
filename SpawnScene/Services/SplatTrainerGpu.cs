@@ -609,11 +609,97 @@ public sealed partial class SplatTrainerGpu : IDisposable
             wgsl = wgsl.Replace("const NEAR_PLANE : f32 = 0.2;", $"const NEAR_PLANE : f32 = {lit};");
         }
         using var module = _device!.CreateShaderModule(new GPUShaderModuleDescriptor { Code = wgsl });
-        return _device.CreateComputePipeline(new GPUComputePipelineDescriptor
+        var pipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
         {
             Layout = "auto",
             Compute = new GPUProgrammableStage { Module = module, EntryPoint = entry },
         });
+        _pipelineNames[pipeline] = entry;
+        return pipeline;
+    }
+
+    // ---------------------------------------------------------------- &gputimes=1
+
+    /// <summary>
+    /// &amp;gputimes=1 (diagnostic): every raw compute pass of a training step writes GPU timestamps (WebGPU timestamp-query),
+    /// summed per pass and reported with the cycle log (<see cref="TakeGpuTimes"/>). Unlike &amp;trainprofile it adds no wait
+    /// between passes, so it measures GPU work, not CPU-GPU round trips. ILGPU's own kernels (radix sort, memsets) are not
+    /// covered: wall time minus the timed passes = them + idle (parity 2026-10-10: is the gap to Brush GPU work or overhead?).
+    /// </summary>
+    public static bool GpuTimes { get; set; }
+
+    const int MaxTimedPasses = 128;
+    readonly Dictionary<GPUComputePipeline, string> _pipelineNames = new(ReferenceEqualityComparer.Instance);
+    GPUQuerySet? _tsSet;
+    GPUBuffer? _tsResolve, _tsRead;
+    readonly List<string> _tsLabels = new();
+    readonly Dictionary<string, double> _tsMs = new();
+    int _tsSteps;
+
+    /// <summary>A pass descriptor with timestamp writes for <paramref name="label"/>, or null when not timing.</summary>
+    GPUComputePassDescriptor? TimedPass(string label)
+    {
+        if (!GpuTimes || _tsLabels.Count >= MaxTimedPasses) return null;
+        if (_tsSet == null)
+        {
+            if (!_gpu.WebGPUAccelerator.NativeAccelerator.EnabledFeatures.Contains("timestamp-query"))
+            {
+                Console.WriteLine("[Trainer] gputimes: the device has no 'timestamp-query' feature");
+                GpuTimes = false;
+                return null;
+            }
+            _tsSet = _device!.CreateQuerySet(new GPUQuerySetDescriptor { Type = GPUQueryType.Timestamp, Count = MaxTimedPasses * 2 });
+            _tsResolve = _device.CreateBuffer(new GPUBufferDescriptor { Size = MaxTimedPasses * 16, Usage = GPUBufferUsage.QueryResolve | GPUBufferUsage.CopySrc });
+            _tsRead = _device.CreateBuffer(new GPUBufferDescriptor { Size = MaxTimedPasses * 16, Usage = GPUBufferUsage.MapRead | GPUBufferUsage.CopyDst });
+        }
+        int k = _tsLabels.Count;
+        _tsLabels.Add(label);
+        return new GPUComputePassDescriptor
+        {
+            TimestampWrites = new GPUComputePassTimestampWrites
+            {
+                QuerySet = _tsSet, BeginningOfPassWriteIndex = (uint)(2 * k), EndOfPassWriteIndex = (uint)(2 * k + 1),
+            },
+        };
+    }
+
+    /// <summary>Resolve this step's timestamps and add each pass's GPU time to its label (CPU transfer: 16 bytes a pass).</summary>
+    async Task CollectGpuTimesAsync()
+    {
+        int n = _tsLabels.Count;
+        if (!GpuTimes || n == 0 || _tsSet == null) return;
+        using (var enc = _device!.CreateCommandEncoder())
+        {
+            enc.ResolveQuerySet(_tsSet, 0u, (uint)(2 * n), _tsResolve!, 0ul);
+            enc.CopyBufferToBuffer(_tsResolve!, 0ul, _tsRead!, 0ul, (ulong)(n * 16));
+            using var cmd = enc.Finish();
+            RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
+        }
+        await _tsRead!.MapAsync(GPUMapMode.Read, 0, n * 16);
+        using (var range = _tsRead.GetMappedRange(0, n * 16))
+        using (var bytes = new Uint8Array(range))
+        {
+            var b = bytes.ReadBytes();
+            for (int k = 0; k < n; k++)
+            {
+                ulong t0 = BitConverter.ToUInt64(b, 16 * k), t1 = BitConverter.ToUInt64(b, 16 * k + 8);
+                if (t1 > t0) _tsMs[_tsLabels[k]] = _tsMs.GetValueOrDefault(_tsLabels[k]) + (t1 - t0) / 1e6;
+            }
+        }
+        _tsRead.Unmap();
+        _tsLabels.Clear();
+        _tsSteps++;
+    }
+
+    /// <summary>Mean GPU ms per step for each timed pass since the last call, then reset. Empty when not timing.</summary>
+    public string TakeGpuTimes()
+    {
+        if (_tsSteps == 0) return "";
+        double total = _tsMs.Values.Sum();
+        string line = $"{total / _tsSteps:F2} GPU ms/step in timed passes = " +
+            string.Join(", ", _tsMs.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value / _tsSteps:F2}"));
+        _tsMs.Clear(); _tsSteps = 0;
+        return line;
     }
 
     /// <summary>
@@ -902,7 +988,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         // ── 1. Emit (tile, depth) keys ──
         using (var enc = _device.CreateCommandEncoder())
         {
-            using var pass = enc.BeginComputePass();
+            using var pass = enc.BeginComputePass(TimedPass("emit_keys"));
             pass.SetPipeline(_emitKeys);
             using var layout = _emitKeys.GetBindGroupLayout(0);
             using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor
@@ -968,7 +1054,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         WriteU32(_countBuf!, (uint)LastKeyCount);
         using (var enc = _device.CreateCommandEncoder())
         {
-            using var pass = enc.BeginComputePass();
+            using var pass = enc.BeginComputePass(TimedPass("tile_ranges"));
             pass.SetPipeline(_tileRanges!);
             using var layout = _tileRanges!.GetBindGroupLayout(0);
             using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor
@@ -992,7 +1078,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         // ── 4. Rasterise: one workgroup per tile ──
         using (var enc = _device.CreateCommandEncoder())
         {
-            using var pass = enc.BeginComputePass();
+            using var pass = enc.BeginComputePass(TimedPass("raster_forward"));
             // The depth-supervised build also writes the rendered inverse depth (SplatTrainerGpu.Depth).
             var forward = depth ? _rasterForwardDepth! : _rasterForward!;
             pass.SetPipeline(forward);
@@ -2309,6 +2395,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         await PhaseAsync("geometry");
         float loss = await FinishLossAsync(readLoss);
         await PhaseAsync("loss read");
+        await CollectGpuTimesAsync();
         return loss;
     }
 
@@ -2403,7 +2490,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     void Dispatch(GPUComputePipeline pipeline, int wgX, int wgY, GPUBindGroupEntry[] entries)
     {
         using var enc = _device!.CreateCommandEncoder();
-        using var pass = enc.BeginComputePass();
+        using var pass = enc.BeginComputePass(TimedPass(_pipelineNames.GetValueOrDefault(pipeline, "pass")));
         pass.SetPipeline(pipeline);
         if (CacheBindGroups)
         {

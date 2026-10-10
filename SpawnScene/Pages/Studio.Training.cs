@@ -968,6 +968,8 @@ public partial class Studio
                             $"({secs:F1}s, {(it + 1) / Math.Max(secs, 1e-6):F1} it/s)");
                         if (_trainer.ProfilePhases)
                             Console.WriteLine($"[Train] cycle {cycle,4} phases: {_trainer.TakePhaseProfile()}");
+                        if (SplatTrainerGpu.GpuTimes)
+                            Console.WriteLine($"[Train] cycle {cycle,4} gpu: {_trainer.TakeGpuTimes()}");
                     }
 
                     // Held-out PSNR DURING the run, not only at the ends.

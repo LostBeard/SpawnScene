@@ -352,7 +352,14 @@ g2 + bar 2e-4: 19.92 / 0.788, 0.50M; g3 every 100, 20%: 20.03 / 0.780, 0.30M. No
 the selection (Brush ends Train at 0.84M). bg2: g4 every 100, 20%, bar 2e-4: **20.27 / 0.809**, 1.16M, 300 s; g5 40%: 20.35 /
 0.813, 1.51M, 404 s; g6 30%, bar 1e-4: 20.37 / 0.820, 2.92M, 683 s. SSIM passes Brush's (0.792) but PSNR saturates near 20.4 -
 Brush gets 21.07 with 0.84M in 118 s: its Train lead is NOT how much it grows. D-SSIM weight is the same (0.2). Left: relocation
-of pruned splats and low-opacity mean noise (MCMC-like exploration); &mcmc=1 (gsplat MCMC) on the new defaults next.
+of pruned splats and low-opacity mean noise (MCMC-like exploration). mc (&mcmc=1, gsplat MCMC, on the five defaults): Train
+20.31 / 0.806 with 3.55M splats in 570 s; **Bicycle 23.49 / 0.654 (-1.02)** - rejected.
+
+**Train, where it stands:** five defaults 20.11 (gsplat 20.42, Brush 21.07). Tried on top and NOT the answer: position lr
+(Brush's rate and end), near plane, opacity lr 0.01 / 0.05, no opacity reset, SH from step 0, initial size, revised-opacity
+growth alone, Brush growth v1 (any amount: PSNR saturates ~20.4 even at 2.9M splats), MCMC. What remains unported from Brush:
+the max-over-views growth signal, opacity-weighted relocation of pruned splats, low-opacity mean noise and its tiny opacity /
+scale losses - together (they are one scheme). Parked: the other 10 scenes are at or past parity.
 
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 

@@ -331,6 +331,20 @@ shared scorer); best PSNR on 9 of 11 (behind Brush on Train 20.07 vs 21.07 and B
 On top of the five defaults: Train 20.17 / 0.781 (20.11 / 0.787: neutral), Bonsai **29.02** (29.93: **-0.91**), Bicycle:
 `Pack-at-upload complete: 1,743,570 splats PSNR 14.39 -> 24.42 dB, SSIM 0.2749 -> 0.7156` (24.68). Ours (0.025) stays - 0.05 (tr2) and 0.01 both worse.
 
+### Smaller initial splats (is, 2026-10-10)
+
+`&initscale=X` (SparsePointCloudInit.ScaleMultiplier; Brush's start ~0.41x ours), on top of the five defaults:
+
+| Scene | defaults | x0.41 | x0.7 |
+|---|---|---|---|
+| Train | 20.11 / 0.787 | 20.14 / 0.792 | 20.16 / 0.789 |
+| Bonsai | 29.93 / 0.934 | 30.05 / 0.935 | 29.96 / 0.935 |
+| Kitchen (seed 1) | 29.59 / 0.921 | 29.46 / 0.922 | 29.56 / 0.921 |
+
+Small and mixed (+0.03..+0.12, Kitchen -0.13 at 0.41): not a default, not Brush's Train edge. Ruled out for Train so far:
+position lr (rate and end), near plane, opacity lr (0.01 and 0.05), opacity reset, SH from step 0, initial size. Left:
+Brush's growth scheme as a whole (10% weighted-random image-preserving splits, prune-and-replace) - a GpuDensify change.
+
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 
 Final cycle (profiled, one sync per phase): backward 19.3, ranges+raster 6.8, prev 6.3, emit+count 6.3, scatter 5.8, sort 5.4,

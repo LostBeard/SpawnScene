@@ -349,7 +349,10 @@ Brush's growth scheme as a whole (10% weighted-random image-preserving splits, p
 
 Train, on top of the five defaults (20.11 / 0.787, 0.42M): g1 refine every 200, 10% selected, our bar: 19.84 / 0.770, 0.22M;
 g2 + bar 2e-4: 19.92 / 0.788, 0.50M; g3 every 100, 20%: 20.03 / 0.780, 0.30M. Not better yet; growth amount matters more than
-the selection (Brush ends Train at 0.84M). bg2: g4 100 / 0.2 / 2e-4, g5 100 / 0.4 / 2e-4, g6 100 / 0.3 / 1e-4.
+the selection (Brush ends Train at 0.84M). bg2: g4 every 100, 20%, bar 2e-4: **20.27 / 0.809**, 1.16M, 300 s; g5 40%: 20.35 /
+0.813, 1.51M, 404 s; g6 30%, bar 1e-4: 20.37 / 0.820, 2.92M, 683 s. SSIM passes Brush's (0.792) but PSNR saturates near 20.4 -
+Brush gets 21.07 with 0.84M in 118 s: its Train lead is NOT how much it grows. D-SSIM weight is the same (0.2). Left: relocation
+of pruned splats and low-opacity mean noise (MCMC-like exploration); &mcmc=1 (gsplat MCMC) on the new defaults next.
 
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 

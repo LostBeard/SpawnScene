@@ -311,6 +311,15 @@ Kitchen and Bicycle, within 10 s on Counter / Train) with fewer splats; Brush is
 candidate default for TJ (opt-in until then; devices without 'subgroups' keep the tree path).
 Counter: ~13.5 keys per splat (5.67M keys / 419K splats).
 
+### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
+
+Final cycle (profiled, one sync per phase): backward 19.3, ranges+raster 6.8, prev 6.3, emit+count 6.3, scatter 5.8, sort 5.4,
+loss+ssim 5.0, clear 4.1, sh 4.0, geometry 3.6, adam 3.2, loss read 0.7 = ~70 ms; unprofiled the step is ~39 ms (271 s / 7K),
+Brush ~25. Now spread over many passes. Roadmap: (1) a GPU timestamp-query profiler (the `timestamp-query` feature is on
+this Chrome) - per-pass GPU time without the syncs that inflate these numbers; (2) drop the per-step key-count readback
+(emit+count waits on 4 bytes, a pipeline bubble every step) - indirect dispatch for the sort; (3) clear only the used
+prefix of keys / values (whole capacity memset every step); (4) "prev" = between-step CPU work (view pick, target set).
+
 ### Train gap follow-ups on top of both changes (tr, 2026-10-09)
 
 | Run | Train | DrJohnson |

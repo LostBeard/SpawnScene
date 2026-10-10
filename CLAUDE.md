@@ -182,11 +182,11 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   opaque kept a 3e38 sentinel and every splat on them counted as a floater: the carve deleted the still-thin walls of
   TJ's Bathroom ("TONS of holes"). TrainerGate's thin-splat-in-a-hole case guards it. Bicycle unchanged by the fix
   (k1 25.06 / 0.7662 vs 25.07 / 0.7663). The end carve's splats are compacted before the save (GpuDensify PruneOnly).
-- **Depth init + per-photo exposure gains are DEFAULTS (2026-10-08, TJ):** `DepthFusionInitStride` 4 (seeds from the
+- **Depth init + per-photo exposure gains are DEFAULTS (2026-10-08; Tuvok proposed, TJ approved; the gains are gated by `&exposure=auto` since 2026-10-09, below):** `DepthFusionInitStride` 4 (seeds from the
   photos' DAv3 depth where two views agree; `&depthinit=0` off) and exposure gains only (`&exposure=0` off, `=1`/`affine`
   the full 3x4). Bathroom held out 15.58 -> 18.57 dB with both, fair score (gains fitted on the left half, right half
   scored - logged as "held out RIGHT HALF") 18.88 -> 24.32 from the gains; Bicycle fair +0.16; Truck neutral.
-- **Random training background is a DEFAULT (2026-10-08, TJ):** each step composites over a random colour, zero-mean
+- **Random training background is a DEFAULT (2026-10-08; Tuvok proposed, TJ approved; benchmark cost checked 2026-10-09: none, within noise on 5 runs):** each step composites over a random colour, zero-mean
   at half width ([-0.25, 0.25]; SplatTrainerGpu.RandomBackground/ZeroMeanBackground/BackgroundAmplitude). Over black a
   half-transparent wall matched the photos as well as a solid one: the black off the photo path in rooms was the
   background showing through (`&bg=1,0,1` captures over magenta). Bathroom see-through 12.0% -> 5.4% of off-path

@@ -253,7 +253,10 @@ defaults 18.89 / 24.85) - safe on the capture the gains exist for.
 blob in front of the held-out camera (0.32 of the mean gap; the blob moves between seeds: ex0 had 0720 / 0680). Train -0.57
 vs gsplat: 00001 -5.2 (a colour fit recovers most) and 00073 -4.7 (the handrail). Bonsai -0.25 vs gsplat, spread evenly.
 `&camerabubble=X` (removes splats within X camera-spreads of a supervised camera at each carve - a camera stands in free
-space) added; cb chain: Kitchen 0.05 / 0.1, Room 0.1, Bicycle 0.1.
+space) added. cb (on top of all four): Kitchen 0.05 -> 29.13 / 0.919 (no catastrophic view, worst -1.49), 0.1 -> 28.81 with a
+blob on DSCF0688 (-12.96) although it removed MORE splats (up to 892 a carve); Room 0.1 30.27 (ro 30.21), Bicycle 0.1 24.49
+(ro 24.49). The bubble is harmless but does NOT target the blob (the clean 0.05 run = seed luck): the blob is not at a
+camera centre. `&blobpick=1` (diagnostic) picks the splats painting held-out views 4+ dB under the median; bp chain running.
 
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 

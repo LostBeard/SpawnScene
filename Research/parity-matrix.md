@@ -249,6 +249,12 @@ a scene (subgroups) vs Brush 1.5-3 min wall. Still behind: Train (-1.22 vs Brush
 Bathroom (phone, own SfM) with all four (`&exposure=auto` -> gains ON, 6.13 stops): held out 18.82 / 0.849, fair 24.97 (today's
 defaults 18.89 / 24.85) - safe on the capture the gains exist for.
 
+**Where the remaining gaps are (gap_anatomy, all four changes):** Kitchen -0.68 is mostly ONE view - DSCF0824 -11.26 dB, a dark
+blob in front of the held-out camera (0.32 of the mean gap; the blob moves between seeds: ex0 had 0720 / 0680). Train -0.57
+vs gsplat: 00001 -5.2 (a colour fit recovers most) and 00073 -4.7 (the handrail). Bonsai -0.25 vs gsplat, spread evenly.
+`&camerabubble=X` (removes splats within X camera-spreads of a supervised camera at each carve - a camera stands in free
+space) added; cb chain: Kitchen 0.05 / 0.1, Room 0.1, Bicycle 0.1.
+
 ### Speed: where our step goes (Counter c1, &trainprofile=1, 2026-10-09)
 
 Final cycle (1 sync per phase, so slower than a real step: 641 s vs 462 s unprofiled): **108 ms/step = backward 47.1 +

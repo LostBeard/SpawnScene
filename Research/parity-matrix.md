@@ -361,6 +361,11 @@ growth alone, Brush growth v1 (any amount: PSNR saturates ~20.4 even at 2.9M spl
 the max-over-views growth signal, opacity-weighted relocation of pruned splats, low-opacity mean noise and its tiny opacity /
 scale losses - together (they are one scheme). Parked: the other 10 scenes are at or past parity.
 
+### Video source, user path (2026-10-10)
+
+First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->
+own SfM 126/126 -> 7K -> save / reopen: held out **22.41 / 0.826** vs the same photos 22.93 / 0.828 (-0.52 dB for H.264 + JPEG).
+
 ### Speed after the subgroup default (Counter, new defaults, &trainprofile=1, 2026-10-10)
 
 Final cycle (profiled, one sync per phase): backward 19.3, ranges+raster 6.8, prev 6.3, emit+count 6.3, scatter 5.8, sort 5.4,

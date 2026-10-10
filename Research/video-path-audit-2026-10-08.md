@@ -1,5 +1,23 @@
 # Video input path audit (2026-10-08, read-only)
 
+## RESULT 2026-10-10: the user path is tested and works
+
+The three changes in section 4 are in (`&videoframes`, the project autotest's video branch with `[Dataset] PICK-FILE`,
+`tools/_cdp_dataset.js` answering with CDP `DOM.setFileInputFiles`). Run `_runs/tuvok-vid.sh` (build f16, the five
+2026-10-09/10 defaults): TruckVideo picked into the real `<input type=file>` -> `[Studio] truck.mp4: 126 frames saved as
+sources in 11.2s` -> `exposure auto: 0 of 126 photos carry EXIF exposure (unknown: keep the gains) -> per-photo gains ON`
+-> own SfM 126 of 126 posed, shared focal 582.9 px (COLMAP 581.9 at this size) -> 7K, 16 held out -> save -> reopen ->
+captures -> `[Dataset] DONE`, no FAIL.
+
+| Truck, 7K, user path, llffhold 8 | held out PSNR / SSIM |
+|---|---|
+| video (126 frames of truck.mp4) | **22.41 / 0.826** |
+| the same 126 photos | 22.93 / 0.828 |
+
+The video plumbing (H.264 + JPEG q0.95 frames) costs 0.52 dB PSNR and nothing measurable in SSIM. Still a slideshow: a real
+phone clip (blur, rolling shutter, stabilisation, near-duplicates) is the next test.
+
+
 Scope: how a video becomes training input, what tests exist, risks, and an end-to-end test plan. Nothing was built,
 run or changed. Paths are relative to `SpawnScene/SpawnScene/` unless they start with `tools/`, `_runs/` or `Research/`.
 

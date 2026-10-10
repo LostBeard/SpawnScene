@@ -418,7 +418,8 @@ target is the ~11-12 ms outside the timed passes. nb: barrier-free fused backwar
 to the per-splat totals with atomics, the gsplat / Brush structure). **Result: slower - reverted.** Gate PASS, but Counter raster_backward
 23.13 ms (14.15 + scatter 1.70 before), 313.5 s vs 254.6 s: WebGPU has no float atomicAdd, so every add is a compare-exchange
 retry loop, and 9 of them per touched SUBGROUP per key (vs per key per tile) contend more than the barriers cost. gsplat /
-Brush have native float atomics (CUDA, Vulkan / DX12 via SPIR-V). The per-key barrier structure stays.
+Brush have native float atomics (CUDA, Vulkan / DX12 via SPIR-V). The per-key barrier structure stays. Train agrees: 13.55 ms
+(7.22 + 0.66 before), 208 s vs 165 s.
 
 ### Video source, user path (2026-10-10)
 

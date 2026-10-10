@@ -34,6 +34,10 @@ public sealed class GpuRadixSort : IDisposable
     readonly GPUBuffer?[] _params = new GPUBuffer?[MaxPasses];
     GPUBuffer? _hist, _sums, _keysAlt, _valuesAlt;
     int _capacity;
+    // SortIndirect: the count comes from a GPU counter, so a prepare pass turns it into each pass's params and the
+    // dispatch sizes (indirect args) - no CPU read of the count.
+    GPUComputePipeline? _prepare;
+    GPUBuffer? _prepIn, _paramStore, _indirect, _countStore;
 
     public GpuRadixSort(GPUDevice device, GPUQueue queue, SpawnDev.ILGPU.WebGPU.WebGPUAccelerator? accelerator = null)
     {
@@ -95,11 +99,11 @@ public sealed class GpuRadixSort : IDisposable
             BitConverter.TryWriteBytes(bytes.AsSpan(12), (uint)scanBlocks);
             _queue.WriteBuffer(prm, 0, bytes);
 
-            Pass(enc, _histogram!, blocks, prm, srcK, _hist!);
-            Pass(enc, _scanReduce!, scanBlocks, prm, _hist!, _sums!);
-            Pass(enc, _scanSums!, 1, prm, _sums!);
-            Pass(enc, _scanDown!, scanBlocks, prm, _hist!, _sums!);
-            Pass(enc, _scatter!, blocks, prm, srcK, srcV, dstK, dstV, _hist!);
+            Pass(enc, "sort_histogram", _histogram!, blocks, prm, srcK, _hist!);
+            Pass(enc, "sort_scan_reduce", _scanReduce!, scanBlocks, prm, _hist!, _sums!);
+            Pass(enc, "sort_scan_sums", _scanSums!, 1, prm, _sums!);
+            Pass(enc, "sort_scan_down", _scanDown!, scanBlocks, prm, _hist!, _sums!);
+            Pass(enc, "sort_scatter", _scatter!, blocks, prm, srcK, srcV, dstK, dstV, _hist!);
 
             (srcK, dstK) = (dstK, srcK);
             (srcV, dstV) = (dstV, srcV);
@@ -114,9 +118,148 @@ public sealed class GpuRadixSort : IDisposable
         RawSubmit.Submit(_accelerator, _queue, new[] { cmd });
     }
 
-    void Pass(GPUCommandEncoder enc, GPUComputePipeline pipeline, int workgroups, params GPUBuffer[] buffers)
+    /// <summary>
+    /// Optional per-pass timestamp writes (the trainer's &amp;gputimes=1): given a label, a pass descriptor or null.
+    /// The sort is its own raw passes, so without this it is in the untimed remainder of a step.
+    /// </summary>
+    public Func<string, GPUComputePassDescriptor?>? TimedPass { get; set; }
+
+    /// <summary>
+    /// Like <see cref="Sort"/>, but the key count is <c>min(counter[0], capacity)</c> read ON THE GPU: a one-thread prepare
+    /// pass writes every pass's params and the indirect dispatch sizes, so the caller never waits for the count (the
+    /// trainer's per-step 4-byte readback drained the GPU every step: &amp;deferkeys). Also writes the clamped count to the
+    /// first 4 bytes of <paramref name="countUniform"/> (the later passes' <c>counts.x</c>) and folds the raw demand into
+    /// <paramref name="peak"/>[0] (atomicMax), so overflow is seen at the next sync instead of this one.
+    /// </summary>
+    public void SortIndirect(GPUBuffer keys, GPUBuffer values, GPUBuffer counter, int capacity, int keyBits,
+        GPUBuffer countUniform, GPUBuffer peak)
     {
-        using var pass = enc.BeginComputePass();
+        if (keyBits < 1 || keyBits > 32) throw new ArgumentOutOfRangeException(nameof(keyBits));
+        EnsureCapacity(capacity);
+        EnsureIndirect();
+        int passes = (keyBits + 7) / 8;
+
+        var q = new byte[16];
+        BitConverter.TryWriteBytes(q.AsSpan(0), (uint)capacity);
+        BitConverter.TryWriteBytes(q.AsSpan(4), (uint)passes);
+        BitConverter.TryWriteBytes(q.AsSpan(8), (uint)MaxWorkgroupsPerDim);
+        _queue.WriteBuffer(_prepIn!, 0, q);
+
+        using var enc = _device.CreateCommandEncoder();
+        using (var pass = enc.BeginComputePass(TimedPass?.Invoke("sort_prepare")))
+        {
+            pass.SetPipeline(_prepare!);
+            using var layout = _prepare!.GetBindGroupLayout(0);
+            var bufs = new[] { _prepIn!, counter, _paramStore!, _indirect!, _countStore!, peak };
+            var entries = new GPUBindGroupEntry[bufs.Length];
+            for (int i = 0; i < bufs.Length; i++)
+                entries[i] = new GPUBindGroupEntry { Binding = (uint)i, Resource = new GPUBufferBinding { Buffer = bufs[i] } };
+            using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor { Layout = layout, Entries = entries });
+            pass.SetBindGroup(0, bg);
+            pass.DispatchWorkgroups(1, 1, 1);
+            pass.End();
+        }
+        enc.CopyBufferToBuffer(_countStore!, 0, countUniform, 0, 4);
+        GPUBuffer srcK = keys, srcV = values, dstK = _keysAlt!, dstV = _valuesAlt!;
+        for (int pass = 0; pass < passes; pass++)
+        {
+            var prm = _params[pass] ??= _device.CreateBuffer(new GPUBufferDescriptor
+            {
+                Size = 16,
+                Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+            });
+            enc.CopyBufferToBuffer(_paramStore!, (ulong)(pass * 16), prm, 0, 16);
+        }
+        for (int pass = 0; pass < passes; pass++)
+        {
+            var prm = _params[pass]!;
+            PassIndirect(enc, "sort_histogram", _histogram!, BlocksArgs, prm, srcK, _hist!);
+            PassIndirect(enc, "sort_scan_reduce", _scanReduce!, ScanArgs, prm, _hist!, _sums!);
+            Pass(enc, "sort_scan_sums", _scanSums!, 1, prm, _sums!);
+            PassIndirect(enc, "sort_scan_down", _scanDown!, ScanArgs, prm, _hist!, _sums!);
+            PassIndirect(enc, "sort_scatter", _scatter!, BlocksArgs, prm, srcK, srcV, dstK, dstV, _hist!);
+            (srcK, dstK) = (dstK, srcK);
+            (srcV, dstV) = (dstV, srcV);
+        }
+        if (passes % 2 == 1)
+        {
+            // The count is not known here: copy the whole capacity back.
+            enc.CopyBufferToBuffer(srcK, 0, keys, 0, (ulong)capacity * 4);
+            enc.CopyBufferToBuffer(srcV, 0, values, 0, (ulong)capacity * 4);
+        }
+        using var cmd = enc.Finish();
+        RawSubmit.Submit(_accelerator, _queue, new[] { cmd });
+    }
+
+    const ulong BlocksArgs = 0, ScanArgs = 12;
+
+    void EnsureIndirect()
+    {
+        EnsurePipelines();
+        if (_prepare != null) return;
+        using (var module = _device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = Prepare }))
+            _prepare = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
+            {
+                Layout = "auto",
+                Compute = new GPUProgrammableStage { Module = module, EntryPoint = "prepare" },
+            });
+        _prepIn = _device.CreateBuffer(new GPUBufferDescriptor { Size = 16, Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst });
+        _paramStore = _device.CreateBuffer(new GPUBufferDescriptor { Size = 16 * MaxPasses, Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopySrc });
+        _indirect = _device.CreateBuffer(new GPUBufferDescriptor { Size = 32, Usage = GPUBufferUsage.Storage | GPUBufferUsage.Indirect });
+        _countStore = _device.CreateBuffer(new GPUBufferDescriptor { Size = 16, Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopySrc });
+    }
+
+    void PassIndirect(GPUCommandEncoder enc, string label, GPUComputePipeline pipeline, ulong argsOffset, params GPUBuffer[] buffers)
+    {
+        using var pass = enc.BeginComputePass(TimedPass?.Invoke(label));
+        pass.SetPipeline(pipeline);
+        using var layout = pipeline.GetBindGroupLayout(0);
+        var entries = new GPUBindGroupEntry[buffers.Length];
+        for (int i = 0; i < buffers.Length; i++)
+            entries[i] = new GPUBindGroupEntry { Binding = (uint)i, Resource = new GPUBufferBinding { Buffer = buffers[i] } };
+        using var bg = _device.CreateBindGroup(new GPUBindGroupDescriptor { Layout = layout, Entries = entries });
+        pass.SetBindGroup(0, bg);
+        pass.DispatchWorkgroupsIndirect(_indirect!, argsOffset);
+        pass.End();
+    }
+
+    // One thread: n = min(demand, capacity), the params of every pass, and the indirect args (x, y, 1) for the per-block
+    // kernels and the scan kernels, split over y past 65535 exactly as Pass does on the CPU.
+    const string Prepare = @"
+struct PrepIn { cap : u32, passes : u32, max_dim : u32, pad : u32 }
+@group(0) @binding(0) var<uniform> q : PrepIn;
+@group(0) @binding(1) var<storage, read> counter : array<u32>;
+@group(0) @binding(2) var<storage, read_write> params : array<u32>;
+@group(0) @binding(3) var<storage, read_write> args : array<u32>;
+@group(0) @binding(4) var<storage, read_write> count_out : array<u32>;
+@group(0) @binding(5) var<storage, read_write> peak : array<atomic<u32>>;
+
+@compute @workgroup_size(1)
+fn prepare() {
+    let demand = counter[0];
+    atomicMax(&peak[0], demand);
+    let n = min(demand, q.cap);
+    let blocks = (n + 1023u) / 1024u;
+    let scan_blocks = (256u * blocks + 1023u) / 1024u;
+    for (var p = 0u; p < q.passes; p = p + 1u) {
+        params[p * 4u + 0u] = n;
+        params[p * 4u + 1u] = p * 8u;
+        params[p * 4u + 2u] = blocks;
+        params[p * 4u + 3u] = scan_blocks;
+    }
+    args[0] = min(blocks, q.max_dim);
+    args[1] = (blocks + q.max_dim - 1u) / q.max_dim;
+    args[2] = 1u;
+    args[3] = min(scan_blocks, q.max_dim);
+    args[4] = (scan_blocks + q.max_dim - 1u) / q.max_dim;
+    args[5] = 1u;
+    count_out[0] = n;
+}
+";
+
+    void Pass(GPUCommandEncoder enc, string label, GPUComputePipeline pipeline, int workgroups, params GPUBuffer[] buffers)
+    {
+        using var pass = enc.BeginComputePass(TimedPass?.Invoke(label));
         pass.SetPipeline(pipeline);
         using var layout = pipeline.GetBindGroupLayout(0);
         var entries = new GPUBindGroupEntry[buffers.Length];
@@ -381,5 +524,8 @@ fn scatter(@builtin(local_invocation_id) lid : vec3<u32>,
         for (int i = 0; i < _params.Length; i++) { _params[i]?.Destroy(); _params[i]?.Dispose(); _params[i] = null; }
         _histogram?.Dispose(); _scanReduce?.Dispose(); _scanSums?.Dispose(); _scanDown?.Dispose(); _scatter?.Dispose();
         _histogram = _scanReduce = _scanSums = _scanDown = _scatter = null;
+        foreach (var b in new[] { _prepIn, _paramStore, _indirect, _countStore }) { b?.Destroy(); b?.Dispose(); }
+        _prepIn = _paramStore = _indirect = _countStore = null;
+        _prepare?.Dispose(); _prepare = null;
     }
 }

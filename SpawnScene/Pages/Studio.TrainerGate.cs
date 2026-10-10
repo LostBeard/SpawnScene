@@ -170,6 +170,26 @@ public partial class Studio
             }
             Console.WriteLine($"[TrainerGate] gpu keys={trainer.LastKeyCount:N0}");
 
+            // &deferkeys (2026-10-10): with the key count read on the GPU (indirect sort, GPU-written counts) the render must
+            // be the synced one bit for bit, and the GPU peak must hold the demand the CPU never read.
+            {
+                int syncedKeys = trainer.LastKeyCount;
+                trainer.ResetPeakKeyDemand();
+                await trainer.RenderForwardAsync(splatBuf, n, cam, depthNear, depthFar, readback: false, deferCount: true);
+                float[] deferred = await trainer.ReadRenderedColourAsync();
+                double maxDiff = 0;
+                for (int i = 0; i < deferred.Length; i++) maxDiff = Math.Max(maxDiff, Math.Abs(deferred[i] - gpuColour[i]));
+                await trainer.SyncKeyDemandAsync();
+                if (!trainer.LastKeyCountDeferred || maxDiff != 0 || trainer.PeakKeyDemand != syncedKeys)
+                {
+                    Console.WriteLine($"[TrainerGate] FAIL: deferred key count: deferred {trainer.LastKeyCountDeferred}, " +
+                        $"max |diff| {maxDiff:G3}, GPU peak {trainer.PeakKeyDemand:N0} vs {syncedKeys:N0} keys");
+                    return;
+                }
+                Console.WriteLine($"[TrainerGate] deferred key count: render identical, GPU peak {trainer.PeakKeyDemand:N0} keys");
+                trainer.ResetPeakKeyDemand();
+            }
+
             // ── CPU model over the same DC data ──
             var cpuSplats = ProjectForCpu(packedDc, n, cam, shDegree: trainer.ActiveShDegree);
             var bin = SplatTileRasterizer.Bin(cpuSplats, GateWidth, GateHeight);

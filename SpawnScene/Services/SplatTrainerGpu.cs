@@ -71,6 +71,9 @@ public sealed partial class SplatTrainerGpu : IDisposable
     MemoryBuffer1D<uint, Stride1D.Dense>? _keys;
     MemoryBuffer1D<uint, Stride1D.Dense>? _values;
     MemoryBuffer1D<int, Stride1D.Dense>? _counter;
+    // &deferkeys: the peak emit demand on the GPU (atomicMax in the sort's prepare), and the GPU-written key count uniform.
+    MemoryBuffer1D<int, Stride1D.Dense>? _keyPeak;
+    GPUBuffer? _gpuKeyCount;
     MemoryBuffer1D<uint, Stride1D.Dense>? _ranges;      // 2 per tile
     MemoryBuffer1D<float, Stride1D.Dense>? _outColour;  // 3 per pixel
     MemoryBuffer1D<float, Stride1D.Dense>? _outFinalT;  // 1 per pixel
@@ -486,6 +489,11 @@ public sealed partial class SplatTrainerGpu : IDisposable
             Size = 16,
             Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
         });
+        _gpuKeyCount = _device.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 16,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
         _uniformBytes = new byte[UniformFloats * sizeof(float)];
         _scratch4 = new Uint32Array(4);
         _dimsBuf = _device.CreateBuffer(new GPUBufferDescriptor
@@ -599,6 +607,30 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// -> 27.78; Train 4.88M -> 1.79M, 192 -> 150 s, 20.16 -> 20.10 (run-to-run noise). &amp;tighttiles=0 = the 3-sigma square.
     /// </summary>
     public static bool TightTiles { get; set; } = true;
+
+    /// <summary>
+    /// &amp;deferkeys=1: a training step that does not read its loss never waits for its key count. The step used to read
+    /// the 4-byte emit counter back before sorting, which drains the GPU every step; then the GPU idled while the CPU
+    /// encoded sort, raster, loss and SSIM (gputimes, Counter late: 35.7 ms wall, 24.1 ms of GPU passes incl. the sort).
+    /// Deferred, the sort takes its count from the counter on the GPU (<see cref="GpuRadixSort.SortIndirect"/>), ranges and
+    /// gradient scatter read it from a GPU-written uniform, and the raw demand goes into a GPU peak. Overflow (demand over
+    /// capacity: once in 7K steps on Counter) is caught at the next sync step - each loss-read step, and densify through
+    /// <see cref="SyncKeyDemandAsync"/> - which grows the buffers; until then that view's frame keeps the keys that fit.
+    /// DEFAULT since 2026-10-10: TrainerGate PASS (deferred render = synced bit for bit, GPU peak = the CPU count); Counter
+    /// 7K 239.2 -> 200.0 s, 27.80 -> 27.77 dB, SSIM 0.8976 both; Train 148.5 -> 127.5 s, 20.12 -> 20.15. &amp;deferkeys=0 = read it.
+    /// </summary>
+    public static bool DeferKeyCount { get; set; } = true;
+
+    /// <summary>The last forward pass did not read its key count (<see cref="DeferKeyCount"/>): LastKeyCount is stale.</summary>
+    public bool LastKeyCountDeferred { get; private set; }
+
+    /// <summary>Fold the GPU-side peak demand of deferred steps into <see cref="PeakKeyDemand"/> (densify sizes from it).</summary>
+    public async Task SyncKeyDemandAsync()
+    {
+        if (_keyPeak == null) return;
+        int[] pk = await _keyPeak.CopyToHostAsync<int>(0, 1);
+        PeakKeyDemand = Math.Max(PeakKeyDemand, pk[0]);
+    }
 
     GPUComputePipeline MakePipeline(string wgsl, string entry)
     {
@@ -871,6 +903,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _keys = accel.Allocate1D<uint>(_keyCapacity);
         _values = accel.Allocate1D<uint>(_keyCapacity);
         _counter = accel.Allocate1D<int>(1);
+        _keyPeak = accel.Allocate1D<int>(1);
+        _keyPeak.MemSetToZero();
         _ranges = accel.Allocate1D<uint>(tileCount * 2);
         _outColour = accel.Allocate1D<float>((long)width * height * 3);
         _outFinalT = accel.Allocate1D<float>((long)width * height);
@@ -944,7 +978,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _lossSum = accel.Allocate1D<float>(1);
         _lossStepsPending = 0;
 
-        _radixSort ??= new GpuRadixSort(_device!, _queue!, _gpu.WebGPUAccelerator);
+        _radixSort ??= new GpuRadixSort(_device!, _queue!, _gpu.WebGPUAccelerator) { TimedPass = TimedPass };
         _radixSort.EnsureCapacity(_keyCapacity);
         await stage($"sort scratch for {_keyCapacity:N0} keys");
     }
@@ -955,9 +989,11 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// </summary>
     public async Task<float[]> RenderForwardAsync(
         MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
-        CameraParams cam, float depthNear, float depthFar, bool readback = true, bool depth = false)
+        CameraParams cam, float depthNear, float depthFar, bool readback = true, bool depth = false, bool deferCount = false)
     {
         if (_device == null || _emitKeys == null) throw new InvalidOperationException("not initialized");
+        // A readback needs the count anyway (and the caller its pixels): defer only GPU-only forwards.
+        deferCount &= !readback;
 
         var accel = _gpu.WebGPUAccelerator;
         var splatGpu = splatBuf.GetGPUBuffer() ?? throw new InvalidOperationException("splat buffer has no GPU handle");
@@ -1015,43 +1051,65 @@ public sealed partial class SplatTrainerGpu : IDisposable
             RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
         }
 
-        // 4 bytes back to learn how many keys exist. A scalar, not bulk data. The readback maps behind
-        // everything already submitted, so it needs no separate wait.
-        int[] counted = await _counter.CopyToHostAsync<int>(0, 1);
-        await PhaseAsync("emit+count");
-        int keyCount = counted[0];
-        LastKeyDemand = keyCount;
-        PeakKeyDemand = Math.Max(PeakKeyDemand, keyCount);
-        // More keys than the buffers hold: grow them and emit again, so this frame's gradients are complete. The
-        // capacity is sized from measured demand per densify window, and that window does not see every view
-        // (TruckFull: ~100 of 219 per window), so a view busier than the window's peak lands here. Growing used to be
-        // impossible, which is why capacity kept a floor of 8 keys a splat (~350 B/splat, 26% of training memory).
-        if (keyCount > _keyCapacity && GrowKeysOnOverflow && TryGrowKeys(keyCount))
-            return await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback, depth);
-        LastOverflowed = keyCount > _keyCapacity;
-        LastKeyCount = Math.Min(keyCount, _keyCapacity);
-        if (LastOverflowed)
-        {
-            Console.WriteLine($"[Trainer] KEY OVERFLOW: {keyCount:N0} needed, capacity {_keyCapacity:N0}. " +
-                "Raise keysPerSplat; this frame is incomplete.");
-        }
-        if (LastKeyCount == 0)
-        {
-            Console.WriteLine("[Trainer] no keys emitted - nothing visible from this view");
-            return readback ? new float[_width * _height * 3] : System.Array.Empty<float>();
-        }
-
-        // ── 2. Sort by key: groups by tile AND orders front-to-back within each tile ──
-        // 8 bits a pass over only the bits the key uses (tile index above DEPTH_BITS of depth), all passes
-        // in one submission. The ILGPU.Algorithms sort this replaces ran 16 two-bit passes, ~100 dispatches,
-        // and was 60-67% of a training step (MEASURED, &trainprofile=1).
         int keyBits = 18 + Math.Max(1, System.Numerics.BitOperations.Log2((uint)Math.Max(1, _tilesX * _tilesY - 1)) + 1);
-        _radixSort!.Sort(_keys!.GetGPUBuffer()!, _values!.GetGPUBuffer()!, LastKeyCount, Math.Min(32, keyBits));
-        accel.FlushPendingCommands();
-        await PhaseAsync("sort");
+        LastKeyCountDeferred = deferCount;
+        if (deferCount)
+        {
+            // &deferkeys: no CPU wait. The sort, ranges and gradient scatter take the count from the GPU.
+            LastOverflowed = false;
+            _radixSort!.SortIndirect(_keys!.GetGPUBuffer()!, _values!.GetGPUBuffer()!, _counter.GetGPUBuffer()!, _keyCapacity,
+                Math.Min(32, keyBits), _gpuKeyCount!, _keyPeak!.GetGPUBuffer()!);
+            await PhaseAsync("sort");
+        }
+        else
+        {
+            // 4 bytes back to learn how many keys exist. A scalar, not bulk data. The readback maps behind
+            // everything already submitted, so it needs no separate wait.
+            int[] counted = await _counter.CopyToHostAsync<int>(0, 1);
+            await PhaseAsync("emit+count");
+            int keyCount = counted[0];
+            if (DeferKeyCount && _keyPeak != null)
+            {
+                // A deferred step since the last sync may have wanted more keys than fit: grow for the busiest view seen.
+                int[] pk = await _keyPeak.CopyToHostAsync<int>(0, 1);
+                PeakKeyDemand = Math.Max(PeakKeyDemand, pk[0]);
+                if (pk[0] > _keyCapacity && keyCount <= _keyCapacity && GrowKeysOnOverflow && TryGrowKeys(pk[0]))
+                    return await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback, depth);
+            }
+            LastKeyDemand = keyCount;
+            PeakKeyDemand = Math.Max(PeakKeyDemand, keyCount);
+            // More keys than the buffers hold: grow them and emit again, so this frame's gradients are complete. The
+            // capacity is sized from measured demand per densify window, and that window does not see every view
+            // (TruckFull: ~100 of 219 per window), so a view busier than the window's peak lands here. Growing used to be
+            // impossible, which is why capacity kept a floor of 8 keys a splat (~350 B/splat, 26% of training memory).
+            if (keyCount > _keyCapacity && GrowKeysOnOverflow && TryGrowKeys(keyCount))
+                return await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback, depth);
+            LastOverflowed = keyCount > _keyCapacity;
+            LastKeyCount = Math.Min(keyCount, _keyCapacity);
+            if (LastOverflowed)
+            {
+                Console.WriteLine($"[Trainer] KEY OVERFLOW: {keyCount:N0} needed, capacity {_keyCapacity:N0}. " +
+                    "Raise keysPerSplat; this frame is incomplete.");
+            }
+            if (LastKeyCount == 0)
+            {
+                Console.WriteLine("[Trainer] no keys emitted - nothing visible from this view");
+                return readback ? new float[_width * _height * 3] : System.Array.Empty<float>();
+            }
+
+            // ── 2. Sort by key: groups by tile AND orders front-to-back within each tile ──
+            // 8 bits a pass over only the bits the key uses (tile index above DEPTH_BITS of depth), all passes
+            // in one submission. The ILGPU.Algorithms sort this replaces ran 16 two-bit passes, ~100 dispatches,
+            // and was 60-67% of a training step (MEASURED, &trainprofile=1).
+            _radixSort!.Sort(_keys!.GetGPUBuffer()!, _values!.GetGPUBuffer()!, LastKeyCount, Math.Min(32, keyBits));
+            accel.FlushPendingCommands();
+            await PhaseAsync("sort");
+            WriteU32(_countBuf!, (uint)LastKeyCount);
+        }
 
         // ── 3. Tile ranges ──
-        WriteU32(_countBuf!, (uint)LastKeyCount);
+        var keyCountBuf = deferCount ? _gpuKeyCount! : _countBuf!;
+        int keyThreads = deferCount ? _keyCapacity : LastKeyCount;
         using (var enc = _device.CreateCommandEncoder())
         {
             using var pass = enc.BeginComputePass(TimedPass("tile_ranges"));
@@ -1064,11 +1122,11 @@ public sealed partial class SplatTrainerGpu : IDisposable
                 {
                     new() { Binding = 0, Resource = new GPUBufferBinding { Buffer = _keys!.GetGPUBuffer()! } },
                     new() { Binding = 1, Resource = new GPUBufferBinding { Buffer = _ranges!.GetGPUBuffer()! } },
-                    new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = _countBuf! } },
+                    new() { Binding = 2, Resource = new GPUBufferBinding { Buffer = keyCountBuf } },
                 },
             });
             pass.SetBindGroup(0, bg);
-            var (trX, trY) = LinearGrid(LastKeyCount);
+            var (trX, trY) = LinearGrid(keyThreads);
             pass.DispatchWorkgroups((uint)trX, (uint)trY, 1);
             pass.End();
             using var cmd = enc.Finish();
@@ -1123,6 +1181,13 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// width*height*3 floats each). Device-to-device, so a multi-view run pays the upload once.
     /// </summary>
     /// <summary>The current target as RGB floats. CPU transfer: evaluation only (the fair held-out score).</summary>
+    /// <summary>The last forward's colour (3 floats per pixel). For the gate: a deferred forward does not read back.</summary>
+    public async Task<float[]> ReadRenderedColourAsync()
+    {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        return await _outColour!.CopyToHostAsync<float>(0, _width * _height * 3);
+    }
+
     public async Task<float[]> ReadTargetAsync()
     {
         await _gpu.WebGPUAccelerator.SynchronizeAsync();
@@ -1452,7 +1517,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     public int PeakKeyDemand { get; private set; }
 
     /// <summary>Clear the peak, at the start of a new densification window.</summary>
-    public void ResetPeakKeyDemand() { PeakKeyDemand = 0; KeyGrowths = 0; }
+    public void ResetPeakKeyDemand() { PeakKeyDemand = 0; KeyGrowths = 0; _keyPeak?.MemSetToZero(); }
 
     /// <summary>
     /// Where a view's gradient dies: magnitudes at each stage of the chain, plus whether the
@@ -2174,9 +2239,10 @@ public sealed partial class SplatTrainerGpu : IDisposable
         else if (RandomBackground)
             _stepBackground = BackgroundAmplitude * (new Vector3(_backgroundRng.NextSingle(), _backgroundRng.NextSingle(), _backgroundRng.NextSingle())
                 - (ZeroMeanBackground ? new Vector3(0.5f) : Vector3.Zero));
-        try { await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false, depth: depthOn); }
+        try { await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false, depth: depthOn,
+            deferCount: DeferKeyCount && !readLoss); }
         finally { _stepBackground = Vector3.Zero; }
-        if (LastKeyCount == 0)
+        if (!LastKeyCountDeferred && LastKeyCount == 0)
         {
             // Clear before returning: the view-support census and densify accum read these
             // buffers after TrainStepAsync returns. Leaving the previous view's gradients here
@@ -2305,24 +2371,25 @@ public sealed partial class SplatTrainerGpu : IDisposable
         if (fused) { }
         else if (depthOn)
         {
-            // counts.y = where the per-key dL/d(1/z) start in depth_io.
-            WriteU32x4(_countBuf!, (uint)LastKeyCount, (uint)(2L * pixels), 0u, 0u);
-            DispatchLinear(_scatterGradDepth!, LastKeyCount, new[]
+            // counts.y = where the per-key dL/d(1/z) start in depth_io. Deferred: x is GPU-written, set y only.
+            if (LastKeyCountDeferred) WriteU32At(_gpuKeyCount!, 4, (uint)(2L * pixels));
+            else WriteU32x4(_countBuf!, (uint)LastKeyCount, (uint)(2L * pixels), 0u, 0u);
+            DispatchLinear(_scatterGradDepth!, LastKeyCountDeferred ? _keyCapacity : LastKeyCount, new[]
             {
                 Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
                 Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
-                Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
+                Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, LastKeyCountDeferred ? _gpuKeyCount! : _countBuf!),
                 Buf(6, _depthIo!.GetGPUBuffer()!), Buf(7, _gradInvz!.GetGPUBuffer()!),
             });
         }
         else
         {
-            WriteU32(_countBuf!, (uint)LastKeyCount);
-            DispatchLinear(_scatterGrad!, LastKeyCount, new[]
+            if (!LastKeyCountDeferred) WriteU32(_countBuf!, (uint)LastKeyCount);
+            DispatchLinear(_scatterGrad!, LastKeyCountDeferred ? _keyCapacity : LastKeyCount, new[]
             {
                 Buf(0, _gradKeyA!.GetGPUBuffer()!), Buf(1, _gradKeyB!.GetGPUBuffer()!),
                 Buf(2, _gradKeyC!.GetGPUBuffer()!), Buf(3, _values!.GetGPUBuffer()!),
-                Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, _countBuf!),
+                Buf(4, _gradFixed!.GetGPUBuffer()!), Buf(5, LastKeyCountDeferred ? _gpuKeyCount! : _countBuf!),
             });
         }
 
@@ -2714,6 +2781,13 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _queue!.WriteBuffer(buf, 0, _scratch4);
     }
 
+    void WriteU32At(GPUBuffer buf, ulong offset, uint value)
+    {
+        var bytes = new byte[4];
+        BitConverter.TryWriteBytes(bytes, value);
+        _queue!.WriteBuffer(buf, offset, bytes);
+    }
+
     void WriteU32(GPUBuffer buf, uint value)
     {
         _scratch4![0] = value;
@@ -2730,6 +2804,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _keys?.Dispose(); _keys = null;
         _values?.Dispose(); _values = null;
         _counter?.Dispose(); _counter = null;
+        _keyPeak?.Dispose(); _keyPeak = null;
         _ranges?.Dispose(); _ranges = null;
         _outColour?.Dispose(); _outColour = null;
         _outFinalT?.Dispose(); _outFinalT = null;
@@ -2791,6 +2866,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _geomCfgBuf?.Destroy(); _geomCfgBuf?.Dispose();
         _targetBytes?.Destroy(); _targetBytes?.Dispose();
         _countBuf?.Destroy(); _countBuf?.Dispose();
+        _gpuKeyCount?.Destroy(); _gpuKeyCount?.Dispose(); _gpuKeyCount = null;
         _dimsBuf?.Destroy(); _dimsBuf?.Dispose();
         _adamCfgBuf?.Destroy(); _adamCfgBuf?.Dispose();
         _adamFlagsBuf?.Destroy(); _adamFlagsBuf?.Dispose();

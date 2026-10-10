@@ -309,6 +309,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("gputimes", out var gpuTimesQ)) SplatTrainerGpu.GpuTimes = gpuTimesQ is "1" or "true";
         // &bgcache=1: reuse bind groups across dispatches (SplatTrainerGpu.CacheBindGroups).
         if (query.TryGetValue("bgcache", out var bgcq)) SplatTrainerGpu.CacheBindGroups = bgcq is "1" or "true";
+        // &deferkeys=0: read the key count back every training step again (SplatTrainerGpu.DeferKeyCount, default on).
+        if (query.TryGetValue("deferkeys", out var dkq)) SplatTrainerGpu.DeferKeyCount = dkq is "1" or "true";
         // &tighttiles=1: opacity-aware per-axis tile footprints in emit_keys (SplatTrainerGpu.TightTiles).
         if (query.TryGetValue("tighttiles", out var ttq)) SplatTrainerGpu.TightTiles = ttq is "1" or "true";
         // &fusescatter=1: fold the scatter pass into the subgroup backward (SplatTrainerGpu.FuseScatter).

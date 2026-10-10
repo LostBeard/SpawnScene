@@ -421,6 +421,27 @@ retry loop, and 9 of them per touched SUBGROUP per key (vs per key per tile) con
 Brush have native float atomics (CUDA, Vulkan / DX12 via SPIR-V). The per-key barrier structure stays. Train agrees: 13.55 ms
 (7.22 + 0.66 before), 208 s vs 165 s.
 
+**gt2 (2026-10-10, sort timed too):** the radix sort is raw WebGPU passes, so it was in the "untimed" share; now timestamped.
+Counter late (cycle 31): wall 35.7 ms/step (28.0 it/s, 7K in 253.0 s with &gputimes), timed GPU 24.1 ms incl. the sort
+(sort_scatter 0.96, histogram 0.18, scans ~0.1: **~1.2 ms**). Still untimed: **~11.6 ms/step**. ILGPU memsets are ~100 MB a
+step (~0.3 ms). So nearly all of it is the GPU idle: the per-step key-count readback drains the queue, then the GPU waits
+while the CPU encodes sort / ranges / raster / loss / SSIM through interop (plus Task.Delay(1) every 4 steps). Growth for an
+overflowing view: once in 7K steps (Counter), never (Train) - a late overflow check is cheap. Next: &deferkeys (dk chain).
+
+**dk (2026-10-10): &deferkeys - DEFAULT.** Training steps that do not read the loss no longer read the key count back:
+GpuRadixSort.SortIndirect (one-thread prepare pass -> per-pass params + indirect dispatch sizes from the GPU counter), tile
+ranges and gradient scatter read a GPU-written count, raw demand atomicMax'd into a GPU peak that the next sync step (and
+densify, SyncKeyDemandAsync) folds in and grows from. TrainerGate PASS (deferred render bit-identical to the synced one,
+GPU peak = CPU count). A/B, same publish, back to back:
+
+| Scene | defaults | &deferkeys=1 | held out PSNR / SSIM | growths / overflows |
+|---|---|---|---|---|
+| Counter | 239.2 s (29.3 it/s) | **200.0 s (35.0 it/s), -16%** | 27.80 / 0.8976 -> 27.77 / 0.8976 | 1 / 0 both |
+| Train | 148.5 s (47.1 it/s) | **127.5 s (54.9 it/s), -14%** | 20.12 / 0.7862 -> 20.15 / 0.7868 | 0 / 0 both |
+
+Brush v0.3.0 on Counter: ~172 s wall (earlier); we were 239, now 200. Next: batch the small per-step passes (one encoder,
+per-pass uniform slots) - the CPU encode cost still bounds the step where the GPU work is short.
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

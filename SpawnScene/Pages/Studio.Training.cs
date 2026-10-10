@@ -1641,6 +1641,7 @@ public partial class Studio
 
         var (w, h) = _trainer!.Size;
         int keys = _trainer.KeysPerSplat;
+        await _trainer.SyncKeyDemandAsync();   // &deferkeys: deferred steps' demand is on the GPU
         if (_trainer.PeakKeyDemand > 0)
         {
             // From THIS window's measured demand, up or down. It used to only ever grow: a sparse start (21k

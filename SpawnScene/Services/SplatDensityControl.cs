@@ -41,11 +41,14 @@ public static class SplatDensityControl
     /// the bar. Override with <c>?densifygrad=</c>. Training uses <c>0.8 L1 + 0.2 D-SSIM</c>
     /// (<see cref="ImageQuality.LambdaDssim"/>).
     /// <para>
-    /// The default is 8e-4 since training densifies on AbsGS's signal by default (Studio.AbsGradOption; gsplat's absgrad
-    /// bar); &amp;absgrad=0 restores the reference signal and its 2e-4.
+    /// The default is 6e-4 on AbsGS's signal (Studio.AbsGradOption; gsplat's absgrad bar is 8e-4, the default until
+    /// 2026-10-11); &amp;absgrad=0 restores the reference signal and its 2e-4. bs2 sweep on the 11 benchmark scenes (7K,
+    /// COLMAP poses, llffhold=8, the 10-10 defaults): 6e-4 better on all 11 (+0.09..+0.28 dB, mean 27.26 -> 27.44) for ~10%
+    /// more training time and ~1.3-1.7x the splats; viewer (Bicycle, user path) 183 -> 155 fps uncapped, scene 91 -> 120 MB.
+    /// 4e-4 doubles the gain (27.63) for ~35% more time and 2-2.7x the splats - Research/parity-matrix.md.
     /// </para>
     /// </summary>
-    public static float GradientThreshold { get; set; } = 8e-4f;
+    public static float GradientThreshold { get; set; } = 6e-4f;
 
     /// <summary>Alias: the threshold IS in NDC units, as the reference's is.</summary>
     public static float GradientThresholdNdc

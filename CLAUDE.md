@@ -221,6 +221,10 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   8. (2026-10-10) No densify apply probe (Studio.Training DensifyProbeOption): the 3-view before/after score at every
      densify was a log-only forensic costing ~1.2 ms a step with the GPU idle; Counter 204 -> 197 s, Train 128 -> 121 s,
      same scores. `&densifyprobe=1` brings it back. Diagnostic: `&cputimes=1` (encode vs wall vs densify per step).
+  9. (2026-10-11) Densify bar 6e-4 (SplatDensityControl.GradientThreshold; was gsplat's absgrad 8e-4): all 11 benchmark
+     scenes up (mean 27.26 -> 27.44) for ~10% more training time, ~1.3-1.7x splats; viewer 183 -> 155 fps (Bicycle, user
+     path), scene 91 -> 120 MB. 4e-4 gives 27.63 at ~35% more time - a High / Max candidate, untested at 15K / 30K.
+     `&densifygrad=X` sets it on every path (was dataset-only before f9d5056).
   Diagnostics: `&blobpick=1` (splats painting bad held-out views), `&splatstats=1` (dataset path too), tools/gap_anatomy.py.
   Opt-ins: `&minviews=N`, `&camerabubble=X`, `&nearplane=X`.
 - **Opt-ins under evaluation** (also on ANY Studio URL, e.g. `spawnscene.com/studio?depthinit=4&exposure=1`):

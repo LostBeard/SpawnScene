@@ -605,6 +605,12 @@ Saved-scene size (.spawnscene v2, 76 bytes a splat before gzip, Studio.SceneFile
 SAME model (2.16M, identical loss curve): **`&densifygrad` was parsed only in the dataset branch** - the project / user path
 ignored it. Fixed (global option now). The viewer has headroom (183 fps at 2.2M); the 4e-4 viewer point is re-run when the
 GPU is free again (Data's ML 5.3.6 gate has it).
+
+**vb2 (after the fix, same path):** 8e-4 2.17M splats, 91 MB, 183 fps, 214 s; **6e-4 2.85M, 120 MB, 155 fps, 245 s**; 4e-4 2.97M,
+125 MB, 147 fps, 285 s (the device budget caps the user path near 3M, so 4e-4 adds little but time). **DECISION 2026-10-11:
+6e-4 is the default** (all 11 benchmark scenes up, mean +0.18 dB, ~+10% training time on the benchmark, viewer -15% fps
+and +32% file on Bicycle). c45 (10-06) had found 6e-4 no better - on the defaults of that day; the 10-10 defaults change
+the answer. 4e-4 stays a High / Max candidate (untested at 15K / 30K).
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

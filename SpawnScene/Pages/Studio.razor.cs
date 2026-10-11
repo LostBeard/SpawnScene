@@ -227,7 +227,7 @@ public partial class Studio : IAsyncDisposable
             if (bp.Length == 2 && int.TryParse(bp[0], out var bc) && int.TryParse(bp[1], out var br) && bc >= 1 && br >= 1)
                 TrainingBlocks = (Math.Min(bc, 8), Math.Min(br, 8));
         }
-        // &absgrad=0: densify on the reference signed sum at its 2e-4 bar instead of AbsGS (the default, 8e-4).
+        // &absgrad=0: densify on the reference signed sum at its 2e-4 bar instead of AbsGS (the default, 6e-4).
         // &densifygrad sets the bar either way.
         // &superres=off|auto|on: override the project's super-resolution setting (Studio.SuperRes).
         if (query.TryGetValue("superres", out var superResQ))
@@ -239,9 +239,9 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("absgrad", out var agq))
         {
             AbsGradOption = agq is not ("0" or "false");
-            if (!query.ContainsKey("densifygrad")) SplatDensityControl.GradientThreshold = AbsGradOption ? 8e-4f : 2e-4f;
+            if (!query.ContainsKey("densifygrad")) SplatDensityControl.GradientThreshold = AbsGradOption ? 6e-4f : 2e-4f;
         }
-        // &densifygrad=X: the densify bar (SplatDensityControl.GradientThreshold; AbsGS default 8e-4). Global (was dataset-only,
+        // &densifygrad=X: the densify bar (SplatDensityControl.GradientThreshold; AbsGS default 6e-4). Global (was dataset-only,
         // 2026-10-11: the project path ignored it, so a user-path test of a lower bar trained the default).
         if (query.TryGetValue("densifygrad", out var dgq) && float.TryParse(dgq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var dgf))

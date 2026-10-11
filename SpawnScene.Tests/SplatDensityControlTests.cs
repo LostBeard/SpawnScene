@@ -244,7 +244,7 @@ public class SplatDensityControlTests
 
         // The default bar is gsplat's absgrad 8e-4: training densifies on AbsGS's signal by default
         // (Studio.AbsGradOption, 2026-10-06); &absgrad=0 restores Kerbl's published 2e-4. Both in these NDC units.
-        Assert.That(SplatDensityControl.GradientThreshold, Is.EqualTo(8e-4f).Within(1e-12f));
+        Assert.That(SplatDensityControl.GradientThreshold, Is.EqualTo(6e-4f).Within(1e-12f));
     }
 
     [Test]

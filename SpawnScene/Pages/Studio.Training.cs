@@ -79,6 +79,9 @@ public partial class Studio
     /// 1.91M -> 0.82M splats and 345 -> 230 s. Bar 6e-4 instead of 8e-4 (c45): Bicycle 24.44 dB / 0.743 with 3.52M splats
     /// in 609 s, Truck 23.71 / 0.859 with 1.20M in 307 s - SSIM +0.002..0.006 for ~50% more splats and ~35% more time,
     /// so 8e-4 stays. At 30K (c44, the user path): Bicycle 2.94M splats vs 4.81M, crisp grass where it had streaks.
+    /// 2026-10-11, on the 10-10 defaults (scale-lr schedule, position-lr decay, tight tiles, deferred key count): 6e-4 IS
+    /// better - all 11 benchmark scenes up (Bicycle +0.21, Truck +0.14, mean +0.18) for ~10% more time - and is the default
+    /// now (SplatDensityControl.GradientThreshold). c45's verdict was right on the defaults it ran on.
     /// </summary>
     public static bool AbsGradOption { get; set; } = true;
 

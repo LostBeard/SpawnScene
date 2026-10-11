@@ -15,9 +15,10 @@ way) but keeping splats QUANTIZED in VRAM and dequantizing in the shader. This i
 | SH bands 1-3: 45 x f32 in 3 parts | 180 (0 at SH 0) | GpuGaussianRenderer `_shRest` |
 | **Total** | **~301 at SH 3, ~121 at SH 0** | |
 
-A runtime measurement (two scene sizes, the difference in GPU memory) is still to do: the first try loaded Brush PLYs,
-which the importer refused (fixed, 9e78783), and nvidia-smi's total did not move - it needs a better probe (Chrome's
-GPU process memory, or WebGPU buffer accounting in the viewer itself).
+**Measured (AOT build, Chrome, nvidia-smi total with the scene open, nothing else on the GPU; twice, identical):**
+Brush Counter 392,017 splats (SH 3) 945 MiB, Brush Garden 969,954 (SH 3) 1,110 MiB, idle 696 MiB -> 165 MiB for 577,937
+splats = **299 B / splat**, matching the ~301 read from the code. (The first try had loaded nothing: the importer refused
+Brush PLYs - fixed, 9e78783.) Fixed cost of the open viewer ~250 MiB over idle.
 
 ## Targets (SOG / SPZ-style: ~65 B/splat)
 

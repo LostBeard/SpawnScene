@@ -682,6 +682,15 @@ the sky gradients (map texels and the splats' alpha term), (2) the map in the sa
 the splats - without it a scene trained with the sky shows black where the map painted. Measure first: does the Bathroom
 user path (indoor, own SfM) stay neutral.
 
+**skb (Bathroom user path, back to back):** held out defaults 19.26 / 0.859, fair 25.31; **sky 19.43 / 0.860, fair 25.50**
+(+0.17 / +0.20). **But off the photo path it is WORSE**: the viewer-rendered Wander views (the viewer does not draw the map)
+show near-black (all channels < 12) on 1.52% of pixels with the defaults vs **2.21%** with the sky (worst view 7.8% ->
+**14.4%**, wanderclose-3: the unseen ceiling opens into a larger black hole). Trained with a map behind it, the room leans
+on the map where few photos constrain it - exactly the see-through the random background was made default to stop. A
+viewer that drew the map would fill those pixels with a colour "at infinity" learned from other directions; indoors that
+is still wrong. **Verdict: the sky map stays opt-in.** Worth revisiting only for outdoor scenes AND with the viewer
+drawing it, judged off-path (Wander) as well as held out; a per-scene switch (outdoor / sky visible) would be needed.
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

@@ -659,6 +659,23 @@ All nine parity defaults (incl. the 6e-4 densify bar, 7b90e28), 7K, COLMAP poses
 (-0.85; the photos' own exposure - eg) and Bonsai (-0.29; the High preset's 4e-4 gets 31.27 at 15K). Training 130-230 s a
 scene (Counter 216 s, Train 133 s) vs Brush 1.5-3 min wall incl. load (Counter 172 s).
 
+### Learned sky map (sk, 2026-10-11; PLANS item 6 "far background")
+
+`&skymap=1` (SplatTrainerGpu.Sky.cs): a 512x256 equirect RGB map at infinity, composited behind the splats per pixel
+(out += T_final x sky(ray), after raster_forward); its gradient dL x T_final scattered bilinearly with fixed-point atomics
+(2^30), Adam lr 0.005; the raster backward's alpha gradient gets the per-pixel sky term (dot(sky, dL), `//SKY:` lines, as
+the uniform background's). TrainerGate PASS with it off (defaults unchanged). Training-side only: held-out renders
+include it; the saved scene and the viewer do NOT yet - not a default until they do.
+
+| Scene | defaults | &skymap=1 |
+|---|---|---|
+| Train | 20.19-20.20 / 0.793 | **20.46 / 0.796** (anatomy gap to Brush -0.85 -> -0.58) |
+| Bicycle | 24.89 / 0.748 | 24.91 / 0.754 |
+| Room (indoor) | 30.87-30.89 / 0.92 | 30.92 / 0.923 |
+
+Same time and splat count. The far splat shell stays (8.0% past 16 spreads) and with it 00001's glare patch: the map wins
+elsewhere in the sky. sk2: sky + &farprune=16 / &fargrow=8 (far prune hurt alone because nothing else painted the sky).
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

@@ -311,6 +311,11 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("farprune", out var farPruneQ) && float.TryParse(farPruneQ,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var farPrune))
             FarPruneSpreads = farPrune;
+        // &skymap=1: a learned sky map behind the splats (SplatTrainerGpu.SkyMap); &skylr=X its Adam lr.
+        if (query.TryGetValue("skymap", out var skyMapQ)) SplatTrainerGpu.SkyMap = skyMapQ is "1" or "true";
+        if (query.TryGetValue("skylr", out var skyLrQ) && float.TryParse(skyLrQ, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var skyLr))
+            SplatTrainerGpu.SkyLr = skyLr;
         // &shmax=N: cap the trained SH degree (Studio.Training ShMaxDegree).
         if (query.TryGetValue("shmax", out var shMaxQ) && int.TryParse(shMaxQ, out var shMax)) ShMaxDegree = Math.Clamp(shMax, 0, 3);
         // &videoframes=N: frames taken from a picked video (Studio.Projects VideoFrameCount; default 120).

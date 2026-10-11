@@ -38,6 +38,137 @@ internal static class SplatTrainerShaders
     /// Shared declarations: uniforms, the packed splat layout, and the projection.
     /// Concatenated ahead of each kernel so projection exists in exactly one place.
     /// </summary>
+    // ---------------------------------------------------------------- &skymap (SplatTrainerGpu.Sky.cs)
+
+    /// <summary>Equirectangular sky map size (texels) and the fixed-point scale of its gradient accumulator.</summary>
+    public const int SkyW = 512, SkyH = 256;
+    public const float SkyGradScale = 1073741824f;   // 2^30: a pixel's dL x T x weight is ~1e-7, ~100 quanta
+
+    const string SkyCommon = @"
+const SKY_W : u32 = 512u;
+const SKY_H : u32 = 256u;
+const SKY_SCALE : f32 = 1073741824.0;
+
+// World-space ray through a pixel centre (camera space: x right, y UP, z forward; image y down - as project()).
+fn sky_ray(px : u32, py : u32) -> vec3<f32> {
+    let x = (f32(px) + 0.5 - u.principal.x) / u.focal.x;
+    let y = (u.principal.y - (f32(py) + 0.5)) / u.focal.y;
+    return normalize(u.cam_right.xyz * x + u.cam_up.xyz * y + u.cam_fwd.xyz);
+}
+
+// Equirect texel coordinates: column from the azimuth around world +Y, row from the polar angle from +Y.
+fn sky_uv(d : vec3<f32>) -> vec2<f32> {
+    let az = atan2(d.x, d.z);
+    let pol = acos(clamp(d.y, -1.0, 1.0));
+    return vec2<f32>((az / 6.28318531 + 0.5) * f32(SKY_W) - 0.5, pol / 3.14159265 * f32(SKY_H) - 0.5);
+}
+
+struct SkyTaps { i : vec4<u32>, w : vec4<f32>, }
+
+// Bilinear taps: wrap in azimuth, clamp at the poles.
+fn sky_taps(uv : vec2<f32>) -> SkyTaps {
+    let fx = floor(uv.x);
+    let fy = floor(uv.y);
+    let ax = uv.x - fx;
+    let ay = uv.y - fy;
+    let n = i32(SKY_W);
+    let x0 = u32(((i32(fx) % n) + n) % n);
+    let x1 = (x0 + 1u) % SKY_W;
+    let y0 = u32(clamp(i32(fy), 0, i32(SKY_H) - 1));
+    let y1 = u32(clamp(i32(fy) + 1, 0, i32(SKY_H) - 1));
+    var t : SkyTaps;
+    t.i = vec4<u32>(y0 * SKY_W + x0, y0 * SKY_W + x1, y1 * SKY_W + x0, y1 * SKY_W + x1);
+    t.w = vec4<f32>((1.0 - ax) * (1.0 - ay), ax * (1.0 - ay), (1.0 - ax) * ay, ax * ay);
+    return t;
+}
+";
+
+    /// <summary>After the forward: sample the sky along each pixel's ray, composite it behind the splats (T_final x sky)
+    /// and keep the per-pixel sample for the backward.</summary>
+    public static string SkyComposite => UniformsBlock + SkyCommon + @"
+@group(0) @binding(1) var<storage, read> sky_map : array<f32>;
+@group(0) @binding(2) var<storage, read_write> out_colour : array<f32>;
+@group(0) @binding(3) var<storage, read> final_t : array<f32>;
+@group(0) @binding(4) var<storage, read_write> sky_pix : array<f32>;
+
+fn sky_rgb(i : u32) -> vec3<f32> { return vec3<f32>(sky_map[i * 3u], sky_map[i * 3u + 1u], sky_map[i * 3u + 2u]); }
+
+@compute @workgroup_size(64)
+fn sky_composite(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let o = gid.x + gid.y * nwg.x * 64u;
+    let w = u32(u.viewport.x);
+    if (o >= w * u32(u.viewport.y)) { return; }
+    let tp = sky_taps(sky_uv(sky_ray(o % w, o / w)));
+    let s = tp.w.x * sky_rgb(tp.i.x) + tp.w.y * sky_rgb(tp.i.y) + tp.w.z * sky_rgb(tp.i.z) + tp.w.w * sky_rgb(tp.i.w);
+    let t = final_t[o];
+    out_colour[o * 3u + 0u] = out_colour[o * 3u + 0u] + t * s.x;
+    out_colour[o * 3u + 1u] = out_colour[o * 3u + 1u] + t * s.y;
+    out_colour[o * 3u + 2u] = out_colour[o * 3u + 2u] + t * s.z;
+    sky_pix[o * 3u + 0u] = s.x;
+    sky_pix[o * 3u + 1u] = s.y;
+    sky_pix[o * 3u + 2u] = s.z;
+}
+";
+
+    /// <summary>After the loss, before the raster backward: dot(sky, dL) per pixel (the splats' alpha gradient term, as
+    /// the uniform background's) and dL/dsky = dL x T_final scattered bilinearly into the map (fixed-point atomics).</summary>
+    public static string SkyBackward => UniformsBlock + SkyCommon + @"
+@group(0) @binding(1) var<storage, read> dL_dpix : array<f32>;
+@group(0) @binding(2) var<storage, read> final_t : array<f32>;
+@group(0) @binding(3) var<storage, read> sky_pix : array<f32>;
+@group(0) @binding(4) var<storage, read_write> sky_dot : array<f32>;
+@group(0) @binding(5) var<storage, read_write> sky_grad : array<atomic<i32>>;
+
+fn add_tap(i : u32, g : vec3<f32>) {
+    atomicAdd(&sky_grad[i * 3u + 0u], i32(round(g.x * SKY_SCALE)));
+    atomicAdd(&sky_grad[i * 3u + 1u], i32(round(g.y * SKY_SCALE)));
+    atomicAdd(&sky_grad[i * 3u + 2u], i32(round(g.z * SKY_SCALE)));
+}
+
+@compute @workgroup_size(64)
+fn sky_backward(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let o = gid.x + gid.y * nwg.x * 64u;
+    let w = u32(u.viewport.x);
+    if (o >= w * u32(u.viewport.y)) { return; }
+    let dl = vec3<f32>(dL_dpix[o * 3u + 0u], dL_dpix[o * 3u + 1u], dL_dpix[o * 3u + 2u]);
+    let s = vec3<f32>(sky_pix[o * 3u + 0u], sky_pix[o * 3u + 1u], sky_pix[o * 3u + 2u]);
+    sky_dot[o] = dot(s, dl);
+    let t = final_t[o];
+    if (t < 1e-4) { return; }
+    let g = dl * t;
+    let tp = sky_taps(sky_uv(sky_ray(o % w, o / w)));
+    add_tap(tp.i.x, g * tp.w.x);
+    add_tap(tp.i.y, g * tp.w.y);
+    add_tap(tp.i.z, g * tp.w.z);
+    add_tap(tp.i.w, g * tp.w.w);
+}
+";
+
+    /// <summary>Adam on the sky map texels; reads and zeroes the fixed-point gradient.</summary>
+    public const string SkyAdam = @"
+struct SkyCfg { lr : f32, b1 : f32, b2 : f32, step : f32, count : u32, pad0 : u32, pad1 : u32, pad2 : u32, }
+@group(0) @binding(0) var<uniform> c : SkyCfg;
+@group(0) @binding(1) var<storage, read_write> sky_map : array<f32>;
+@group(0) @binding(2) var<storage, read_write> sky_m : array<f32>;
+@group(0) @binding(3) var<storage, read_write> sky_v : array<f32>;
+@group(0) @binding(4) var<storage, read_write> sky_grad : array<atomic<i32>>;
+const SKY_SCALE : f32 = 1073741824.0;
+
+@compute @workgroup_size(64)
+fn sky_adam(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let i = gid.x + gid.y * nwg.x * 64u;
+    if (i >= c.count) { return; }
+    let g = f32(atomicExchange(&sky_grad[i], 0)) / SKY_SCALE;
+    let m = c.b1 * sky_m[i] + (1.0 - c.b1) * g;
+    let v = c.b2 * sky_v[i] + (1.0 - c.b2) * g * g;
+    sky_m[i] = m;
+    sky_v[i] = v;
+    let mh = m / (1.0 - pow(c.b1, c.step));
+    let vh = v / (1.0 - pow(c.b2, c.step));
+    sky_map[i] = sky_map[i] - c.lr * mh / (sqrt(vh) + 1e-15);
+}
+";
+
     /// <summary>
     /// Camera and viewport, shared by every pass. Split out of <see cref="Common"/> because the
     /// optimiser kernels need the same uniforms with a WRITABLE splat buffer, and a binding
@@ -888,6 +1019,7 @@ fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
 // SplatTrainerGpu.AbsGrad is on. f32 bit patterns in u32 atomics, added by compare-exchange (WGSL has
 // no float atomics); a splat's tiles are few, so the loop rarely spins.
 @group(0) @binding(10) var<storage, read_write> densify_abs : array<atomic<u32>>; // 2 per splat: sum |dPx|,|dPy|
+//SKY: @group(0) @binding(16) var<storage, read> sky_dot : array<f32>;   // &skymap: dot(sky behind the pixel, dL)
 // Depth supervision (DepthVariant): reads dL/d(inverse depth) at depth_io[pixels + o], writes each key's dL/d(1/z) at
 // depth_io[2 pixels + key]. Inverse depth blends exactly like a colour channel, so dL/d(alpha) gains the same term.
 //DEPTH: @group(0) @binding(15) var<storage, read_write> depth_io : array<f32>;
@@ -941,10 +1073,12 @@ fn raster_backward(
     var my_end = range.x;
     var dL = vec3<f32>(0.0);
 //DEPTH:     var dLd = 0.0;
+    var sky_term = 0.0;
     if (inside) {
         let o = py * u32(u.viewport.x) + px;
         t = final_t[o];
         t_final = t;
+//SKY:         sky_term = sky_dot[o];
         // Clamp end_idx into this tile's key span. A stale/overflow-corrupted end past
         // range.y walked off the tile list; an end below range.x made reach never true
         // (STAGE PROBE: forward+loss live, max|gradPerKey|==0 on a subset of Truck views).
@@ -1036,6 +1170,8 @@ fn raster_backward(
             // The background behind the pixel is scaled by T_final = prod(1 - alpha_j): its share falls as this alpha
             // rises (the reference backward.cu's bg_dot_dpixel term). Exactly zero when background is zero.
             dL_dalpha = dL_dalpha - t_final / max(1.0 - alpha, 1e-4) * dot(u.background.xyz, dL);
+            // &skymap: the learned sky behind the pixel is a per-pixel background (sky_dot = dot(sky, dL)).
+            dL_dalpha = dL_dalpha - t_final / max(1.0 - alpha, 1e-4) * sky_term;
 //DEPTH:             dL_dalpha = dL_dalpha + (sb_invz[s] - rec_inv) * t * dLd;
 //DEPTH:             contrib_d = w * dLd;
 

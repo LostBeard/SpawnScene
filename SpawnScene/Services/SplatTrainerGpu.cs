@@ -642,6 +642,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     GPUComputePipeline MakePipeline(string wgsl, string entry)
     {
         if (TightTiles) wgsl = wgsl.Replace("//TIGHT: ", "").Replace("//TIGHT:", "");
+        if (SkyMap) wgsl = wgsl.Replace("//SKY:", "");
         if (NearPlane != 0.2f)
         {
             var lit = NearPlane.ToString("0.0#########", System.Globalization.CultureInfo.InvariantCulture);
@@ -1167,6 +1168,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
             using var cmd = enc.Finish();
             RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, new[] { cmd });
         }
+        // &skymap: the learned sky behind the splats, before anything reads the colour (loss, exposure, dumps).
+        if (SkyMap) SkyCompositeDispatch();
         await PhaseAsync("ranges+raster");
 
         // CPU transfer: gate comparison only. Training passes readback:false and the colour
@@ -2365,7 +2368,13 @@ public sealed partial class SplatTrainerGpu : IDisposable
                 Buf(11, _splatColour!.GetGPUBuffer()!),
             };
         if (depthOn) backwardEntries.Add(Buf(15, _depthIo!.GetGPUBuffer()!));
+        if (SkyMap)
+        {
+            SkyBackwardDispatch();
+            backwardEntries.Add(SkyDotEntry());
+        }
         Dispatch(depthOn ? _rasterBackwardDepth! : _rasterBackward!, _tilesX, _tilesY, backwardEntries.ToArray());
+        if (SkyMap) SkyAdamDispatch();
 
         await PhaseAsync("backward");
         // Cleared here, not at the top of the step: the census and densify accum read the
@@ -2859,6 +2868,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     {
         DisposeBuffers();
         DisposeFloaterCensus();
+        DisposeSky();
         // Per VIEW, not per splat: they live through every resize. In DisposeBuffers (which every densify resize runs)
         // they were freed after the first densify, and camera refinement silently stepped no camera (c19, 2026-10-04).
         DisposeExposure();

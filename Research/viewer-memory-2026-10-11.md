@@ -116,3 +116,20 @@ At SH 3 with `&shq8=1`: SH 45 + source 56 + render vertex buffer 48 + sort 8 + r
 
 Both 1 and 2 end at ~134 B/splat (2.2x the f32 viewer's 299); 3 at ~100. SOG/SPZ-class ~65 B needs quantized positions
 too (SOG: 16-bit per axis + per-scene bounds) - later, with LOD pages as the other route to huge scenes.
+
+## Step 2 (render vertex buffer 48 -> 36 B) measured and built (2026-10-11)
+
+Simulated first (`&vbqsim=1`, pack-shader rounding, since removed): scale through f16, quaternion through SNORM16
+(not f16 - 9943cce's needles). Scale check on real scenes: Brush Truck 7K has 14% needles (axis ratio > 100) and 1.0%
+of axes below f16's normal range (6.1e-5; subnormal, up to 13% relative - all far below a pixel); our Train 7K 0.03%.
+Then built: SplatFormat.PackedBytes 36 (pos f32x3, colour/alpha f16x4, scale f16x4, quat snorm16x4 normalized at pack).
+
+| vs the f32 vertex, viewer bench 1600x900 | mean PSNR | min pose | max diff |
+|---|---|---|---|
+| Train 7K, 7 poses, 50 deg | 59.68 dB | 59.24 | 2/255 |
+| Brush Truck 7K (needles), 8 poses, 50 deg | 60.50 dB | 59.27 | 2/255 |
+| Brush Truck 7K, same poses at 15 deg (3.3x closer look) | 60.40 dB | 59.21 | 3/255 (0.0003% of px > 2) |
+
+Real vs simulated: the same PSNR to two decimals (98-263 pixels of ~11M differ by one level). VRAM, Train 7K over idle:
+352 -> 344 MiB f32 SH, 257 -> 247 MiB with `&shq8=1` (12 B x 742K = 8.5 MiB). This one is a format change, not an
+option (built 2026-10-11, NOT deployed - TJ). Per splat at SH 3 now: ~287 B default, ~152 B with `&shq8=1`.

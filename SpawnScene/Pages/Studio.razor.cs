@@ -313,6 +313,9 @@ public partial class Studio : IAsyncDisposable
             FarPruneSpreads = farPrune;
         // &shq8sim=1: the viewer rounds SH bands to 8 bits (GpuGaussianRenderer.ShQuantizeSimulate) - fidelity check.
         if (query.TryGetValue("shq8sim", out var shq8Q)) GpuGaussianRenderer.ShQuantizeSimulate = shq8Q is "1" or "true";
+        // &shq8=1: the viewer keeps SH bands as 8-bit codes (GpuGaussianRenderer.ShCompact).
+        if (query.TryGetValue("shq8", out var shq8C)) GpuGaussianRenderer.ShCompact = shq8C is "1" or "true";
+        if (query.TryGetValue("shq8cycles", out var shq8Cn) && int.TryParse(shq8Cn, out var shq8Ck)) GpuGaussianRenderer.ShCompactCycles = shq8Ck;
         // &skymap=1: a learned sky map behind the splats (SplatTrainerGpu.SkyMap); &skylr=X its Adam lr.
         if (query.TryGetValue("skymap", out var skyMapQ)) SplatTrainerGpu.SkyMap = skyMapQ is "1" or "true";
         if (query.TryGetValue("skylr", out var skyLrQ) && float.TryParse(skyLrQ, System.Globalization.NumberStyles.Float,

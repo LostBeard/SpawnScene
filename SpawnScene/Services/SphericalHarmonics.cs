@@ -144,6 +144,34 @@ fn sh_coeff(i : u32, k : u32) -> f32 {
 }
 ";
 
+    /// <summary>
+    /// The 8-bit SH step for a band whose largest |v| is m: m / 127 kept to 16 mantissa bits, so code * step is exact
+    /// and a decoded band's largest |v| (127 * step) gives the same step back (GpuGaussianRenderer.ShCompact's round trip).
+    /// </summary>
+    public const string WgslShStep = @"
+fn sh_step(m : f32) -> f32 { return bitcast<f32>((bitcast<u32>(m / 127.0) + 0x40u) & 0xFFFFFF80u); }
+";
+
+    /// <summary>
+    /// <see cref="WgslPartAccess"/> over 8-bit codes (GpuGaussianRenderer.ShCompact): the module declares sh_rest0..2 as
+    /// <c>array&lt;u32&gt;</c> (4 codes a word, 15 a row) and <c>sh_scale</c> (bands 1..3 largest |v|); v = code *
+    /// sh_step(m), the same expression as the renderer's unpack_q8. k = basis * 3 + channel, so the band folds away like
+    /// the part.
+    /// </summary>
+    public const string WgslPartAccessQ8 = WgslShStep + @"
+const SH_PART_FLOATS : u32 = 15u;
+fn sh_coeff(i : u32, k : u32) -> f32 {
+    let o = i * SH_PART_FLOATS + k % SH_PART_FLOATS;
+    var w : u32;
+    if (k < SH_PART_FLOATS) { w = sh_rest0[o >> 2u]; }
+    else if (k < 2u * SH_PART_FLOATS) { w = sh_rest1[o >> 2u]; }
+    else { w = sh_rest2[o >> 2u]; }
+    let b = k / 3u;
+    let s = sh_step(sh_scale[select(select(2u, 1u, b < 8u), 0u, b < 3u)]);
+    return f32(extractBits(bitcast<i32>(w), (o & 3u) * 8u, 8u)) * s;
+}
+";
+
     /// <summary>Split rows of <see cref="RestFloatsPerSplat"/> floats into the <see cref="Parts"/> part layouts.</summary>
     public static float[][] SplitParts(ReadOnlySpan<float> rows)
     {

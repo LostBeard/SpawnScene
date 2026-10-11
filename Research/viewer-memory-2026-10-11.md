@@ -58,3 +58,36 @@ nothing near the +-1 clamp. So the fixed 1/128 scale used ~40% of the codes: the
 the band's max |v|** (3 floats per scene, in the renderer's uniforms), ~2.5x finer steps than measured here - 57 dB is the
 floor. Next: the real buffer (u8x4-packed, 45 B/splat instead of 180, a draw-only copy - save / export / Edit keep f32),
 then the memory measurement (expect ~299 -> ~165 B/splat at SH 3).
+
+## Step 1 built: 8-bit SH codes in VRAM, `&shq8=1` (2026-10-11)
+
+GpuGaussianRenderer.ShCompact (GpuGaussianRenderer.ShCompact.cs): at the first pack after a scene's SH bands arrive,
+the f32 parts become 8-bit codes (4 to a u32, 15 a row a part) with one scale per band = the band's largest |v|, found
+on the GPU (workgroup + global atomicMax on the bits; never read back); the f32 is freed. The pack pass reads codes
+through SphericalHarmonics.WgslPartAccessQ8 (code * m / 127). Every f32 reader (ShRestBuffers, CopyShPartToIlgpu, the
+readbacks for save, LOD install) expands to f32 first; the next draw compacts again; readbacks hold compaction off
+across their awaits. LOD trees / the streamed pool stay f32.
+
+Train 7K (741,883 splats, SH 3), same harness, nothing else on the GPU:
+
+| | f32 bands | 8-bit codes |
+|---|---|---|
+| nvidia-smi with the scene open (two runs each, identical) | 1091 MiB | 996 MiB |
+| Saved | | **95 MiB = 135 B / splat** (the code's 180 -> 45) |
+| Render vs f32, 7 training poses 1600x900 | - | **60.08 dB mean** (59.84-60.48), max 1/255, 16-19% of pixels 1 level |
+
+So the viewer is ~164 B / splat at SH 3 instead of ~299 (1.8x more splats in the same memory). Per-band scale beat
+the fixed-step simulation (57.0 dB, max 2/255) as predicted.
+
+**Round trip, exact (sh_step):** the step s = m / 127 is kept to 16 mantissa bits, so code * s is exact in f32 and a
+decoded band's largest |v| gives back the same s even through the GPU's inexact division. Checked:
+- `&shq8cycles=3` (three extra expand + compact cycles): render pixel-identical to one compaction at all 7 poses; VRAM
+  995 vs 996 MiB (no leak). Fidelity unchanged by the exact step (60.08 dB).
+- The user path (`AUTOTEST=project`, Bathroom 12 photos, 1500 iterations, 326,379 splats, `&shq8=1`): train ->
+  compact at the handoff -> save (the trainer's f32) -> reload (compacts) -> the legacy SH load check (expand, write as
+  row-major, reload, compact, expand): **PASS bit for bit**, 14,687,055 floats. Also 3000 iterations / 667K splats:
+  saved and reloaded fine (the bit check skips scenes over 500K).
+
+Status: opt-in (`&shq8=1`), not deployed as a default - for TJ: render 60 dB from f32 (max 1/255), viewer -45% memory
+at SH 3; the cost is that a LOADED scene that is edited, saved or trained from while compact carries 8-bit SH from then
+on (freshly trained scenes save the trainer's f32).

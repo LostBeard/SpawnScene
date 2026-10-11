@@ -29,7 +29,7 @@ public enum AdaptiveResMode
 ///   - CAS post-processing sharpening
 ///   - Adaptive resolution: halves canvas pixel dims during fast movement, restores when still
 /// </summary>
-public class GpuGaussianRenderer : IDisposable
+public partial class GpuGaussianRenderer : IDisposable
 {
     private readonly GpuService _gpu;
     private readonly GpuSplatSorter _sorter;
@@ -64,26 +64,40 @@ public class GpuGaussianRenderer : IDisposable
 
     // Pack compute pipeline: converts Float32 sort output → packed vertex format
     private GPUComputePipeline? _packPipeline;
-    bool _packBuiltQ8Sim;
+    int _packBuiltVariant = -1;
 
-    /// <summary>The pack pipeline, with the SH accessor <see cref="ShQuantizeSimulate"/> asks for. Rebuilt (and its bind
-    /// group dropped - an "auto" layout belongs to its pipeline) when the option changes after init: the harness sets it
-    /// from the URL after the renderer exists.</summary>
+    /// <summary>The SH accessor the pack pass needs: 2 = 8-bit codes (<see cref="ShCompact"/>, once compacted),
+    /// 1 = f32 rounded to 8 bits (<see cref="ShQuantizeSimulate"/>), 0 = f32.</summary>
+    int PackVariant => _shPacked ? 2 : ShQuantizeSimulate ? 1 : 0;
+
+    /// <summary>The pack pipeline for <see cref="PackVariant"/>. Rebuilt (and its bind group dropped - an "auto" layout
+    /// belongs to its pipeline) when the variant changes: the harness sets the options from the URL after the renderer
+    /// exists, and compaction switches the SH storage.</summary>
     void BuildPackPipeline()
     {
-        var packSource = ShQuantizeSimulate
-            ? PackComputeSource.Replace(SphericalHarmonics.WgslPartAccess, SphericalHarmonics.WgslPartAccessQ8Sim)
-            : PackComputeSource;
-        if (ShQuantizeSimulate)
+        int variant = PackVariant;
+        var packSource = variant switch
+        {
+            2 => PackComputeSource
+                .Replace("sh_rest0 : array<f32>", "sh_rest0 : array<u32>")
+                .Replace("sh_rest1 : array<f32>", "sh_rest1 : array<u32>")
+                .Replace("sh_rest2 : array<f32>", "sh_rest2 : array<u32>")
+                .Replace(SphericalHarmonics.WgslPartAccess,
+                    "@group(0) @binding(9) var<storage, read> sh_scale : array<f32>;\n" + SphericalHarmonics.WgslPartAccessQ8),
+            1 => PackComputeSource.Replace(SphericalHarmonics.WgslPartAccess, SphericalHarmonics.WgslPartAccessQ8Sim),
+            _ => PackComputeSource,
+        };
+        if (variant != 0)
             Console.WriteLine("[Renderer] pack pipeline: SH " + (ReferenceEquals(packSource, PackComputeSource)
-                ? "8-bit REQUESTED BUT NOT SUBSTITUTED" : "rounded to 8 bits (simulated, &shq8sim)"));
+                ? "8-bit REQUESTED BUT NOT SUBSTITUTED"
+                : variant == 2 ? "from 8-bit codes (&shq8)" : "rounded to 8 bits (simulated, &shq8sim)"));
         using var packShader = _device!.CreateShaderModule(new GPUShaderModuleDescriptor { Code = packSource });
         _packPipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
         {
             Layout = "auto",
             Compute = new GPUProgrammableStage { Module = packShader, EntryPoint = "pack_splats" },
         });
-        _packBuiltQ8Sim = ShQuantizeSimulate;
+        _packBuiltVariant = variant;
         _packBindGroup?.Dispose();
         _packBindGroup = null;
     }
@@ -106,7 +120,7 @@ public class GpuGaussianRenderer : IDisposable
     private GPUBuffer[]? _shRest;
 
     /// <summary>&amp;shq8sim=1 (harness): draw with SH bands rounded to 8 bits (SphericalHarmonics.WgslPartAccessQ8Sim). Read
-    /// when the pack pipeline is built.</summary>
+    /// when the pack pipeline is built. The storage itself: <see cref="ShCompact"/>.</summary>
     public static bool ShQuantizeSimulate { get; set; }
     private GPUBuffer? _shRestCached;
     private GPUBuffer? _shDummy;
@@ -130,6 +144,7 @@ public class GpuGaussianRenderer : IDisposable
 
     void DestroyShRest()
     {
+        _shPacked = false;
         if (_shRest == null) return;
         foreach (var b in _shRest) { b.Destroy(); b.Dispose(); }
         _shRest = null;
@@ -145,13 +160,15 @@ public class GpuGaussianRenderer : IDisposable
     /// <summary>The SH degree the viewer is drawing with (0 = DC only).</summary>
     public int ShDegree => _shDegree;
 
-    /// <summary>The SH part buffers the viewer owns (PartFloatsPerSplat floats a splat each), or null.</summary>
-    public GPUBuffer[]? ShRestBuffers => _shRest;
+    /// <summary>The SH part buffers the viewer owns (PartFloatsPerSplat floats a splat each), or null. 8-bit codes
+    /// (<see cref="ShCompact"/>) are expanded to f32 first; the next draw compacts them again.</summary>
+    public GPUBuffer[]? ShRestBuffers { get { ExpandShRest(); return _shRest; } }
 
     /// <summary>SH part <paramref name="part"/>'s first <paramref name="splatCount"/> rows copied into a new ILGPU buffer
     /// (scene editing gathers and grows them with kernels). The caller owns it.</summary>
     public MemoryBuffer1D<float, Stride1D.Dense> CopyShPartToIlgpu(Accelerator a, int part, int splatCount)
     {
+        ExpandShRest();
         long floats = (long)splatCount * SphericalHarmonics.PartFloatsPerSplat;
         var dst = a.Allocate1D<float>(floats);
         _gpu.WebGPUAccelerator.FlushPendingCommands();
@@ -247,6 +264,7 @@ public class GpuGaussianRenderer : IDisposable
     /// </summary>
     public async Task InstallLodAsync(GpuLodTree tree, float tau)
     {
+        ExpandShRest();
         var oldSh = _shRest;
         int degree = _shDegree;
         _shRest = null;   // kept alive across the upload, re-sized below
@@ -476,8 +494,12 @@ public class GpuGaussianRenderer : IDisposable
     /// </summary>
     public async Task<float[][]?> ReadShRestPartsAsync()
     {
+        ExpandShRest();
         if (_shRest == null || _device == null || _queue == null) return null;
         var parts = new float[_shRest.Length][];
+        _shHold++;   // no compaction between the parts' awaits
+        try
+        {
         for (int part = 0; part < parts.Length; part++)
         {
             ulong bytes = _shRest[part].Size;
@@ -499,6 +521,8 @@ public class GpuGaussianRenderer : IDisposable
             staging.Unmap();
             staging.Destroy();
         }
+        }
+        finally { _shHold--; }
         return parts;
     }
 
@@ -509,8 +533,12 @@ public class GpuGaussianRenderer : IDisposable
     /// </summary>
     public async Task<Uint8Array[]?> ReadShRestUint8ArraysAsync()
     {
+        ExpandShRest();
         if (_shRest == null || _device == null || _queue == null) return null;
         var parts = new Uint8Array[_shRest.Length];
+        _shHold++;   // no compaction between the parts' awaits
+        try
+        {
         for (int part = 0; part < parts.Length; part++)
         {
             ulong bytes = _shRest[part].Size;
@@ -532,6 +560,8 @@ public class GpuGaussianRenderer : IDisposable
             staging.Unmap();
             staging.Destroy();
         }
+        }
+        finally { _shHold--; }
         return parts;
     }
 
@@ -1642,7 +1672,6 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         var dataBuf = _sorter.PackedDataBuf;
         var idxBuf = _sorter.IndicesBuf;
         if (_device == null || _splatBuffer == null || _packPipeline == null || dataBuf == null || idxBuf == null) return;
-        if (_packBuiltQ8Sim != ShQuantizeSimulate) BuildPackPipeline();
 
         using var encoder = _device.CreateCommandEncoder();
         AppendPackComputePass(encoder, dataBuf, idxBuf, _splatCount);
@@ -2445,7 +2474,8 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         MemoryBuffer1D<int, Stride1D.Dense>? lodDrawnCount = null)
     {
         if (_splatBuffer == null || _device == null || _packPipeline == null || _packCountBuf == null) return;
-        if (_packBuiltQ8Sim != ShQuantizeSimulate) BuildPackPipeline();
+        CompactShIfAsked();
+        if (_packBuiltVariant != PackVariant) BuildPackPipeline();
 
         var srcDataBuffer = dataBuf.GetGPUBuffer();
         if (srcDataBuffer == null) return;
@@ -2497,7 +2527,9 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                     new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _shRest?[2] ?? _shDummy } },
                     new() { Binding = 7, Resource = new GPUBufferBinding { Buffer = EnsureSelectionBuffer() } },
                     new() { Binding = 8, Resource = new GPUBufferBinding { Buffer = _selMask ?? _shDummy } },
-                }
+                }.Concat(_packBuiltVariant == 2
+                    ? new GPUBindGroupEntry[] { new() { Binding = 9, Resource = new GPUBufferBinding { Buffer = _shScale! } } }
+                    : System.Array.Empty<GPUBindGroupEntry>()).ToArray()
             });
         }
 
@@ -2604,6 +2636,7 @@ fn lod_args() {
         _splatBuffer?.Destroy();
         _splatBuffer?.Dispose();
         DestroyShRest();
+        DisposeShQ8();
         _shSplitPipeline?.Dispose();
         _shDummy?.Destroy(); _shDummy?.Dispose();
         _uniformBuffer?.Destroy();

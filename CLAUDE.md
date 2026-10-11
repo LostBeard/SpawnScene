@@ -37,6 +37,8 @@ NOT given the y-up turn (PlayCanvas's biker.spz matches its compressed PLY); ano
 with no SH bands must bind three DISTINCT stand-in buffers (WebGPU refuses aliased read_write bindings; CPU tests cannot
 see it). `_cdp_page.js` takes `PAGE_LOG=<regex>` to print the app's own console lines.
 
+**Viewer VRAM, 8-bit SH (`&shq8=1`, opt-in, 2026-10-11):** GpuGaussianRenderer.ShCompact keeps SH bands as 8-bit codes with a per-band step (GpuGaussianRenderer.ShCompact.cs; SphericalHarmonics.WgslPartAccessQ8): 180 -> 45 B a splat, Train 7K -95 MiB, render 60.1 dB vs f32 (max 1/255). f32 readers (ShRestBuffers, CopyShPartToIlgpu, readbacks, LOD) expand first and the next draw compacts; the step keeps the round trip bit-exact (`&shq8cycles=N` checks it). `&shq8sim=1` = the rounding simulated on f32. Research/viewer-memory-2026-10-11.md.
+
 **Samples:** `wwwroot/samples/catalog.json` (SampleCatalog) - openly licensed Commons sets and photos in the
 LostBeard/spawnscene-samples HF dataset, fetched through the hub's `/src` proxy (never huggingface.co directly).
 `autotest=samples&name=<folder>` loads one into a project. Tools: commons_fetch.py, package_sample.py,

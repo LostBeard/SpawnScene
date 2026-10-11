@@ -328,6 +328,9 @@ public partial class Studio
             _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);
         // &shq8sim=1: draw with the SH bands rounded to 8 bits (GpuGaussianRenderer.ShQuantizeSimulate; viewer bench).
         if (query.TryGetValue("shq8sim", out var shq8v)) GpuGaussianRenderer.ShQuantizeSimulate = shq8v is "1" or "true";
+        // &shq8=1: the viewer keeps SH bands as 8-bit codes (GpuGaussianRenderer.ShCompact; 45 B a splat, not 180).
+        if (query.TryGetValue("shq8", out var shq8c)) GpuGaussianRenderer.ShCompact = shq8c is "1" or "true";
+        if (query.TryGetValue("shq8cycles", out var shq8cn) && int.TryParse(shq8cn, out var shq8ck)) GpuGaussianRenderer.ShCompactCycles = shq8ck;
         // &cas=N: CAS sharpening 0..1 (default 0.5); &cas=0 shows the raw blend, as other viewers do (viewer bench).
         if (query.TryGetValue("cas", out var casq) && float.TryParse(casq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var casv))

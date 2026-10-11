@@ -311,6 +311,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("farprune", out var farPruneQ) && float.TryParse(farPruneQ,
                 System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var farPrune))
             FarPruneSpreads = farPrune;
+        // &shq8sim=1: the viewer rounds SH bands to 8 bits (GpuGaussianRenderer.ShQuantizeSimulate) - fidelity check.
+        if (query.TryGetValue("shq8sim", out var shq8Q)) GpuGaussianRenderer.ShQuantizeSimulate = shq8Q is "1" or "true";
         // &skymap=1: a learned sky map behind the splats (SplatTrainerGpu.SkyMap); &skylr=X its Adam lr.
         if (query.TryGetValue("skymap", out var skyMapQ)) SplatTrainerGpu.SkyMap = skyMapQ is "1" or "true";
         if (query.TryGetValue("skylr", out var skyLrQ) && float.TryParse(skyLrQ, System.Globalization.NumberStyles.Float,

@@ -326,6 +326,8 @@ public partial class Studio
         if (query.TryGetValue("lodpx", out var lpq) && float.TryParse(lpq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var lpv))
             _gpuRenderer.LodCullPixels = Math.Max(0f, lpv);
+        // &shq8sim=1: draw with the SH bands rounded to 8 bits (GpuGaussianRenderer.ShQuantizeSimulate; viewer bench).
+        if (query.TryGetValue("shq8sim", out var shq8v)) GpuGaussianRenderer.ShQuantizeSimulate = shq8v is "1" or "true";
         // &cas=N: CAS sharpening 0..1 (default 0.5); &cas=0 shows the raw blend, as other viewers do (viewer bench).
         if (query.TryGetValue("cas", out var casq) && float.TryParse(casq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var casv))

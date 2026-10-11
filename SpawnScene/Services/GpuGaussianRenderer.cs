@@ -64,6 +64,29 @@ public class GpuGaussianRenderer : IDisposable
 
     // Pack compute pipeline: converts Float32 sort output → packed vertex format
     private GPUComputePipeline? _packPipeline;
+    bool _packBuiltQ8Sim;
+
+    /// <summary>The pack pipeline, with the SH accessor <see cref="ShQuantizeSimulate"/> asks for. Rebuilt (and its bind
+    /// group dropped - an "auto" layout belongs to its pipeline) when the option changes after init: the harness sets it
+    /// from the URL after the renderer exists.</summary>
+    void BuildPackPipeline()
+    {
+        var packSource = ShQuantizeSimulate
+            ? PackComputeSource.Replace(SphericalHarmonics.WgslPartAccess, SphericalHarmonics.WgslPartAccessQ8Sim)
+            : PackComputeSource;
+        if (ShQuantizeSimulate)
+            Console.WriteLine("[Renderer] pack pipeline: SH " + (ReferenceEquals(packSource, PackComputeSource)
+                ? "8-bit REQUESTED BUT NOT SUBSTITUTED" : "rounded to 8 bits (simulated, &shq8sim)"));
+        using var packShader = _device!.CreateShaderModule(new GPUShaderModuleDescriptor { Code = packSource });
+        _packPipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
+        {
+            Layout = "auto",
+            Compute = new GPUProgrammableStage { Module = packShader, EntryPoint = "pack_splats" },
+        });
+        _packBuiltQ8Sim = ShQuantizeSimulate;
+        _packBindGroup?.Dispose();
+        _packBindGroup = null;
+    }
     private GPUBindGroup? _packBindGroup;
 
     // LOD cut, drawn indirect: a one-thread pass turns the cull's drawn count into the pack dispatch (u32 0..2) and the
@@ -81,6 +104,10 @@ public class GpuGaussianRenderer : IDisposable
     // SphericalHarmonics.Parts buffers of PartFloatsPerSplat floats a splat (one 45-float buffer capped a binding at
     // 11.9M splats).
     private GPUBuffer[]? _shRest;
+
+    /// <summary>&amp;shq8sim=1 (harness): draw with SH bands rounded to 8 bits (SphericalHarmonics.WgslPartAccessQ8Sim). Read
+    /// when the pack pipeline is built.</summary>
+    public static bool ShQuantizeSimulate { get; set; }
     private GPUBuffer? _shRestCached;
     private GPUBuffer? _shDummy;
     private GPUComputePipeline? _shSplitPipeline;
@@ -914,16 +941,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         _canvasHeight = _physicalHeight;
 
         // ── Pack Compute Pipeline (Float32 → Float16/Unorm8 packing) ──
-        using var packShader = _device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = PackComputeSource });
-        _packPipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
-        {
-            Layout = "auto",
-            Compute = new GPUProgrammableStage
-            {
-                Module = packShader,
-                EntryPoint = "pack_splats",
-            }
-        });
+        BuildPackPipeline();
 
         // ── Splat Pipeline (packed vertex format) ──
         using var splatShader = _device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = SplatShaderSource });
@@ -1624,6 +1642,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         var dataBuf = _sorter.PackedDataBuf;
         var idxBuf = _sorter.IndicesBuf;
         if (_device == null || _splatBuffer == null || _packPipeline == null || dataBuf == null || idxBuf == null) return;
+        if (_packBuiltQ8Sim != ShQuantizeSimulate) BuildPackPipeline();
 
         using var encoder = _device.CreateCommandEncoder();
         AppendPackComputePass(encoder, dataBuf, idxBuf, _splatCount);
@@ -2426,6 +2445,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         MemoryBuffer1D<int, Stride1D.Dense>? lodDrawnCount = null)
     {
         if (_splatBuffer == null || _device == null || _packPipeline == null || _packCountBuf == null) return;
+        if (_packBuiltQ8Sim != ShQuantizeSimulate) BuildPackPipeline();
 
         var srcDataBuffer = dataBuf.GetGPUBuffer();
         if (srcDataBuffer == null) return;

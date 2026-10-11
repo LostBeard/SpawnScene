@@ -37,3 +37,24 @@ Brush PLYs - fixed, 9e78783.) Fixed cost of the open viewer ~250 MiB over idle.
 - The trainer keeps f32 (gradients need it); quantization is viewer-side, on upload / load.
 - SPZ (8-bit SH, 24-bit positions) could then upload without expanding to f32.
 - LOD streaming (pages in a fixed pool) is the other route to huge scenes; compact splats make every page hold more.
+
+## Step 1 measured: 8-bit SH changes the picture by 57 dB (2026-10-11)
+
+`&shq8sim=1` (GpuGaussianRenderer.ShQuantizeSimulate; SphericalHarmonics.WgslPartAccessQ8Sim) rounds every SH band
+coefficient to 8 bits (fixed scale 1/128, clamp [-1, 127/128]) where the pack shader reads it - the render the real 8-bit
+storage would give, without changing the storage yet. Viewer bench, Inria Train 7K (741,883 splats, SH 3), the 7 training
+poses, 1600x900, sorted, CAS off; q8 render vs the f32 render:
+
+| Pose | 0 | 1 | 2 | 3 | 4 | 5 | 6 | Mean |
+|---|---|---|---|---|---|---|---|---|
+| PSNR (dB) | 57.23 | 56.85 | 56.93 | 56.78 | 57.02 | 57.18 | 57.33 | **57.04** |
+
+Max |diff| 2/255 at every pose, mean 0.12-0.14/255; 31-35% of pixels move by 1-2 levels. For scale: 8-bit blend targets
+were 24-30 dB (viewer-speed-2026-10-08), and a 7K-vs-30K training difference is a few dB at ~25 dB - this is far below
+anything visible.
+
+Coefficient range on this scene: max |v| 0.40 / 0.32 / 0.29 for bands 1 / 2 / 3 (99.9th percentile 0.18 / 0.15 / 0.14);
+nothing near the +-1 clamp. So the fixed 1/128 scale used ~40% of the codes: the real storage uses a **per-band scale =
+the band's max |v|** (3 floats per scene, in the renderer's uniforms), ~2.5x finer steps than measured here - 57 dB is the
+floor. Next: the real buffer (u8x4-packed, 45 B/splat instead of 180, a draw-only copy - save / export / Edit keep f32),
+then the memory measurement (expect ~299 -> ~165 B/splat at SH 3).

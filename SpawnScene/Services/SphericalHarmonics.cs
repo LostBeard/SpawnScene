@@ -128,6 +128,22 @@ fn sh_coeff(i : u32, k : u32) -> f32 {
 }
 ";
 
+    /// <summary>
+    /// <see cref="WgslPartAccess"/> with every coefficient rounded as 8-bit storage would hold it (SPZ's SH: a byte,
+    /// (b - 128) / 128, so [-1, 127/128] in 1/128 steps). The viewer's &amp;shq8sim=1: measures what 8-bit SH bands would
+    /// cost the picture before the storage is built (Research/viewer-memory-2026-10-11.md).
+    /// </summary>
+    public const string WgslPartAccessQ8Sim = @"
+const SH_PART_FLOATS : u32 = 15u;
+fn sh_q8(v : f32) -> f32 { return clamp(round(v * 128.0), -128.0, 127.0) / 128.0; }
+fn sh_coeff(i : u32, k : u32) -> f32 {
+    let o = i * SH_PART_FLOATS + k % SH_PART_FLOATS;
+    if (k < SH_PART_FLOATS) { return sh_q8(sh_rest0[o]); }
+    if (k < 2u * SH_PART_FLOATS) { return sh_q8(sh_rest1[o]); }
+    return sh_q8(sh_rest2[o]);
+}
+";
+
     /// <summary>Split rows of <see cref="RestFloatsPerSplat"/> floats into the <see cref="Parts"/> part layouts.</summary>
     public static float[][] SplitParts(ReadOnlySpan<float> rows)
     {

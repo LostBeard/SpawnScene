@@ -690,6 +690,8 @@ on the map where few photos constrain it - exactly the see-through the random ba
 viewer that drew the map would fill those pixels with a colour "at infinity" learned from other directions; indoors that
 is still wrong. **Verdict: the sky map stays opt-in.** Worth revisiting only for outdoor scenes AND with the viewer
 drawing it, judged off-path (Wander) as well as held out; a per-scene switch (outdoor / sky visible) would be needed.
+The same off-path measure for today's densify bar default (it was decided on held out + viewer fps): Bathroom Wander
+near-black 1.55% / worst 7.77% at 8e-4 (bgb-def) vs 1.52% / 7.83% at 6e-4 (skb-def) - unchanged; 6e-4 passes off-path.
 
 ### Video source, user path (2026-10-10)
 

@@ -597,6 +597,8 @@ splats. 4e-4: better on all 11 (+0.14..+0.57), ~+35% time, ~2-2.7x splats; equal
 growth stays and only the bar is in question. Leaning: 6e-4 as Standard's default (half the gain for a quarter of the time
 cost), 4e-4 for High / Max - pending the viewer cost (vb chain: Bicycle project path at 8e-4 / 4e-4, .spawnscene size and
 the app viewer's uncapped fps). The GPU went to Data's ML 5.3.5 release gate (TJ-approved) first.
+Saved-scene size (.spawnscene v2, 76 bytes a splat before gzip, Studio.SceneFile): Bicycle 132 MB (8e-4) -> 224 MB (6e-4) ->
+354 MB (4e-4); Counter 31 -> 41 -> 63 MB; Train 33 -> 45 -> 70 MB. Viewer frame rate still to measure (GPU with Data).
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

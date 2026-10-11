@@ -152,3 +152,16 @@ expands and PINS f32 for the rest of the scene; brief reads (the import seat's b
   buffers. After the fix, training never compacts (the trainer pins right after each upload); project autotest
   (`&rowq=1&shq8=1`, Bathroom 12 photos 1500 it): supervised 20.32 dB / 0.8844 vs 20.38 / 0.8827 without (run noise),
   legacy SH PASS bit for bit.
+
+## Frame rate: unchanged (2026-10-11)
+
+Viewer bench uncapped (SPAWNSCENE_CHROME_UNCAPPED=1), 1600x900, sorted, nothing else on the GPU, 2 repeats each, the
+36-B vertex build (05d959b): defaults vs `&shq8=1&rowq=1` (both decodes in the pack pass, compact cull).
+
+| Scene | defaults | &shq8 + &rowq |
+|---|---|---|
+| Train 7K (742K, SH 3), 7 poses | 256.5 fps (257.4 / 255.6) | 256.2 fps (256.9 / 255.4) |
+| Brush Truck 7K (586K, SH 3), 8 poses | 328.2 fps (328.5 / 327.8) | 327.7 fps (327.8 / 327.6) |
+
+Per pose within 1-2 fps. So the compact options cost nothing measurable in speed; what they cost is the 8-bit SH carried
+by a loaded scene that is edited / saved / trained from while compact (`&shq8` only; `&rowq` expands to f32 first).

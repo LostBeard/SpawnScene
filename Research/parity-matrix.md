@@ -537,6 +537,28 @@ every 100, 20%, bar 2e-4 on today's defaults **20.27 / 0.808** (anatomy -0.77), 
 Brush's growth scheme is now ported whole (selection v1, signal gm, relocation rl); none closes Train alone. r0's config
 does beat today's defaults on Train (20.27 / 0.808 vs 20.10-20.19 / 0.787) at 2.6x the splats and 1.37x the time - an
 11-scene run decides whether it is a default candidate.
+
+**bg11 (2026-10-10): &growth=brush every 100, 20% of candidates, bar 2e-4 on all 11 scenes - BETTER ON ALL 11.** Same
+settings as the defaults table (in-app held-out PSNR):
+
+| Scene | defaults | brush growth | delta | splats | time |
+|---|---|---|---|---|---|
+| Train | 20.07 | 20.23 | +0.16 | 1.16M | 165 s (defaults ~121) |
+| Bonsai | 29.93 | **30.69** | +0.76 | 1.39M | 238 s |
+| Counter | 27.80 | 28.17 | +0.37 | 1.13M | 276 s (defaults ~197) |
+| Kitchen | 29.59 | 30.09 | +0.50 | 1.34M | 299 s |
+| Room | 30.69 | 31.11 | +0.42 | 1.44M | 251 s |
+| Bicycle | 24.68 | 25.05 | +0.37 | **5.05M** (defaults 1.74M) | 259 s |
+| Garden | 26.63 | 27.10 | +0.47 | 3.84M | 318 s |
+| Stump | 26.13 | 26.64 | +0.51 | 3.85M | 212 s |
+| Truck | 24.68 | 24.82 | +0.14 | 1.79M | 170 s |
+| DrJohnson | 29.14 | 29.40 | +0.26 | 2.20M | 189 s |
+| Playroom | 30.50 | 30.75 | +0.25 | 1.35M | 160 s |
+| **mean** | **27.26** | **27.64** | **+0.38** | | |
+
+Brush 26.95, gsplat 26.73. Bonsai now past Brush (30.47). Train still behind Brush (21.07). The cost: ~1.4x training time
+and 2-3x the splats (bigger saved scenes, heavier viewing). Room's first run hung at page load (harness, a fetch failure;
+re-run). Next: the user path (Bathroom, own SfM) before deciding - bgb chain.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

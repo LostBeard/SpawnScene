@@ -675,6 +675,12 @@ include it; the saved scene and the viewer do NOT yet - not a default until they
 
 Same time and splat count. The far splat shell stays (8.0% past 16 spreads) and with it 00001's glare patch: the map wins
 elsewhere in the sky. sk2: sky + &farprune=16 / &fargrow=8 (far prune hurt alone because nothing else painted the sky).
+**sk2: sky + far prune / far grow - both worse than the sky alone:** Train sky+farprune16 20.36 / 0.788, sky+fargrow8 20.36 /
+0.791 (sky alone 20.46 / 0.796); Bicycle 24.87 / 24.79 (sky alone 24.91). The far splats still carry content the map
+cannot (parallax, not infinity). Sky alone is the candidate. To become a default it needs: (1) a finite-difference gate for
+the sky gradients (map texels and the splats' alpha term), (2) the map in the saved scene and drawn by the viewer behind
+the splats - without it a scene trained with the sky shows black where the map painted. Measure first: does the Bathroom
+user path (indoor, own SfM) stay neutral.
 
 ### Video source, user path (2026-10-10)
 

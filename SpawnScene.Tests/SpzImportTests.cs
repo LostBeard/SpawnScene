@@ -177,4 +177,131 @@ public class SpzImportTests
             }
         }
     }
+
+    // ---------------------------------------------------------------- version 4 (zstd streams, SpzImport.DecodeV4)
+
+    /// <summary>
+    /// A v4 file from a v3 stream, as nianticlabs/spz saveSpz lays it out: the 32-byte header, optional extension records,
+    /// the TOC (compressed / uncompressed u64 pairs) and each attribute array zstd-compressed on its own (an empty SH
+    /// array omitted).
+    /// </summary>
+    static byte[] ToV4(byte[] v3, byte[]? extensions = null)
+    {
+        var h = SpzImport.ParseHeader(v3);
+        long[] offs = { h.PosOff, h.AlphaOff, h.ColourOff, h.ScaleOff, h.RotOff, h.ShOff, h.Bytes };
+        var streams = new List<byte[]>();
+        using var zstd = new ZstdSharp.Compressor(12);
+        var raws = new List<int>();
+        for (int k = 0; k < 6; k++)
+        {
+            int len = (int)(offs[k + 1] - offs[k]);
+            if (len == 0) continue;
+            raws.Add(len);
+            streams.Add(zstd.Wrap(v3.AsSpan((int)offs[k], len)).ToArray());
+        }
+        var ext = extensions ?? Array.Empty<byte>();
+        int toc = 32 + ext.Length;
+        var file = new List<byte>();
+        var head = new byte[32];
+        BitConverter.GetBytes(SpzImport.Magic).CopyTo(head, 0);
+        BitConverter.GetBytes(4u).CopyTo(head, 4);
+        BitConverter.GetBytes((uint)h.Count).CopyTo(head, 8);
+        head[12] = (byte)h.ShDegree; head[13] = (byte)h.FractionalBits;
+        head[14] = (byte)((h.Antialiased ? 1 : 0) | (ext.Length > 0 ? 2 : 0));
+        head[15] = (byte)streams.Count;
+        BitConverter.GetBytes((uint)toc).CopyTo(head, 16);
+        file.AddRange(head);
+        file.AddRange(ext);
+        for (int k = 0; k < streams.Count; k++)
+        {
+            file.AddRange(BitConverter.GetBytes((ulong)streams[k].Length));
+            file.AddRange(BitConverter.GetBytes((ulong)raws[k]));
+        }
+        foreach (var st in streams) file.AddRange(st);
+        return file.ToArray();
+    }
+
+    static byte[] Extension(uint type, params uint[] payload)
+    {
+        var r = new List<byte>();
+        r.AddRange(BitConverter.GetBytes(type));
+        r.AddRange(BitConverter.GetBytes((uint)(payload.Length * 4)));
+        foreach (var v in payload) r.AddRange(BitConverter.GetBytes(v));
+        return r.ToArray();
+    }
+
+    [TestCase(3)]
+    [TestCase(0)]
+    public void Version4_DecodesToTheVersion3Stream(int shDegree)
+    {
+        int shDim = shDegree == 3 ? 15 : 0;
+        var v3 = Pack(Cloud(shDim), 3, shDegree, shDim);
+        var back = SpzImport.DecodeV4(ToV4(v3));
+        Assert.That(back, Is.EqualTo(v3), "v4 streams rebuild the v3 stream byte for byte");
+        var (p, _) = Decode(back);
+        var (q, _) = Decode(v3);
+        Assert.That(p, Is.EqualTo(q), "and decode to the same splats");
+    }
+
+    [Test]
+    public void Version4_Extensions_DefaultFrameRead_OtherFrameRefused_UnknownSkipped()
+    {
+        var v3 = Pack(Cloud(15), 3, 3, 15);
+        Assert.That(SpzImport.DecodeV4(ToV4(v3, Extension(SpzImport.ExtCoordinateSystem, SpzImport.CoordinateRub))), Is.EqualTo(v3), "RUB");
+        Assert.That(SpzImport.DecodeV4(ToV4(v3, Extension(0xADBE0002, 1, 2, 3, 4, 5))), Is.EqualTo(v3), "unknown type skipped by length");
+        var ex = Assert.Throws<FormatException>(() => SpzImport.DecodeV4(ToV4(v3, Extension(SpzImport.ExtCoordinateSystem, 6))))!;
+        Assert.That(ex.Message, Does.Contain("coordinate system 6"));
+    }
+
+    [Test]
+    public void Version4_DamagedFilesAreRefusedWithAReason()
+    {
+        var v4 = ToV4(Pack(Cloud(15), 3, 3, 15));
+        Assert.Throws<FormatException>(() => SpzImport.DecodeV4(v4.AsSpan(0, v4.Length - 1)), "cut off");
+        var extra = v4.Concat(new byte[] { 0 }).ToArray();
+        Assert.Throws<FormatException>(() => SpzImport.DecodeV4(extra), "bytes after the last stream");
+        var fewer = (byte[])v4.Clone();
+        fewer[15] = 5;
+        Assert.Throws<FormatException>(() => SpzImport.DecodeV4(fewer), "a stream count that does not match the SH degree");
+        var lying = (byte[])v4.Clone();
+        BitConverter.GetBytes(9999999u).CopyTo(lying, 8);
+        Assert.Throws<FormatException>(() => SpzImport.DecodeV4(lying), "a point count the streams do not hold");
+    }
+
+    /// <summary>A real v4 file: PlayCanvas's biker.spz (152,746 splats, SH 0), when the scratch copy is on this machine.</summary>
+    [Test]
+    public void Version4_RealFile_PlayCanvasBiker()
+    {
+        string? path = null;
+        for (var dir = new DirectoryInfo(TestContext.CurrentContext.TestDirectory); dir != null; dir = dir.Parent)
+        {
+            var candidate = Path.Combine(dir.FullName, "_models_scratch", "pc", "biker.spz");
+            if (File.Exists(candidate)) { path = candidate; break; }
+        }
+        Assume.That(path, Is.Not.Null, "biker.spz is not on this machine");
+        var v3 = SpzImport.DecodeV4(File.ReadAllBytes(path!));
+        var h = SpzImport.ParseHeader(v3);
+        Assert.That((h.Count, h.ShDegree), Is.EqualTo((152_746, 0)));
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var a = context.CreateCPUAccelerator(0);
+        var padded = new byte[(v3.Length + 3) / 4 * 4 + 8];
+        v3.CopyTo(padded, 0);
+        var words = new uint[padded.Length / 4];
+        Buffer.BlockCopy(padded, 0, words, 0, padded.Length);
+        using var w = a.Allocate1D(words);
+        using var packed = a.Allocate1D<float>((long)h.Count * SplatFormat.Floats);
+        using var s0 = a.Allocate1D<float>(1); using var s1 = a.Allocate1D<float>(1); using var s2 = a.Allocate1D<float>(1);
+        SpzImport.Run(a, w.View, h, packed.View, s0.View, s1.View, s2.View);
+        a.Synchronize();
+        var p = packed.GetAsArray1D();
+        for (int i = 0; i < h.Count; i++)
+        {
+            int o = i * SplatFormat.Floats;
+            for (int k = 0; k < SplatFormat.Floats; k++) Assert.That(float.IsFinite(p[o + k]), $"#{i}[{k}] finite");
+            Assert.That(p[o + 9], Is.InRange(0f, 1f), $"#{i} opacity");
+            Assert.That(p[o + 6], Is.GreaterThan(0f), $"#{i} scale");
+            float qn = MathF.Sqrt(p[o + 10] * p[o + 10] + p[o + 11] * p[o + 11] + p[o + 12] * p[o + 12] + p[o + 13] * p[o + 13]);
+            Assert.That(qn, Is.EqualTo(1f).Within(1e-3f), $"#{i} quaternion");
+        }
+    }
 }

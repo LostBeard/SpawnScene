@@ -14,6 +14,8 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
     <PackageReference Include="NUnit" Version="4.6.1" />
+    <!-- SPZ v4 attribute streams are zstd (Chrome's DecompressionStream has none). MIT, pure C#. -->
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.8" />
     <PackageReference Include="NUnit3TestAdapter" Version="6.3.0" />
     <PackageReference Include="SpawnDev.ILGPU" Version="5.3.5" />
     <PackageReference Include="SpawnDev.ILGPU.ML" Version="5.3.4" />

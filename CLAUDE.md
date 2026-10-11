@@ -31,7 +31,9 @@ SPZ too); `&sceneup=keep` leaves them. Imports seat on the scene's dense core (2
 CompressedPlyImportTests (vs a port of PlayCanvas's decoder), SpzImportTests (Niantic's packing ported),
 SplatFileImportTests, SogImportTests (vs a port of PlayCanvas's SOG iterator); the y-up turn is checked against SH physics. Verified 2026-10-08 on Inria's Train (7K PLY),
 antimatter15's train.splat, Spark's butterfly/penguin .spz, PlayCanvas's biker/guitar compressed PLY and skull.sog (v2, SH 3; also unbundled: `?import=.../meta.json` fetches the textures beside it, pixel-identical). SPZ v4 (zstd
-streams, already in PlayCanvas's examples) is refused with a reason: Chrome's DecompressionStream has no zstd. A kernel
+streams; Chrome's DecompressionStream has no zstd) is read since 2026-10-11: SpzImport.DecodeV4 decompresses the streams
+with ZstdSharp.Port (MIT, pure C#) into the v3 stream the GPU converter already reads; v4 is stored y-UP (RUB), so it is
+NOT given the y-up turn (PlayCanvas's biker.spz matches its compressed PLY); another declared frame is refused. A kernel
 with no SH bands must bind three DISTINCT stand-in buffers (WebGPU refuses aliased read_write bindings; CPU tests cannot
 see it). `_cdp_page.js` takes `PAGE_LOG=<regex>` to print the app's own console lines.
 

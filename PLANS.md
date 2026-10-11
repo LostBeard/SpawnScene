@@ -97,7 +97,8 @@ held-out number and looks worse off-path does not ship.
 7. **Density control at 30K:** revisit MCMC at equal budget, error-driven densification (Bulo et al.), Taming-style
    budget for the device.
 8. **Viewer:** per-tile sort against popping (StopThePop). Import: 3DGS .ply, compressed .ply, .sog, .spz v2/v3 and .splat
-   DONE 2026-10-08 (GPU conversion, y-up turn); next SPZ v4 (zstd: needs a decoder).
+   DONE 2026-10-08 (GPU conversion, y-up turn); SPZ v4 DONE 2026-10-11 (ZstdSharp, TJ's pick). Next: quantized splats
+   in viewer VRAM (8-bit SH bands first - ~300 -> ~65 B/splat is the SOG/SPZ-style target), measured for fidelity.
 
 ## Demo samples (done 2026-10-07, pending TJ)
 

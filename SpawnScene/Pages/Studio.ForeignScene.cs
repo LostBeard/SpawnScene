@@ -171,25 +171,48 @@ public partial class Studio
         if (magic.Length < 2) return false;
         if (magic[0] == (byte)'N' && magic[1] == (byte)'G')
         {
-            // A raw NGSP header: SPZ v4 (per-attribute zstd streams after a 32-byte header and a table of contents). The
-            // browser's DecompressionStream has no zstd (Chrome 151: gzip / deflate only), so it needs a zstd decoder.
+            // A raw NGSP header: SPZ v4, per-attribute zstd streams after a 32-byte header and a table of contents. The
+            // browser's DecompressionStream has no zstd (Chrome 151: gzip / deflate only): ZstdSharp in SpzImport.DecodeV4
+            // rebuilds the v3 stream, and the rest is the v3 path.
             using var hs = file.Slice(0, Math.Min(8L, file.Size));
             using var hb = await hs.ArrayBuffer();
             using var hu = new Uint8Array(hb);
             var h8 = hu.ReadBytes();
-            if (h8.Length == 8 && BitConverter.ToUInt32(h8) == SpzImport.Magic)
+            if (h8.Length != 8 || BitConverter.ToUInt32(h8) != SpzImport.Magic) return false;
+            var tv4 = System.Diagnostics.Stopwatch.StartNew();
+            byte[] v3;
+            try
             {
-                int v = (int)BitConverter.ToUInt32(h8, 4);
-                _statusMessage = $"Cannot open {name}: SPZ version {v} (zstd-compressed) is not read yet - versions 2 and 3 are";
-                Console.WriteLine($"[Import] {name}: SPZ v{v}, zstd streams - not read yet");
+                // CPU transfer: file I/O - zstd has no browser or GPU decoder; the file is read and decompressed once.
+                using var whole = await file.ArrayBuffer();
+                using var wu = new Uint8Array(whole);
+                v3 = SpzImport.DecodeV4(wu.ReadBytes());
+            }
+            catch (FormatException ex)
+            {
+                _statusMessage = $"Cannot open {name}: {ex.Message}";
+                Console.WriteLine($"[Import] {name}: {ex.Message}");
                 return true;
             }
-            return false;
+            Console.WriteLine($"[Import] {name}: SPZ v4, zstd streams decompressed in {tv4.Elapsed.TotalSeconds:F1}s");
+            using var v3u = new Uint8Array(v3);
+            using var v3buf = v3u.Buffer;
+            return await ImportSpzStreamAsync(v3buf, name, query, tv4, fileVersion: 4);
         }
         if (magic[0] != 0x1f || magic[1] != 0x8b) return false;
         var t0 = System.Diagnostics.Stopwatch.StartNew();
         // CPU transfer: none - gunzipped by the browser, JS-side.
         using var raw = await GzipAsync(file, decompress: true);
+        return await ImportSpzStreamAsync(raw, name, query, t0, fileVersion: 0);
+    }
+
+    /// <summary>
+    /// The decoded SPZ stream (a gunzipped v2 / v3 file, or v4 rebuilt as v3 by SpzImport.DecodeV4) into a new project
+    /// scene; false when it is not SPZ. <paramref name="fileVersion"/> is the version to report (0 = the stream's own).
+    /// </summary>
+    async Task<bool> ImportSpzStreamAsync(ArrayBuffer raw, string name, Dictionary<string, string> query,
+        System.Diagnostics.Stopwatch t0, int fileVersion)
+    {
         byte[] head;
         using (var hu = new Uint8Array(raw, 0, Math.Min(16L, raw.ByteLength)))
             head = hu.ReadBytes();
@@ -202,7 +225,10 @@ public partial class Studio
             Console.WriteLine($"[Import] {name}: {ex.Message}");
             return true;
         }
-        bool flip = TurnImportYUp(query);
+        // v2 / v3 files in circulation are y down and get the y-up turn; v4 is written in its spec's default frame, RUB
+        // (y UP): turned, PlayCanvas's biker.spz stood on its head while the same model's compressed PLY (turned) stood
+        // upright, and untouched it matches that PLY (2026-10-11). DecodeV4 refuses any other declared frame.
+        bool flip = fileVersion != 4 && TurnImportYUp(query);
         var (packed, sh) = await SpzImport.ConvertAsync(_gpuService.WebGPUAccelerator, raw, h, flip);
         Uint8Array packedU8;
         var shU8 = new List<Uint8Array>();
@@ -224,7 +250,7 @@ public partial class Studio
             SplatCount = h.Count, FloatsPerSplat = SplatFormat.Floats, ColoursAreShDc = true,
             ShDegree = sh != null ? h.KeptShDegree : 0, ImportedFrom = name,
         };
-        Console.WriteLine($"[Import] {name}: SPZ v{h.Version}, {h.Count:N0} splats, SH degree {h.ShDegree}" +
+        Console.WriteLine($"[Import] {name}: SPZ v{(fileVersion > 0 ? fileVersion : h.Version)}, {h.Count:N0} splats, SH degree {h.ShDegree}" +
             (h.ShDegree > 3 ? " (band 4 dropped)" : "") + (h.Antialiased ? ", antialiased" : "") + $", decoded in {t0.Elapsed.TotalSeconds:F1}s" +
             (flip ? " (turned y-up)" : ""));
         await SaveAndOpenImportedSceneAsync(Path.GetFileNameWithoutExtension(name), scene, packedU8, shU8, query, "spz");

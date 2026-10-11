@@ -42,7 +42,11 @@ without turning. So every import turns the scene 180 degrees about X by default:
 
 - **SPZ v4** (32-byte NGSP header, a table of contents, per-attribute zstd streams). Already in PlayCanvas's examples
   (biker.spz). Chrome 151's DecompressionStream has gzip / deflate / deflate-raw only, no zstd - it needs a decoder:
-  ZstdSharp (MIT, pure C#, NuGet) or a small JS one (fzstd, MIT). A dependency, so TJ's call. Refused with that reason.
+  ZstdSharp (MIT, pure C#, NuGet) or a small JS one (fzstd, MIT). A dependency, so TJ's call. **DONE 2026-10-11 with
+  ZstdSharp.Port 0.8.8 (TJ):** SpzImport.DecodeV4 (header, extension records, TOC, per-stream zstd) rebuilds the v3 stream;
+  tests round-trip v3 -> v4 -> v3 byte for byte (SH 3 and 0), extensions (RUB read, another frame refused, unknown skipped),
+  damaged files, and the real biker.spz on the CPU kernel. In Chrome (AOT build): biker.spz 152,746 splats decoded in 0.3 s.
+  v4 is RUB (y up): with the y-up turn the biker stood on its head; untouched it matches the compressed PLY.
 - `.ksplat` (mkkellogg GaussianSplats3D), `.splatv` (4D), glTF KHR_gaussian_splatting (draft).
 
 ## Test files (research only, not redistributed)

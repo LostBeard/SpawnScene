@@ -40,6 +40,83 @@ public static class SpzImport
         public int KeptShDegree => Math.Min(3, ShDegree);
     }
 
+    /// <summary>SPZ extension type: the coordinate system the packed data is stored in (SPZ_ADOBE_coordinate_system).</summary>
+    public const uint ExtCoordinateSystem = 0xADBE0003;
+    /// <summary>CoordinateSystem RUB (Right Up Back): the packed frame of every SPZ without that extension.</summary>
+    public const uint CoordinateRub = 4;
+
+    /// <summary>
+    /// SPZ version 4 (nianticlabs/spz README "File layout (version 4)", load-spz.cc decompressNgspStreams): a 32-byte
+    /// plaintext header (magic, version, numPoints, shDegree, fractionalBits, flags, numStreams, tocByteOffset, 12 reserved),
+    /// optional extension records (u32 type, u32 length, payload) up to the TOC, the TOC (numStreams x [compressed u64,
+    /// uncompressed u64]) and the zstd streams back to back - positions, alphas, colours, scales, rotations, SH, each exactly
+    /// the array version 3 stores, an empty one (SH at degree 0) omitted. Returns those arrays behind a 16-byte version-3
+    /// header: the gunzipped v3 stream, which <see cref="ParseHeader"/> and <see cref="ConvertAsync"/> already read.
+    /// The data must be in the default frame (RUB): a file whose coordinate-system extension says otherwise is refused with
+    /// the reason (drawing it in the wrong frame would look like a broken scene); other extensions are skipped by length,
+    /// as the format allows. CPU work: zstd has no browser or GPU decoder; it is file I/O, done once.
+    /// </summary>
+    public static byte[] DecodeV4(ReadOnlySpan<byte> file)
+    {
+        if (file.Length < 32 || BitConverter.ToUInt32(file) != Magic) throw new FormatException("not an SPZ file");
+        uint version = BitConverter.ToUInt32(file[4..]);
+        if (version != 4) throw new FormatException($"SPZ version {version} with a plaintext header is not read");
+        uint count = BitConverter.ToUInt32(file[8..]);
+        int shDegree = file[12], frac = file[13], flags = file[14], streams = file[15];
+        uint toc = BitConverter.ToUInt32(file[16..]);
+        if (count == 0 || count > int.MaxValue / 16) throw new FormatException($"SPZ claims {count} points");
+        if (shDegree > 4) throw new FormatException($"SPZ SH degree {shDegree}");
+        if (toc < 32 || toc > file.Length) throw new FormatException("SPZ v4: table of contents outside the file");
+
+        if ((flags & 0x2) != 0)
+        {
+            int at = 32;
+            while (at + 8 <= (int)toc)
+            {
+                uint type = BitConverter.ToUInt32(file[at..]);
+                int len = (int)BitConverter.ToUInt32(file[(at + 4)..]);
+                if (len < 0 || at + 8 + len > (int)toc) throw new FormatException("SPZ v4: an extension record runs past the header zone");
+                if (type == ExtCoordinateSystem && len >= 4)
+                {
+                    uint cs = BitConverter.ToUInt32(file[(at + 8)..]);
+                    if (cs != 0 && cs != CoordinateRub)
+                        throw new FormatException($"SPZ stored in coordinate system {cs} (not the default RUB) is not read yet");
+                }
+                else Console.WriteLine($"[SPZ] skipped extension 0x{type:X8} ({len} bytes)");
+                at += 8 + len;
+            }
+        }
+
+        var header = new Header(3, (int)count, shDegree, frac, (flags & 0x1) != 0);
+        long[] sizes = { 9L * count, count, 3L * count, 3L * count, 4L * count, 3L * header.ShDim * count };
+        var expected = sizes.Where(s => s > 0).ToArray();
+        if (streams != expected.Length)
+            throw new FormatException($"SPZ v4: {streams} streams, expected {expected.Length} for SH degree {shDegree}");
+        long data = toc + 16L * streams;
+        if (data > file.Length) throw new FormatException("SPZ v4: table of contents runs past the file");
+
+        var output = new byte[header.Bytes];
+        BitConverter.GetBytes(Magic).CopyTo(output, 0);
+        BitConverter.GetBytes(3u).CopyTo(output, 4);
+        BitConverter.GetBytes(count).CopyTo(output, 8);
+        output[12] = (byte)shDegree; output[13] = (byte)frac; output[14] = (byte)(flags & 0x1);
+        long dst = 16;
+        using var zstd = new ZstdSharp.Decompressor();
+        for (int i = 0; i < streams; i++)
+        {
+            ulong compressed = BitConverter.ToUInt64(file[(int)(toc + 16 * i)..]);
+            ulong raw = BitConverter.ToUInt64(file[(int)(toc + 16 * i + 8)..]);
+            if ((long)raw != expected[i]) throw new FormatException($"SPZ v4: stream {i} is {raw} bytes, expected {expected[i]}");
+            if (compressed > (ulong)(file.Length - data)) throw new FormatException($"SPZ v4: stream {i} runs past the file");
+            int written = zstd.Unwrap(file.Slice((int)data, (int)compressed), output.AsSpan((int)dst, (int)raw));
+            if (written != (int)raw) throw new FormatException($"SPZ v4: stream {i} decompressed to {written} bytes, expected {raw}");
+            dst += (long)raw;
+            data += (long)compressed;
+        }
+        if (data != file.Length) throw new FormatException("SPZ v4: bytes after the last stream");
+        return output;
+    }
+
     /// <summary>Read the header of gunzipped SPZ bytes; <see cref="FormatException"/> with a reason when we cannot read it.</summary>
     public static Header ParseHeader(ReadOnlySpan<byte> d)
     {

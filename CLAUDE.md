@@ -168,7 +168,8 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
 
 ### Training defaults worth knowing
 
-- Densification uses AbsGS's signal (sum of per-pixel |dL/dmean2D|, bar 8e-4) since 2026-10-06; `&absgrad=0` restores
+- Densification uses AbsGS's signal (sum of per-pixel |dL/dmean2D|; bar 6e-4 since 2026-10-11, 8e-4 before, High / Max 4e-4)
+  since 2026-10-06; `&absgrad=0` restores
   the reference signed sum (2e-4). Bicycle 7K held out +0.43 dB / SSIM +0.038 with fewer splats; Truck equal with 57%
   fewer. TrainerGate's `absgrad` case guards it.
 - Versus the reference (gsplat, same photos held out, llffhold=8, COLMAP poses), TruckFull 30K: ours 24.95 dB / SSIM

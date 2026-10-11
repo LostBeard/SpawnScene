@@ -629,6 +629,12 @@ densifies over the same 15K window, so it follows High. Train at 15K / 4e-4 is 2
 **ct3 (2026-10-11, &cputimes densify stages, Counter, bar 6e-4):** densify is 1.7 ms of a ~35 ms step (~5%): carry Adam / SH
 0.75, plan (GpuDensify) 0.5, resize 0.3, viewer upload 0.07, seed logits 0.03 ms per step. At most ~5% left there - the step
 is the GPU's (~33 ms; backward ~14). Densify speed work parked.
+
+**eg (2026-10-11): Train with GAINS-ONLY exposure (&exposure=gains), today's defaults:** 20.22 / 0.796 (default 20.19 / 0.793,
+raw neutral); anatomy vs Brush raw -0.83, **after the per-image colour fit -0.36** (default -0.86). ex2's -0.7 dB raw loss
+was the FULL 3x4 affine (&exposure=1); gains-only costs nothing raw on Train and the content moves half the way to Brush.
+exposure=auto already uses gains-only where it turns them on (phones: EXIF spread); stills without EXIF stay off (Bicycle
+gains-only was 24.99 vs 25.14 on 10-08) - no default change. Train's remaining raw gap is the photos' exposure itself.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

@@ -377,6 +377,18 @@ public partial class Studio
     /// <summary>&amp;cputimes: ms spent in the densify apply probe (ProbeViewsAsync before + after) since the last cycle line.</summary>
     double _probeMs;
 
+    /// <summary>&amp;cputimes: wall ms per densify stage (each awaits its own work), summed until the next cycle line.</summary>
+    readonly Dictionary<string, double> _densifyStageMs = new();
+    long _densifyStageT;
+    void DensifyStage(string name)
+    {
+        if (!CpuTimesOption) return;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_densifyStageT != 0 && name != "start")
+            _densifyStageMs[name] = _densifyStageMs.GetValueOrDefault(name) + System.Diagnostics.Stopwatch.GetElapsedTime(_densifyStageT, now).TotalMilliseconds;
+        _densifyStageT = now;
+    }
+
     /// <summary>
     /// Train the supervised views in a fresh random order every epoch, as the reference does
     /// (<see cref="TrainingSchedule.ShuffleEpoch"/>), instead of file order. <c>&amp;shuffleviews=0</c> for file order.
@@ -1087,6 +1099,10 @@ public partial class Studio
                             Console.WriteLine($"[Train] cycle {cycle,4} cpu: TrainStepAsync {cpuStepMs / Math.Max(1, cpuSteps):F2} ms " +
                                 $"(steps without a loss read), loop {loopMs:F2} ms/step, yield {cpuDelayMs / cpuIters:F2} ms/step, " +
                                 $"densify {cpuDensifyMs / cpuIters:F2} ms/step (of it the apply probe {_probeMs / cpuIters:F2}), drained before densify {cpuDrainMs / cpuIters:F2} ms/step");
+                            if (_densifyStageMs.Count > 0)
+                                Console.WriteLine($"[Train] cycle {cycle,4} densify stages (ms per step): " + string.Join(", ",
+                                    _densifyStageMs.OrderByDescending(kv => kv.Value).Select(kv => $"{kv.Key} {kv.Value / cpuIters:F2}")));
+                            _densifyStageMs.Clear();
                             cpuStepMs = cpuDelayMs = cpuDensifyMs = cpuDrainMs = _probeMs = 0; cpuSteps = cpuIters = 0;
                             cpuLoopStart = System.Diagnostics.Stopwatch.GetTimestamp();
                         }
@@ -1512,6 +1528,7 @@ public partial class Studio
         // splats on Truck (MEASURED 2026-09-24). Only counters and an 8 KiB histogram cross now.
         int budget = Math.Min(MaxDensifiedSplats, _trainer!.MaxTrainableSplats(_trainer.KeysPerSplat));
         _gpuDensify ??= new GpuDensify(_gpuService.WebGPUAccelerator);
+        DensifyStage("start");
         (int Far8, int Far16, int Far16Opaque) shellBefore = default;
         if (ShellLogOption && !pruneOnly && _rigSpread > 0f)
         {
@@ -1544,6 +1561,7 @@ public partial class Studio
             r = r with { Packed = r2.Packed, Count = r2.Count, AdamSources = adam, FeatureSources = feat, Cloned = r.Cloned + (r2.Count - r.Count) };
         }
 
+        DensifyStage("plan (GpuDensify)");
         // Always report, including - especially including - when the answer is "nothing".
         Console.WriteLine(
             $"[Densify] signal: {r.Visible * 100.0 / n:F1}% of {n:N0} splats visible, {r.Candidates:N0} over the " +
@@ -1801,7 +1819,9 @@ public partial class Studio
         Func<int, int, int, Task> carry)
     {
         var accel = _gpuService.WebGPUAccelerator;
+        DensifyStage("start");
         await _gpuRenderer.UploadSceneFromGpuBuffer(next, m);
+        DensifyStage("viewer upload");
         var live = _gpuRenderer.PackedSplatBuffer;
         if (live == null)
         {
@@ -1839,11 +1859,14 @@ public partial class Studio
         // 450k sailed through - see SplatTrainerGpu.CarryOptimizerRowsAsync for the numbers.
         // Adam and SH: GPU RemapFloatRows, one bank at a time (the old "GPU Adam remap killed opacity" was
         // the remap zeroing its own output - see RemapGpuFencedAsync; CarryGateAsync checks every bank).
+        DensifyStage("key demand");
         await carry(n, m, resetOpacity ? 3 : -1);
+        DensifyStage("carry Adam / SH");
         await _trainer.ResizeAsync(w, h, m, keys);
         // Wait for the device after Resize on its own, so a loss caused by the allocations is
         // reported here and not blamed on the first dispatch that follows.
         await accel.SynchronizeAsync();
+        DensifyStage("resize"); 
         // Live GPU memory with the splat count: what a device memory budget has to cover (bytes per splat, measured).
         Console.WriteLine($"[{logTag}] resized trainer to {m:N0} splats; " +
             $"{SpawnDev.ILGPU.WebGPU.WebGPUBufferAccounting.LiveStorageBytes / 1048576.0:F0} MB live storage " +
@@ -1854,6 +1877,7 @@ public partial class Studio
         _trainer.SeedLogits(live, m);
         await accel.SynchronizeAsync();
         _trainer.ResetDensifyStats();
+        DensifyStage("seed logits");
 
         Console.WriteLine($"[{logTag}] {n:N0} -> {m:N0} splats: {planText}");
         return (live, m);

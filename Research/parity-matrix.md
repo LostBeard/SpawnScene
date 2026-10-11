@@ -625,6 +625,10 @@ gradient bar".
 4e-4 better on all three (SSIM too). **High and Max now densify at 4e-4** (ReconstructionPresets.HighDensifyBar, picked by
 the matched preset at train time; Standard / Draft / Custom keep the 6e-4 default; &densifygrad and &absgrad=0 win). Max
 densifies over the same 15K window, so it follows High. Train at 15K / 4e-4 is 21.05 - Brush's 7K Train is 21.07.
+
+**ct3 (2026-10-11, &cputimes densify stages, Counter, bar 6e-4):** densify is 1.7 ms of a ~35 ms step (~5%): carry Adam / SH
+0.75, plan (GpuDensify) 0.5, resize 0.3, viewer upload 0.07, seed logits 0.03 ms per step. At most ~5% left there - the step
+is the GPU's (~33 ms; backward ~14). Densify speed work parked.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

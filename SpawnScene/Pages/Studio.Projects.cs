@@ -998,7 +998,10 @@ public partial class Studio
             _cameraController.SetPose(new(h[0], h[1], h[2]), new(h[3], h[4], h[5]), new(h[6], h[7], h[8]));
             return;
         }
-        if ((scene.TrainedIterations <= 0 && scene.ImportedFrom == null) || _gpuRenderer.PackedSplatBuffer is not { } packed) return;
+        if (scene.TrainedIterations <= 0 && scene.ImportedFrom == null) return;
+        // A read: borrowed, so the rows can still be kept compact (&rowq) afterwards.
+        using var rows = _gpuRenderer.BorrowRowsF32();
+        if (rows.Rows is not { } packed) return;
         // Another tool's scene is often a 360 capture with its background shell (trees, sky) trained in: the 1-99% box
         // reaches into it and the seat landed among the trees, the subject far away (Inria's Train, 2026-10-08). Frame
         // the dense middle instead.

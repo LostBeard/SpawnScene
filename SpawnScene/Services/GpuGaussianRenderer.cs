@@ -66,9 +66,10 @@ public partial class GpuGaussianRenderer : IDisposable
     private GPUComputePipeline? _packPipeline;
     int _packBuiltVariant = -1;
 
-    /// <summary>The pack pass variant, by the SH accessor: 2 = 8-bit codes (<see cref="ShCompact"/>, once compacted),
-    /// 1 = f32 rounded to 8 bits (<see cref="ShQuantizeSimulate"/>), 0 = f32.</summary>
-    int PackVariant => _shPacked ? 2 : ShQuantizeSimulate ? 1 : 0;
+    /// <summary>The pack pass variant. Low bits, the SH accessor: 2 = 8-bit codes (<see cref="ShCompact"/>, once
+    /// compacted), 1 = f32 rounded to 8 bits (<see cref="ShQuantizeSimulate"/>), 0 = f32. Bit 4: compact source rows
+    /// (<see cref="RowCompact"/>, once compacted).</summary>
+    int PackVariant => (_shPacked ? 2 : ShQuantizeSimulate ? 1 : 0) | (_sorter.RowsCompact ? 4 : 0);
 
     /// <summary>The pack pipeline for <see cref="PackVariant"/>. Rebuilt (and its bind group dropped - an "auto" layout
     /// belongs to its pipeline) when the variant changes: the harness sets the options from the URL after the renderer
@@ -76,7 +77,7 @@ public partial class GpuGaussianRenderer : IDisposable
     void BuildPackPipeline()
     {
         int variant = PackVariant;
-        var packSource = variant switch
+        var packSource = (variant & 3) switch
         {
             2 => PackComputeSource
                 .Replace("sh_rest0 : array<f32>", "sh_rest0 : array<u32>")
@@ -87,10 +88,17 @@ public partial class GpuGaussianRenderer : IDisposable
             1 => PackComputeSource.Replace(SphericalHarmonics.WgslPartAccess, SphericalHarmonics.WgslPartAccessQ8Sim),
             _ => PackComputeSource,
         };
-        if (variant != 0)
+        if ((variant & 4) != 0)
+        {
+            var rq = packSource.Replace(PackRowsF32, PackRowsCompact)
+                .Replace("src     : array<f32>;  // SplatFormat.Floats per splat", "src     : array<u32>;  // SplatFormat.CompactWords per splat (&rowq)");
+            Console.WriteLine("[Renderer] pack pipeline: " + (rq == packSource ? "compact rows REQUESTED BUT NOT SUBSTITUTED" : "source rows compact (&rowq)"));
+            packSource = rq;
+        }
+        if ((variant & 3) != 0)
             Console.WriteLine("[Renderer] pack pipeline: SH " + (ReferenceEquals(packSource, PackComputeSource)
                 ? "8-bit REQUESTED BUT NOT SUBSTITUTED"
-                : variant == 2 ? "from 8-bit codes (&shq8)" : "rounded to 8 bits (simulated, &shq8sim)"));
+                : (variant & 3) == 2 ? "from 8-bit codes (&shq8)" : "rounded to 8 bits (simulated, &shq8sim)"));
         using var packShader = _device!.CreateShaderModule(new GPUShaderModuleDescriptor { Code = packSource });
         _packPipeline = _device.CreateComputePipeline(new GPUComputePipelineDescriptor
         {
@@ -837,7 +845,9 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// <see cref="RepackForDisplay"/> afterwards or the viewer keeps showing the pre-training
     /// vertex data.
     /// </summary>
-    public MemoryBuffer1D<float, Stride1D.Dense>? PackedSplatBuffer => _sorter.PackedDataBuf;
+    /// <summary>The source rows as f32 (SplatFormat.Floats a splat). Compact rows (<see cref="RowCompact"/>) are expanded
+    /// first and stay f32 for the rest of this scene: the caller may hold the buffer across frames.</summary>
+    public MemoryBuffer1D<float, Stride1D.Dense>? PackedSplatBuffer { get { PinRowsF32(); return _sorter.PackedDataBuf; } }
 
     /// <summary>Splats currently uploaded.</summary>
     public int SplatCount => _splatCount;
@@ -1518,6 +1528,13 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// </summary>
     public async Task UploadScene(GaussianScene scene)
     {
+        _rowsHold++;   // no row compaction while the rows and the counts change (RowCompact)
+        try { await UploadSceneCore(scene); } finally { _rowsHold--; }
+    }
+
+    async Task UploadSceneCore(GaussianScene scene)
+    {
+        _rowsPinned = false;
         UseRgbColours(); // a CPU-side scene (.ply / .splat / depth) is always RGB, never a trained scene
         await _sorter.UploadAsync(scene);
 
@@ -1594,6 +1611,14 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     public async Task UploadSceneFromGpuBuffer(
         MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)
     {
+        _rowsHold++;   // no row compaction while the rows and the counts change (RowCompact)
+        try { await UploadSceneFromGpuBufferCore(packedBuf, splatCount); } finally { _rowsHold--; }
+    }
+
+    async Task UploadSceneFromGpuBufferCore(
+        MemoryBuffer1D<float, Stride1D.Dense> packedBuf, int splatCount)
+    {
+        _rowsPinned = false;
         await _sorter.UploadFromGpuBufferAsync(packedBuf, splatCount);
 
         _splatCount = _sorter.SplatCount;
@@ -1621,6 +1646,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// </summary>
     public async Task<float[]?> ReadPackedDataAsync(int splatCount)
     {
+        PinRowsF32();
         var buf = _sorter.PackedDataBuf;
         if (buf == null) return null;
         try
@@ -1646,6 +1672,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// </summary>
     public async Task<Uint8Array?> ReadPackedUint8ArrayAsync(int splatCount)
     {
+        PinRowsF32();
         var buf = _sorter.PackedDataBuf;
         if (buf == null) return null;
         try
@@ -1669,12 +1696,12 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// </summary>
     private void PackAtUpload()
     {
-        var dataBuf = _sorter.PackedDataBuf;
+        var rows = _sorter.RowsGpuBuffer;
         var idxBuf = _sorter.IndicesBuf;
-        if (_device == null || _splatBuffer == null || _packPipeline == null || dataBuf == null || idxBuf == null) return;
+        if (_device == null || _splatBuffer == null || _packPipeline == null || rows == null || idxBuf == null) return;
 
         using var encoder = _device.CreateCommandEncoder();
-        AppendPackComputePass(encoder, dataBuf, idxBuf, _splatCount);
+        AppendPackComputePass(encoder, rows, idxBuf, _splatCount);
         _lodArgsValid = false;   // the buffer holds every row now, not a cut
         using var cmdBuf = encoder.Finish();
         _submitArray[0] = cmdBuf;
@@ -1728,6 +1755,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
             return;
         }
         if (!_renderLogged) { _renderLogged = true; Console.WriteLine($"[Render] First frame ({RenderMode}): {_splatCount} splats, cam={camera.Position} fwd={camera.Forward}"); }
+        CompactRowsIfAsked();
 
         // ── Adaptive Resolution: enter/exit half-res based on mode and camera velocity ──
         {
@@ -1850,7 +1878,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// <summary>Sorted alpha-blend rendering: cull → sort → pack → render → optional CAS.</summary>
     private void RenderSorted(CameraParams camera, Matrix4x4 mvp)
     {
-        var (dataBuf, idxBuf, sortRan, visibleCount) = _sorter.Sort(camera, mvp);
+        var (_, idxBuf, sortRan, visibleCount) = _sorter.Sort(camera, mvp);
         if (sortRan) _packCameraPos = camera.Position;
 
         // Upload uniforms (frame_index/dilation/min_alpha not used in sorted mode)
@@ -1864,8 +1892,8 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         using var colorView = colorTexture.CreateView();
         using var encoder = _device!.CreateCommandEncoder();
 
-        if (sortRan && dataBuf != null && idxBuf != null)
-            AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount, _sorter.LodDrawnCountBuffer);
+        if (sortRan && idxBuf != null)
+            AppendPackComputePass(encoder, _sorter.RowsGpuBuffer, idxBuf, visibleCount, _sorter.LodDrawnCountBuffer);
 
         // Always the f32-precision path: splats blend into the rgba16float offscreen target, then the CAS
         // pass writes the canvas. Strength 0 (or low-res motion) makes CAS an exact copy.
@@ -2252,12 +2280,12 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         (MemoryBuffer1D<float, Stride1D.Dense>? dataBuf, MemoryBuffer1D<int, Stride1D.Dense>? idxBuf, bool sortRan, int visibleCount) sorted;
         try { sorted = _sorter.Sort(head, cullMvp); }
         finally { _sorter.LodCullPixels = lod; _sorter.LodFocalOverride = 0f; }
-        var (dataBuf, idxBuf, sortRan, visibleCount) = sorted;
+        var (_, idxBuf, sortRan, visibleCount) = sorted;
         _xrSortedVisible = visibleCount;
-        if (!sortRan || dataBuf == null || idxBuf == null) return;
+        if (!sortRan || idxBuf == null) return;
         _packCameraPos = head.Position;
         using var encoder = _device.CreateCommandEncoder();
-        AppendPackComputePass(encoder, dataBuf, idxBuf, visibleCount, _sorter.LodDrawnCountBuffer);
+        AppendPackComputePass(encoder, _sorter.RowsGpuBuffer, idxBuf, visibleCount, _sorter.LodDrawnCountBuffer);
         using var cmd = encoder.Finish();
         _submitArray[0] = cmd;
         RawSubmit.Submit(_gpu.WebGPUAccelerator, _queue!, _submitArray);
@@ -2468,7 +2496,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
     /// </summary>
     private void AppendPackComputePass(
         GPUCommandEncoder encoder,
-        MemoryBuffer1D<float, Stride1D.Dense> dataBuf,
+        GPUBuffer? srcDataBuffer,
         MemoryBuffer1D<int, Stride1D.Dense> idxBuf,
         int visibleCount,
         MemoryBuffer1D<int, Stride1D.Dense>? lodDrawnCount = null)
@@ -2477,7 +2505,6 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
         CompactShIfAsked();
         if (_packBuiltVariant != PackVariant) BuildPackPipeline();
 
-        var srcDataBuffer = dataBuf.GetGPUBuffer();
         if (srcDataBuffer == null) return;
 
         var srcIdxBuffer = idxBuf.GetGPUBuffer();
@@ -2527,7 +2554,7 @@ fn split_sh_rows(@builtin(workgroup_id) wg : vec3<u32>, @builtin(num_workgroups)
                     new() { Binding = 6, Resource = new GPUBufferBinding { Buffer = _shRest?[2] ?? _shDummy } },
                     new() { Binding = 7, Resource = new GPUBufferBinding { Buffer = EnsureSelectionBuffer() } },
                     new() { Binding = 8, Resource = new GPUBufferBinding { Buffer = _selMask ?? _shDummy } },
-                }.Concat(_packBuiltVariant == 2
+                }.Concat((_packBuiltVariant & 3) == 2
                     ? new GPUBindGroupEntry[] { new() { Binding = 9, Resource = new GPUBufferBinding { Buffer = _shScale! } } }
                     : System.Array.Empty<GPUBindGroupEntry>()).ToArray()
             });
@@ -2637,6 +2664,7 @@ fn lod_args() {
         _splatBuffer?.Dispose();
         DestroyShRest();
         DisposeShQ8();
+        DisposeRowQ();
         _shSplitPipeline?.Dispose();
         _shDummy?.Destroy(); _shDummy?.Dispose();
         _uniformBuffer?.Destroy();
@@ -3288,18 +3316,21 @@ struct Selection {
 // SplatEditor's per-splat selection mask (add / subtract selections), read when sel.rows.z == 1; a stand-in otherwise.
 @group(0) @binding(8) var<storage, read> sel_mask : array<i32>;
 
+// Source row access: sv(row offset, float k of SplatFormat's 14) - f32 here, decoded in the compact variant (&rowq).
+" + PackRowsF32 + @"
+
 // SplatEditor.Selected: the filters, then the row range or region, inverted when asked.
 fn is_selected(i : u32, o : u32) -> bool {
     if (sel.lo.w == 0.0) { return false; }
-    if (sel.filt.x > 0.0 && src[o + 9u] >= sel.filt.x) { return false; }
-    if (sel.filt.y > 0.0 && max(src[o + 6u], max(src[o + 7u], src[o + 8u])) <= sel.filt.y) { return false; }
+    if (sel.filt.x > 0.0 && sv(o, 9u) >= sel.filt.x) { return false; }
+    if (sel.filt.y > 0.0 && max(sv(o, 6u), max(sv(o, 7u), sv(o, 8u))) <= sel.filt.y) { return false; }
     var region = false;
     if (sel.rows.z == 1) {
         region = sel_mask[i] != 0;
     } else if (sel.rows.y > sel.rows.x) {
         region = i32(i) >= sel.rows.x && i32(i) < sel.rows.y;
     } else {
-        let c = sel.m * vec4<f32>(src[o], src[o + 1u], src[o + 2u], 1.0);
+        let c = sel.m * vec4<f32>(sv(o, 0u), sv(o, 1u), sv(o, 2u), 1.0);
         if (c.w > 1e-7) {
             let n = c.xyz / c.w;
             region = all(n >= sel.lo.xyz) && all(n <= sel.hi.xyz);
@@ -3339,19 +3370,19 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
     }
 
     // Index lookup: maps sorted position i to original splat data — eliminates CPU reorder pass
-    let srcOff = u32(origIdx) * 14u;
+    let srcOff = u32(origIdx) * SRC_STRIDE;
 
     // Position: 3 floats bitcast to 3 u32s (preserve full precision)
-    dst[dstOff + 0u] = bitcast<u32>(src[srcOff + 0u]);  // pos.x
-    dst[dstOff + 1u] = bitcast<u32>(src[srcOff + 1u]);  // pos.y
-    dst[dstOff + 2u] = bitcast<u32>(src[srcOff + 2u]);  // pos.z
+    dst[dstOff + 0u] = bitcast<u32>(sv(srcOff, 0u));  // pos.x
+    dst[dstOff + 1u] = bitcast<u32>(sv(srcOff, 1u));  // pos.y
+    dst[dstOff + 2u] = bitcast<u32>(sv(srcOff, 2u));  // pos.z
 
     // Colour: linear RGB, OR SH DC -> RGB when training converted the buffer (feeding raw DC made every
     // trained scene look like washed blobs). f16, unclamped above 1 like the trainer's compositing.
-    var rgb = vec3<f32>(src[srcOff + 3u], src[srcOff + 4u], src[srcOff + 5u]);
+    var rgb = vec3<f32>(sv(srcOff, 3u), sv(srcOff, 4u), sv(srcOff, 5u));
     if (u.colours_are_sh_dc != 0u) {
         // Same function the trainer renders with, for the direction from this pack's camera.
-        let pos = vec3<f32>(src[srcOff + 0u], src[srcOff + 1u], src[srcOff + 2u]);
+        let pos = vec3<f32>(sv(srcOff, 0u), sv(srcOff, 1u), sv(srcOff, 2u));
         rgb = sh_view_rgb(u32(origIdx), normalize(pos - u.cam_pos.xyz), rgb, u.sh_degree);
     }
     // Selected (Edit tools): amber-tinted, so what Delete / Move / Copy will take is visible first.
@@ -3359,16 +3390,16 @@ fn pack_splats(@builtin(global_invocation_id) gid : vec3<u32>,
         rgb = mix(rgb, vec3<f32>(1.0, 0.72, 0.15), 0.5);
     }
     dst[dstOff + 3u] = pack2x16float(vec2<f32>(max(rgb.r, 0.0), max(rgb.g, 0.0)));
-    dst[dstOff + 4u] = pack2x16float(vec2<f32>(max(rgb.b, 0.0), clamp(src[srcOff + 9u], 0.0, 1.0)));
+    dst[dstOff + 4u] = pack2x16float(vec2<f32>(max(rgb.b, 0.0), clamp(sv(srcOff, 9u), 0.0, 1.0)));
 
     // Scale f16 (relative 5e-4: a size, never a tilt), rotation SNORM16, normalized here. NOT f16: ~3 digits of a unit
     // quaternion tilts a 3DGS needle 1000x longer than wide by ten times its own width - gsplat's own Truck imported
     // as fur at the exact camera gsplat drew cleanly (2026-10-04); snorm16's 3e-5 is 30x finer. Against the f32 vertex
     // (2026-10-11): ~60 dB on Train 7K and Brush Truck, also zoomed to 15 deg (SplatFormat.PackedBytes).
-    var q = vec4<f32>(src[srcOff + 10u], src[srcOff + 11u], src[srcOff + 12u], src[srcOff + 13u]);
+    var q = vec4<f32>(sv(srcOff, 10u), sv(srcOff, 11u), sv(srcOff, 12u), sv(srcOff, 13u));
     if (dot(q, q) > 0.0) { q = normalize(q); }
-    dst[dstOff + 5u] = pack2x16float(vec2<f32>(src[srcOff + 6u], src[srcOff + 7u]));
-    dst[dstOff + 6u] = pack2x16float(vec2<f32>(src[srcOff + 8u], 1.0));
+    dst[dstOff + 5u] = pack2x16float(vec2<f32>(sv(srcOff, 6u), sv(srcOff, 7u)));
+    dst[dstOff + 6u] = pack2x16float(vec2<f32>(sv(srcOff, 8u), 1.0));
     dst[dstOff + 7u] = pack2x16snorm(q.xy);
     dst[dstOff + 8u] = pack2x16snorm(q.zw);
 }

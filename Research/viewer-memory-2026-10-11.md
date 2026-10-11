@@ -133,3 +133,22 @@ Then built: SplatFormat.PackedBytes 36 (pos f32x3, colour/alpha f16x4, scale f16
 Real vs simulated: the same PSNR to two decimals (98-263 pixels of ~11M differ by one level). VRAM, Train 7K over idle:
 352 -> 344 MiB f32 SH, 257 -> 247 MiB with `&shq8=1` (12 B x 742K = 8.5 MiB). This one is a format change, not an
 option (built 2026-10-11, NOT deployed - TJ). Per splat at SH 3 now: ~287 B default, ~152 B with `&shq8=1`.
+
+## Step 3 built: compact source rows, `&rowq=1` (2026-10-11)
+
+GpuGaussianRenderer.RowCompact (GpuGaussianRenderer.RowCompact.cs): the sorter's source rows become SplatFormat.CompactWords
+(9 u32 = 36 B: pos f32 bits, colour / opacity / scale f16 pairs, quaternion snorm16 pairs) at the start of a frame; the f32
+rows are freed. Readers: the pack shader through `sv(row, k)` (PackRowsF32 / PackRowsCompact) and a compact flat cull
+(GpuSplatSorter.CullAndDistanceCompactKernel - read as u32, never through a float view: a word whose high half is 0 is an
+f32 subnormal a GPU may flush). `PackedSplatBuffer` (36 call sites that keep or write the rows: training, Edit, export...)
+expands and PINS f32 for the rest of the scene; brief reads (the import seat's bounds, XR entry) borrow
+(`BorrowRowsF32`: the live rows with compaction held, or a temporary expanded copy). LOD never compacts.
+
+- VRAM, Train 7K: 1086 -> 1072 MiB (-14 MiB = 20 B x 742K); with `&shq8=1` too: 976 MiB (-110 MiB, ~132 B/splat at SH 3).
+- Render vs f32 rows: **identical** (0/255 at every pose: Train 7K 7 poses, Brush Truck 8 poses at 50 and 15 deg) - the
+  draw vertex already holds colour / opacity / scale f16 and the quaternion snorm16.
+- Bug found and fixed before commit: an upload sets the renderer's count after an await; a frame in that gap compacted a
+  trainer's grown buffer at the OLD count (165,438 of 198,447 rows). Uploads now hold compaction off, counts come from the
+  buffers. After the fix, training never compacts (the trainer pins right after each upload); project autotest
+  (`&rowq=1&shq8=1`, Bathroom 12 photos 1500 it): supervised 20.32 dB / 0.8844 vs 20.38 / 0.8827 without (run noise),
+  legacy SH PASS bit for bit.

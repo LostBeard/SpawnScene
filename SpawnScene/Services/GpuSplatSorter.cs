@@ -30,6 +30,9 @@ public class GpuSplatSorter : IDisposable
 
     // ILGPU buffers — persistent across frames
     private MemoryBuffer1D<float, Stride1D.Dense>? _packedDataBuf;
+    private MemoryBuffer1D<uint, Stride1D.Dense>? _compactRows;   // GpuGaussianRenderer.RowCompact; _packedDataBuf is null then
+    private Action<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+        CullParams>? _cullDistanceCompactKernel;
     private MemoryBuffer1D<int, Stride1D.Dense>? _distanceBuf;   // int32 depth keys (int.MinValue = culled)
     private MemoryBuffer1D<int, Stride1D.Dense>? _indicesBuf;    // splat indices (-1 = culled sentinel)
 
@@ -280,6 +283,28 @@ public class GpuSplatSorter : IDisposable
 
     /// <summary>Expose packed data buffer for stochastic pack-at-upload.</summary>
     public MemoryBuffer1D<float, Stride1D.Dense>? PackedDataBuf => _packedDataBuf;
+
+    /// <summary>The source rows as SplatFormat.CompactWords u32s a splat (GpuGaussianRenderer.RowCompact), or null; while
+    /// set, <see cref="PackedDataBuf"/> is null.</summary>
+    public MemoryBuffer1D<uint, Stride1D.Dense>? CompactRows => _compactRows;
+    public bool RowsCompact => _compactRows != null;
+
+    /// <summary>The buffer the pack pass reads the rows from, compact or f32.</summary>
+    public SpawnDev.SpawnJS.JSObjects.GPUBuffer? RowsGpuBuffer => _compactRows?.GetGPUBuffer() ?? _packedDataBuf?.GetGPUBuffer();
+
+    /// <summary>Take compact rows in place of the f32 rows (freed; GPU work already submitted on them still runs).</summary>
+    public void SwapToCompactRows(MemoryBuffer1D<uint, Stride1D.Dense> rows)
+    {
+        _packedDataBuf?.Dispose(); _packedDataBuf = null;
+        _compactRows = rows;
+    }
+
+    /// <summary>Take f32 rows in place of the compact rows (freed).</summary>
+    public void SwapToF32Rows(MemoryBuffer1D<float, Stride1D.Dense> rows)
+    {
+        _compactRows?.Dispose(); _compactRows = null;
+        _packedDataBuf = rows;
+    }
     /// <summary>Expose index buffer for stochastic pack-at-upload (filled with identity 0..N-1).</summary>
     public MemoryBuffer1D<int, Stride1D.Dense>? IndicesBuf => _indicesBuf;
 
@@ -343,17 +368,54 @@ public class GpuSplatSorter : IDisposable
         if (i >= p.SplatCount) return;
 
         int o = i * FloatsPerSplat;
-        float x = packedData[o];
-        float y = packedData[o + 1];
-        float z = packedData[o + 2];
-        float opacity = packedData[o + 9];
+        int key = CullKey(packedData[o], packedData[o + 1], packedData[o + 2], packedData[o + 9],
+            packedData[o + 6], packedData[o + 7], packedData[o + 8], p);
+        outDistances[i] = key;
+        outIndices[i] = key < 0 ? -1 : i;
+    }
 
+    /// <summary>
+    /// <see cref="CullAndDistanceKernel"/> over compact rows (SplatFormat.CompactWords u32s a splat,
+    /// GpuGaussianRenderer.RowCompact): positions are f32 bits, opacity and scales f16 halves. Read as u32, never through a
+    /// float view: a word whose high half is 0 is an f32 subnormal, which a GPU may flush to zero on the way.
+    /// </summary>
+    private static void CullAndDistanceCompactKernel(
+        Index1D index,
+        ArrayView1D<uint, Stride1D.Dense> rows,
+        ArrayView1D<int, Stride1D.Dense> outDistances,
+        ArrayView1D<int, Stride1D.Dense> outIndices,
+        CullParams p)
+    {
+        int i = index;
+        if (i >= p.SplatCount) return;
+
+        int o = i * SplatFormat.CompactWords;
+        uint w5 = rows[o + 5];
+        int key = CullKey(Interop.IntAsFloat(rows[o]), Interop.IntAsFloat(rows[o + 1]), Interop.IntAsFloat(rows[o + 2]),
+            HalfToFloat(rows[o + 4] >> 16), HalfToFloat(w5 & 0xFFFFu), HalfToFloat(w5 >> 16), HalfToFloat(rows[o + 6] & 0xFFFFu), p);
+        outDistances[i] = key;
+        outIndices[i] = key < 0 ? -1 : i;
+    }
+
+    /// <summary>IEEE half bits (low 16) to float; the f16 max for inf / NaN (compact rows hold finite values).</summary>
+    static float HalfToFloat(uint h)
+    {
+        uint e = (h >> 10) & 0x1Fu;
+        uint m = h & 0x3FFu;
+        float v = e == 0 ? m * 5.9604645e-8f : e == 31 ? 65504f : Interop.IntAsFloat(((e + 112u) << 23) | (m << 13));
+        return (h & 0x8000u) != 0 ? -v : v;
+    }
+
+    /// <summary>
+    /// The flat cull's sort key for one splat, or -1 when culled. Returns the key instead of writing it: no view
+    /// parameters on a helper (WGSL restricts storage pointers as function arguments).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    static int CullKey(float x, float y, float z, float opacity, float s0, float s1, float s2, CullParams p)
+    {
         // Frustum cull with per-splat radius margin + zero-opacity rejection.
         // Splats are anisotropic and oriented, so the bounding radius is the LARGEST axis --
         // reading sx alone would cull an edge-on disk whose long axis is still on screen.
-        float s0 = packedData[o + 6];
-        float s1 = packedData[o + 7];
-        float s2 = packedData[o + 8];
         float sMax = s0 > s1 ? s0 : s1;
         if (s2 > sMax) sMax = s2;
         float splatScale = sMax;
@@ -379,16 +441,13 @@ public class GpuSplatSorter : IDisposable
             {
                 // Sort key: ASCENDING = back to front, so far splats get small keys.
                 int qDist = (int)(dist * p.DistScale);
-                outDistances[i] = p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
-                outIndices[i] = i;
-                return;
+                return p.DistMax - (qDist > p.DistMax ? p.DistMax : qDist);
             }
         }
 
         // Sentinel: -1 = 0xFFFFFFFF sorts LAST ascending, and its low 16 bits (0xFFFF) are above every
         // visible 16-bit key (<= 65534). Pack shader skips idx < 0 -> no wasted vertex/fragment work.
-        outDistances[i] = -1;
-        outIndices[i] = -1;
+        return -1;
     }
 
     /// <summary>
@@ -714,7 +773,7 @@ public class GpuSplatSorter : IDisposable
     public (MemoryBuffer1D<float, Stride1D.Dense>?, MemoryBuffer1D<int, Stride1D.Dense>?, bool sortRan, int visibleCount)
         Sort(CameraParams camera, Matrix4x4 mvp)
     {
-        if (_splatCount == 0 || _packedDataBuf == null || _indicesBuf == null)
+        if (_splatCount == 0 || (_packedDataBuf == null && _compactRows == null) || _indicesBuf == null)
             return (_packedDataBuf, _indicesBuf, false, _lastSortVisibleCount);
 
         var camPos = camera.Position;
@@ -821,10 +880,16 @@ public class GpuSplatSorter : IDisposable
             _cullDistanceLodKernel(_splatCount, _packedDataBuf.View, _distanceBuf!.View, _indicesBuf.View,
                 _lodParent.View, _lodBounds!.View, _lodSize!.View, _lodDrawnCount.View, cullParams);
         }
+        else if (_compactRows != null)
+        {
+            _cullDistanceCompactKernel ??= accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<uint, Stride1D.Dense>,
+                ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, CullParams>(CullAndDistanceCompactKernel);
+            _cullDistanceCompactKernel(_splatCount, _compactRows.View, _distanceBuf!.View, _indicesBuf.View, cullParams);
+        }
         else
         _cullDistanceKernel(
             _splatCount,
-            _packedDataBuf.View,
+            _packedDataBuf!.View,
             _distanceBuf!.View,
             _indicesBuf.View,
             cullParams);
@@ -925,6 +990,7 @@ public class GpuSplatSorter : IDisposable
     private void DisposeBuffers()
     {
         _packedDataBuf?.Dispose(); _packedDataBuf = null;
+        _compactRows?.Dispose(); _compactRows = null;
         _distanceBuf?.Dispose(); _distanceBuf = null;
         _indicesBuf?.Dispose(); _indicesBuf = null;
         _radixSort?.Dispose(); _radixSort = null;

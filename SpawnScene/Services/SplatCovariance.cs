@@ -29,6 +29,11 @@ public static class SplatFormat
 
     /// <summary>u32 words per vertex (<see cref="PackedBytes"/> / 4).</summary>
     public const int PackedWords = 9;
+
+    /// <summary>u32 words per COMPACT source row (GpuGaussianRenderer.RowCompact, &amp;rowq): pos x y z f32 bits, (r g)
+    /// (b opacity) (sx sy) (sz -) f16 pairs, quaternion (x y) (z w) snorm16 pairs - 36 bytes instead of
+    /// <see cref="Floats"/> x 4 = 56.</summary>
+    public const int CompactWords = 9;
 }
 
 /// <summary>

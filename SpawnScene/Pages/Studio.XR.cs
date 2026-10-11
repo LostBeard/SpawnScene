@@ -45,7 +45,9 @@ public partial class Studio
             // before it could spend the click's user activation); frames until then draw nothing.
             _xrSceneBox = null;
             _xrPlaceMiniature = _gpuRenderer.XRTransparent;
-            var packed = _gpuRenderer.PackedSplatBuffer;
+            // Reads only: borrowed, so a compact scene (&rowq) stays compact in the headset.
+            var rowsLease = _gpuRenderer.BorrowRowsF32();
+            var packed = rowsLease.Rows;
             int n = _gpuRenderer.SplatCount;
             try
             {
@@ -69,6 +71,7 @@ public partial class Studio
             }
             else
                 _xrPlaceMiniature = false;   // no bounds: the VR start at scale 1 (head at the camera)
+            rowsLease.Dispose();
             _xrBoundsReady = true;
 
             // Initialize WebGL blit helper for WebGL XR fallback

@@ -611,6 +611,8 @@ GPU is free again (Data's ML 5.3.6 gate has it).
 6e-4 is the default** (all 11 benchmark scenes up, mean +0.18 dB, ~+10% training time on the benchmark, viewer -15% fps
 and +32% file on Bicycle). c45 (10-06) had found 6e-4 no better - on the defaults of that day; the 10-10 defaults change
 the answer. 4e-4 stays a High / Max candidate (untested at 15K / 30K).
+Deployed (run 38127746813, 7b90e28) and verified live: a spawnscene.com Bathroom project run logs "over the 0.0006
+gradient bar".
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

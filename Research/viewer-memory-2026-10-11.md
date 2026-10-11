@@ -91,3 +91,28 @@ decoded band's largest |v| gives back the same s even through the GPU's inexact 
 Status: opt-in (`&shq8=1`), not deployed as a default - for TJ: render 60 dB from f32 (max 1/255), viewer -45% memory
 at SH 3; the cost is that a LOADED scene that is edited, saved or trained from while compact carries 8-bit SH from then
 on (freshly trained scenes save the trainer's f32).
+
+## What is left per splat, and the order (2026-10-11, after 8-bit SH)
+
+At SH 3 with `&shq8=1`: SH 45 + source 56 + render vertex buffer 48 + sort 8 + radix scratch ~9 = ~166 B (measured
+~164). The two f32 row buffers are now the bulk.
+
+1. **Render vertex buffer 48 -> 36 B** (pos f32x3, colour/alpha f16x4, scale f16x4, quat f16x4 - instanced vertex
+   attributes, so only the pack shader's writes and the two vertex layouts change). History: it WAS f16 until 9943cce
+   (2026-10-04, the conic-sign fix), which went to f32 with "measured no change on the reference scene, kept for
+   needle-heavy imports" - a precaution, not a measured loss. So the measurement that decides it: f16 vs f32 render
+   on a needle-heavy import (gsplat's Truck, the scene that exposed the conic sign) plus Train 7K, viewer bench PSNR /
+   max diff, and the near tyre at gsplat's exact camera (&park). Tiny splats: f16's smallest normal is 6.1e-5 (scene
+   units) - check the scale distribution of real scenes for values below it (subnormals keep ~1e-7 at reduced
+   precision; the EWA filter floors the screen footprint anyway). -12 B/splat.
+2. **Source rows 56 -> ~36 B** (pos f32x3, DC + opacity f16x4, scale f16x3 + pad, quat snorm16x4 or f16x4). 36 readers
+   in 17 files take `PackedSplatBuffer` as f32 rows and the trainer writes through it, so it would follow the SH pattern:
+   compact for display, expand on any access, compact again at the next draw. The per-frame readers that must read the
+   compact rows directly: the pack shader and GpuSplatSorter's three cull kernels (ILGPU; positions, plus scale /
+   opacity for the cull). -20 B/splat.
+3. Dropping the render vertex buffer entirely (draw straight from compact source rows through the sort indices, the SH
+   colour evaluated per frame in the vertex stage instead of baked at pack) is the large one (-36..48 B) but changes the
+   stochastic path's pack-once design and the cost per frame: measure fps before deciding.
+
+Both 1 and 2 end at ~134 B/splat (2.2x the f32 viewer's 299); 3 at ~100. SOG/SPZ-class ~65 B needs quantized positions
+too (SOG: 16-bit per axis + per-scene bounds) - later, with LOD pages as the other route to huge scenes.

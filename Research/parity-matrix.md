@@ -692,6 +692,9 @@ is still wrong. **Verdict: the sky map stays opt-in.** Worth revisiting only for
 drawing it, judged off-path (Wander) as well as held out; a per-scene switch (outdoor / sky visible) would be needed.
 The same off-path measure for today's densify bar default (it was decided on held out + viewer fps): Bathroom Wander
 near-black 1.55% / worst 7.77% at 8e-4 (bgb-def) vs 1.52% / 7.83% at 6e-4 (skb-def) - unchanged; 6e-4 passes off-path.
+And the High / Max bar (4e-4, 7K proxy on the user path, b4b): Wander near-black 1.39% / worst 7.52% (6e-4: 1.52 / 7.83) -
+no see-through regression; held out 19.12 / 0.855 (fair 25.18) vs 19.26 / 0.859 (25.31), inside Bathroom's 4-view noise
+(default runs 19.26-19.35). 1.03M splats vs 0.78M, 158 vs 134 s.
 
 ### Video source, user path (2026-10-10)
 

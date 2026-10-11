@@ -574,6 +574,29 @@ budget-limited the same way). **Control - our own growth (every candidate) with 
 still. Either way ~1.35-1.4x training time and 2-3x the splats. Not a default yet: the knee between bar 8e-4 and 4e-4 is
 unmeasured, and so is what 2-3x the splats does to viewing (fps on phone / Quest) and saved-scene size. Next: an 11-scene
 bar sweep (6e-4, 5e-4, 4e-4) with splat counts, then viewer fps + file size at the chosen point - then decide.
+
+**bs2 (2026-10-10/11): densify bar sweep, our growth (every candidate), all 11 scenes** (in-app held-out PSNR; splats, time):
+
+| Scene | 8e-4 (default) | 6e-4 | 4e-4 | brush growth (bg11) |
+|---|---|---|---|---|
+| Train | 20.07 (0.44M, 121 s) | 20.19 (0.59M, 132 s) | 20.25 (0.92M, 165 s) | 20.23 (1.16M) |
+| Bonsai | 29.93 | 30.15 (0.70M, 183 s) | 30.50 (1.05M, 220 s) | 30.69 (1.39M) |
+| Counter | 27.80 (197 s) | 27.96 (0.54M, 216 s) | 28.11 (0.83M, 266 s) | 28.17 (1.13M) |
+| Kitchen | 29.59 | 29.83 (0.67M, 227 s) | 30.10 (1.04M, 287 s) | 30.09 (1.34M) |
+| Room | 30.69 | 30.89 (0.68M, 205 s) | 31.03 (1.08M, 254 s) | 31.11 (1.44M) |
+| Bicycle | 24.68 (1.74M) | 24.89 (2.95M, 233 s) | 25.10 (4.66M, 327 s) | 25.05 (5.05M) |
+| Garden | 26.63 | 26.85 (1.84M, 232 s) | 27.07 (2.83M, 317 s) | 27.10 (3.84M) |
+| Stump | 26.13 | 26.41 (2.27M, 191 s) | 26.70 (3.47M, 266 s) | 26.64 (3.85M) |
+| Truck | 24.68 | 24.82 (0.92M, 129 s) | 24.95 (1.41M, 168 s) | 24.82 (1.79M) |
+| DrJohnson | 29.14 | 29.23 (1.16M, 174 s) | 29.37 (1.80M, 217 s) | 29.40 (2.20M) |
+| Playroom | 30.50 | 30.61 (0.67M, 144 s) | 30.72 (1.05M, 176 s) | 30.75 (1.35M) |
+| **mean** | **27.26** | **27.44 (+0.18)** | **27.63 (+0.37)** | 27.64 (+0.38) |
+
+Quality rises smoothly with the splat count - no knee. 6e-4: better on all 11 (+0.09..+0.28), ~+10% training time, ~1.3-1.7x
+splats. 4e-4: better on all 11 (+0.14..+0.57), ~+35% time, ~2-2.7x splats; equal to brush growth with fewer splats, so our
+growth stays and only the bar is in question. Leaning: 6e-4 as Standard's default (half the gain for a quarter of the time
+cost), 4e-4 for High / Max - pending the viewer cost (vb chain: Bicycle project path at 8e-4 / 4e-4, .spawnscene size and
+the app viewer's uncapped fps). The GPU went to Data's ML 5.3.5 release gate (TJ-approved) first.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

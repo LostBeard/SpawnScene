@@ -599,6 +599,12 @@ cost), 4e-4 for High / Max - pending the viewer cost (vb chain: Bicycle project 
 the app viewer's uncapped fps). The GPU went to Data's ML 5.3.5 release gate (TJ-approved) first.
 Saved-scene size (.spawnscene v2, 76 bytes a splat before gzip, Studio.SceneFile): Bicycle 132 MB (8e-4) -> 224 MB (6e-4) ->
 354 MB (4e-4); Counter 31 -> 41 -> 63 MB; Train 33 -> 45 -> 70 MB. Viewer frame rate still to measure (GPU with Data).
+
+**vb (2026-10-11, Bicycle via the PROJECT path, own SfM, Standard 7K):** default bar: 2.17M splats, .spawnscene 91 MB (gzipped;
+157 MB quantized before gzip), app viewer **183 fps uncapped** at 1600x1000 on the default view. The 4e-4 run trained the
+SAME model (2.16M, identical loss curve): **`&densifygrad` was parsed only in the dataset branch** - the project / user path
+ignored it. Fixed (global option now). The viewer has headroom (183 fps at 2.2M); the 4e-4 viewer point is re-run when the
+GPU is free again (Data's ML 5.3.6 gate has it).
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

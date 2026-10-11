@@ -241,6 +241,11 @@ public partial class Studio : IAsyncDisposable
             AbsGradOption = agq is not ("0" or "false");
             if (!query.ContainsKey("densifygrad")) SplatDensityControl.GradientThreshold = AbsGradOption ? 8e-4f : 2e-4f;
         }
+        // &densifygrad=X: the densify bar (SplatDensityControl.GradientThreshold; AbsGS default 8e-4). Global (was dataset-only,
+        // 2026-10-11: the project path ignored it, so a user-path test of a lower bar trained the default).
+        if (query.TryGetValue("densifygrad", out var dgq) && float.TryParse(dgq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var dgf))
+            SplatDensityControl.GradientThreshold = dgf;
         // &mipfilter=F: the Mip-Splatting 3D filter as a per-splat scale floor while training (0.2 = the paper's; 0 = off).
         // Global (was dataset-only), so the user path can be measured with it too.
         if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,
@@ -734,12 +739,6 @@ public partial class Studio : IAsyncDisposable
             // ?densify=N runs adaptive density control every N ITERATIONS (reference: 100).
             if (query.TryGetValue("densify", out var dnq) && int.TryParse(dnq, out var dni))
                 DensifyEveryIters = dni;
-            // ?densifygrad=X is the densify bar on the reference quantity: mean over views of
-            // |dL/dmean2D| in NDC units (default 2e-4, Kerbl's densify_grad_threshold).
-            if (query.TryGetValue("densifygrad", out var dgq) && float.TryParse(dgq,
-                    System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var dgf))
-                SplatDensityControl.GradientThreshold = dgf;
             // ?densifyuntil=N stops densify/opacity-reset after iteration N (Kerbl: 15000).
             if (query.TryGetValue("densifyuntil", out var duq) && int.TryParse(duq, out var dui))
                 DensifyUntilIter = dui;

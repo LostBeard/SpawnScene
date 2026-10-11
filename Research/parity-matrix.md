@@ -559,6 +559,21 @@ settings as the defaults table (in-app held-out PSNR):
 Brush 26.95, gsplat 26.73. Bonsai now past Brush (30.47). Train still behind Brush (21.07). The cost: ~1.4x training time
 and 2-3x the splats (bigger saved scenes, heavier viewing). Room's first run hung at page load (harness, a fetch failure;
 re-run). Next: the user path (Bathroom, own SfM) before deciding - bgb chain.
+
+**bgb (user path + control):** Bathroom (phone photos, own SfM, project autotest): defaults 19.35 / 0.859, 662K splats, 124 s,
+fair 25.19; brush growth 19.48 / 0.862, 636K, 123 s, fair 25.12 - neutral to slightly up (the phone set's growth is not
+budget-limited the same way). **Control - our own growth (every candidate) with the bar at 4e-4 instead of 8e-4:**
+
+| Scene | defaults (bar 8e-4) | ours, bar 4e-4 | brush growth (20%, bar 2e-4) |
+|---|---|---|---|
+| Train | 20.07, 0.44M, 121 s | 20.25 / 0.801, 0.92M, 165 s | 20.23 / 0.808, 1.16M, 165 s |
+| Bonsai | 29.93 | 30.50 / 0.942, 1.05M, 220 s | 30.69 / 0.944, 1.39M, 238 s |
+| Counter | 27.80, 197 s | 28.11 / 0.908, 0.83M, 266 s | 28.17 / 0.911, 1.13M, 276 s |
+
+**The bg11 gain is mostly MORE SPLATS** (a lower bar), not Brush's selection; Brush's adds a little more with more splats
+still. Either way ~1.35-1.4x training time and 2-3x the splats. Not a default yet: the knee between bar 8e-4 and 4e-4 is
+unmeasured, and so is what 2-3x the splats does to viewing (fps on phone / Quest) and saved-scene size. Next: an 11-scene
+bar sweep (6e-4, 5e-4, 4e-4) with splat counts, then viewer fps + file size at the chosen point - then decide.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

@@ -16,7 +16,7 @@ public static class GaussianPly
         long Count, int HeaderBytes, int StrideBytes,
         int X, int Y, int Z, int Dc0, int Dc1, int Dc2, int Opacity,
         int Scale0, int Scale1, int Scale2, int Rot0, int Rot1, int Rot2, int Rot3,
-        int RestFirst, int RestPerChannel)
+        int RestFirst, int RestPerChannel, int[] RestOffsets)
     {
         /// <summary>SH degree the file carries (0..3), from the f_rest count.</summary>
         public int ShDegree => RestPerChannel switch { 0 => 0, 3 => 1, 8 => 2, _ => 3 };
@@ -96,14 +96,15 @@ public static class GaussianPly
         while (offsets.ContainsKey($"f_rest_{rest}")) rest++;
         if (rest is not (0 or 9 or 24 or 45)) throw new FormatException($"PLY has {rest} f_rest values - expected 0, 9, 24 or 45");
         int restFirst = rest > 0 ? Need("f_rest_0") : 0;
-        // The f_rest values must be consecutive floats (they are, in every writer) - the kernel reads them by index.
-        for (int k = 1; k < rest; k++)
-            if (Need($"f_rest_{k}") != restFirst + 4 * k) throw new FormatException("PLY f_rest values are not consecutive");
+        // Each f_rest by NAME: most writers put f_rest_0..N in order, but Brush v0.3.0 writes its properties sorted as
+        // strings (f_rest_0, f_rest_1, f_rest_10, ..., f_rest_2, ...) - "not consecutive" refused every Brush export.
+        var restOffsets = new int[rest];
+        for (int k = 0; k < rest; k++) restOffsets[k] = Need($"f_rest_{k}");
 
         return new Layout(count, headerBytes, stride,
             Need("x"), Need("y"), Need("z"), Need("f_dc_0"), Need("f_dc_1"), Need("f_dc_2"), Need("opacity"),
             Need("scale_0"), Need("scale_1"), Need("scale_2"), Need("rot_0"), Need("rot_1"), Need("rot_2"), Need("rot_3"),
-            restFirst, rest / 3);
+            restFirst, rest / 3, restOffsets);
     }
 
     /// <summary>

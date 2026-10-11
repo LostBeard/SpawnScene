@@ -33,8 +33,11 @@ public static class GaussianPlyImport
     }
 
     static Action<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-        ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>? _kernel;
+        ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, Params>? _kernel;
     static Accelerator? _loadedFor;
+    // The f_rest byte offsets of the layout being converted (GaussianPly.Layout.RestOffsets), uploaded once per layout.
+    static MemoryBuffer1D<int, Stride1D.Dense>? _restOffsets;
+    static int[]? _restOffsetsFor;
 
     /// <summary>The u32 at any byte address (a PLY header has any length, so vertex fields are not word aligned).</summary>
     static uint ReadU32(ArrayView1D<uint, Stride1D.Dense> w, int byteAddr)
@@ -50,7 +53,8 @@ public static class GaussianPlyImport
     static float F(ArrayView1D<uint, Stride1D.Dense> w, int byteAddr) => Interop.IntAsFloat(ReadU32(w, byteAddr));
 
     static void Kernel(Index1D i, ArrayView1D<uint, Stride1D.Dense> w, ArrayView1D<float, Stride1D.Dense> packed,
-        ArrayView1D<float, Stride1D.Dense> sh0, ArrayView1D<float, Stride1D.Dense> sh1, ArrayView1D<float, Stride1D.Dense> sh2, Params p)
+        ArrayView1D<float, Stride1D.Dense> sh0, ArrayView1D<float, Stride1D.Dense> sh1, ArrayView1D<float, Stride1D.Dense> sh2,
+        ArrayView1D<int, Stride1D.Dense> restOff, Params p)
     {
         if (i >= p.Count) return;
         int b = p.First + i * p.Stride;
@@ -85,7 +89,7 @@ public static class GaussianPlyImport
             for (int c = 0; c < 3; c++)
             {
                 // PLY f_rest: channel-major (c * bandsInFile + band). Ours: band-major, (band - 1) * 3 + c, in parts of 15.
-                float v = k <= p.RestPerChannel ? F(w, b + p.RestFirst + 4 * (c * p.RestPerChannel + k - 1)) : 0f;
+                float v = k <= p.RestPerChannel ? F(w, b + restOff[c * p.RestPerChannel + k - 1]) : 0f;
                 if (p.Flip != 0 && ((FlipSignMask >> k) & 1) != 0) v = -v;
                 int f = (k - 1) * 3 + c;
                 int part = f / SphericalHarmonics.PartFloatsPerSplat, idx = partBase + f % SphericalHarmonics.PartFloatsPerSplat;
@@ -101,10 +105,23 @@ public static class GaussianPlyImport
         GaussianPly.Layout L, bool flipToYUp, ArrayView1D<float, Stride1D.Dense> packed,
         ArrayView1D<float, Stride1D.Dense> sh0, ArrayView1D<float, Stride1D.Dense> sh1, ArrayView1D<float, Stride1D.Dense> sh2)
     {
-        if (!ReferenceEquals(_loadedFor, a)) { _kernel = null; _compressed = null; _loadedFor = a; }
+        if (!ReferenceEquals(_loadedFor, a))
+        {
+            _kernel = null; _compressed = null; _loadedFor = a;
+            _restOffsets?.Dispose(); _restOffsets = null; _restOffsetsFor = null;
+        }
         _kernel ??= a.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<uint, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, Params>(Kernel);
-        _kernel(count, words, packed, sh0, sh1, sh2, new Params
+            ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
+            ArrayView1D<int, Stride1D.Dense>, Params>(Kernel);
+        // Never empty (a buffer must exist even at SH degree 0, when the kernel reads none of it).
+        var offsets = L.RestOffsets.Length > 0 ? L.RestOffsets : new[] { 0 };
+        if (_restOffsets == null || _restOffsetsFor == null || !_restOffsetsFor.AsSpan().SequenceEqual(offsets))
+        {
+            _restOffsets?.Dispose();
+            _restOffsets = a.Allocate1D(offsets);
+            _restOffsetsFor = offsets;
+        }
+        _kernel(count, words, packed, sh0, sh1, sh2, _restOffsets.View, new Params
         {
             Count = count, V0 = v0, First = first, Stride = L.StrideBytes,
             X = L.X, Y = L.Y, Z = L.Z, Dc0 = L.Dc0, Dc1 = L.Dc1, Dc2 = L.Dc2, Opacity = L.Opacity,

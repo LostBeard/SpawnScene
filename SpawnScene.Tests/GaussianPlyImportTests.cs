@@ -22,11 +22,14 @@ public class GaussianPlyImportTests
 
     static float Rest(int v, int j) => 0.01f * j - 0.2f + 0.05f * v;
 
-    static (byte[] File, float[][] Q) MakePly(int shRestPerChannel = 15)
+    /// <param name="sortedAsStrings">Brush v0.3.0's order: every property sorted as a string (f_rest_0, f_rest_1, f_rest_10,
+    /// ..., opacity, rot_0, ..., x, y, z) instead of the reference trainer's.</param>
+    static (byte[] File, float[][] Q) MakePly(int shRestPerChannel = 15, bool sortedAsStrings = false)
     {
         var props = new List<string> { "x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2" };
         for (int j = 0; j < shRestPerChannel * 3; j++) props.Add($"f_rest_{j}");
         props.AddRange(new[] { "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3" });
+        if (sortedAsStrings) props.Sort(StringComparer.Ordinal);
         var head = new StringBuilder("ply\nformat binary_little_endian 1.0\ncomment made by a test\n");
         head.Append($"element vertex {N}\n");
         foreach (var p in props) head.Append($"property float {p}\n");
@@ -39,13 +42,16 @@ public class GaussianPlyImportTests
         using var bw = new BinaryWriter(ms);
         for (int v = 0; v < N; v++)
         {
-            bw.Write(1f + v); bw.Write(2f + v); bw.Write(3f + v);          // x y z
-            bw.Write(0f); bw.Write(0f); bw.Write(0f);                    // normals
-            bw.Write(0.1f * (v + 1)); bw.Write(0.2f); bw.Write(-0.3f);   // f_dc
-            for (int j = 0; j < shRestPerChannel * 3; j++) bw.Write(Rest(v, j));
-            bw.Write(v == 0 ? 0f : 2f);                                  // opacity logit
-            bw.Write(MathF.Log(0.5f)); bw.Write(MathF.Log(0.25f)); bw.Write(MathF.Log(2f));
-            foreach (var q in quats[v]) bw.Write(q);                     // w x y z
+            var val = new Dictionary<string, float>
+            {
+                ["x"] = 1f + v, ["y"] = 2f + v, ["z"] = 3f + v, ["nx"] = 0f, ["ny"] = 0f, ["nz"] = 0f,
+                ["f_dc_0"] = 0.1f * (v + 1), ["f_dc_1"] = 0.2f, ["f_dc_2"] = -0.3f,
+                ["opacity"] = v == 0 ? 0f : 2f,                                         // logit
+                ["scale_0"] = MathF.Log(0.5f), ["scale_1"] = MathF.Log(0.25f), ["scale_2"] = MathF.Log(2f),
+                ["rot_0"] = quats[v][0], ["rot_1"] = quats[v][1], ["rot_2"] = quats[v][2], ["rot_3"] = quats[v][3],   // w x y z
+            };
+            for (int j = 0; j < shRestPerChannel * 3; j++) val[$"f_rest_{j}"] = Rest(v, j);
+            foreach (var name in props) bw.Write(val[name]);
         }
         bw.Flush();
         return (ms.ToArray(), quats);
@@ -69,6 +75,20 @@ public class GaussianPlyImportTests
         var result = (packed.GetAsArray1D(), sh.Select(s => s.GetAsArray1D()).ToArray());
         foreach (var s in sh) s.Dispose();
         return result;
+    }
+
+    /// <summary>Brush v0.3.0 exports sort the properties as strings, so f_rest_10 sits between f_rest_1 and f_rest_2. Every
+    /// one of its PLYs used to be refused ("f_rest values are not consecutive"); each is now read by name, to the same splats.</summary>
+    [TestCase(false)]
+    [TestCase(true)]
+    public void BrushPropertyOrder_ConvertsToTheSameSplats(bool flip)
+    {
+        var (reference, _) = MakePly();
+        var (brush, _) = MakePly(sortedAsStrings: true);
+        var (p0, sh0) = Convert(reference, flip);
+        var (p1, sh1) = Convert(brush, flip);
+        Assert.That(p1, Is.EqualTo(p0), "packed rows");
+        for (int k = 0; k < 3; k++) Assert.That(sh1[k], Is.EqualTo(sh0[k]), $"SH part {k}");
     }
 
     [Test]

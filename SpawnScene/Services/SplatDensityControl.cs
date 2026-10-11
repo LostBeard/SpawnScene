@@ -48,7 +48,10 @@ public static class SplatDensityControl
     /// 4e-4 doubles the gain (27.63) for ~35% more time and 2-2.7x the splats - Research/parity-matrix.md.
     /// </para>
     /// </summary>
-    public static float GradientThreshold { get; set; } = 6e-4f;
+    public static float GradientThreshold { get; set; } = DefaultGradientThreshold;
+
+    /// <summary>The AbsGS densify bar every run starts from (High / Max presets use ReconstructionPresets.HighDensifyBar).</summary>
+    public const float DefaultGradientThreshold = 6e-4f;
 
     /// <summary>Alias: the threshold IS in NDC units, as the reference's is.</summary>
     public static float GradientThresholdNdc

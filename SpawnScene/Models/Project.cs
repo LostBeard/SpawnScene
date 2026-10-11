@@ -135,13 +135,30 @@ public static class ReconstructionPresets
     /// </summary>
     public const int StandardKeypoints = 1024, HighKeypoints = 3072;
 
-    public static readonly (string Name, int Iterations, int MaxDimension, int MaxSplats, int Keypoints, string Hint)[] All =
+    /// <summary>
+    /// Densify bar (SplatDensityControl.GradientThreshold) of the High and Max presets; 0 in the table = the app default
+    /// (6e-4). 2026-10-11, 15K iterations, benchmark settings: 4e-4 vs 6e-4 - Train 21.05 vs 20.96, Bonsai 31.27 vs 30.95,
+    /// Counter 28.82 vs 28.66 (SSIM up on all three) for ~27% more training time and ~1.6x the splats
+    /// (Research/parity-matrix.md, hp). Max densifies over the same 15K window as High.
+    /// </summary>
+    public const float HighDensifyBar = 4e-4f;
+
+    public static readonly (string Name, int Iterations, int MaxDimension, int MaxSplats, int Keypoints, float DensifyBar, string Hint)[] All =
     {
-        ("Draft", 3000, 720, 500_000, StandardKeypoints, "A quick look: about a third of Standard's training."),
-        ("Standard", 7000, 1024, DeviceMaxSplats, StandardKeypoints, "The reference's first checkpoint. Right for most captures."),
-        ("High", 15000, 1600, DeviceMaxSplats, HighKeypoints, "About twice Standard's training, and 3072 keypoints a photo: more cameras placed on wide-baseline captures (DrJohnson +3.3 dB), ~0.9 dB sharper on a well-covered one (TruckFull)."),
-        ("Max", 30000, PhotoSize, DeviceMaxSplats, HighKeypoints, "The full reference run at the photos' own size with 3072 keypoints: about twice High's training time, for a little more (+0.4 dB)."),
+        ("Draft", 3000, 720, 500_000, StandardKeypoints, 0f, "A quick look: about a third of Standard's training."),
+        ("Standard", 7000, 1024, DeviceMaxSplats, StandardKeypoints, 0f, "The reference's first checkpoint. Right for most captures."),
+        ("High", 15000, 1600, DeviceMaxSplats, HighKeypoints, HighDensifyBar, "About 2.5x Standard's training, 3072 keypoints a photo and more, finer splats: more cameras placed on wide-baseline captures (DrJohnson +3.3 dB), sharper on well-covered ones."),
+        ("Max", 30000, PhotoSize, DeviceMaxSplats, HighKeypoints, HighDensifyBar, "The full reference run at the photos' own size with 3072 keypoints: about twice High's training time, for a little more (+0.4 dB)."),
     };
+
+    /// <summary>The densify bar of the preset these settings match, or 0 (the app default) for Standard, Draft and Custom.</summary>
+    public static float DensifyBarFor(ProjectSettings s)
+    {
+        string name = Match(s);
+        foreach (var p in All)
+            if (p.Name == name) return p.DensifyBar;
+        return 0f;
+    }
 
     /// <summary>
     /// A project saved under a preset before that preset's current values moves to them: the old fixed 3M splat cap, and

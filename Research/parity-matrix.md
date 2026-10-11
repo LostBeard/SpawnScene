@@ -613,6 +613,18 @@ and +32% file on Bicycle). c45 (10-06) had found 6e-4 no better - on the default
 the answer. 4e-4 stays a High / Max candidate (untested at 15K / 30K).
 Deployed (run 38127746813, 7b90e28) and verified live: a spawnscene.com Bathroom project run logs "over the 0.0006
 gradient bar".
+
+**hp (2026-10-11): the bar at 15K iterations (the High preset's), benchmark settings:**
+
+| Scene | 6e-4 | 4e-4 | delta | time |
+|---|---|---|---|---|
+| Train | 20.96 / 0.816, 0.71M, 333 s | 21.05 / 0.823, 1.13M, 431 s | +0.09 | +29% |
+| Bonsai | 30.95 / 0.944, 0.72M, 438 s | **31.27** / 0.947, 1.10M, 543 s | +0.32 | +24% |
+| Counter | 28.66 / 0.913, 0.62M, 545 s | 28.82 / 0.918, 0.97M, 691 s | +0.16 | +27% |
+
+4e-4 better on all three (SSIM too). **High and Max now densify at 4e-4** (ReconstructionPresets.HighDensifyBar, picked by
+the matched preset at train time; Standard / Draft / Custom keep the 6e-4 default; &densifygrad and &absgrad=0 win). Max
+densifies over the same 15K window, so it follows High. Train at 15K / 4e-4 is 21.05 - Brush's 7K Train is 21.07.
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

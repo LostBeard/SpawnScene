@@ -239,13 +239,17 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("absgrad", out var agq))
         {
             AbsGradOption = agq is not ("0" or "false");
-            if (!query.ContainsKey("densifygrad")) SplatDensityControl.GradientThreshold = AbsGradOption ? 6e-4f : 2e-4f;
+            if (!query.ContainsKey("densifygrad"))
+                SplatDensityControl.GradientThreshold = AbsGradOption ? SplatDensityControl.DefaultGradientThreshold : 2e-4f;
         }
         // &densifygrad=X: the densify bar (SplatDensityControl.GradientThreshold; AbsGS default 6e-4). Global (was dataset-only,
         // 2026-10-11: the project path ignored it, so a user-path test of a lower bar trained the default).
         if (query.TryGetValue("densifygrad", out var dgq) && float.TryParse(dgq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var dgf))
+        {
             SplatDensityControl.GradientThreshold = dgf;
+            DensifyBarFromQuery = true;
+        }
         // &mipfilter=F: the Mip-Splatting 3D filter as a per-splat scale floor while training (0.2 = the paper's; 0 = off).
         // Global (was dataset-only), so the user path can be measured with it too.
         if (query.TryGetValue("mipfilter", out var mfq) && float.TryParse(mfq,

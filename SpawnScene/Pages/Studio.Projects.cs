@@ -796,6 +796,15 @@ public partial class Studio
 
                 int trainIters = _activeProject.Settings.TrainIterations;
                 int trainedIters = 0;
+                // The preset's densify bar (High / Max: finer, 2026-10-11 hp), else the default; &densifygrad and
+                // &absgrad=0 keep what they set.
+                if (!DensifyBarFromQuery && AbsGradOption)
+                {
+                    float presetBar = ReconstructionPresets.DensifyBarFor(_activeProject.Settings);
+                    SplatDensityControl.GradientThreshold = presetBar > 0f ? presetBar : SplatDensityControl.DefaultGradientThreshold;
+                    if (presetBar > 0f)
+                        Console.WriteLine($"[Studio] {ReconstructionPresets.Match(_activeProject.Settings)} preset: densify bar {presetBar:G3}");
+                }
                 if (trainIters > 0 && scene.TrainingViews.Count > 0)
                     trainedIters = TrainingBlocks.Columns * TrainingBlocks.Rows > 1
                         ? await TrainPartitionedAsync(

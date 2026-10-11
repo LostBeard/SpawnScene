@@ -33,6 +33,21 @@ public class ReconstructionPresetTests
     }
 
     [Test]
+    public void HighAndMax_DensifyFiner_TheRestUseTheDefaultBar()
+    {
+        // 2026-10-11 hp: at 15K, bar 4e-4 beat the 6e-4 default on Train / Bonsai / Counter for ~27% more time.
+        foreach (var p in ReconstructionPresets.All)
+        {
+            var s = new ProjectSettings();
+            ReconstructionPresets.Apply(s, p.Name);
+            float expected = p.Name is "High" or "Max" ? ReconstructionPresets.HighDensifyBar : 0f;
+            Assert.That(ReconstructionPresets.DensifyBarFor(s), Is.EqualTo(expected), p.Name);
+        }
+        var custom = new ProjectSettings { TrainIterations = 12345 };
+        Assert.That(ReconstructionPresets.DensifyBarFor(custom), Is.EqualTo(0f), "Custom keeps the default bar");
+    }
+
+    [Test]
     public void OnlyDraft_CapsSplats_TheRestTakeWhatTheDeviceFits()
     {
         // Very large scenes are a goal (TJ, 2026-10-02); the fixed 3M cap on every preset was not.

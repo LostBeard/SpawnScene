@@ -343,6 +343,9 @@ public partial class Studio
     /// CPU transfer: the packed buffer twice per densify - a diagnostic, never a default.
     /// </summary>
     public static bool ShellLogOption { get; set; }
+
+    /// <summary>&amp;densifygrad was given: the URL's bar wins over the project preset's (ReconstructionPresets.DensifyBarFor).</summary>
+    public static bool DensifyBarFromQuery { get; set; }
     int _shellLastAfter16 = -1, _shellLastAfter8 = -1, _shellDensifies;
     long _shellByDensify16, _shellBetween16, _shellByDensify8, _shellBetween8;
 

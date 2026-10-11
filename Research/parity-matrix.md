@@ -635,6 +635,30 @@ raw neutral); anatomy vs Brush raw -0.83, **after the per-image colour fit -0.36
 was the FULL 3x4 affine (&exposure=1); gains-only costs nothing raw on Train and the content moves half the way to Brush.
 exposure=auto already uses gains-only where it turns them on (phones: EXIF spread); stills without EXIF stay off (Bicycle
 gains-only was 24.99 vs 25.14 on 10-08) - no default change. Train's remaining raw gap is the photos' exposure itself.
+### Three-way on TODAY'S defaults (tw, 2026-10-11)
+
+All nine parity defaults (incl. the 6e-4 densify bar, 7b90e28), 7K, COLMAP poses, llffhold=8, exact photo sizes; ONE scorer
+(tools/rescore.py: PSNR / SSIM / LPIPS-alex). Brush v0.3.0 and gsplat 1.5.3 rows as measured 2026-10-09 (same scorer):
+
+| Scene | Brush v0.3.0 | gsplat 1.5.3 | SpawnScene (today) | best PSNR |
+|---|---|---|---|---|
+| Bicycle | 24.00 / 0.677 / 0.323 | 23.75 / 0.640 / 0.367 | **24.89 / 0.748 / 0.212** | ours (+0.89) |
+| Garden | 26.14 / 0.804 / 0.166 | 25.99 / 0.809 / 0.149 | **26.86 / 0.845 / 0.110** | ours (+0.72) |
+| Stump | 25.30 / 0.694 / 0.300 | 25.00 / 0.682 / 0.304 | **26.48 / 0.765 / 0.187** | ours (+1.18) |
+| Playroom | 29.51 / 0.900 / 0.206 | 29.47 / 0.897 / 0.199 | **30.60 / 0.913 / 0.171** | ours (+1.09) |
+| DrJohnson | 28.22 / 0.896 / 0.226 | 28.28 / 0.889 / 0.230 | **29.23 / 0.906 / 0.196** | ours (+0.95) |
+| Counter | 27.61 / 0.889 / 0.184 | 27.60 / 0.888 / 0.189 | **27.92 / 0.894 / 0.179** | ours (+0.31) |
+| Room | 30.25 / 0.907 / 0.190 | 30.07 / 0.899 / 0.203 | **30.87 / 0.915 / 0.176** | ours (+0.62) |
+| Truck | 24.71 / 0.860 / 0.132 | 23.88 / 0.852 / 0.134 | **24.82 / 0.871 / 0.120** | ours (+0.11) |
+| Kitchen | 29.18 / 0.907 / 0.123 | 29.37 / 0.913 / 0.117 | **29.78 / 0.917 / 0.112** | ours (+0.41) |
+| Bonsai | **30.47** / 0.929 / 0.147 | 30.15 / 0.926 / 0.151 | 30.18 / **0.930** / 0.146 | Brush (-0.29) |
+| Train | **21.07** / **0.792** / **0.200** | 20.42 / 0.771 / 0.231 | 20.22 / 0.784 / 0.221 | Brush (-0.85) |
+| **mean** | 26.95 / 0.841 / 0.200 | 26.73 / 0.833 / 0.207 | **27.44 / 0.862 / 0.166** | |
+
+**Best PSNR on 9 of 11, +0.49 dB mean over Brush and +0.71 over gsplat, best mean SSIM and LPIPS.** Behind Brush: Train
+(-0.85; the photos' own exposure - eg) and Bonsai (-0.29; the High preset's 4e-4 gets 31.27 at 15K). Training 130-230 s a
+scene (Counter 216 s, Train 133 s) vs Brush 1.5-3 min wall incl. load (Counter 172 s).
+
 ### Video source, user path (2026-10-10)
 
 First end-to-end test (Research/video-path-audit-2026-10-08.md, RESULT): TruckVideo through the real file pick -> 126 frames ->

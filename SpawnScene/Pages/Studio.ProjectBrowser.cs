@@ -14,6 +14,26 @@ public partial class Studio
     /// <summary>The project whose Delete was pressed once and now shows "Confirm"; any other click clears it.</summary>
     private string? _pendingDeleteProjectId;
 
+    /// <summary>The card button showing "Confirm delete" (<see cref="_pendingDeleteProjectId"/>'s), flipped in place: arming
+    /// the confirm changes one button, it does not rebuild the gallery (TJ, 2026-10-12).</summary>
+    private UIButton? _pendingDeleteButton;
+
+    /// <summary>A card's Delete button as "Delete" or armed as "Confirm delete" (right-aligned on a card of width
+    /// <paramref name="cardW"/>).</summary>
+    private static void SetDeleteButtonArmed(UIButton? button, bool armed, float cardW)
+    {
+        if (button == null) return;
+        button.X = cardW - (armed ? 132 : 76);
+        button.Width = armed ? 120 : 64;
+        button.Text = armed ? "Confirm delete" : "Delete";
+        button.NormalColor = armed ? AccentDanger : Color.FromArgb(255, 34, 40, 50);
+    }
+
+    /// <summary>The gallery's scroll view, kept so a rebuild (Delete -> Confirm, a delete, a resize, coming back from a
+    /// project) stays where the user was: a new UIScrollView starts at the top, and pressing Delete at the bottom of a long
+    /// list jumped the page to the top (TJ, 2026-10-12).</summary>
+    private UIScrollView? _projectBrowserScroll;
+
     /// <summary>Thumbnail cache key of a project's source photo. Per project: phone photos share names (IMG_0001.jpg)
     /// across projects, and a key of the file name alone showed one project's photo in another.</summary>
     private static string SourceThumbKey(string projectId, string fileName, int w = 256, int h = 256) =>
@@ -21,6 +41,8 @@ public partial class Studio
 
     private void BuildProjectBrowserUI()
     {
+        float keepScroll = _projectBrowserScroll?.ScrollOffset ?? 0f;
+        _pendingDeleteButton = null;
         _uiRoot.ClearChildren();
         _thumbTiles.Clear();
         _statusLabel = null;
@@ -69,6 +91,7 @@ public partial class Studio
             X = 0, Y = 87, Width = panelW, Height = panelH - 87,
             Padding = 0, BackgroundColor = Color.Transparent, BorderWidth = 0,
         });
+        _projectBrowserScroll = list;
         float x = ProjectPageGutter, w = panelW - ProjectPageGutter * 2, y = 20;
 
         if (_projects == null || _projects.Count == 0)
@@ -162,19 +185,36 @@ public partial class Studio
                 FontSize = FontSize.Caption, Color = UITheme.Current.TextSecondary,
             });
 
-            bool confirming = _pendingDeleteProjectId == project.Id;
-            card.AddChild(new UIButton
+            UIButton? delete = null;
+            delete = card.AddChild(new UIButton
             {
-                X = cardW - (confirming ? 132 : 76), Y = thumbH + 30, Width = confirming ? 120 : 64, Height = 28,
-                Text = confirming ? "Confirm delete" : "Delete", FontSize = FontSize.Caption,
-                NormalColor = confirming ? AccentDanger : Color.FromArgb(255, 34, 40, 50), HoverColor = AccentDangerHover,
+                Y = thumbH + 30, Height = 28, FontSize = FontSize.Caption, HoverColor = AccentDangerHover,
                 OnClick = () =>
                 {
-                    if (_pendingDeleteProjectId == p.Id) { _pendingDeleteProjectId = null; _ = OnDeleteProject(p); }
-                    else { _pendingDeleteProjectId = p.Id; BuildProjectBrowserUI(); }
+                    if (_pendingDeleteProjectId == p.Id)
+                    {
+                        _pendingDeleteProjectId = null;
+                        _pendingDeleteButton = null;
+                        _ = OnDeleteProject(p);
+                        return;
+                    }
+                    // Arm this card's confirm in place and disarm the one armed before - no rebuild.
+                    SetDeleteButtonArmed(_pendingDeleteButton, false, cardW);
+                    _pendingDeleteProjectId = p.Id;
+                    _pendingDeleteButton = delete;
+                    SetDeleteButtonArmed(delete, true, cardW);
                 },
             });
+            bool confirming = _pendingDeleteProjectId == project.Id;
+            SetDeleteButtonArmed(delete, confirming, cardW);
+            if (confirming) _pendingDeleteButton = delete;
         }
+
+        // Back where the user was, clamped to the rebuilt content (a delete shortens it). Set directly: ScrollTo centres its
+        // target, and the view clamps the offset only on wheel / drag input, so an unclamped one could leave blank space.
+        int rows = (_projects.Count + cols - 1) / cols;
+        float contentBottom = y + rows * cardH + (rows - 1) * gap;
+        list.ScrollOffset = Math.Clamp(keepScroll, 0f, Math.Max(0f, contentBottom - list.Height + list.Padding * 2));
     }
 
 }

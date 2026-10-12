@@ -113,7 +113,25 @@ public partial class Studio
 
     // ─── Scene Generation ───
 
+    /// <summary>
+    /// Generate scene: the whole run holds <see cref="_pipelineBusy"/>, which the project page's generate panel, photo and
+    /// scene buttons read ("Working...", disabled) - only the dataset path used to set it, so the panel stayed live while a
+    /// scene generated and a second Generate could start over the first (TJ, 2026-10-12).
+    /// </summary>
     private async void OnGenerateSceneClicked()
+    {
+        if (_pipelineBusy || _activeProject == null || _activeProject.Sources.Count == 0) return;
+        _pipelineBusy = true;
+        if (_state == StudioState.ProjectDetail) BuildProjectDetailUI();
+        try { await GenerateSceneCoreAsync(); }
+        finally
+        {
+            _pipelineBusy = false;
+            if (_state == StudioState.ProjectDetail) BuildProjectDetailUI();
+        }
+    }
+
+    private async Task GenerateSceneCoreAsync()
     {
         if (_activeProject == null || _activeProject.Sources.Count == 0) return;
 

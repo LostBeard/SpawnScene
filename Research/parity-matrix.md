@@ -975,3 +975,36 @@ by +0.2-0.4. a0 (baseline repeat: noise) and a7 (all six off, nearest gsplat's s
 ## Open gaps (biggest first)
 1. Hamamni Baths: -2.2 dB held out against gsplat ON THE SAME CAMERAS (trainer, not capture). Ablating our defaults.
 2. No fair 7K reference on any scene yet; only Truck 30K is like for like (-0.18 dB PSNR, +0.010 SSIM, 4.3x fewer splats).
+
+## 30K three-way (2026-10-11/12, interim: gsplat Bicycle / Garden / Stump still running)
+
+Same 11 scenes, pixels and split as the 7K table (every 8th held out), one scorer (tools/rescore.py), RTX 4070 12 GB.
+SpawnScene: today's defaults (9 parity defaults, bar 6e-4), densify until 15K (= gsplat refine_stop_iter), `&gpumem=8`.
+gsplat 1.5.3 `default`, Brush v0.3.0 defaults, both 30,000 steps. Chain: _runs/tuvok-p30.sh, tuvok-p30b.sh. Times marked
+shared overlapped a peer's GPU (18:22-18:33) or CPU-heavy runs (19:02-21:08): quality is unaffected, those times are not
+clean. Brush splat counts were not logged.
+
+| Scene | SpawnScene PSNR / SSIM / LPIPS, splats, time | gsplat 1.5.3 | Brush v0.3.0 | best PSNR |
+|---|---|---|---|---|
+| TrainFull | 21.65 / 0.822 / 0.149, 0.74M, 675 s (GPU shared) | 21.60 / 0.816 / 0.144, 1.84M, 1222 s | 22.81 / 0.836 / 0.118, 1144 s | Brush |
+| Bonsai360 | 31.95 / 0.943 / 0.124, 0.68M, 856 s | 32.04 / 0.941 / 0.123, 1.86M, 1719 s | 32.64 / 0.946 / 0.117, 939 s | Brush |
+| Counter360 | 29.18 / 0.910 / 0.146, 0.68M, 1081 s (CPU shared) | 29.09 / 0.909 / 0.147, 1.67M, 1726 s | 29.30 / 0.912 / 0.143, 913 s | Brush |
+| Kitchen360 | 31.55 / 0.929 / 0.091, 0.90M, 1239 s (CPU shared) | 31.06 / 0.925 / 0.096, 2.15M, 2117 s | 31.68 / 0.927 / 0.094, 859 s | Brush |
+| Room360 | 32.16 / 0.926 / 0.147, 0.92M, 1126 s (CPU shared) | 31.30 / 0.916 / 0.160, 2.26M, 1895 s | 32.35 / 0.929 / 0.144, 937 s | Brush |
+| Bicycle360 | 25.51 / 0.789 / 0.140, 3.72M, 1449 s (CPU shared) | running | 25.47 / 0.789 / 0.145, 1098 s | SpawnScene |
+| Garden360 | 27.77 / 0.872 / 0.073, 2.18M, 1232 s (CPU shared) | running | 27.62 / 0.865 / 0.082, 1037 s | SpawnScene |
+| Stump360 | 27.05 / 0.793 / 0.132, 2.54M, 1072 s | running | 27.19 / 0.801 / 0.128, 876 s | Brush |
+| TruckFull | 25.95 / 0.887 / 0.091, 1.03M, 642 s | 25.17 / 0.877 / 0.093, 3.78M, 2111 s | 26.04 / 0.893 / 0.075, 695 s | Brush |
+| DrJohnsonFull | 29.52 / 0.907 / 0.163, 1.79M, 1014 s | 28.33 / 0.888 / 0.184, 5.21M, 2836 s | 29.66 / 0.912 / 0.153, 1068 s | Brush |
+| PlayroomFull | 30.45 / 0.913 / 0.149, 0.97M, 768 s | 29.40 / 0.899 / 0.169, 3.15M, 1920 s | 30.21 / 0.905 / 0.143, 761 s | SpawnScene |
+
+Means over all 11 (shared scorer): SpawnScene 28.43 / 0.881 / 0.128, Brush 28.63 / 0.883 / 0.122.
+Over the 8 scenes gsplat has finished: SpawnScene 29.05 / 0.905 / 0.133, gsplat 28.50 / 0.896 / 0.140, Brush 29.34 / 0.908 / 0.123.
+
+**Read plainly:** at 30K **Brush leads** - best PSNR on 8 of 11, mean +0.20 dB / +0.002 SSIM / -0.006 LPIPS over us.
+At 7K we led (27.44 vs Brush 26.95, best on 9 of 11): Brush gains ~1.7 dB from 7K to 30K, we gain ~1.0. Brush wins every
+indoor scene (Train by 1.16, Bonsai 0.69, the rest 0.09-0.19); we win Bicycle, Garden and Playroom. Against gsplat we lead
+(+0.55 dB over its 8 finished scenes, 7 of 8, ~40% of its splats, ~2x faster on clean runs).
+**gsplat on 12 GB:** its default Bicycle 30K filled the card at ~13K steps (11.3 GB, 20 -> 1 it/s, Windows shared-memory
+spill); the big three are re-run last for their quality only. Ours fit Bicycle in 3.72M splats.
+**Next:** what Brush does after 7K that we do not - its late schedule (lr decays, growth after 7K, its 30K splat count).

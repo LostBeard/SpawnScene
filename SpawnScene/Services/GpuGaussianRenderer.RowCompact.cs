@@ -14,8 +14,9 @@ namespace SpawnScene.Services;
 // frame frees. A new scene upload unpins. LOD trees and the streamed pool are never compacted.
 public partial class GpuGaussianRenderer
 {
-    /// <summary>&amp;rowq=1: draw from compact source rows (positions f32, colour / opacity / scale f16, rotation snorm16).</summary>
-    public static bool RowCompact { get; set; }
+    /// <summary>Draw from compact source rows (positions f32, colour / opacity / scale f16, rotation snorm16). The default
+    /// since 2026-10-12; <c>&amp;rowq=0</c> keeps the f32 rows.</summary>
+    public static bool RowCompact { get; set; } = true;
 
     bool _rowsPinned;
     int _rowsHold;   // leases out (BorrowRowsF32): no compaction under them

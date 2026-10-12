@@ -14,8 +14,9 @@ namespace SpawnScene.Services;
 // &shq8cycles checks it). LOD trees and the streamed pool stay f32 (the pager writes f32 rows).
 public partial class GpuGaussianRenderer
 {
-    /// <summary>&amp;shq8=1: keep SH bands as 8-bit codes with one scale per band (bands 1..3).</summary>
-    public static bool ShCompact { get; set; }
+    /// <summary>Keep SH bands as 8-bit codes with one scale per band (bands 1..3). The default since 2026-10-12 (TJ: deploy
+    /// the viewer memory work); <c>&amp;shq8=0</c> keeps them f32.</summary>
+    public static bool ShCompact { get; set; } = true;
 
     /// <summary>&amp;shq8cycles=N (harness): after the first compaction, expand to f32 and compact again N times - what an
     /// Edit, save or train-from does. A round trip must not drift: the render is to be pixel-identical to N = 0.</summary>

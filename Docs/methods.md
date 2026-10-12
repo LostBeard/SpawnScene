@@ -31,16 +31,22 @@ cost).
   2026-10-08 (phone room +1.3 dB held out, Bicycle neutral).
 
 ### 4. Training (Kerbl et al. 2023, with these changes)
-- Loss 0.8 L1 + 0.2 D-SSIM; spherical harmonics up to degree 3 (one band per 1000 iterations); Adam with the
-  reference's learning rates; camera pose refinement.
+- Loss 0.8 L1 + 0.2 D-SSIM; spherical harmonics up to degree 3 (one band per 1000 iterations); Adam; camera pose
+  refinement.
+- **Schedules for the run's own length**: the position learning rate decays 100x over the run (the reference fixes
+  that decay at 30,000 steps, which left a 7K run at a third of its decay and underfit); the log-scale rate decays
+  0.01 -> 0.006 (Brush's; it was a flat 0.005 - better on all 11 benchmark scenes).
 - **Density control: AbsGS** (Ye et al. 2024) - the densify signal is the sum of per-pixel |dL/dmean2D| instead of
-  the signed sum. Bicycle 7K +0.43 dB with fewer splats; Truck the same quality with 57% fewer.
+  the signed sum, with a bar of 6e-4 (4e-4 on the High / Max presets: more splats, more detail, more time), until
+  15,000 steps. A cloned or split splat's children get opacity `1 - sqrt(1 - a)`, so the pair composites to the parent
+  (the reference keeps `a` on both, and the image jumps at every densify).
 - **Floater census**: a GPU pass measures each splat's share of blending weight in front of the photos' surfaces
   (the depth at which transmittance falls through 0.5); splats that are mostly in front of what every photo saw are
   removed while densifying and at the end.
 - **Per-photo exposure** (gains only): each photo gets three per-channel gains, learned with the scene and folded into
   it at the end (the reference's appearance model is a full 3x4 affine; its offsets cannot fold into a semi-transparent
-  scene and cost fixed-exposure captures 0.2-0.6 dB, so we keep the gains). Default since 2026-10-08.
+  scene and cost fixed-exposure captures 0.2-0.6 dB, so we keep the gains). Used when the photos' EXIF exposure varies
+  by a third of a stop or more, or is unknown (a phone capture: +5.9 dB fair score); fixed-exposure sets train without.
 - **Random background while training**: each step composites the render over a random colour, so a surface only
   matches the photos if it is opaque. Trained over black, a half-transparent wall matches as well as a solid one, and
   from any other angle the background shows through - the dark holes in room captures. The reference's
@@ -51,6 +57,10 @@ cost).
   differences), Mip-Splatting's 3D filter (`&mipfilter`), MCMC densification (`&mcmc`).
 - WebGPU has no float atomics: per-splat gradients are reduced per tile in the backward pass and summed with an atomic
   compare-and-swap on f32 bit patterns.
+- **Speed**: the backward pass reduces with WebGPU `subgroups` and skips subgroups a splat does not touch (1.6-1.8x);
+  each splat is binned only into the tiles its ellipse reaches at opacity x weight >= 1/255, not its 3-sigma square
+  (60% fewer sort keys, ~1.3x); and a step never reads the key count back - the radix sort sizes itself from it on the
+  GPU (`SortIndirect`). A 7K benchmark scene trains in 2-4 minutes on an RTX 4070.
 - Every trainer shader is checked against a CPU oracle in a GPU test gate (`autotest=trainer-gate`).
 
 ## One photo
@@ -64,10 +74,15 @@ cost).
 
 ## Viewer
 - Sorted alpha blending at full resolution (GPU radix sort), EWA filter, optional stochastic sort-free mode.
+- **Compact GPU memory** (~132 bytes a splat at SH degree 3, from ~299): the SH bands are 8-bit codes with one step per
+  band (found on the GPU; the step keeps 16 mantissa bits so a decode / re-encode round trip is bit-exact), the draw
+  vertex is 36 bytes (position f32, colour and scale f16, rotation snorm16 - not f16, whose ~1e-3 tilts a 1000:1
+  needle splat by its own width), and the source rows are 36 bytes instead of 56. Tools that edit or train expand the
+  rows to f32 first. Render 60 dB from f32, same frame rate.
 - Level-of-detail tree with a parallel cut steered to a splat budget; `.spawnscene` v3 files stream chunks over HTTP
   range requests into a fixed GPU memory pool.
 - WebXR VR / AR, with the interface itself drawn in WebGPU (SpawnDev.GameUI).
-- Opens other tools' formats (3DGS PLY, compressed PLY, SOG, SPZ, SPLAT), decoded on the GPU.
+- Opens other tools' formats (3DGS PLY, compressed PLY, SOG, SPZ v2-v4, SPLAT), decoded on the GPU.
 
 ## References
 - B. Kerbl, G. Kopanas, T. Leimkühler, G. Drettakis. *3D Gaussian Splatting for Real-Time Radiance Field Rendering.*

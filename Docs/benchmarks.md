@@ -19,19 +19,70 @@ it says so.
 
 ## Training quality
 
-| Scene | Iterations | Metric | SpawnScene (WebGPU, in a browser tab) | gsplat 1.5.3 `default` (CUDA) |
-|---|---|---|---|---|
-| Tanks and Temples *Truck* (all 251 photos, 979 px) | 30K | PSNR / SSIM | 24.95 dB / **0.887** | **25.13** dB / 0.877 |
-| | | splats | **0.89M** | 3.79M |
-| | | time | 25 min | - |
-Provenance: Truck - SpawnScene run c49 (2026-10-06), gsplat 30K run of the same date and split (`val_step29999.json`
-kept).
+Eleven standard scenes (Mip-NeRF 360, Tanks and Temples, Deep Blending), three trainers, **one scorer** for all of them
+(`tools/rescore.py`: PSNR / SSIM / LPIPS-AlexNet on the held-out renders each tool saved - each tool's own scorer
+differs). Same images at the same resolution, the same COLMAP poses and the same split for every tool. Every run of every
+tool **ends** its schedule at the iteration count shown (a "7K" row is a 7,000-step run, not step 7,000 of a 30K run).
+Higher PSNR / SSIM and lower LPIPS are better.
 
-**Withdrawn 2026-10-08: the Bicycle 7K row** (SpawnScene 25.07 / 0.766 vs gsplat 23.14 / 0.666). The two numbers were
-taken under different schedules: gsplat's at step 7,000 of a 30K run - which is how the 3DGS paper and gsplat publish
-"7K" - and SpawnScene's from a run whose schedule ENDS at 7K (its learning rates fully decayed), which favours
-SpawnScene. A gsplat run that ends at 7K scored 21.29 / 0.552, below the published numbers for the scene, unexplained so
-far. Both tools are being re-run per scene under one schedule (Research/parity-matrix.md, parity-references-2026-10-08.md).
+| Mean over the 11 scenes | 7K steps | 30K steps |
+|---|---|---|
+| **SpawnScene** (WebGPU, in a browser tab) | **27.44 / 0.862 / 0.166** | 28.43 / 0.881 / 0.128 |
+| Brush v0.3.0 (WebGPU, in a browser tab) | 26.95 / 0.841 / 0.200 | **28.63 / 0.883 / 0.122** |
+| gsplat 1.5.3 `default` (CUDA) | 26.73 / 0.833 / 0.207 | 28.50 / 0.896 / 0.140 (8 scenes, see below) |
+| Best PSNR | SpawnScene on 9 of 11 | Brush on 8 of 11, SpawnScene on 3 |
+
+**What this says, plainly:** at 7K SpawnScene leads both (+0.49 dB over Brush, +0.71 over gsplat, best mean SSIM and
+LPIPS). At 30K **Brush leads** by 0.20 dB on the mean: it wins every indoor scene (Train by 1.16 dB, Bonsai 0.69, the rest
+0.1-0.2) and SpawnScene wins Bicycle, Garden and Playroom. Against gsplat at 30K SpawnScene is ahead on 7 of the 8 scenes
+it finished (+0.55 dB mean over those 8) with about 40% of its splats in about half the time. Closing the 30K gap to
+Brush is the open work.
+
+### 7K, per scene (2026-10-11)
+
+| Scene | SpawnScene | Brush v0.3.0 | gsplat 1.5.3 |
+|---|---|---|---|
+| Bicycle | **24.89 / 0.748 / 0.212** | 24.00 / 0.677 / 0.323 | 23.75 / 0.640 / 0.367 |
+| Garden | **26.86 / 0.845 / 0.110** | 26.14 / 0.804 / 0.166 | 25.99 / 0.809 / 0.149 |
+| Stump | **26.48 / 0.765 / 0.187** | 25.30 / 0.694 / 0.300 | 25.00 / 0.682 / 0.304 |
+| Room | **30.87 / 0.915 / 0.176** | 30.25 / 0.907 / 0.190 | 30.07 / 0.899 / 0.203 |
+| Counter | **27.92 / 0.894 / 0.179** | 27.61 / 0.889 / 0.184 | 27.60 / 0.888 / 0.189 |
+| Kitchen | **29.78 / 0.917 / 0.112** | 29.18 / 0.907 / 0.123 | 29.37 / 0.913 / 0.117 |
+| Bonsai | 30.18 / **0.930 / 0.146** | **30.47** / 0.929 / 0.147 | 30.15 / 0.926 / 0.151 |
+| Truck | **24.82 / 0.871 / 0.120** | 24.71 / 0.860 / 0.132 | 23.88 / 0.852 / 0.134 |
+| Train | 20.22 / 0.784 / 0.221 | **21.07 / 0.792 / 0.200** | 20.42 / 0.771 / 0.231 |
+| DrJohnson | **29.23 / 0.906 / 0.196** | 28.22 / 0.896 / 0.226 | 28.28 / 0.889 / 0.230 |
+| Playroom | **30.60 / 0.913 / 0.171** | 29.51 / 0.900 / 0.206 | 29.47 / 0.897 / 0.199 |
+
+SpawnScene trains a 7K scene in 130-234 s on an RTX 4070 (Truck 130 s, Bicycle 234 s).
+
+### 30K, per scene (2026-10-11/12)
+
+| Scene | SpawnScene (splats, time) | Brush v0.3.0 (time) | gsplat 1.5.3 (splats, time) |
+|---|---|---|---|
+| Bicycle | **25.51** / 0.789 / **0.140** (3.72M, 24 min*) | 25.47 / 0.789 / 0.145 (18 min) | did not finish on 12 GB (below) |
+| Garden | **27.77 / 0.872 / 0.073** (2.18M, 21 min*) | 27.62 / 0.865 / 0.082 (17 min) | not run (same limit) |
+| Stump | 27.05 / 0.793 / 0.132 (2.54M, 18 min) | **27.19 / 0.801 / 0.128** (15 min) | not run (same limit) |
+| Room | 32.16 / 0.926 / 0.147 (0.92M, 19 min*) | **32.35 / 0.929 / 0.144** (16 min) | 31.30 / 0.916 / 0.160 (2.26M, 32 min) |
+| Counter | 29.18 / 0.910 / 0.146 (0.68M, 18 min*) | **29.30 / 0.912 / 0.143** (15 min) | 29.09 / 0.909 / 0.147 (1.67M, 29 min) |
+| Kitchen | 31.55 / **0.929 / 0.091** (0.90M, 21 min*) | **31.68** / 0.927 / 0.094 (14 min) | 31.06 / 0.925 / 0.096 (2.15M, 35 min) |
+| Bonsai | 31.95 / 0.943 / 0.124 (0.68M, 14 min) | **32.64 / 0.946 / 0.117** (16 min) | 32.04 / 0.941 / 0.123 (1.86M, 29 min) |
+| Truck | 25.95 / 0.888 / 0.091 (1.03M, 11 min) | **26.04 / 0.893 / 0.075** (12 min) | 25.17 / 0.877 / 0.093 (3.78M, 35 min) |
+| Train | 21.65 / 0.822 / 0.149 (0.74M, 11 min*) | **22.81 / 0.836 / 0.118** (19 min) | 21.60 / 0.816 / 0.144 (1.84M, 20 min) |
+| DrJohnson | 29.52 / 0.907 / 0.163 (1.79M, 17 min) | **29.66 / 0.912 / 0.153** (18 min) | 28.33 / 0.888 / 0.184 (5.21M, 47 min) |
+| Playroom | **30.45 / 0.913** / 0.149 (0.97M, 13 min) | 30.21 / 0.905 / **0.143** (13 min) | 29.40 / 0.899 / 0.169 (3.15M, 32 min) |
+
+SpawnScene densifies until 15K like gsplat (`refine_stop_iter`) and ran with an 8 GB training budget (`&gpumem=8`; the
+default 4 GB caps a scene at about 3.3M splats). Times: SpawnScene's are its training loop alone, Brush's and gsplat's wall clock including loading and evaluation
+(so ours read slightly short); \* marks SpawnScene runs that shared the
+machine with other work for part of the run, so their times are not clean (the scores are unaffected). Brush's splat
+counts were not recorded. **gsplat on a 12 GB card:** its default Bicycle 30K filled the RTX 4070's memory at about
+step 13,000 (11.4 of 12.3 GB) and slowed from 20 to under 1 step a second as Windows spilled it to system memory - 11 more
+hours to go when it was stopped. Garden and Stump grow as large and were not run. SpawnScene trained Bicycle in 3.72M
+splats.
+
+Provenance: `Research/parity-matrix.md` ("Three-way on TODAY'S defaults", "30K three-way"), run logs kept
+(`_runs/tuvok-tw-*`, `_runs/tuvok-p30*`).
 
 ### Without COLMAP
 
@@ -122,13 +173,29 @@ Measured with harness-only switches on the same poses ([Research/viewer-speed-20
   variant and Spark 31.7 dB, and GaussianSplats3D 30.2 dB; GaussianSplats3D and Spark 30.1 dB; SpawnScene and
   GaussianSplats3D 23.8 dB. Which of these is closest to a reference renderer at these poses has not been measured yet.
 
+### GPU memory
+
+Measured with the scene open (nvidia-smi, Inria *Train* 7K, 741,883 splats, SH degree 3), since 2026-10-12:
+
+| | bytes a splat | Train 7K scene |
+|---|---|---|
+| Before (f32 everywhere) | ~299 | 1091 MiB |
+| Now (default: 8-bit SH bands with a per-band step, 36-byte draw vertex, compact source rows) | ~132 | 976 MiB |
+
+That is about 2.3x as many splats in the same memory. The render changes by 60 dB PSNR from the f32 one (max 1-3 of 255,
+also on needle-heavy Truck seen close up; source-row compaction alone changes no pixel), and the frame rate is the same
+(Train 256.5 vs 256.2 fps, Truck 328.2 vs 327.7, uncapped). `&shq8=0` / `&rowq=0` turn the two options off.
+Details: [Research/viewer-memory-2026-10-11.md](../Research/viewer-memory-2026-10-11.md).
+
 ### Formats
 
-SpawnScene opens 3DGS `.ply`, SuperSplat compressed `.ply`, PlayCanvas `.sog`, Niantic `.spz` (v2/v3) and `.splat`,
-decoding all of them on the GPU. Each decoder is tested against the format owner's reference decoder (ported) and
+SpawnScene opens 3DGS `.ply` (including Brush's exports), SuperSplat compressed `.ply`, PlayCanvas `.sog`, Niantic `.spz`
+(v2, v3 and the zstd-compressed v4) and `.splat`, decoding all of them on the GPU (v4's zstd streams are decompressed by
+ZstdSharp first: browsers have no zstd decoder). Each decoder is tested against the format owner's reference decoder (ported) and
 verified on the owner's published sample files - see [Research/scene-formats-2026-10-08.md](../Research/scene-formats-2026-10-08.md).
 
 ## Training in a browser: who else does it
 
-[Brush](https://github.com/ArthurBrussee/brush) (Rust, wgpu) also trains 3DGS in a browser tab. **A paired comparison on
-the scenes above is in progress.** Desktop trainers (gsplat, the reference 3DGS) are the quality bar.
+[Brush](https://github.com/ArthurBrussee/brush) (Rust, wgpu) also trains 3DGS in a browser tab; it is in both tables
+above. SpawnScene is ahead at 7K and behind at 30K (0.20 dB on the mean, most of it on Train and Bonsai). Desktop
+trainers (gsplat, the reference 3DGS) are the quality bar.

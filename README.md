@@ -36,20 +36,30 @@ machine.
 
 ## How good is it?
 
-Measured with the reference protocol (every 8th photo held out, never trained on; PSNR / SSIM on those photos):
+Eleven standard scenes (Mip-NeRF 360, Tanks and Temples, Deep Blending), every 8th photo held out and never trained on,
+the same photos, poses and split for every tool, and **one scorer** for all of them. Mean PSNR / SSIM / LPIPS on the
+held-out photos (higher, higher, lower is better):
 
-| Scene | | SpawnScene (in the browser) | gsplat 1.5.3 (CUDA reference) |
-|---|---|---|---|
-| Tanks and Temples *Truck*, 30K iterations | PSNR / SSIM | 24.95 dB / **0.887** | 25.13 dB / 0.877 |
-| | splats | **0.89M** | 3.79M |
-Same photos, same camera poses (COLMAP), same resolution, same split. A comparison across every standard scene and the
-other trainers (gsplat, the reference 3DGS, Brush) is being measured now; an earlier Bicycle row was withdrawn because
-its gsplat number was not a like-for-like 7K run. Details and the protocol: [Docs/benchmarks.md](Docs/benchmarks.md).
+| | 7K steps | 30K steps |
+|---|---|---|
+| **SpawnScene** (in a browser tab) | **27.44 / 0.862 / 0.166** - best on 9 of 11 | 28.43 / 0.881 / 0.128 - best on 3 of 11 |
+| Brush (in a browser tab) | 26.95 / 0.841 / 0.200 | **28.63 / 0.883 / 0.122** - best on 8 of 11 |
+| gsplat (CUDA, the reference) | 26.73 / 0.833 / 0.207 | SpawnScene +0.55 dB on the 8 scenes it finished |
+
+- **7K:** SpawnScene leads both trainers, +0.49 dB over Brush and +0.71 over gsplat, in 2-4 minutes a scene on an
+  RTX 4070.
+- **30K:** ahead of gsplat with about 40% of its splats in about half the time; **behind Brush by 0.20 dB** (it wins the
+  indoor scenes, most by 0.1-0.2 dB, Train by 1.2). gsplat's default could not finish Bicycle at 30K on a 12 GB card;
+  SpawnScene trained it in 3.7M splats.
+
+Per-scene tables, timings and the protocol: [Docs/benchmarks.md](Docs/benchmarks.md).
 
 **Viewer:** opened in SpawnScene, Spark, PlayCanvas and GaussianSplats3D from the same seven camera poses, a 742K-splat
 scene draws the same picture in all four, and all four hold 60 fps at 1600x900 on an RTX 4070. Uncapped, SpawnScene is
 currently the slowest of the four (221-309 fps, 0.55-0.61x GaussianSplats3D's rate at every pose) - a gap we are
-working on. Screenshots and the full table: [Docs/benchmarks.md#viewer](Docs/benchmarks.md#viewer).
+working on. It holds splats in **~132 bytes of GPU memory each** (8-bit SH bands, a 36-byte draw vertex, compact source
+rows: 2.3x as many splats as before in the same memory, a picture 60 dB PSNR from the full-precision one). Screenshots and the full table:
+[Docs/benchmarks.md#viewer](Docs/benchmarks.md#viewer).
 
 ## Features
 
@@ -71,6 +81,8 @@ working on. Screenshots and the full table: [Docs/benchmarks.md#viewer](Docs/ben
   - **floater removal**: a GPU census removes splats that hang in front of what the photos saw;
   - **solid surfaces**: training over a random background makes the walls the photos saw opaque, so turning around in
     a room no longer shows holes through them (a bathroom: see-through pixels off the photo path 12% -> 5%).
+- **Fast**: a WebGPU subgroup reduction in the backward pass, tile binning that follows each splat's ellipse, and no
+  per-step GPU readback - a 7K benchmark scene in 2-4 minutes on an RTX 4070.
 - **Quality presets** for photo resolution, keypoints, iterations and scene size, sized to your GPU's memory.
 
 ### From a single photo
@@ -86,9 +98,9 @@ working on. Screenshots and the full table: [Docs/benchmarks.md#viewer](Docs/ben
 
 ### Open other tools' scenes
 
-**Open scene file** (or `?import=<url>`) takes standard 3DGS **`.ply`** (the reference trainer, gsplat, nerfstudio,
-Postshot, Polycam), SuperSplat's **compressed `.ply`**, PlayCanvas **`.sog`**, Niantic **`.spz`** (v2/v3) and
-**`.splat`** - all decoded on the GPU (a 30K PLY is 0.5-0.8 GB) and turned upright. For example
+**Open scene file** (or `?import=<url>`) takes standard 3DGS **`.ply`** (the reference trainer, gsplat, Brush,
+nerfstudio, Postshot, Polycam), SuperSplat's **compressed `.ply`**, PlayCanvas **`.sog`**, Niantic **`.spz`** (v2, v3 and
+the zstd-compressed v4) and **`.splat`** - all decoded on the GPU (a 30K PLY is 0.5-0.8 GB) and turned upright. For example
 [spawnscene.com/studio?import=...skull.sog](https://spawnscene.com/studio?import=https://raw.githubusercontent.com/playcanvas/engine/main/examples/assets/splats/skull.sog).
 
 ### Big scenes
@@ -108,6 +120,8 @@ Postshot, Polycam), SuperSplat's **compressed `.ply`**, PlayCanvas **`.sog`**, N
 ### Viewing
 
 - WebGPU renderer with sorted and stochastic (sort-free) modes, EWA anti-aliasing and contrast-adaptive sharpening.
+- **Compact GPU memory**: about 132 bytes a splat with full view-dependent colour (SH degree 3), down from about 299, at
+  the same frame rate - bigger scenes on the same GPU.
 - **WebXR**: view scenes in VR or AR (Quest browser and tethered headsets), with a device-sized splat budget and
   in-headset box selection.
 - The whole interface is drawn with WebGPU ([SpawnDev.GameUI](https://github.com/LostBeard/SpawnDev.GameUI)), so it

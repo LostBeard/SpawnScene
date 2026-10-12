@@ -1008,3 +1008,11 @@ indoor scene (Train by 1.16, Bonsai 0.69, the rest 0.09-0.19); we win Bicycle, G
 **gsplat on 12 GB:** its default Bicycle 30K filled the card at ~13K steps (11.3 GB, 20 -> 1 it/s, Windows shared-memory
 spill); the big three are re-run last for their quality only. Ours fit Bicycle in 3.72M splats.
 **Next:** what Brush does after 7K that we do not - its late schedule (lr decays, growth after 7K, its 30K splat count).
+
+**30K status at the pause (2026-10-12 08:06, TJ needs the PC):**
+- gsplat Bicycle 30K stopped at step 13,200: 2.39 s/it once its splats filled the 12 GB card (Windows shared-memory spill),
+  ETA +11 h. gsplat's default does not complete Bicycle 30K on 12 GB in useful time; Garden / Stump 30K were not run (same
+  wall). Options later: gsplat `--packed`, or a bigger card. Ours: Bicycle 3.72M splats, 24 min.
+- First A/B toward Brush's 30K lead (_runs/tuvok-b30.sh, Train 30K): `&opacitycap=0` (reset schedule, no opacity cap - Brush
+  never resets) 21.62 / 0.821 / 0.140, 0.93M splats vs default 21.65 / 0.822 / 0.149, 0.74M: PSNR unchanged, LPIPS -0.009.
+  Not the Train gap (-1.16 vs Brush). Not yet run: Bonsai oc0, `&densifygrad=4e-4`, `&poslr=0.25` (Train + Bonsai).

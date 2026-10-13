@@ -1248,17 +1248,29 @@ public partial class Studio
                 for (int hv = 0; hv < views.Count; hv++)
                 {
                     if (views[hv].UsedForSupervision) continue;
+                    var p0 = views[hv].Camera.Position;
+                    var f0 = System.Numerics.Vector3.Normalize(views[hv].Camera.Forward);
+                    float loss0 = float.NaN, loss1 = float.NaN;
                     for (int k = 0; k < PoseTestIterations; k++)
                     {
                         var hc = views[hv].Camera.ScaledTo(w, h);
                         var (hn, hf) = SplatBounds.DepthRangeFor(box, hc);
                         _trainer.SetTargetFrom(targets, hv);
-                        await _trainer.TrainStepAsync(packed, n, hc, hn, hf, colourLr: 0f, opacityLr: 0f, geometry: frozen,
-                            readLoss: false, poseSlot: hv);
+                        bool readEnds = k == 0 || k == PoseTestIterations - 1;
+                        float l = await _trainer.TrainStepAsync(packed, n, hc, hn, hf, colourLr: 0f, opacityLr: 0f, geometry: frozen,
+                            readLoss: readEnds, poseSlot: hv);
+                        if (k == 0) loss0 = l; else if (readEnds) loss1 = l;
                         var hg = await _trainer.ReadPoseGradsAsync(views.Count);
                         float d2 = 1f - 0.9f * k / Math.Max(1f, PoseTestIterations - 1f);
                         poseAdam.Step(views[hv].Camera, hg.AsSpan(hv * 6, 6), hv, PoseLrRotation * d2, PoseLrTranslation * poseSpread * d2);
                     }
+                    // Per photo: how far the refinement moved it and what it bought (2026-10-13: one held-out Bathroom photo lost
+                    // 2.5 dB with free space on and nothing in the logs said whether its pose went elsewhere).
+                    var f1 = System.Numerics.Vector3.Normalize(views[hv].Camera.Forward);
+                    float turnDeg = MathF.Acos(Math.Clamp(System.Numerics.Vector3.Dot(f0, f1), -1f, 1f)) * 180f / MathF.PI;
+                    float moved = (views[hv].Camera.Position - p0).Length() / Math.Max(poseSpread, 1e-6f);
+                    Console.WriteLine($"[Train] held-out pose {hv} {views[hv].ImageName}: turned {turnDeg:F2} deg, moved {moved:P1} of the " +
+                        $"camera spread, step loss {loss0:G4} -> {loss1:G4}");
                     refined++;
                 }
                 }

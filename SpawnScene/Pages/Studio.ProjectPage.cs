@@ -486,6 +486,11 @@ public partial class Studio
             i => ReconstructionPresets.Apply(s, presetNames[i]),
             preset == "Custom" ? "Custom: the settings below were changed by hand. Pick a preset to reset them."
                 : ReconstructionPresets.All.First(p => p.Name == preset).Hint);
+        y = AddChoiceRow(parent, x, y, w, "Floater cleanup",
+            new (string, int)[] { ("On", 1), ("Off", 0) },
+            s.FloaterCleanup ? 1 : 0, v => s.FloaterCleanup = v == 1,
+            "Uses each photo's depth map to clear the haze and floaters that hang in front of walls when you move away " +
+            "from where the photos were taken. Off trains from the photos' colours alone.");
 
         // What these photos would train at under this device's budget, and for how long (TrainingTimeEstimate: the trainer's
         // own sizing rule, and the speed this device measured on its last run).
@@ -535,11 +540,6 @@ public partial class Studio
             $"Device = as many as this computer's GPU memory setting fits: {deviceSplats:N0}" +
             (s.TrainMaxSplats != ReconstructionPresets.DeviceMaxSplats && s.TrainMaxSplats > deviceSplats
                 ? $", so it caps this {s.TrainMaxSplats:N0}." : "."));
-        y = AddChoiceRow(parent, x, y, w, "Floater cleanup",
-            new (string, int)[] { ("On", 1), ("Off", 0) },
-            s.FloaterCleanup ? 1 : 0, v => s.FloaterCleanup = v == 1,
-            "Uses each photo's depth map to clear the haze and floaters that hang in front of walls when you move away " +
-            "from where the photos were taken. Off trains from the photos' colours alone.");
 
         // -- Device: this machine's GPU memory budget (localStorage, all projects) --
         y = AddSectionHeading(parent, x, y + 8, w, "Device", "this computer");

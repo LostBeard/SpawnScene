@@ -214,6 +214,7 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("depthcarve", out var dcq)) DepthCarveOption = dcq is "1" or "true";
         if (query.TryGetValue("depthcheck", out var dckq)) DepthCheckOption = dckq is "1" or "true";
         if (DepthCarveOption || DepthCheckOption) MultiViewGenerationService.KeepDepthTargets = true;
+        if (query.TryGetValue("depthinitmode", out var dimq)) MultiViewGenerationService.DepthFusionKeepUncontradicted = dimq == "free";
         if (query.TryGetValue("depthtargetpx", out var dtpq) && int.TryParse(dtpq, out var dtpv))
             MultiViewGenerationService.DepthTargetLongSide = Math.Clamp(dtpv, 64, 4096);
         // &freespace=X: the free-space loss against the photos' depth maps (SplatTrainerGpu.FreeSpace), weight X;

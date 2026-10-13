@@ -44,11 +44,12 @@ public class DepthFusionInitTests
     }
 
     static async Task<(float[] packed, int count)> Fuse(Accelerator a, MemoryBuffer1D<float, Stride1D.Dense> d0,
-        MemoryBuffer1D<float, Stride1D.Dense> d1, int stride)
+        MemoryBuffer1D<float, Stride1D.Dense> d1, int stride, bool keepUncontradicted = false)
     {
         var cams = new CameraParams?[] { Cam(0f), Cam(0.5f) };
         var depths = new DepthFusionInit.DepthMap?[] { new(d0, W, H), new(d1, W, H) };
-        var r = await DepthFusionInit.FuseAsync(a, cams, depths, new[] { 0, 1 }, PlanePoints(), null, stride, 0.03f, 1f);
+        var r = await DepthFusionInit.FuseAsync(a, cams, depths, new[] { 0, 1 }, PlanePoints(), null, stride, 0.03f, 1f,
+            keepUncontradicted: keepUncontradicted);
         Assert.That(r, Is.Not.Null, "both views should scale to the SfM points");
         var (buf, n, report) = r!.Value;
         TestContext.WriteLine($"scales {report.Scales}; {n} seeds from {report.Candidates} samples");
@@ -113,6 +114,84 @@ public class DepthFusionInitTests
         // View 1's own scale still fits (most of it is right), and its corrupted samples agree with nobody; view 0's
         // samples landing on the corrupted third lose their only agreement.
         Assert.That(n, Is.EqualTo(expected));
+    }
+
+    /// <summary>Samples of a camera's stride grid whose world point (on the plane) lands inside the other camera's frame.</summary>
+    static int InOther(CameraParams self, CameraParams other, int stride, Func<int, int, bool>? selfCorrupt = null, float corruptDepth = PlaneZ)
+    {
+        int count = 0;
+        for (int sy = 0; sy < (H + stride - 1) / stride; sy++)
+            for (int sx = 0; sx < (W + stride - 1) / stride; sx++)
+            {
+                int px = Math.Min(sx * stride + stride / 2, W - 1), py = Math.Min(sy * stride + stride / 2, H - 1);
+                float z = selfCorrupt != null && selfCorrupt(px, py) ? corruptDepth : PlaneZ;
+                var world = WorldSpaceGeometry.UnprojectPixel(self, px + 0.5f, py + 0.5f, z);
+                if (!WorldSpaceGeometry.Project(other, world, out float u, out float v, out _)) continue;
+                if (u < 0 || v < 0 || u >= W || v >= H) continue;
+                count++;
+            }
+        return count;
+    }
+
+    /// <summary>
+    /// Uncontradicted mode (&amp;depthinitmode=free, 2026-10-13): with clean depths every view-0 sample is a seed - also the
+    /// ones view 1 never sees, which agreement mode drops - and view 1 adds only the samples view 0 cannot see (the rest
+    /// agree with view 0, which emitted them). Red check in the same test: agreement mode gives the overlap only.
+    /// </summary>
+    [Test]
+    public async Task UncontradictedModeKeepsWhatOnlyOneViewSees()
+    {
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var a = context.CreateCPUAccelerator(0);
+        using var d0 = Depth(a, 2.5f);
+        using var d1 = Depth(a, 5f);
+        const int stride = 4;
+        int grid = ((W + stride - 1) / stride) * ((H + stride - 1) / stride);
+        var (p, n) = await Fuse(a, d0, d1, stride, keepUncontradicted: true);
+        int expected = grid + (grid - InOther(Cam(0.5f), Cam(0f), stride));
+        Assert.That(n, Is.EqualTo(expected), "all of view 0, plus view 1's samples outside view 0");
+        for (int i = 0; i < n; i++) Assert.That(p[i * SplatFormat.Floats + 2], Is.EqualTo(PlaneZ).Within(1e-3f), $"seed {i} z");
+        var (_, nAgree) = await Fuse(a, d0, d1, stride);
+        Assert.That(nAgree, Is.EqualTo(ExpectedOverlap(stride)).And.LessThan(n), "agreement mode: the overlap only");
+    }
+
+    /// <summary>
+    /// A wrong NEAR depth is a floater: view 1's right third reads 30% too near, so view 0 - looking at the plane behind -
+    /// sees through those samples and they must go; view 0's samples there are only occluded from view 1 (it reads a nearer
+    /// surface), which is no evidence, so they stay.
+    /// </summary>
+    [Test]
+    public async Task UncontradictedModeDropsWhatAnotherViewSeesThrough()
+    {
+        using var context = Context.Create(b => b.CPU().EnableAlgorithms());
+        using var a = context.CreateCPUAccelerator(0);
+        Func<int, int, bool> rightThird = (x, y) => x >= 2 * W / 3;
+        using var d0 = Depth(a, 2.5f);
+        var near = new float[W * H];
+        for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) near[y * W + x] = PlaneZ / 5f * (rightThird(x, y) ? 0.7f : 1f);
+        using var d1 = a.Allocate1D(near);
+        const int stride = 4;
+        int grid = ((W + stride - 1) / stride) * ((H + stride - 1) / stride);
+        var (p, n) = await Fuse(a, d0, d1, stride, keepUncontradicted: true);
+        int nearZ = 0;
+        for (int i = 0; i < n; i++) if (MathF.Abs(p[i * SplatFormat.Floats + 2] - PlaneZ) > 0.1f) nearZ++;
+        TestContext.WriteLine($"{n} seeds, {nearZ} off the plane");
+        // View 1's near samples that view 0 can see (in its frame) are contradicted; the ones outside view 0 stay (nobody
+        // can say) - count them on the grid at the corrupted depth.
+        int nearOutside0 = 0;
+        var c0 = Cam(0f); var c1 = Cam(0.5f);
+        for (int sy = 0; sy < (H + stride - 1) / stride; sy++)
+            for (int sx = 0; sx < (W + stride - 1) / stride; sx++)
+            {
+                int px = Math.Min(sx * stride + stride / 2, W - 1), py = Math.Min(sy * stride + stride / 2, H - 1);
+                if (!rightThird(px, py)) continue;
+                var world = WorldSpaceGeometry.UnprojectPixel(c1, px + 0.5f, py + 0.5f, PlaneZ * 0.7f);
+                bool in0 = WorldSpaceGeometry.Project(c0, world, out float u, out float v, out _) && u >= 0 && v >= 0 && u < W && v < H;
+                if (!in0) nearOutside0++;
+            }
+        Assert.That(nearZ, Is.EqualTo(nearOutside0), "near samples view 0 sees through are dropped; only the unseen ones stay");
+        int onPlane = n - nearZ;
+        Assert.That(onPlane, Is.GreaterThanOrEqualTo(grid), "every view-0 sample stays (occlusion is no evidence)");
     }
 
     /// <summary>

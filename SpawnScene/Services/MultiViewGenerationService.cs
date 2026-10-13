@@ -1215,6 +1215,13 @@ public class MultiViewGenerationService
     /// </summary>
     public static int DepthTargetLongSide { get; set; } = 384;
 
+    /// <summary>
+    /// <c>&amp;depthinitmode=free</c>: depth seeds wherever no other photo sees THROUGH the sample (DepthFusionInit
+    /// KeepUncontradicted), not only where another photo's depth agrees - a surface one photo sees well (a room behind an
+    /// object, seen at grazing angles by the rest) starts seeded, as the single-photo path seeds every pixel.
+    /// </summary>
+    public static bool DepthFusionKeepUncontradicted { get; set; }
+
     /// <summary>The last generate's depth maps for training (DepthFusionInit.DepthTargets; this service owns them until
     /// <see cref="ReleaseDepthTargets"/>).</summary>
     public DepthFusionInit.DepthTargets? LastDepthTargets { get; private set; }
@@ -1824,13 +1831,13 @@ public class MultiViewGenerationService
                         return (im.GpuRgba.View, () => { if (made) im.DisposeGpu(); });
                     },
                     keepTargets: KeepDepthTargets ? t => { LastDepthTargets?.Dispose(); LastDepthTargets = t; } : null,
-                    targetLongSide: DepthTargetLongSide);
+                    targetLongSide: DepthTargetLongSide, keepUncontradicted: DepthFusionKeepUncontradicted);
                 if (LastDepthTargets is { } kept)
                     Console.WriteLine($"[MultiView] depth targets kept for training: {kept.Views.Count} views, {kept.Bytes / 1048576.0:F0} MB");
                 if (fused is { } f)
                 {
                     Console.WriteLine($"[MultiView] depth fusion init: {f.Count:N0} seeds from {f.Report.Candidates:N0} samples of " +
-                        $"{f.Report.ScaledViews}/{f.Report.Views} views (stride {DepthFusionInitStride}, agree within {DepthFusionRelTol:P0}) " +
+                        $"{f.Report.ScaledViews}/{f.Report.Views} views (stride {DepthFusionInitStride}, {(DepthFusionKeepUncontradicted ? "kept unless another view sees through it" : "agree")} within {DepthFusionRelTol:P0}) " +
                         $"in {t0.Elapsed.TotalSeconds:F1}s; depth scales {f.Report.Scales}");
                     LastCameras = poses.Cameras;
                     LastPoseSource = "dav3-chunked";

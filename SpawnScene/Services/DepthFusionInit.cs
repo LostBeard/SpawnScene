@@ -35,6 +35,8 @@ public static class DepthFusionInit
     public struct Params
     {
         public int View, Views, Stride, Capacity, MinAgree;
+        /// <summary>1 = keep a sample no other view CONTRADICTS (sees through it to a surface behind it) even when none agrees.</summary>
+        public int KeepUncontradicted;
         public float RelTol, Opacity, MaxScale;
     }
 
@@ -94,7 +96,7 @@ public static class DepthFusionInit
         IReadOnlyList<Vector3> sparsePoints, IReadOnlyList<byte[]?>? rgba, int stride, float relTol, float maxScale,
         bool snapEdges = false,
         Func<int, Task<(ArrayView1D<int, Stride1D.Dense> Rgba, Action Release)?>>? deviceRgba = null,
-        Action<DepthTargets>? keepTargets = null, int targetLongSide = 384)
+        Action<DepthTargets>? keepTargets = null, int targetLongSide = 384, bool keepUncontradicted = false)
     {
         // Per accelerator: a kernel cached from another (disposed) accelerator runs against freed state - MEASURED, the
         // second of two unit tests on fresh CPU accelerators failed only when run after the first.
@@ -228,6 +230,7 @@ public static class DepthFusionInit
             _fuse!(gw * gh, allDepth.View, offBuf.View, allRgba.View, camBuf.View, outPacked.View, counter.View, new Params
             {
                 View = k, Views = used.Count, Stride = stride, Capacity = capacity, MinAgree = 1,
+                KeepUncontradicted = keepUncontradicted ? 1 : 0,
                 RelTol = relTol, Opacity = SparsePointCloudInit.InitialOpacity, MaxScale = maxScale,
             });
         }
@@ -288,7 +291,7 @@ public static class DepthFusionInit
         float wy = cams[c + 1] + cams[c + 4] * xc + cams[c + 7] * yc + cams[c + 10] * d;
         float wz = cams[c + 2] + cams[c + 5] * xc + cams[c + 8] * yc + cams[c + 11] * d;
 
-        int agree = 0;
+        int agree = 0, contra = 0;
         bool earlier = false;
         for (int j = 0; j < p.Views; j++)
         {
@@ -309,8 +312,15 @@ public static class DepthFusionInit
                 agree++;
                 if (j < p.View) earlier = true;
             }
+            // View j sees a surface BEHIND the point: it looks straight through it, so the point is in j's free space.
+            // (Behind j's surface is only occlusion: no evidence either way.)
+            else if (zc < dj * (1f - p.RelTol)) contra++;
         }
-        if (agree < p.MinAgree || earlier) return;
+        // Agreement mode (default): another view must agree. Uncontradicted mode: none may see through it - a surface only
+        // this photo sees is kept, as the single-photo path keeps every pixel. Either way an agreed surface is emitted once,
+        // by the first view that agrees.
+        if (earlier) return;
+        if (p.KeepUncontradicted != 0 ? contra > 0 : agree < p.MinAgree) return;
 
         int slot = Atomic.Add(ref counter[0], 1);
         if (slot >= p.Capacity) return;

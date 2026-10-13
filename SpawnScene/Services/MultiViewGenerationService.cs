@@ -1207,6 +1207,14 @@ public class MultiViewGenerationService
     /// <summary>Keep the photos' scaled depth maps after a generate (Studio's &amp;depthloss: training supervises with them).</summary>
     public static bool KeepDepthTargets { get; set; }
 
+    /// <summary>
+    /// <c>&amp;depthtargetpx=N</c>: long side of the kept depth maps. Default = what DAv3 predicts in the multi-view pass
+    /// (SafeMultiViewPatches x 14 = 672): anything smaller throws detail away (it was 384 until 2026-10-13 - the free-space
+    /// loss then softened the pine cone itself, its maps too coarse at the object's silhouette), anything larger is an
+    /// upsample of the same prediction. 88 views at 672 x 448 = 106 MB on the GPU.
+    /// </summary>
+    public static int DepthTargetLongSide { get; set; } = DepthEstimationService.SafeMultiViewPatches * DepthEstimationService.PatchSize;
+
     /// <summary>The last generate's depth maps for training (DepthFusionInit.DepthTargets; this service owns them until
     /// <see cref="ReleaseDepthTargets"/>).</summary>
     public DepthFusionInit.DepthTargets? LastDepthTargets { get; private set; }
@@ -1815,7 +1823,8 @@ public class MultiViewGenerationService
                         if (im.GpuRgba == null) return null;
                         return (im.GpuRgba.View, () => { if (made) im.DisposeGpu(); });
                     },
-                    keepTargets: KeepDepthTargets ? t => { LastDepthTargets?.Dispose(); LastDepthTargets = t; } : null);
+                    keepTargets: KeepDepthTargets ? t => { LastDepthTargets?.Dispose(); LastDepthTargets = t; } : null,
+                    targetLongSide: DepthTargetLongSide);
                 if (LastDepthTargets is { } kept)
                     Console.WriteLine($"[MultiView] depth targets kept for training: {kept.Views.Count} views, {kept.Bytes / 1048576.0:F0} MB");
                 if (fused is { } f)

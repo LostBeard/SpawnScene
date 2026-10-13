@@ -168,6 +168,15 @@ public partial class Studio
                 return;
             }
 
+            // &dumpheld=1: the trainer's render of every held-out photo's view (held-<name>-trainer.png), as the sample
+            // autotest does - the Bathroom's free-space loss sat on ONE held-out photo (2026-10-13) and had to be looked at.
+            if (DumpHeldOption)
+                foreach (var hv in liveScene.TrainingViews.Where(v => !v.UsedForSupervision))
+                {
+                    await StashTrainerRenderAsync($"held-{System.IO.Path.GetFileNameWithoutExtension(hv.ImageName)}", hv.Camera);
+                    await Task.Delay(1500);   // the harness polls every 500 ms
+                }
+
             // -- Before and after the round trip through OPFS, from the same pose --
             var seat = liveScene.TrainingCameras.Count > 0 ? liveScene.TrainingCameras[0] : null;
             await CaptureProjectViewAsync("live", seat);

@@ -420,7 +420,11 @@ public partial class Studio : IAsyncDisposable
                 System.Globalization.CultureInfo.InvariantCulture, out var ssv2)) DepthEdgeSnap.StepScale = ssv2;
         if (query.TryGetValue("snapmid", out var snapMidQ) && float.TryParse(snapMidQ, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var snapMidV)) DepthEdgeSnap.MaxMidFraction = Math.Clamp(snapMidV, 0.05f, 1f);
-        if (query.TryGetValue("depthmodel", out var dmq) && !string.IsNullOrWhiteSpace(dmq)) DepthModelOverride = dmq;
+        if (query.TryGetValue("depthmodel", out var dmq) && !string.IsNullOrWhiteSpace(dmq))
+        {
+            DepthModelOverride = dmq;
+            if (DepthEstimationService.AvailableModels.Any(m => m.Id == dmq)) MultiViewGenerationService.MultiViewDepthModelId = dmq;
+        }
         if (query.TryGetValue("inpaint", out var ipq)) DepthToGaussianKernel.InpaintHiddenLayer = ipq is "1" or "true";
         // &exposure=1: per-photo exposure compensation (Studio.Training.ExposureOption).
         if (query.TryGetValue("exposure", out var exq)) { ExposureOption = exq is not ("0" or "false"); ExposureGainsOnlyOption = exq is not ("1" or "true" or "affine"); ExposureAutoOption = exq == "auto"; }

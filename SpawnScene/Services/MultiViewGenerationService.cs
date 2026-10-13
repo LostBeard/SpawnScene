@@ -1205,6 +1205,13 @@ public class MultiViewGenerationService
     }
 
     /// <summary>Keep the photos' scaled depth maps after a generate (Studio's &amp;depthloss: training supervises with them).</summary>
+    /// <summary>
+    /// The DAv3 model the multi-photo path runs (poses, seeds, the free-space maps). It was always the default (Small): the
+    /// project's Depth model setting and &amp;depthmodel reached only the single-photo path (2026-10-13: an A/B of Base
+    /// measured Small twice - same 639,154 seeds). Studio sets it from the project setting / &amp;depthmodel per generate.
+    /// </summary>
+    public static string MultiViewDepthModelId { get; set; } = DepthEstimationService.DefaultModelId;
+
     public static bool KeepDepthTargets { get; set; } = true;   // free space is a default (2026-10-13): ~33 MB, released after training
 
     /// <summary>
@@ -1237,10 +1244,10 @@ public class MultiViewGenerationService
         ReleaseDepthTargets();
 
         // Ensure depth model is loaded before checking model type
-        if (!_depthService.IsReady)
+        if (!_depthService.IsReady || _depthService.LoadedModelId != MultiViewDepthModelId)
         {
             SetStatus("Loading depth model...");
-            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+            await _depthService.LoadModelAsync(MultiViewDepthModelId);
         }
         // Without a depth model the legacy 2D-offset path below would run instead of SfM and save an untrained
         // depth collage (10-07 Bicycle b0: a dropped weights fetch -> 14.8M splats, 0 training views). Fail loudly.
@@ -1310,10 +1317,10 @@ public class MultiViewGenerationService
         }
 
         // ─── Step 3: Ensure depth model loaded ───
-        if (!_depthService.IsReady)
+        if (!_depthService.IsReady || _depthService.LoadedModelId != MultiViewDepthModelId)
         {
             SetStatus("Loading depth model...");
-            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+            await _depthService.LoadModelAsync(MultiViewDepthModelId);
         }
 
         // ─── Step 4: Pass 1 — generate reference depth, count splats per view ───
@@ -1439,10 +1446,10 @@ public class MultiViewGenerationService
                 "[MultiView] chunked poses produced nothing; falling back to the single-pass cascade.");
         }
 
-        if (!_depthService.IsReady)
+        if (!_depthService.IsReady || _depthService.LoadedModelId != MultiViewDepthModelId)
         {
             SetStatus("Loading DAv3 model...");
-            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+            await _depthService.LoadModelAsync(MultiViewDepthModelId);
         }
 
         int n = Math.Min(images.Count, DepthEstimationService.MaxMultiViewImages);
@@ -2098,10 +2105,10 @@ public class MultiViewGenerationService
     /// </summary>
     private async Task<ChunkedPoseResult?> PoseAllViewsChunkedAsync(IReadOnlyList<ImportedImage> images)
     {
-        if (!_depthService.IsReady)
+        if (!_depthService.IsReady || _depthService.LoadedModelId != MultiViewDepthModelId)
         {
             SetStatus("Loading DAv3 model...");
-            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+            await _depthService.LoadModelAsync(MultiViewDepthModelId);
         }
 
         var shapes = images.Select(im => (im.Width, im.Height)).ToArray();
@@ -2945,10 +2952,10 @@ public class MultiViewGenerationService
         if (images.Count != cameras.Count)
             throw new ArgumentException("Image count must match camera count.");
 
-        if (!_depthService.IsReady)
+        if (!_depthService.IsReady || _depthService.LoadedModelId != MultiViewDepthModelId)
         {
             SetStatus("Loading depth model...");
-            await _depthService.LoadModelAsync(DepthEstimationService.DefaultModelId);
+            await _depthService.LoadModelAsync(MultiViewDepthModelId);
         }
 
         int n = images.Count;

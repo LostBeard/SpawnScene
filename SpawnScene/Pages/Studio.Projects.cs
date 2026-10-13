@@ -672,6 +672,10 @@ public partial class Studio
         if (_activeProject == null) return;
         // The depth input the measured runs used (the dataset path sets it per run; nothing else may leak in).
         DepthEstimationService.SetSquareInput(DepthEstimationService.SafeMultiViewPatches);
+        // The project's depth model drives the multi-photo path too (poses, seeds, free-space maps); &depthmodel wins.
+        var mvModel = DepthModelOverride ?? _activeProject.Settings.DepthModel ?? DepthEstimationService.DefaultModelId;
+        MultiViewGenerationService.MultiViewDepthModelId = DepthEstimationService.AvailableModels.Any(m => m.Id == mvModel)
+            ? mvModel : DepthEstimationService.DefaultModelId;
 
         _statusMessage = "Preparing multi-view pipeline...";
         BuildProjectDetailUI();

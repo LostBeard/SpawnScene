@@ -12,7 +12,7 @@ are the depth maps used at all?
 - The floater carve measured each splat against the render's OWN surface (where T crosses 0.5): an opaque floater IS that
   surface and reads ~0.5 (TrainerGate: 0.4922), so the 0.9 carve kept it.
 
-## Built (3e53cce, + depth maps at 672 px)
+## Built (3e53cce .. 5135841)
 
 - Census against each photo's depth map (`&depthcheck=1` measure, `&depthcarve=1` carve) + agreement bins.
 - Free-space loss `&freespace=X`: per pixel the opacity in front of (1 - 0.15) x the photo's depth, 1 - T_f.

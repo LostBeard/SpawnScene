@@ -781,13 +781,51 @@ fn exposure_adam(@builtin(local_invocation_index) li : u32) {
     /// in free space is in front of it in every photo that looks through it - that is how the photos could see past it,
     /// and why it stays faint enough to cost them nothing while it hangs in the air from anywhere else.
     /// Pixels that never turn opaque have no surface and add only to TOTAL.
+    /// <para>
+    /// With a depth map bound (dref.f.x = its scale to scene units &gt; 0) the surface is the PHOTO's depth instead (the
+    /// minimum over a (2r+1)^2 neighbourhood of map pixels, r = dref.f.w, so a thin part or an edge the map blurs is never
+    /// behind its own surface). The render's own surface cannot see an opaque floater: it IS the surface at its pixels
+    /// (an isolated opaque splat reads ~0.5 against it), and a carve at 0.9 keeps it. The photo's depth map never had it
+    /// (TJ, 2026-10-13: "thousands of floaters in the final results and none of them show up on the depth maps").
+    /// Pixels where the map has no depth fall back to the render's surface. Every pixel with a map also adds to the
+    /// agreement histogram (rendered surface / map depth, unfiltered), the scale check of the maps against the scene.
+    /// </para>
     /// </summary>
     public const string FloaterCensus = Common + @"
 @group(0) @binding(2) var<storage, read> ranges : array<vec2<u32>>;
 @group(0) @binding(3) var<storage, read> values : array<u32>;
 @group(0) @binding(4) var<storage, read_write> census : array<atomic<u32>>;   // 2 per splat: total, front
 @group(0) @binding(5) var<uniform> cfg : vec4<f32>;                          // x front margin, y fixed-point scale
+@group(0) @binding(6) var<storage, read> depth_maps : array<f32>;
+struct DepthRef {
+    f : vec4<f32>,   // x = map scale to scene units (0 = no map: the render's own surface), y = map width, z = map height, w = min radius (map px)
+    n : vec4<u32>,   // x = viewport width, y = viewport height, z = map offset (floats)
+};
+@group(0) @binding(7) var<uniform> dref : DepthRef;
+// 13 bins per pixel with a map: rendered surface / map depth in < 0.5, 0.5-0.7, 0.7-0.8, 0.8-0.9, 0.9-0.95, 0.95-1.05,
+// 1.05-1.1, 1.1-1.25, 1.25-1.5, 1.5-2, > 2; [11] the render has no surface there; [12] the map has no depth there.
+@group(0) @binding(8) var<storage, read_write> agree : array<atomic<u32>>;
 @group(0) @binding(11) var<storage, read> splat_colour : array<f32>;
+
+fn dref_at(x : i32, y : i32) -> f32 {
+    let mw = i32(dref.f.y);
+    let mh = i32(dref.f.z);
+    return depth_maps[dref.n.z + u32(clamp(y, 0, mh - 1) * mw + clamp(x, 0, mw - 1))];
+}
+
+fn agree_bin(r : f32) -> u32 {
+    if (r < 0.5) { return 0u; }
+    if (r < 0.7) { return 1u; }
+    if (r < 0.8) { return 2u; }
+    if (r < 0.9) { return 3u; }
+    if (r < 0.95) { return 4u; }
+    if (r < 1.05) { return 5u; }
+    if (r < 1.1) { return 6u; }
+    if (r < 1.25) { return 7u; }
+    if (r < 1.5) { return 8u; }
+    if (r < 2.0) { return 9u; }
+    return 10u;
+}
 fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
     return vec3<f32>(splat_colour[i * 3u], splat_colour[i * 3u + 1u], splat_colour[i * 3u + 2u]);
 }
@@ -815,6 +853,26 @@ fn floater_census(
     // workgroup (as raster_forward's), so every barrier stays in uniform control flow.
     var surface = 3.0e38;
     for (var walk = 0u; walk < 2u; walk = walk + 1u) {
+        // Between the walks: the photo's depth replaces the render's surface where the map has one (per thread, no barrier).
+        if (walk == 1u && inside && dref.f.x > 0.0) {
+            let mx = i32(round((f32(px) + 0.5) * dref.f.y / f32(dref.n.x) - 0.5));
+            let my = i32(round((f32(py) + 0.5) * dref.f.z / f32(dref.n.y) - 0.5));
+            let r = i32(dref.f.w);
+            var m = 3.0e38;   // stays > 0 only when every map pixel in the window has a depth
+            for (var dy = -r; dy <= r; dy = dy + 1) {
+                for (var dx = -r; dx <= r; dx = dx + 1) {
+                    m = min(m, dref_at(mx + dx, my + dy));
+                }
+            }
+            let centre = dref_at(mx, my) * dref.f.x;
+            if (m > 0.0) {
+                if (surface < 1.0e38) { atomicAdd(&agree[agree_bin(surface / centre)], 1u); }
+                else { atomicAdd(&agree[11], 1u); }
+                surface = m * dref.f.x;
+            } else {
+                atomicAdd(&agree[12], 1u);
+            }
+        }
         var t = 1.0;
         var done = !inside;
         var base = range.x;
@@ -890,7 +948,7 @@ fn floater_fold(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_wor
     /// cfg.z mask (1 floaters, 2 unseen; the save keeps only splats with opacity, and a densify step right after prunes
     /// them), and always fills a histogram the host prints:
     /// hist[0..9] seen splats by front fraction (tenths), hist[10..19] the same weighted by total weight (x 10),
-    /// hist[20] unseen splats, hist[21] floaters, hist[22] floaters' total weight (x 10).
+    /// hist[20] unseen splats, hist[21] floaters, hist[22] floaters' total weight (x 10), hist[23] seen splats' front weight (x 10).
     /// </summary>
     public const string FloaterClassify = @"
 @group(0) @binding(0) var<storage, read_write> splats : array<f32>;   // 14 per splat
@@ -917,6 +975,7 @@ fn floater_classify(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num
     let wq = u32(min(total * 10.0, 1.0e8));   // all weights sum to <= pixels x views (~1.4e8): x10 fits u32
     atomicAdd(&hist[b], 1u);
     atomicAdd(&hist[10u + b], wq);
+    atomicAdd(&hist[23], u32(min(front * 10.0, 1.0e8)));   // all weight in front of the surfaces, floater or not
     if (f >= cfg.x) {
         atomicAdd(&hist[21], 1u);
         atomicAdd(&hist[22], wq);
@@ -1023,6 +1082,12 @@ fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
 // Depth supervision (DepthVariant): reads dL/d(inverse depth) at depth_io[pixels + o], writes each key's dL/d(1/z) at
 // depth_io[2 pixels + key]. Inverse depth blends exactly like a colour channel, so dL/d(alpha) gains the same term.
 //DEPTH: @group(0) @binding(15) var<storage, read_write> depth_io : array<f32>;
+// Free space (SplatTrainerGpu.FreeSpace, the //FREE: lines): per pixel the photo's surface as an inverse-depth
+// threshold (0 = no map there) and the term's weight. Loss per pixel = the opacity piled up in front of the photo's
+// surface, 1 - T_f (T_f = transmittance after the last splat in front of it); dL/d(alpha_i) = T_f / (1 - alpha_i) for
+// every splat in front, 0 for the rest. Walking back to front, T_f is the transmittance the walk holds when it meets the
+// first splat in front (the farthest of them), before undoing it. Same form as the background term below.
+//FREE: @group(0) @binding(17) var<storage, read> free_px : array<f32>;   // 2 per pixel: threshold 1/z, weight
 
 fn densify_abs_add(i : u32, v : f32) {
     var old = atomicLoad(&densify_abs[i]);
@@ -1051,6 +1116,7 @@ var<workgroup> sb_conic  : array<vec3<f32>, 64>;
 var<workgroup> sb_colour : array<vec3<f32>, 64>;
 var<workgroup> sb_opacity: array<f32, 64>;   // 0 for an invalid projection: alpha 0 never hits
 //DEPTH: var<workgroup> sb_invz : array<f32, 64>;
+//FREE: var<workgroup> sb_z : array<f32, 64>;
 // The furthest key any pixel of this tile reached (max end_idx). Keys behind it touch no pixel.
 var<workgroup> tile_end_atomic : atomic<u32>;
 var<workgroup> tile_end_plain : u32;
@@ -1073,6 +1139,9 @@ fn raster_backward(
     var my_end = range.x;
     var dL = vec3<f32>(0.0);
 //DEPTH:     var dLd = 0.0;
+//FREE:     var free_thr = 0.0;
+//FREE:     var free_w = 0.0;
+//FREE:     var free_tf = -1.0;
     var sky_term = 0.0;
     if (inside) {
         let o = py * u32(u.viewport.x) + px;
@@ -1088,6 +1157,8 @@ fn raster_backward(
         my_end = min(max(end_idx[o], range.x), range.y);
         dL = vec3<f32>(dL_dpix[o * 3u + 0u], dL_dpix[o * 3u + 1u], dL_dpix[o * 3u + 2u]);
 //DEPTH:         dLd = depth_io[u32(u.viewport.x) * u32(u.viewport.y) + o];
+//FREE:         free_thr = free_px[o * 2u];
+//FREE:         free_w = free_px[o * 2u + 1u];
     }
 
     // Colour accumulated by everything BEHIND the splat currently being processed.
@@ -1123,6 +1194,7 @@ fn raster_backward(
             sb_colour[li] = q.colour;
             sb_opacity[li] = select(0.0, q.opacity, q.valid);
 //DEPTH:             sb_invz[li] = select(0.0, 1.0 / max(q.depth, 1e-6), q.valid);
+//FREE:             sb_z[li] = select(0.0, q.depth, q.valid);
         }
         workgroupBarrier();
 
@@ -1158,6 +1230,8 @@ fn raster_backward(
             // Floor the divisor so a 1-ulp disagreement at the MAX_ALPHA edge
             // cannot Inf and wipe the rest of the reverse recurrence. Cap the
             // recovered T so a long saturated reverse walk cannot NaN the tile.
+//FREE:             let free_front = free_thr > 0.0 && sb_z[s] > 0.0 && 1.0 / sb_z[s] > free_thr;
+//FREE:             free_tf = select(free_tf, t, free_front && free_tf < 0.0);
             t = clamp(t / max(1.0 - alpha, 1e-4), 0.0, 1e4);
             let w = alpha * t;
 
@@ -1172,6 +1246,7 @@ fn raster_backward(
             dL_dalpha = dL_dalpha - t_final / max(1.0 - alpha, 1e-4) * dot(u.background.xyz, dL);
             // &skymap: the learned sky behind the pixel is a per-pixel background (sky_dot = dot(sky, dL)).
             dL_dalpha = dL_dalpha - t_final / max(1.0 - alpha, 1e-4) * sky_term;
+//FREE:             dL_dalpha = dL_dalpha + select(0.0, free_w * free_tf / max(1.0 - alpha, 1e-4), free_front);
 //DEPTH:             dL_dalpha = dL_dalpha + (sb_invz[s] - rec_inv) * t * dLd;
 //DEPTH:             contrib_d = w * dLd;
 
@@ -1668,6 +1743,52 @@ fn inv_depth_l1(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocatio
         workgroupBarrier();
     }
     if (lid == 0u && group < dims.z) { loss_partial[group] = wg_sum[0]; }
+}
+";
+
+    /// <summary>
+    /// Free space (SplatTrainerGpu.FreeSpace): per pixel of the current view, the photo's surface as an inverse-depth
+    /// threshold for the backward's //FREE: lines - 1 / ((1 - margin) x the nearest map depth within the radius x the
+    /// map's scale) - and the term's weight. Pixel to map exactly as the floater census maps them (FloaterCensus), so the
+    /// census measures the same loss (its front weight summed per pixel is 1 - T_f). No map or no depth: 0, 0.
+    /// </summary>
+    public const string FreeSpacePrep = @"
+struct FreeCfg {
+    f : vec4<f32>,   // x = map scale (0 = no map), y = map width, z = map height, w = min radius (map px)
+    g : vec4<f32>,   // x = 1 - margin, y = weight per pixel
+    n : vec4<u32>,   // x = viewport width, y = viewport height, z = map offset (floats)
+};
+@group(0) @binding(0) var<storage, read> depth_maps : array<f32>;
+@group(0) @binding(1) var<storage, read_write> free_px : array<f32>;
+@group(0) @binding(2) var<uniform> cfg : FreeCfg;
+
+fn map_at(x : i32, y : i32) -> f32 {
+    let mw = i32(cfg.f.y);
+    let mh = i32(cfg.f.z);
+    return depth_maps[cfg.n.z + u32(clamp(y, 0, mh - 1) * mw + clamp(x, 0, mw - 1))];
+}
+
+@compute @workgroup_size(256)
+fn free_space_prep(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_workgroups) nwg : vec3<u32>) {
+    let p = gid.x + gid.y * nwg.x * 256u;   // 2D past 65535 groups (DispatchLinear)
+    if (p >= cfg.n.x * cfg.n.y) { return; }
+    var thr = 0.0;
+    if (cfg.f.x > 0.0) {
+        let px = p % cfg.n.x;
+        let py = p / cfg.n.x;
+        let mx = i32(round((f32(px) + 0.5) * cfg.f.y / f32(cfg.n.x) - 0.5));
+        let my = i32(round((f32(py) + 0.5) * cfg.f.z / f32(cfg.n.y) - 0.5));
+        let r = i32(cfg.f.w);
+        var m = 3.0e38;
+        for (var dy = -r; dy <= r; dy = dy + 1) {
+            for (var dx = -r; dx <= r; dx = dx + 1) {
+                m = min(m, map_at(mx + dx, my + dy));
+            }
+        }
+        if (m > 0.0) { thr = 1.0 / (cfg.g.x * m * cfg.f.x); }
+    }
+    free_px[p * 2u] = thr;
+    free_px[p * 2u + 1u] = select(0.0, cfg.g.y, thr > 0.0);
 }
 ";
 

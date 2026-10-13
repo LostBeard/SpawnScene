@@ -153,6 +153,37 @@ public partial class Studio
     /// </summary>
     public static float DepthLossOption { get; set; }
 
+    /// <summary>
+    /// <c>&amp;depthcarve=1</c>: the floater census (SplatTrainerGpu.Floaters) measures each view against the photo's own
+    /// depth map (DAv3 scaled to the SfM points, DepthFusionInit.DepthTargets) instead of the render's surface, during
+    /// training and at the end. The render's surface cannot see an opaque floater (it IS the surface there); the photo's
+    /// depth never had it. Views without a map (quarter turns) keep the render's surface.
+    /// </summary>
+    public static bool DepthCarveOption { get; set; }
+    /// <summary><c>&amp;depthcheck=1</c>: report the census against the photos' depth maps at the end (measure only).
+    /// Always on with <see cref="DepthCarveOption"/>.</summary>
+    public static bool DepthCheckOption { get; set; }
+    /// <summary><c>&amp;depthcarvemargin=M</c>: in front of a photo's depth = closer than (1 - M) x it.</summary>
+    public static float DepthCarveMargin { get; set; } = 0.15f;
+    /// <summary><c>&amp;depthcarver=R</c>: the photo's surface at a pixel = the nearest depth within R map pixels (the maps are
+    /// 384 px on the long side; edges and thin parts the map blurs stay behind their own surface).</summary>
+    public static int DepthCarveRadius { get; set; } = 1;
+
+    /// <summary>
+    /// <c>&amp;freespace=X</c>: the free-space loss (SplatTrainerGpu.FreeSpace) at weight X for the whole run - every photo's
+    /// depth map says the space in front of its surface is empty, and the opacity piled up there is the loss. 0 = off.
+    /// </summary>
+    public static float FreeSpaceOption { get; set; }
+    /// <summary><c>&amp;freespacemargin=M</c>: in front = closer than (1 - M) x the photo's depth.</summary>
+    public static float FreeSpaceMargin { get; set; } = 0.15f;
+    /// <summary><c>&amp;freespacer=R</c>: the photo's surface = the nearest map depth within R map pixels.</summary>
+    public static int FreeSpaceRadius { get; set; } = 1;
+
+    /// <summary>The census's depth reference for one view: its map, or null (no map kept, or a quarter-turned view).</summary>
+    static SplatTrainerGpu.CensusDepth? CensusDepthFor(TrainingView v, DepthFusionInit.DepthTargets? t) =>
+        t != null && v.QuarterTurns == 0 && t.Views.TryGetValue(v.ImageIndex, out var d)
+            ? new SplatTrainerGpu.CensusDepth(t.Maps, d.Offset, d.Width, d.Height, d.Scale, DepthCarveRadius) : null;
+
     /// <summary>gsplat MCMCStrategy.refine_stop_iter: relocation and growth stop here (noise and the regularisers do not).</summary>
     public static int McmcUntilIter { get; set; } = 25_000;
 
@@ -717,7 +748,19 @@ public partial class Studio
             Console.WriteLine(
                 $"[Train] supervising on {supervised.Count} views, " +
                 $"{views.Count - supervised.Count} held out");
-            var depthTargets = DepthLossOption > 0f ? _multiViewService.LastDepthTargets : null;
+            var depthTargets = DepthLossOption > 0f || FreeSpaceOption > 0f ? _multiViewService.LastDepthTargets : null;
+            _trainer.FreeSpaceMargin = FreeSpaceMargin;
+            _trainer.FreeSpaceRadius = FreeSpaceRadius;
+            if (FreeSpaceOption > 0f)
+                Console.WriteLine(depthTargets == null ? "[Train] free space: the generate kept no depth maps - off"
+                    : !SplatTrainerGpu.FreeSpace ? "[Train] free space: the trainer could not build it - off"
+                    : $"[Train] free space: weight {FreeSpaceOption:G3}, in front = closer than {1f - FreeSpaceMargin:P0} of the photo's depth, radius {FreeSpaceRadius}");
+            var censusDepth = DepthCarveOption || DepthCheckOption ? _multiViewService.LastDepthTargets : null;
+            if (DepthCarveOption || DepthCheckOption)
+                Console.WriteLine(censusDepth == null
+                    ? "[Floaters] photo depth: the generate kept no depth maps - census against the render's surface only"
+                    : $"[Floaters] photo depth: {supervised.Count(i => CensusDepthFor(views[i], censusDepth) != null)} of {supervised.Count} " +
+                      $"supervised views have a map; {(DepthCarveOption ? "carving" : "measuring")} at {DepthCarveMargin:P0} in front, radius {DepthCarveRadius}");
             if (DepthLossOption > 0f)
                 Console.WriteLine(depthTargets == null
                     ? "[Train] depth supervision: the generate kept no depth maps - off"
@@ -890,7 +933,9 @@ public partial class Studio
                     if (views[vi].QuarterTurns == 0 && depthTargets.Views.TryGetValue(views[vi].ImageIndex, out var dt))
                     {
                         _trainer.SetDepthTarget(depthTargets.Maps, dt.Offset, dt.Width, dt.Height, dt.Scale);
-                        _trainer.DepthLossWeight = TrainingSchedule.ExponentialLr(DepthLossOption, DepthLossOption * 0.01f, it, iterations);
+                        _trainer.DepthLossWeight = DepthLossOption > 0f
+                            ? TrainingSchedule.ExponentialLr(DepthLossOption, DepthLossOption * 0.01f, it, iterations) : 0f;
+                        _trainer.FreeSpaceWeight = FreeSpaceOption;
                     }
                     else _trainer.SetDepthTarget(null);
                 }
@@ -1017,7 +1062,7 @@ public partial class Studio
                     // on a reset iteration (every opacity is about to become faint).
                     if (densifying && !resetOpacity && CarveEveryIters > 0 && CarveFloaterShare > 0f
                         && (g + 1) % CarveEveryIters == 0)
-                        await CarveDuringTrainingAsync(packed, n, views, supervised, box, w, h, g + 1);
+                        await CarveDuringTrainingAsync(packed, n, views, supervised, box, w, h, g + 1, DepthCarveOption ? censusDepth : null);
                     if (densifying || resetOpacity)
                     {
                         // Do NOT RecalibrateGradientScales here from fixed-point stats.
@@ -1164,6 +1209,7 @@ public partial class Studio
             // Depth supervision is a training loss only: held-out refinement and scoring below run without it.
             _trainer.SetDepthTarget(null);
             _trainer.DepthLossWeight = 0f;
+            _trainer.FreeSpaceWeight = 0f;
             onProgress?.Invoke(new TrainProgress(itersDone, iterations, n, total));
             // Fewer iterations than one cycle (one pass over the supervised views: TruckFull 200 iters < 219 views) never
             // closes a cycle, and this printed "NaN -> NaN" as if training had diverged. Report the partial cycle instead.
@@ -1226,7 +1272,7 @@ public partial class Studio
 
             int bubbled = await CameraBubbleAsync(packed, n, views, supervised, "end")
                 + await ViewSupportCarveAsync(packed, n, views, supervised, "end");
-            if (await FloaterCensusAsync(packed, n, views, targets, box, w, h) || bubbled > 0)
+            if (await FloaterCensusAsync(packed, n, views, targets, box, w, h, censusDepth) || bubbled > 0)
             {
                 // The end carve only zeroes opacity. Nothing densifies after it, so without this the scene was SAVED with
                 // them: Bathroom 7K kept 113,942 of 705,744 splats (16%) at opacity 0 - file size and draw cost for nothing.
@@ -1300,7 +1346,8 @@ public partial class Studio
     /// <summary>One in-training carve: census over the supervised views, floaters' opacity to 0 (the densify step that
     /// follows prunes them).</summary>
     private async Task CarveDuringTrainingAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
-        IReadOnlyList<TrainingView> views, IReadOnlyList<int> supervised, SplatBounds.Aabb box, int w, int h, int iter)
+        IReadOnlyList<TrainingView> views, IReadOnlyList<int> supervised, SplatBounds.Aabb box, int w, int h, int iter,
+        DepthFusionInit.DepthTargets? depthRef)
     {
         if (_trainer!.TrainableVolume != null) return;   // frozen context: see FloaterCensusAsync
         var t0 = DateTime.UtcNow;
@@ -1309,12 +1356,13 @@ public partial class Studio
         {
             var cam = views[vi].Camera.ScaledTo(w, h);
             var (near, far) = SplatBounds.DepthRangeFor(box, cam);
-            await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, CarveFrontMargin);
+            var dref = CensusDepthFor(views[vi], depthRef);
+            await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, dref != null ? DepthCarveMargin : CarveFrontMargin, dref);
         }
         var r = await _trainer.ClassifyFloatersAsync(packed, n, CarveFloaterShare, minWeight: 1f, carve: true);
         await CameraBubbleAsync(packed, n, views, supervised, $"iter {iter}");
         await ViewSupportCarveAsync(packed, n, views, supervised, $"iter {iter}");
-        Console.WriteLine($"[Floaters] iter {iter}: carved {r.Floaters:N0} of {n:N0} " +
+        Console.WriteLine($"[Floaters] iter {iter}{(depthRef != null ? " (vs photo depth)" : "")}: carved {r.Floaters:N0} of {n:N0} " +
             $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s, {r.FloaterWeight / Math.Max(1e-9, r.WeightByFront.Sum()):P2} of the weight)");
     }
 
@@ -1342,10 +1390,14 @@ public partial class Studio
 
     /// <returns>True when splats were carved (opacity 0), so the caller compacts them away.</returns>
     private async Task<bool> FloaterCensusAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
-        MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box, int w, int h)
+        MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box, int w, int h, DepthFusionInit.DepthTargets? photoDepth = null)
     {
         // A partitioned block's frozen context must come out exactly as it went in (as the unconstrained prune skips it).
         if (_trainer!.TrainableVolume != null) { Console.WriteLine("[Floaters] skipped: partitioned block (frozen context)"); return false; }
+        // The measurement (TJ 2026-10-13: floaters never show in the depth maps): weight in front of the photos' own depth,
+        // before the end carve and after it, whatever the carve measures against.
+        if (photoDepth != null) await MeasureAgainstPhotoDepthAsync(packed, n, views, box, w, h, photoDepth, "before the end carve");
+        var depthRef = DepthCarveOption ? photoDepth : null;
         var t0 = DateTime.UtcNow;
         _trainer!.ResetFloaterCensus(n);
         foreach (var v in views)
@@ -1353,7 +1405,8 @@ public partial class Studio
             if (!v.UsedForSupervision) continue;
             var cam = v.Camera.ScaledTo(w, h);
             var (near, far) = SplatBounds.DepthRangeFor(box, cam);
-            await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, CarveFrontMargin);
+            var dref = CensusDepthFor(v, depthRef);
+            await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, dref != null ? DepthCarveMargin : CarveFrontMargin, dref);
         }
         bool carve = CarveFloaterShare > 0f;
         // An isolated opaque splat reads ~0.5 (its soft rim lies in front of whatever is behind it - the trainer gate's
@@ -1363,7 +1416,7 @@ public partial class Studio
         bool measuring = views.Any(v => !v.UsedForSupervision);
         EvalScores? before = carve && measuring ? await EvaluateAsync(_trainer, packed, n, views, targets, box) : null;
         var report = await _trainer.ClassifyFloatersAsync(packed, n, share, minWeight: CarveUnseenMinWeight, carve, carve && CarveUnseen);
-        Console.WriteLine($"[Floaters] census at {CarveFrontMargin:P0} in front, floater = front share >= {share:P0} " +
+        Console.WriteLine($"[Floaters] census{(depthRef != null ? $" vs photo depth at {DepthCarveMargin:P0}," : "")} at {CarveFrontMargin:P0} in front, floater = front share >= {share:P0} " +
             $"({(DateTime.UtcNow - t0).TotalSeconds:F1}s): {report}");
         if (before is { } b)
         {
@@ -1372,7 +1425,36 @@ public partial class Studio
                 $"SSIM {b.SupSsim:F4} -> {after.SupSsim:F4}; held out {b.HeldPsnr:F3} -> {after.HeldPsnr:F3} dB, " +
                 $"SSIM {b.HeldSsim:F4} -> {after.HeldSsim:F4}");
         }
+        // Carved splats have opacity 0 and paint nothing: the census now reads what the saved scene will hold.
+        if (photoDepth != null && carve) await MeasureAgainstPhotoDepthAsync(packed, n, views, box, w, h, photoDepth, "after the end carve");
         return carve && (report.Floaters > 0 || (CarveUnseen && report.Unseen > 0));
+    }
+
+    /// <summary>
+    /// Measure only: the census of every supervised view against its photo's depth map, reported as the share of all
+    /// blending weight in front of the photos' depth (the floater measure held-out PSNR cannot give: every held-out photo
+    /// sits beside a training photo, where a floater lines up with what is behind it) and the per-pixel agreement of the
+    /// render's surface with the maps (their scale check).
+    /// </summary>
+    private async Task MeasureAgainstPhotoDepthAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
+        SplatBounds.Aabb box, int w, int h, DepthFusionInit.DepthTargets photoDepth, string when)
+    {
+        _trainer!.ResetFloaterCensus(n);
+        foreach (var v in views)
+        {
+            if (!v.UsedForSupervision) continue;
+            var dref = CensusDepthFor(v, photoDepth);
+            if (dref == null) continue;
+            var cam = v.Camera.ScaledTo(w, h);
+            var (near, far) = SplatBounds.DepthRangeFor(box, cam);
+            await _trainer.AccumulateFloaterCensusAsync(packed, n, cam, near, far, DepthCarveMargin, dref);
+        }
+        var agreement = await _trainer.ReadDepthAgreementAsync();
+        var r = await _trainer.ClassifyFloatersAsync(packed, n, CarveFloaterShare > 0f ? CarveFloaterShare : 0.9f, minWeight: CarveUnseenMinWeight, carve: false);
+        double all = r.WeightByFront.Sum();
+        Console.WriteLine($"[Floaters] PHOTO DEPTH {when}: {(all > 0 ? r.FrontWeight / all : 0):P2} of all weight in front of the photos' depth " +
+            $"(at {DepthCarveMargin:P0}, radius {DepthCarveRadius}); {r}");
+        Console.WriteLine($"[Floaters] PHOTO DEPTH agreement {when}: {agreement}");
     }
 
     /// <summary>

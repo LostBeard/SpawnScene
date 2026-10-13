@@ -23,11 +23,36 @@ public sealed partial class SplatTrainerGpu
     MemoryBuffer1D<float, Stride1D.Dense>? _floaterTotals;   // 2 per splat over the views: total, front
     MemoryBuffer1D<uint, Stride1D.Dense>? _floaterHist;      // 23 words
     GPUBuffer? _floaterCfgBuf;
-    int _floaterViews;
+    GPUBuffer? _floaterDepthCfgBuf;                          // DepthRef: the view's depth map (or none)
+    MemoryBuffer1D<uint, Stride1D.Dense>? _floaterAgree;     // 13 bins: rendered surface / map depth, per pixel
+    MemoryBuffer1D<float, Stride1D.Dense>? _floaterNoMap;    // bound when a view has no map (the shader reads nothing)
+    int _floaterViews, _floaterDepthViews;
+
+    /// <summary>
+    /// A view's depth map as the census's surface (FloaterCensus with a map): <paramref name="Width"/> x
+    /// <paramref name="Height"/> floats at <paramref name="Offset"/> in <paramref name="Maps"/>, camera depth times
+    /// <paramref name="Scale"/> = scene units (DepthFusionInit.DepthTargets); the surface at a pixel is the minimum over
+    /// (2 <paramref name="MinRadius"/> + 1)^2 map pixels around it.
+    /// </summary>
+    public readonly record struct CensusDepth(MemoryBuffer1D<float, Stride1D.Dense> Maps, long Offset, int Width, int Height,
+        float Scale, int MinRadius);
+
+    /// <summary>Pixels by rendered surface / photo depth (FloaterCensus's agreement bins) over the census's mapped views.</summary>
+    public sealed record DepthAgreement(int Views, uint[] Bins)
+    {
+        static readonly string[] Names = { "<0.5", "0.5-0.7", "0.7-0.8", "0.8-0.9", "0.9-0.95", "0.95-1.05", "1.05-1.1",
+            "1.1-1.25", "1.25-1.5", "1.5-2", ">2", "no render surface", "no map depth" };
+        public override string ToString()
+        {
+            double all = Bins.Sum(x => (double)x);
+            return $"{Views} views, {all:N0} px; rendered / photo depth: " +
+                string.Join(" ", Bins.Select((b, i) => $"{Names[i]}:{(all > 0 ? b / all : 0):P1}"));
+        }
+    }
 
     /// <summary>The census after <see cref="ClassifyFloatersAsync"/>: splats by front fraction, and the floaters.</summary>
     public sealed record FloaterReport(int Views, uint[] ByFront, double[] WeightByFront, uint Unseen, uint Floaters,
-        double FloaterWeight)
+        double FloaterWeight, double FrontWeight)
     {
         public uint Seen => (uint)ByFront.Sum(x => (long)x);
         public override string ToString()
@@ -37,7 +62,7 @@ public sealed partial class SplatTrainerGpu
                 $"{b * 10}-{b * 10 + 10}%:{ByFront[b]:N0}/{(w > 0 ? WeightByFront[b] / w : 0):P1}"));
             return $"over {Views} views: {Seen:N0} seen splats ({Unseen:N0} unseen) by front share [count/weight share] {bins}; " +
                 $"floaters {Floaters:N0} ({(Seen > 0 ? Floaters / (double)Seen : 0):P1} of seen) carrying " +
-                $"{(w > 0 ? FloaterWeight / w : 0):P2} of all blending weight";
+                $"{(w > 0 ? FloaterWeight / w : 0):P2} of all blending weight; all splats: {(w > 0 ? FrontWeight / w : 0):P2} of the weight in front";
         }
     }
 
@@ -61,28 +86,48 @@ public sealed partial class SplatTrainerGpu
             _floaterTotals = accel.Allocate1D<float>(words);
         }
         _floaterHist ??= accel.Allocate1D<uint>(32);
+        _floaterAgree ??= accel.Allocate1D<uint>(16);
+        _floaterNoMap ??= accel.Allocate1D<float>(4);
+        _floaterDepthCfgBuf ??= _device!.CreateBuffer(new GPUBufferDescriptor
+        {
+            Size = 32,
+            Usage = GPUBufferUsage.Uniform | GPUBufferUsage.CopyDst,
+        });
+        _floaterAgree.MemSetToZero();
         _floaterFixed.MemSetToZero();
         _floaterTotals!.MemSetToZero();
         accel.FlushPendingCommands();   // the clears ahead of the raw dispatches below
         _floaterViews = 0;
+        _floaterDepthViews = 0;
     }
 
     /// <summary>
     /// Add one training view to the census: the forward pass builds that view's sorted keys and tile ranges, the census
     /// walks them, the fold moves the fixed-point sums into the run's totals. <paramref name="frontMargin"/> is how far
-    /// in front of the photo's surface (a fraction of its depth) counts as in front.
+    /// in front of the photo's surface (a fraction of its depth) counts as in front. With <paramref name="depth"/> the
+    /// surface is that view's depth map wherever it has one (FloaterCensus), not the render's own.
     /// </summary>
     public async Task AccumulateFloaterCensusAsync(MemoryBuffer1D<float, Stride1D.Dense> splatBuf, int splatCount,
-        CameraParams cam, float depthNear, float depthFar, float frontMargin)
+        CameraParams cam, float depthNear, float depthFar, float frontMargin, CensusDepth? depth = null)
     {
         await RenderForwardAsync(splatBuf, splatCount, cam, depthNear, depthFar, readback: false);
         if (LastKeyCount == 0) return;
         WriteVec4(_floaterCfgBuf!, frontMargin, FloaterFixedScale, 0f, 0f);
+        bool mapped = depth is { } dm && dm.Width > 0 && dm.Height > 0 && dm.Scale > 0f && float.IsFinite(dm.Scale);
+        var f = mapped ? new[] { depth!.Value.Scale, depth.Value.Width, depth.Value.Height, Math.Max(0, depth.Value.MinRadius) }
+            : new[] { 0f, 1f, 1f, 0f };
+        var nu = new uint[] { (uint)_width, (uint)_height, mapped ? (uint)depth!.Value.Offset : 0u, 0u };
+        var bytes = new byte[32];
+        Buffer.BlockCopy(f, 0, bytes, 0, 16);
+        Buffer.BlockCopy(nu, 0, bytes, 16, 16);
+        _queue!.WriteBuffer(_floaterDepthCfgBuf!, 0, bytes);
+        if (mapped) _floaterDepthViews++;
         Dispatch(_floaterCensus!, _tilesX, _tilesY, new[]
         {
             Buf(0, _uniformBuf!), Buf(1, splatBuf.GetGPUBuffer()!), Buf(2, _ranges!.GetGPUBuffer()!),
             Buf(3, _values!.GetGPUBuffer()!), Buf(4, _floaterFixed!.GetGPUBuffer()!), Buf(5, _floaterCfgBuf!),
-            Buf(11, _splatColour!.GetGPUBuffer()!),
+            Buf(6, (mapped ? depth!.Value.Maps : _floaterNoMap!).GetGPUBuffer()!), Buf(7, _floaterDepthCfgBuf!),
+            Buf(8, _floaterAgree!.GetGPUBuffer()!), Buf(11, _splatColour!.GetGPUBuffer()!),
         });
         WriteVec4(_floaterCfgBuf!, splatCount, FloaterFixedScale, 0f, 0f);
         DispatchLinear(_floaterFold!, splatCount, groupSize: 256, entries: new[]
@@ -113,8 +158,17 @@ public sealed partial class SplatTrainerGpu
             Buf(2, _floaterHist!.GetGPUBuffer()!), Buf(3, _floaterCfgBuf!),
         });
         // CPU transfer: 23 histogram words.
-        uint[] h = await _floaterHist.CopyToHostAsync<uint>(0, 23);
-        return new FloaterReport(_floaterViews, h[..10], h[10..20].Select(x => x / 10.0).ToArray(), h[20], h[21], h[22] / 10.0);
+        uint[] h = await _floaterHist.CopyToHostAsync<uint>(0, 24);
+        return new FloaterReport(_floaterViews, h[..10], h[10..20].Select(x => x / 10.0).ToArray(), h[20], h[21], h[22] / 10.0,
+            h[23] / 10.0);
+    }
+
+    /// <summary>The census's depth agreement since <see cref="ResetFloaterCensus"/> (CPU transfer: 13 words).</summary>
+    public async Task<DepthAgreement> ReadDepthAgreementAsync()
+    {
+        await _gpu.WebGPUAccelerator.SynchronizeAsync();
+        var b = await _floaterAgree!.CopyToHostAsync<uint>(0, 13);
+        return new DepthAgreement(_floaterDepthViews, b);
     }
 
     /// <summary>The census totals, 2 per splat (total, front). CPU transfer: the trainer gate only, at gate scale.</summary>
@@ -171,6 +225,9 @@ public sealed partial class SplatTrainerGpu
         _floaterTotals?.Dispose(); _floaterTotals = null;
         _floaterHist?.Dispose(); _floaterHist = null;
         _floaterCfgBuf?.Destroy(); _floaterCfgBuf = null;
+        _floaterDepthCfgBuf?.Destroy(); _floaterDepthCfgBuf = null;
+        _floaterAgree?.Dispose(); _floaterAgree = null;
+        _floaterNoMap?.Dispose(); _floaterNoMap = null;
         _pickOut?.Dispose(); _pickOut = null;
     }
 }

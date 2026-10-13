@@ -444,6 +444,8 @@ public sealed partial class SplatTrainerGpu : IDisposable
         _emitKeys = MakePipeline(SplatTrainerShaders.EmitKeys, "emit_keys");
         _tileRanges = MakePipeline(SplatTrainerShaders.TileRanges, "tile_ranges");
         _rasterForward = MakePipeline(SplatTrainerShaders.RasterForward, "raster_forward");
+        CheckFreeSpaceLimits();
+        _freeBuilt = FreeSpace;
         _rasterBackward = MakePipeline(BackwardSource(), "raster_backward");
         _scatterGrad = MakePipeline(SplatTrainerShaders.ScatterGradients, "scatter_gradients");
         _lossL1 = MakePipeline(SplatTrainerShaders.LossL1, "loss_l1");
@@ -643,6 +645,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
     {
         if (TightTiles) wgsl = wgsl.Replace("//TIGHT: ", "").Replace("//TIGHT:", "");
         if (SkyMap) wgsl = wgsl.Replace("//SKY:", "");
+        if (_freeBuilt) wgsl = wgsl.Replace("//FREE:", "");
         if (NearPlane != 0.2f)
         {
             var lit = NearPlane.ToString("0.0#########", System.Globalization.CultureInfo.InvariantCulture);
@@ -2368,6 +2371,11 @@ public sealed partial class SplatTrainerGpu : IDisposable
                 Buf(11, _splatColour!.GetGPUBuffer()!),
             };
         if (depthOn) backwardEntries.Add(Buf(15, _depthIo!.GetGPUBuffer()!));
+        if (_freeBuilt)
+        {
+            DispatchFreeSpacePrep(pixels);
+            backwardEntries.Add(FreeSpaceEntry());
+        }
         if (SkyMap)
         {
             SkyBackwardDispatch();
@@ -2873,6 +2881,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         // they were freed after the first densify, and camera refinement silently stepped no camera (c19, 2026-10-04).
         DisposeExposure();
         DisposeDepth();
+        DisposeFreeSpace();
         _posePartials?.Dispose(); _posePartials = null;
         _poseGrads?.Dispose(); _poseGrads = null;
         _radixSort?.Dispose(); _radixSort = null;

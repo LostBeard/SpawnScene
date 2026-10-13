@@ -15,9 +15,135 @@ namespace SpawnScene.Pages;
 /// faint splat and nothing else. A thin splat alone in a hole in the wall (no pixel of it turns opaque, so there is no
 /// surface there) must read 0 - and survive the carve. Red check, in the same run: at a 0.8 margin (in front = closer than a fifth of the
 /// surface depth) the faint splat at a third of it no longer counts, so the same assertion must FAIL.
+/// <para>
+/// Photo depth (2026-10-13): an OPAQUE floater hangs in front of the wall too. Against the render's own surface it reads
+/// ~0.5 like the box (it IS the surface at its core) and a 0.9 carve keeps it - TJ's floaters. Against a depth map that
+/// holds the wall and the box (what the photo saw), it must read ~1 while wall, box and the thin splat stay ~0; the
+/// agreement bins must put the wall's pixels at 0.95-1.05. Red check: the same census with the map's scale 0 (no map)
+/// must give the opaque floater back its ~0.5.
+/// </para>
+/// <para>
+/// Free space (SplatTrainerGpu.FreeSpace) on the same scene and map, colour target = the scene's own render (the colour
+/// terms sit at their minimum): the opacity gradient of each floater must match central finite differences of the loss
+/// as the census measures it (its front weight summed per pixel is 1 - T_f), be positive (opacity goes down), and wall,
+/// box and thin splat must get none of it. Red check: at a 0.8 margin both floaters are behind the threshold and their
+/// gradient must vanish. It trains: opacity alone moving, the opaque floater fades and the wall stays.
+/// </para>
 /// </summary>
 public partial class Studio
 {
+    async Task<bool> FreeSpaceGateAsync(CameraParams cam, float[] packed, int n, MemoryBuffer1D<float, Stride1D.Dense> mapBuf,
+        int wallCount, int box, int floater, int opaqueFloater, int thin)
+    {
+        var accel = _gpuService.WebGPUAccelerator;
+        bool was = SplatTrainerGpu.FreeSpace;
+        SplatTrainerGpu.FreeSpace = true;
+        using var trainer = new SplatTrainerGpu(_gpuService);
+        try { trainer.Initialize(); }
+        finally { SplatTrainerGpu.FreeSpace = was; }
+        await trainer.ResizeAsync(cam.Width, cam.Height, n, keysPerSplat: 64);
+        using var buf = accel.Allocate1D<float>(packed.Length);
+        buf.CopyFromCPU(packed);
+        await accel.SynchronizeAsync();
+        trainer.SeedLogits(buf, n);
+        trainer.SetDepthTarget(mapBuf, 0, cam.Width, cam.Height, 1f);
+        trainer.FreeSpaceRadius = 1;
+        trainer.FreeSpaceMargin = 0.15f;
+        trainer.FreeSpaceWeight = 0f;
+        var frozen = new SplatTrainerGpu.GeometryStep(0f, 0f, 0f, 1e-9f, 1e9f);
+        const float lambda = 1f;
+        int pixels = cam.Width * cam.Height, F = SplatFormat.Floats, op = SplatFormat.OffOpacity;
+        try
+        {
+            // Warm-up (the first step rewrites the rows from the trainer's own buffers), then the scene's own render as target.
+            await trainer.TrainStepAsync(buf, n, cam, 0.5f, 20f, 0f, 0f, frozen, readLoss: true);
+            var img = await trainer.RenderForwardAsync(buf, n, cam, 0.5f, 20f, readback: true);
+            trainer.SetTarget(img);
+
+            async Task<float[]> OpacityGradsAsync(float margin)
+            {
+                trainer.FreeSpaceMargin = margin;
+                trainer.FreeSpaceWeight = lambda;
+                await trainer.TrainStepAsync(buf, n, cam, 0.5f, 20f, 0f, 0f, frozen, readLoss: true);
+                trainer.FreeSpaceWeight = 0f;
+                var gr = await trainer.ReadGradientsAsync(n);
+                var o = new float[n];
+                for (int i = 0; i < n; i++) o[i] = gr[i * SplatTrainerGpu.GradsPerSplat + 3];
+                return o;
+            }
+            // The loss as the census measures it: lambda x mean over pixels of the weight in front of the photo's depth.
+            async Task<double> LossAsync()
+            {
+                trainer.ResetFloaterCensus(n);
+                await trainer.AccumulateFloaterCensusAsync(buf, n, cam, 0.5f, 20f, 0.15f,
+                    new SplatTrainerGpu.CensusDepth(mapBuf, 0, cam.Width, cam.Height, 1f, 1));
+                var t = await trainer.ReadFloaterTotalsAsync(n);
+                double front = 0;
+                for (int i = 0; i < n; i++) front += t[2 * i + 1];
+                return lambda * front / pixels;
+            }
+
+            var g = await OpacityGradsAsync(0.15f);
+            var rows = await buf.CopyToHostAsync<float>(0, packed.Length);
+            var fd = new Dictionary<int, double>();
+            foreach (int i in new[] { floater, opaqueFloater })
+            {
+                float o0 = rows[i * F + op], eps = 0.004f;
+                buf.View.SubView(i * F + op, 1).CopyFromCPU(new[] { o0 + eps });
+                double lp = await LossAsync();
+                buf.View.SubView(i * F + op, 1).CopyFromCPU(new[] { o0 - eps });
+                double lm = await LossAsync();
+                buf.View.SubView(i * F + op, 1).CopyFromCPU(new[] { o0 });
+                fd[i] = (lp - lm) / (2 * eps);
+            }
+            await accel.SynchronizeAsync();
+            float others = 0f;
+            for (int i = 0; i < wallCount; i++) others = MathF.Max(others, MathF.Abs(g[i]));
+            others = MathF.Max(others, MathF.Max(MathF.Abs(g[box]), MathF.Abs(g[thin])));
+            float gMax = MathF.Max(g[floater], g[opaqueFloater]);
+            bool close(int i) => g[i] > 0f && Math.Abs(g[i] - fd[i]) <= 0.25 * Math.Max(Math.Abs(g[i]), Math.Abs(fd[i]));
+            Console.WriteLine($"[TrainerGate] free space dL/d(opacity), analytic vs finite difference of the census: faint floater " +
+                $"{g[floater]:G4}/{fd[floater]:G4}, opaque floater {g[opaqueFloater]:G4}/{fd[opaqueFloater]:G4}; wall/box/thin max |g| {others:G3}");
+            if (!close(floater) || !close(opaqueFloater) || !(others < 0.02f * gMax))
+            {
+                Console.WriteLine("[TrainerGate] FAIL: free space gradient");
+                return false;
+            }
+
+            // Red check: both floaters behind the threshold (0.2 x the wall's depth = 1.2, nearer than either).
+            var red = await OpacityGradsAsync(0.8f);
+            Console.WriteLine($"[TrainerGate] free space red check at a 0.8 margin: faint {red[floater]:G3}, opaque {red[opaqueFloater]:G3}");
+            if (MathF.Abs(red[floater]) > 0.02f * gMax || MathF.Abs(red[opaqueFloater]) > 0.02f * gMax)
+            {
+                Console.WriteLine("[TrainerGate] FAIL: free space red check - floaters behind the threshold still pushed");
+                return false;
+            }
+
+            // It trains: opacity alone, 100 steps.
+            trainer.FreeSpaceMargin = 0.15f;
+            trainer.FreeSpaceWeight = lambda;
+            for (int k = 0; k < 100; k++)
+                await trainer.TrainStepAsync(buf, n, cam, 0.5f, 20f, 0f, 0.1f, frozen, readLoss: k == 99);
+            var after = await buf.CopyToHostAsync<float>(0, packed.Length);
+            float wallMin = 1f;
+            for (int i = 0; i < wallCount; i++) wallMin = MathF.Min(wallMin, after[i * F + op]);
+            Console.WriteLine($"[TrainerGate] free space training, opacity only, 100 steps: opaque floater {rows[opaqueFloater * F + op]:F3} -> " +
+                $"{after[opaqueFloater * F + op]:F3}, faint {rows[floater * F + op]:F3} -> {after[floater * F + op]:F3}, wall min {wallMin:F3}");
+            if (!(after[opaqueFloater * F + op] < 0.5f) || !(after[floater * F + op] < rows[floater * F + op]) || !(wallMin > 0.9f))
+            {
+                Console.WriteLine("[TrainerGate] FAIL: free space did not fade the floaters alone");
+                return false;
+            }
+            Console.WriteLine("[TrainerGate] free space PASS");
+            return true;
+        }
+        finally
+        {
+            trainer.FreeSpaceWeight = 0f;
+            trainer.SetDepthTarget(null);
+        }
+    }
+
     async Task<bool> FloaterCensusGateAsync(CameraParams cam)
     {
         var accel = _gpuService.WebGPUAccelerator;
@@ -69,6 +195,11 @@ public partial class Studio
         float tileW = 2.4f * ww / gx, tileH = 2.4f * wh / gy;
         Add(cam.Position + fwd * wallDepth + right * (-ww * 1.2f + tileW * 13.5f) + up * (-wh * 1.2f + tileH * 2.5f),
             0.5f * tileW, 0.5f * tileH, 0.01f, 0.3f);
+        // The opaque floater (photo-depth case): left of centre, nearer than the faint one, clear of box, faint splat and hole.
+        int opaqueFloater = wallCount + 4;
+        const float opaqueDepth = 1.5f;
+        Add(cam.Position + fwd * opaqueDepth - right * (0.5f * halfW(opaqueDepth)), 0.08f * halfW(opaqueDepth),
+            0.08f * halfW(opaqueDepth), 0.08f * halfW(opaqueDepth), 0.99f);
         int n = rows.Count / SplatFormat.Floats;
         var packed = rows.ToArray();
 
@@ -141,6 +272,68 @@ public partial class Studio
             Console.WriteLine("[TrainerGate] FAIL: unseen carve");
             return false;
         }
+
+        // Photo depth: the map the photo would have - the wall plane's depth at every pixel, the box's over its footprint
+        // (3 sigma plus 2 px), no floaters. In the SHADER's camera basis (from the view matrix, which orthogonalises Up):
+        // the scene above is laid out along the camera's raw Up, so the wall plane is tilted in camera space and its depth
+        // varies across the frame (a constant 6 put the gate's own map 5-10% off - MEASURED, first run).
+        buf.CopyFromCPU(packed);
+        await accel.SynchronizeAsync();
+        WorldSpaceGeometry.ViewMatrixToCameraBasis(cam.ViewMatrix, out var sRight, out var sUp, out var sFwd, out var sPos);
+        var wallNormal = Vector3.Normalize(Vector3.Cross(right, up));
+        var wallPoint = cam.Position + fwd * wallDepth;
+        var boxCentre = cam.Position + fwd * boxDepth + up * (0.35f * halfW(boxDepth) * cam.Height / cam.Width);
+        var rel = boxCentre - sPos;
+        float bz = Vector3.Dot(rel, sFwd);
+        float bu = cam.CenterX + cam.FocalX * Vector3.Dot(rel, sRight) / bz, bv = cam.CenterY - cam.FocalY * Vector3.Dot(rel, sUp) / bz;
+        float boxRadiusPx = 3f * cam.FocalX * 0.12f * halfW(boxDepth) / bz + 2f;
+        var map = new float[cam.Width * cam.Height];
+        for (int y = 0; y < cam.Height; y++)
+            for (int x = 0; x < cam.Width; x++)
+            {
+                float dx = x + 0.5f - bu, dy = y + 0.5f - bv;
+                if (dx * dx + dy * dy <= boxRadiusPx * boxRadiusPx) { map[y * cam.Width + x] = bz; continue; }
+                // Camera-space ray with z = 1, into the world; its hit on the wall plane, as camera depth.
+                var dir = sRight * ((x + 0.5f - cam.CenterX) / cam.FocalX) + sUp * ((cam.CenterY - (y + 0.5f)) / cam.FocalY) + sFwd;
+                float tHit = Vector3.Dot(wallPoint - sPos, wallNormal) / Vector3.Dot(dir, wallNormal);
+                map[y * cam.Width + x] = tHit;   // dir has unit camera z, so the parameter IS the depth
+            }
+        using var mapBuf = accel.Allocate1D<float>(map.Length);
+        mapBuf.CopyFromCPU(map);
+        await accel.SynchronizeAsync();
+        async Task<float[]> DepthSharesAsync(float scale)
+        {
+            trainer.ResetFloaterCensus(n);
+            await trainer.AccumulateFloaterCensusAsync(buf, n, cam, 0.5f, 20f, 0.15f,
+                new SplatTrainerGpu.CensusDepth(mapBuf, 0, cam.Width, cam.Height, scale, 1));
+            var t = await trainer.ReadFloaterTotalsAsync(n);
+            var share = new float[n];
+            for (int i = 0; i < n; i++) share[i] = t[2 * i] > 0f ? t[2 * i + 1] / t[2 * i] : -1f;
+            return share;
+        }
+        var own = s[opaqueFloater];   // the render's own surface, from the first census above
+        var d = await DepthSharesAsync(1f);
+        var agreement = await trainer.ReadDepthAgreementAsync();
+        float dWallMax = 0f;
+        for (int i = 0; i < wallCount; i++) if (d[i] >= 0f) dWallMax = MathF.Max(dWallMax, d[i]);
+        double agreeAll = agreement.Bins.Sum(x => (double)x), agreeOne = agreement.Bins[5] / Math.Max(1.0, agreeAll);
+        Console.WriteLine($"[TrainerGate] photo depth: opaque floater {d[opaqueFloater]:F4} (render's own surface {own:F4}); " +
+            $"faint floater {d[floater]:F4}; wall max {dWallMax:F4}; box {d[box]:F4}; thin splat {d[thin]:F4}; agreement {agreement}");
+        if (!(d[opaqueFloater] > 0.99f && own < 0.9f && d[floater] > 0.99f && dWallMax < 0.01f && d[box] < 0.01f
+              && d[thin] >= 0f && d[thin] < 0.01f && agreement.Views == 1 && agreeOne > 0.5))
+        {
+            Console.WriteLine("[TrainerGate] FAIL: floater census against photo depth");
+            return false;
+        }
+        // Red check: no map (scale 0) - the opaque floater must read the render's ~0.5 again.
+        var noMap = await DepthSharesAsync(0f);
+        if (noMap[opaqueFloater] > 0.9f)
+        {
+            Console.WriteLine($"[TrainerGate] FAIL: photo depth red check - with no map the opaque floater still reads {noMap[opaqueFloater]:F4}");
+            return false;
+        }
+        Console.WriteLine($"[TrainerGate] photo depth PASS (red check: no map, opaque floater {noMap[opaqueFloater]:F4})");
+        if (!await FreeSpaceGateAsync(cam, packed, n, mapBuf, wallCount, box, floater, opaqueFloater, thin)) return false;
 
         // Red check: with the faint splat no longer "in front" by the margin, the same assertion must fail.
         buf.CopyFromCPU(packed);

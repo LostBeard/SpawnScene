@@ -209,6 +209,26 @@ public partial class Studio : IAsyncDisposable
             DepthLossOption = Math.Clamp(depthLossV, 0f, 10f);
             MultiViewGenerationService.KeepDepthTargets = true;
         }
+        // &depthcarve=1: the floater carve measures against the photos' depth maps (Studio.Training DepthCarveOption);
+        // &depthcheck=1 only reports the census against them. &depthcarvemargin=M, &depthcarver=R (map pixels).
+        if (query.TryGetValue("depthcarve", out var dcq)) DepthCarveOption = dcq is "1" or "true";
+        if (query.TryGetValue("depthcheck", out var dckq)) DepthCheckOption = dckq is "1" or "true";
+        if (DepthCarveOption || DepthCheckOption) MultiViewGenerationService.KeepDepthTargets = true;
+        // &freespace=X: the free-space loss against the photos' depth maps (SplatTrainerGpu.FreeSpace), weight X;
+        // &freespacemargin=M, &freespacer=R.
+        if (query.TryGetValue("freespace", out var fsq2) && float.TryParse(fsq2, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var fsv) && fsv > 0f)
+        {
+            FreeSpaceOption = Math.Clamp(fsv, 0f, 100f);
+            SplatTrainerGpu.FreeSpace = true;
+            MultiViewGenerationService.KeepDepthTargets = true;
+        }
+        if (query.TryGetValue("freespacemargin", out var fsmq) && float.TryParse(fsmq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var fsmv)) FreeSpaceMargin = Math.Clamp(fsmv, 0f, 0.9f);
+        if (query.TryGetValue("freespacer", out var fsrq) && int.TryParse(fsrq, out var fsrv)) FreeSpaceRadius = Math.Clamp(fsrv, 0, 8);
+        if (query.TryGetValue("depthcarvemargin", out var dcmq) && float.TryParse(dcmq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var dcmv)) DepthCarveMargin = Math.Clamp(dcmv, 0f, 0.9f);
+        if (query.TryGetValue("depthcarver", out var dcrq) && int.TryParse(dcrq, out var dcrv)) DepthCarveRadius = Math.Clamp(dcrv, 0, 8);
         if (query.TryGetValue("inpaintreach", out var uIr) && float.TryParse(uIr, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var uIrv)) OcclusionFill.InpaintMaskReach = Math.Clamp(uIrv, 1f, 4f);
         if (query.TryGetValue("depthinit", out var uDi) && int.TryParse(uDi, out var uDiv)) _multiViewService.DepthFusionInitStride = Math.Max(0, uDiv);

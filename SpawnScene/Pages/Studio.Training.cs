@@ -178,11 +178,15 @@ public partial class Studio
     /// Kitchen360 31.71 -> 31.70 (fog gone off-path, 2.6x faster), Bicycle360 24.65 -> 24.65 (SSIM +0.002), Bathroom 19.22
     /// -> 18.59 (all on one held-out photo of a bright patterned window, 16.56 -> 13.83, at weights 0.1 and 0.3 alike);
     /// the held-out photos' own depth agreed better on every scene. <c>&amp;freespace=0</c> = off.</remarks>
-    public static float FreeSpaceOption { get; set; } = 0.3f;
+    public static float FreeSpaceOption { get; set; } = FreeSpaceDefaultWeight;
+    /// <summary>The measured weight (0.1-1 within 0.25 dB on the pine cone; 0.3 best): Floater cleanup On.</summary>
+    public const float FreeSpaceDefaultWeight = 0.3f;
     /// <summary><c>&amp;freespacemargin=M</c>: in front = closer than (1 - M) x the photo's depth.</summary>
     public static float FreeSpaceMargin { get; set; } = 0.15f;
     /// <summary><c>&amp;freespacecover=1</c>: SplatTrainerGpu.FreeSpaceCover (push scaled by the opacity behind).</summary>
     public static bool FreeSpaceCover { get; set; } = true;
+    /// <summary>The URL set <c>&amp;freespace</c>: it wins over the project's Floater cleanup setting (harness A/Bs).</summary>
+    public static bool FreeSpaceFromQuery { get; set; }
     /// <summary><c>&amp;freespacer=R</c>: the photo's surface = the nearest map depth within R map pixels.</summary>
     public static int FreeSpaceRadius { get; set; } = 1;
 
@@ -759,6 +763,7 @@ public partial class Studio
             _trainer.FreeSpaceMargin = FreeSpaceMargin;
             _trainer.FreeSpaceRadius = FreeSpaceRadius;
             _trainer.FreeSpaceCover = FreeSpaceCover;
+            if (FreeSpaceOption <= 0f) Console.WriteLine("[Train] free space: off (Floater cleanup Off, or &freespace=0)");
             if (FreeSpaceOption > 0f)
                 Console.WriteLine(depthTargets == null ? "[Train] free space: the generate kept no depth maps - off"
                     : !SplatTrainerGpu.FreeSpace ? "[Train] free space: the trainer could not build it - off"

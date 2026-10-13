@@ -215,6 +215,12 @@ public enum SuperResolutionMode { Off, Auto, On }
 public class ProjectSettings
 {
     public string DepthModel { get; set; } = "depth-anything-v3-small";
+    /// <summary>
+    /// Floater cleanup (2+ photos): training clears opacity hanging in front of each photo's depth map (SplatTrainerGpu.FreeSpace,
+    /// Studio.Training FreeSpaceOption 0.3, cover mode). On by default - also for projects saved before it existed (a missing
+    /// property keeps this initialiser). Research/floaters-photo-depth-2026-10-13.md.
+    /// </summary>
+    public bool FloaterCleanup { get; set; } = true;
     public string QualityPreset { get; set; } = "Standard";
     public int Subsample { get; set; } = 2;
     public float EdgeSharpness { get; set; } = 0.3f;

@@ -222,6 +222,7 @@ public partial class Studio : IAsyncDisposable
                 System.Globalization.CultureInfo.InvariantCulture, out var fsv))
         {
             FreeSpaceOption = Math.Clamp(fsv, 0f, 100f);   // 0 = off (the default is 0.3)
+            FreeSpaceFromQuery = true;
             SplatTrainerGpu.FreeSpace = FreeSpaceOption > 0f;
             if (FreeSpaceOption > 0f) MultiViewGenerationService.KeepDepthTargets = true;
         }

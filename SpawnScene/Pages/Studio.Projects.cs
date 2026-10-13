@@ -823,6 +823,8 @@ public partial class Studio
                     if (presetBar > 0f)
                         Console.WriteLine($"[Studio] {ReconstructionPresets.Match(_activeProject.Settings)} preset: densify bar {presetBar:G3}");
                 }
+                // The project's Floater cleanup setting (ProjectSettings.FloaterCleanup); a URL &freespace wins.
+                if (!FreeSpaceFromQuery) FreeSpaceOption = _activeProject.Settings.FloaterCleanup ? FreeSpaceDefaultWeight : 0f;
                 if (trainIters > 0 && scene.TrainingViews.Count > 0)
                     trainedIters = TrainingBlocks.Columns * TrainingBlocks.Rows > 1
                         ? await TrainPartitionedAsync(

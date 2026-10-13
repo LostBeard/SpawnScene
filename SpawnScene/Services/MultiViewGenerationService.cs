@@ -1208,12 +1208,12 @@ public class MultiViewGenerationService
     public static bool KeepDepthTargets { get; set; }
 
     /// <summary>
-    /// <c>&amp;depthtargetpx=N</c>: long side of the kept depth maps. Default = what DAv3 predicts in the multi-view pass
-    /// (SafeMultiViewPatches x 14 = 672): anything smaller throws detail away (it was 384 until 2026-10-13 - the free-space
-    /// loss then softened the pine cone itself, its maps too coarse at the object's silhouette), anything larger is an
-    /// upsample of the same prediction. 88 views at 672 x 448 = 106 MB on the GPU.
+    /// <c>&amp;depthtargetpx=N</c>: long side of the kept depth maps (384). MEASURED 2026-10-13, pine cone held out with
+    /// &amp;freespace=0.3: 384 px 16.54 / 0.7107, 672 px (the multi-view prediction size) 16.55 / 0.7109 - the same, for
+    /// 100 MB instead of 33 MB over 87 views. The prediction is the limit, not how many of its pixels are kept: sharper
+    /// maps need a better depth model, not a larger resample of this one.
     /// </summary>
-    public static int DepthTargetLongSide { get; set; } = DepthEstimationService.SafeMultiViewPatches * DepthEstimationService.PatchSize;
+    public static int DepthTargetLongSide { get; set; } = 384;
 
     /// <summary>The last generate's depth maps for training (DepthFusionInit.DepthTargets; this service owns them until
     /// <see cref="ReleaseDepthTargets"/>).</summary>

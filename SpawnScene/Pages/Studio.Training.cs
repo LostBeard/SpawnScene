@@ -176,6 +176,8 @@ public partial class Studio
     public static float FreeSpaceOption { get; set; }
     /// <summary><c>&amp;freespacemargin=M</c>: in front = closer than (1 - M) x the photo's depth.</summary>
     public static float FreeSpaceMargin { get; set; } = 0.15f;
+    /// <summary><c>&amp;freespacecover=1</c>: SplatTrainerGpu.FreeSpaceCover (push scaled by the opacity behind).</summary>
+    public static bool FreeSpaceCover { get; set; }
     /// <summary><c>&amp;freespacer=R</c>: the photo's surface = the nearest map depth within R map pixels.</summary>
     public static int FreeSpaceRadius { get; set; } = 1;
 
@@ -751,10 +753,12 @@ public partial class Studio
             var depthTargets = DepthLossOption > 0f || FreeSpaceOption > 0f ? _multiViewService.LastDepthTargets : null;
             _trainer.FreeSpaceMargin = FreeSpaceMargin;
             _trainer.FreeSpaceRadius = FreeSpaceRadius;
+            _trainer.FreeSpaceCover = FreeSpaceCover;
             if (FreeSpaceOption > 0f)
                 Console.WriteLine(depthTargets == null ? "[Train] free space: the generate kept no depth maps - off"
                     : !SplatTrainerGpu.FreeSpace ? "[Train] free space: the trainer could not build it - off"
-                    : $"[Train] free space: weight {FreeSpaceOption:G3}, in front = closer than {1f - FreeSpaceMargin:P0} of the photo's depth, radius {FreeSpaceRadius}");
+                    : $"[Train] free space: weight {FreeSpaceOption:G3}, in front = closer than {1f - FreeSpaceMargin:P0} of the photo's depth, radius {FreeSpaceRadius}" +
+                      (FreeSpaceCover ? ", scaled by the opacity behind (cover)" : ""));
             var censusDepth = DepthCarveOption || DepthCheckOption ? _multiViewService.LastDepthTargets : null;
             if (DepthCarveOption || DepthCheckOption)
                 Console.WriteLine(censusDepth == null

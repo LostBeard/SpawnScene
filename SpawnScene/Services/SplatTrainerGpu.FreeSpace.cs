@@ -30,6 +30,13 @@ public sealed partial class SplatTrainerGpu
     /// <summary>In front = closer than (1 - margin) x the photo's depth.</summary>
     public float FreeSpaceMargin { get; set; } = 0.15f;
 
+    /// <summary>
+    /// Cover mode: scale each pixel's term by the opacity BEHIND the splats in front of the photo's surface
+    /// (B = 1 - T_final / T_f). Floaters in front of something solid get the whole push; splats with nothing behind them
+    /// keep their opacity, so a wrong far depth (a blown-out window) cannot open a see-through hole.
+    /// </summary>
+    public bool FreeSpaceCover { get; set; }
+
     /// <summary>The photo's surface at a pixel = the nearest map depth within this many map pixels (edges, thin parts).</summary>
     public int FreeSpaceRadius { get; set; } = 1;
 
@@ -67,7 +74,7 @@ public sealed partial class SplatTrainerGpu
         var f = new float[]
         {
             mapped ? _depthScale : 0f, mapped ? _depthMapW : 1f, mapped ? _depthMapH : 1f, Math.Max(0, FreeSpaceRadius),
-            1f - Math.Clamp(FreeSpaceMargin, 0f, 0.9f), FreeSpaceWeight / Math.Max(1, pixels), 0f, 0f,
+            1f - Math.Clamp(FreeSpaceMargin, 0f, 0.9f), FreeSpaceWeight / Math.Max(1, pixels), FreeSpaceCover ? 1f : 0f, 0f,
         };
         var nu = new uint[] { (uint)_width, (uint)_height, mapped ? (uint)_depthMapOffset : 0u, 0u };
         var bytes = new byte[48];

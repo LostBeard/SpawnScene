@@ -1087,6 +1087,10 @@ fn splat_rgb(i : u32, pos : vec3<f32>, dc : vec3<f32>) -> vec3<f32> {
 // surface, 1 - T_f (T_f = transmittance after the last splat in front of it); dL/d(alpha_i) = T_f / (1 - alpha_i) for
 // every splat in front, 0 for the rest. Walking back to front, T_f is the transmittance the walk holds when it meets the
 // first splat in front (the farthest of them), before undoing it. Same form as the background term below.
+// A NEGATIVE weight is cover mode (SplatTrainerGpu.FreeSpaceCover): the term is scaled by B = 1 - T_final / T_f, the
+// opacity BEHIND the splats in front (held constant in the step). A floater in front of a wall has B ~ 1 and gets the full
+// push; splats in front of nothing (a blown-out window DAv3 calls far: Bathroom 2026-10-13, the push opened a see-through
+// hole there) have B ~ 0 and keep their opacity.
 //FREE: @group(0) @binding(17) var<storage, read> free_px : array<f32>;   // 2 per pixel: threshold 1/z, weight
 
 fn densify_abs_add(i : u32, v : f32) {
@@ -1142,6 +1146,7 @@ fn raster_backward(
 //FREE:     var free_thr = 0.0;
 //FREE:     var free_w = 0.0;
 //FREE:     var free_tf = -1.0;
+//FREE:     var free_b = 1.0;
     var sky_term = 0.0;
     if (inside) {
         let o = py * u32(u.viewport.x) + px;
@@ -1231,7 +1236,9 @@ fn raster_backward(
             // cannot Inf and wipe the rest of the reverse recurrence. Cap the
             // recovered T so a long saturated reverse walk cannot NaN the tile.
 //FREE:             let free_front = free_thr > 0.0 && sb_z[s] > 0.0 && 1.0 / sb_z[s] > free_thr;
-//FREE:             free_tf = select(free_tf, t, free_front && free_tf < 0.0);
+//FREE:             let free_first = free_front && free_tf < 0.0;
+//FREE:             free_tf = select(free_tf, t, free_first);
+//FREE:             free_b = select(free_b, select(1.0, clamp(1.0 - t_final / max(t, 1e-6), 0.0, 1.0), free_w < 0.0), free_first);
             t = clamp(t / max(1.0 - alpha, 1e-4), 0.0, 1e4);
             let w = alpha * t;
 
@@ -1246,7 +1253,7 @@ fn raster_backward(
             dL_dalpha = dL_dalpha - t_final / max(1.0 - alpha, 1e-4) * dot(u.background.xyz, dL);
             // &skymap: the learned sky behind the pixel is a per-pixel background (sky_dot = dot(sky, dL)).
             dL_dalpha = dL_dalpha - t_final / max(1.0 - alpha, 1e-4) * sky_term;
-//FREE:             dL_dalpha = dL_dalpha + select(0.0, free_w * free_tf / max(1.0 - alpha, 1e-4), free_front);
+//FREE:             dL_dalpha = dL_dalpha + select(0.0, abs(free_w) * free_b * free_tf / max(1.0 - alpha, 1e-4), free_front);
 //DEPTH:             dL_dalpha = dL_dalpha + (sb_invz[s] - rec_inv) * t * dLd;
 //DEPTH:             contrib_d = w * dLd;
 
@@ -1755,7 +1762,7 @@ fn inv_depth_l1(@builtin(workgroup_id) wid : vec3<u32>, @builtin(local_invocatio
     public const string FreeSpacePrep = @"
 struct FreeCfg {
     f : vec4<f32>,   // x = map scale (0 = no map), y = map width, z = map height, w = min radius (map px)
-    g : vec4<f32>,   // x = 1 - margin, y = weight per pixel
+    g : vec4<f32>,   // x = 1 - margin, y = weight per pixel, z = 1: cover mode (the weight is written negative)
     n : vec4<u32>,   // x = viewport width, y = viewport height, z = map offset (floats)
 };
 @group(0) @binding(0) var<storage, read> depth_maps : array<f32>;
@@ -1788,7 +1795,7 @@ fn free_space_prep(@builtin(global_invocation_id) gid : vec3<u32>, @builtin(num_
         if (m > 0.0) { thr = 1.0 / (cfg.g.x * m * cfg.f.x); }
     }
     free_px[p * 2u] = thr;
-    free_px[p * 2u + 1u] = select(0.0, cfg.g.y, thr > 0.0);
+    free_px[p * 2u + 1u] = select(0.0, select(cfg.g.y, -cfg.g.y, cfg.g.z > 0.5), thr > 0.0);
 }
 ";
 

@@ -228,6 +228,8 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("freespacemargin", out var fsmq) && float.TryParse(fsmq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var fsmv)) FreeSpaceMargin = Math.Clamp(fsmv, 0f, 0.9f);
         if (query.TryGetValue("freespacer", out var fsrq) && int.TryParse(fsrq, out var fsrv)) FreeSpaceRadius = Math.Clamp(fsrv, 0, 8);
+        // &freespacecover=1: the free-space push scaled by the opacity behind the splats in front (SplatTrainerGpu.FreeSpaceCover).
+        if (query.TryGetValue("freespacecover", out var fscq)) FreeSpaceCover = fscq is "1" or "true";
         if (query.TryGetValue("depthcarvemargin", out var dcmq) && float.TryParse(dcmq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var dcmv)) DepthCarveMargin = Math.Clamp(dcmv, 0f, 0.9f);
         if (query.TryGetValue("depthcarver", out var dcrq) && int.TryParse(dcrq, out var dcrv)) DepthCarveRadius = Math.Clamp(dcrv, 0, 8);

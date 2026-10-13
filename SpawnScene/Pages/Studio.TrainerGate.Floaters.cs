@@ -134,12 +134,46 @@ public partial class Studio
                 Console.WriteLine("[TrainerGate] FAIL: free space did not fade the floaters alone");
                 return false;
             }
+            // Cover mode: with the wall behind them the floaters' gradients are plain mode's (B ~ 1); with the wall gone
+            // (nothing behind them, B = 0) cover mode must leave them alone while plain mode still pushes - B does the work.
+            buf.CopyFromCPU(packed);
+            await accel.SynchronizeAsync();
+            trainer.SeedLogits(buf, n);
+            trainer.FreeSpaceWeight = 0f;
+            await trainer.TrainStepAsync(buf, n, cam, 0.5f, 20f, 0f, 0f, frozen, readLoss: true);
+            trainer.SetTarget(await trainer.RenderForwardAsync(buf, n, cam, 0.5f, 20f, readback: true));
+            trainer.FreeSpaceCover = false;
+            var plainWall = await OpacityGradsAsync(0.15f);
+            trainer.FreeSpaceCover = true;
+            var coverWall = await OpacityGradsAsync(0.15f);
+            var noWall = (float[])packed.Clone();
+            for (int i = 0; i < wallCount; i++) noWall[i * F + op] = 0f;
+            buf.CopyFromCPU(noWall);
+            await accel.SynchronizeAsync();
+            trainer.SeedLogits(buf, n);
+            await trainer.TrainStepAsync(buf, n, cam, 0.5f, 20f, 0f, 0f, frozen, readLoss: true);
+            trainer.SetTarget(await trainer.RenderForwardAsync(buf, n, cam, 0.5f, 20f, readback: true));
+            var coverNoWall = await OpacityGradsAsync(0.15f);
+            trainer.FreeSpaceCover = false;
+            var plainNoWall = await OpacityGradsAsync(0.15f);
+            bool near(float a, float b) => MathF.Abs(a - b) <= 0.05f * MathF.Max(MathF.Abs(a), MathF.Abs(b));
+            Console.WriteLine($"[TrainerGate] free space cover: wall behind - faint {plainWall[floater]:G4}/{coverWall[floater]:G4}, opaque " +
+                $"{plainWall[opaqueFloater]:G4}/{coverWall[opaqueFloater]:G4} (plain/cover); nothing behind - faint {plainNoWall[floater]:G4}/" +
+                $"{coverNoWall[floater]:G4}, opaque {plainNoWall[opaqueFloater]:G4}/{coverNoWall[opaqueFloater]:G4}");
+            if (!near(plainWall[floater], coverWall[floater]) || !near(plainWall[opaqueFloater], coverWall[opaqueFloater])
+                || !(plainNoWall[floater] > 0.5f * plainWall[floater]) || !(plainNoWall[opaqueFloater] > 0.5f * plainWall[opaqueFloater])
+                || MathF.Abs(coverNoWall[floater]) > 0.02f * plainWall[floater] || MathF.Abs(coverNoWall[opaqueFloater]) > 0.02f * plainWall[opaqueFloater])
+            {
+                Console.WriteLine("[TrainerGate] FAIL: free space cover mode");
+                return false;
+            }
             Console.WriteLine("[TrainerGate] free space PASS");
             return true;
         }
         finally
         {
             trainer.FreeSpaceWeight = 0f;
+            trainer.FreeSpaceCover = false;
             trainer.SetDepthTarget(null);
         }
     }

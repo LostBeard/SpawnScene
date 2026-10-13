@@ -16,7 +16,7 @@ are the depth maps used at all?
 
 - Census against each photo's depth map (`&depthcheck=1` measure, `&depthcarve=1` carve) + agreement bins.
 - Free-space loss `&freespace=X`: per pixel the opacity in front of (1 - 0.15) x the photo's depth, 1 - T_f.
-- Depth maps kept at the multi-view prediction size, 672 px (`&depthtargetpx`; was 384).
+- Depth maps: `&depthtargetpx` (default 384; 672 = the multi-view prediction size measured the same, below).
 - TrainerGate PASS: opaque floater 1.0 vs photo depth (0.49 vs the render's surface); free-space gradient vs finite
   differences within 2.5%; red checks.
 
@@ -46,5 +46,22 @@ The capture itself: close-ups with the room out of focus, a mirror-glossy table,
 Off the photo path (Wander pan views = turning around in the room): `img/pinecone-freespace-pan-2026-10-13.jpg` (left
 sA, right sF03) - walls flat, frames / door / armchairs / floor readable, the fog mostly gone.
 
-Next: weight sweep down (0.1), 672 vs 384 px maps, free space + depth loss, then the user path and the benchmark scenes
-(must not cost them), then default.
+**Round 2 (same 10 held-out photos):** weight 0.3 at 384 px 16.54 / 0.7107, at 672 px 16.55 / 0.7109 (100 vs 33 MB: kept
+size is not the limit); weight 0.1 16.47 / 0.7062 (5.5% in front); 0.3 + depthloss=1 16.49 / 0.7093 (adds nothing);
+cover mode (`&freespacecover`, push scaled by the opacity behind) 16.51 / 0.7098.
+
+## Validation for a default (llffhold=8 held out, `&freespace=0.3` vs off)
+
+| scene | path | base | free space 0.3 | note |
+|---|---|---|---|---|
+| Pine cone | own SfM, dataset | 15.64 / 0.657 | **16.49 / 0.694** | LPIPS 0.559 -> 0.501; room readable off-path |
+| Pine cone | user path | 14.53 / 0.646 | **14.68 / 0.677** | right half 14.88 -> 15.30 |
+| Kitchen360 | own SfM, dataset | 31.71 / 0.929 | 31.53 / 0.930 | 2.6x faster (353 -> 137 s); off-path fog gone (`img/kitchen-freespace-out-2026-10-13.jpg`), one see-through gap |
+| Bathroom | user path | 19.21 / 0.859 | 18.64 / 0.855 | ALL on held-out photo 30 (HDR): 16.45 -> 13.81 (reproduced 16.51 -> 14.01); the other three up; cover mode 14.14 |
+| Bicycle360 | own SfM, dataset | (baseline run hung at boot) | 24.63 / 0.728 | 2.8M splats, 484 s |
+
+Not a default yet: the Bathroom photo-30 loss is unexplained (cover mode did not fix it, so not the see-through hole
+alone). Next batch (tuvok-y.sh): held-out renders on the user path (`&dumpheld`, 0a01889), per-photo held-out pose
+refinement in the log (5135841), and the HELD-OUT photo depth measure (53c9a28) - the held-out photos' own depth maps,
+which never reach training (TJ's idea; the supervised measure partly grades its own homework once free space trains
+against those maps).

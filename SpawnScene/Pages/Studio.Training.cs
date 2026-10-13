@@ -1431,6 +1431,8 @@ public partial class Studio
         }
         // Carved splats have opacity 0 and paint nothing: the census now reads what the saved scene will hold.
         if (photoDepth != null && carve) await MeasureAgainstPhotoDepthAsync(packed, n, views, box, w, h, photoDepth, "after the end carve");
+        // The independent one: the held-out photos' own depth maps, on the scene as it will be saved (no-op without held-out photos).
+        if (photoDepth != null) await MeasureAgainstPhotoDepthAsync(packed, n, views, box, w, h, photoDepth, "(final scene)", heldOut: true);
         return carve && (report.Floaters > 0 || (CarveUnseen && report.Unseen > 0));
     }
 
@@ -1439,14 +1441,21 @@ public partial class Studio
     /// blending weight in front of the photos' depth (the floater measure held-out PSNR cannot give: every held-out photo
     /// sits beside a training photo, where a floater lines up with what is behind it) and the per-pixel agreement of the
     /// render's surface with the maps (their scale check).
+    /// <para>
+    /// <paramref name="heldOut"/>: the HELD-OUT photos instead (TJ, 2026-10-13: "use the depth map from that held out
+    /// image"). Their maps never reach training - free space and the depth loss train against the supervised photos'
+    /// maps, so the supervised measure partly grades its own homework; this one does not. Still DAv3's estimate, not
+    /// ground truth (a blown-out window, a mirror).
+    /// </para>
     /// </summary>
     private async Task MeasureAgainstPhotoDepthAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n, IReadOnlyList<TrainingView> views,
-        SplatBounds.Aabb box, int w, int h, DepthFusionInit.DepthTargets photoDepth, string when)
+        SplatBounds.Aabb box, int w, int h, DepthFusionInit.DepthTargets photoDepth, string when, bool heldOut = false)
     {
+        if (heldOut && !views.Any(v => !v.UsedForSupervision && CensusDepthFor(v, photoDepth) != null)) return;
         _trainer!.ResetFloaterCensus(n);
         foreach (var v in views)
         {
-            if (!v.UsedForSupervision) continue;
+            if (v.UsedForSupervision == heldOut) continue;
             var dref = CensusDepthFor(v, photoDepth);
             if (dref == null) continue;
             var cam = v.Camera.ScaledTo(w, h);
@@ -1456,9 +1465,10 @@ public partial class Studio
         var agreement = await _trainer.ReadDepthAgreementAsync();
         var r = await _trainer.ClassifyFloatersAsync(packed, n, CarveFloaterShare > 0f ? CarveFloaterShare : 0.9f, minWeight: CarveUnseenMinWeight, carve: false);
         double all = r.WeightByFront.Sum();
-        Console.WriteLine($"[Floaters] PHOTO DEPTH {when}: {(all > 0 ? r.FrontWeight / all : 0):P2} of all weight in front of the photos' depth " +
+        string tag = heldOut ? "HELD-OUT PHOTO DEPTH" : "PHOTO DEPTH";
+        Console.WriteLine($"[Floaters] {tag} {when}: {(all > 0 ? r.FrontWeight / all : 0):P2} of all weight in front of the photos' depth " +
             $"(at {DepthCarveMargin:P0}, radius {DepthCarveRadius}); {r}");
-        Console.WriteLine($"[Floaters] PHOTO DEPTH agreement {when}: {agreement}");
+        Console.WriteLine($"[Floaters] {tag} agreement {when}: {agreement}");
     }
 
     /// <summary>

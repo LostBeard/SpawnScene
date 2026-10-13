@@ -183,6 +183,15 @@ Custom immediate-mode-style UI rendered entirely via WebGPU for VR compatibility
   splat's share of blending weight in front of the photos' surfaces; >= 0.9 is removed every 1000 iterations while
   densifying and at the end, plus splats under 1 px of weight in every photo. Bicycle 7K held out 25.01 -> 24.97 dB,
   SSIM 0.7630 -> 0.7643, sky drips and near-grass haze gone off the photo path; TruckFull 7K 23.74 -> 23.94 dB.
+- **Free space against the photos' depth is a DEFAULT (2026-10-13; TJ: floaters "all over the room" off the photo path, "none
+  of them show up on the depth maps"):** `&freespace=0.3` + `&freespacecover=1` (SplatTrainerGpu.FreeSpace; `&freespace=0`
+  off). Loss per pixel = the opacity in front of (1 - 0.15) x the photo's DAv3 depth (1 - T_f), scaled by the opacity
+  BEHIND it (cover: no push where nothing is behind, so a wrong far depth cannot open a hole). Only where the generate kept
+  depth maps (our SfM; not COLMAP-posed benchmark runs). Held out vs off: pine cone 15.64 -> 16.51, Kitchen 31.71 -> 31.70,
+  Bicycle 24.65 -> 24.65, Bathroom 19.22 -> 18.59 (one bright-window photo); the held-out photos' own depth agreed better
+  on all. Judge floaters HELD OUT + Wander + `HELD-OUT PHOTO DEPTH` (`&depthcheck=1`), never supervised PSNR (COLMAP poses
+  on the pine cone: 31.4 supervised / 12.4 held out). Research/floaters-photo-depth-2026-10-13.md. The census can also
+  carve against the photos' depth (`&depthcarve=1`, weak: 39% -> 37% in front) and TrainerGate covers all of it.
 - **Census: a pixel with no surface has nothing in front of it** (fixed 2026-10-07, 37c1fd2). Pixels that never turned
   opaque kept a 3e38 sentinel and every splat on them counted as a floater: the carve deleted the still-thin walls of
   TJ's Bathroom ("TONS of holes"). TrainerGate's thin-splat-in-a-hole case guards it. Bicycle unchanged by the fix

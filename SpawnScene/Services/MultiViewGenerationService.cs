@@ -1205,7 +1205,7 @@ public class MultiViewGenerationService
     }
 
     /// <summary>Keep the photos' scaled depth maps after a generate (Studio's &amp;depthloss: training supervises with them).</summary>
-    public static bool KeepDepthTargets { get; set; }
+    public static bool KeepDepthTargets { get; set; } = true;   // free space is a default (2026-10-13): ~33 MB, released after training
 
     /// <summary>
     /// <c>&amp;depthtargetpx=N</c>: long side of the kept depth maps (384). MEASURED 2026-10-13, pine cone held out with

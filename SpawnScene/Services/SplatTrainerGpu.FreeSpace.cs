@@ -22,7 +22,7 @@ namespace SpawnScene.Services;
 public sealed partial class SplatTrainerGpu
 {
     /// <summary>Build the backward with the free-space term (read when the pipelines are built). <c>&amp;freespace=X</c>.</summary>
-    public static bool FreeSpace { get; set; }
+    public static bool FreeSpace { get; set; } = true;
 
     /// <summary>The term's weight (lambda; the loss is lambda x the mean over pixels of 1 - T_f). 0 = no term this step.</summary>
     public float FreeSpaceWeight { get; set; }

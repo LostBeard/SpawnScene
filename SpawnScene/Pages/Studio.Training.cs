@@ -173,11 +173,16 @@ public partial class Studio
     /// <c>&amp;freespace=X</c>: the free-space loss (SplatTrainerGpu.FreeSpace) at weight X for the whole run - every photo's
     /// depth map says the space in front of its surface is empty, and the opacity piled up there is the loss. 0 = off.
     /// </summary>
-    public static float FreeSpaceOption { get; set; }
+    /// <remarks>DEFAULT 0.3 with <see cref="FreeSpaceCover"/> since 2026-10-13 (Research/floaters-photo-depth-2026-10-13.md):
+    /// held out vs off - pine cone own SfM 15.64 -> 16.51 dB (LPIPS 0.559 -> ~0.50, the room readable off the photo path),
+    /// Kitchen360 31.71 -> 31.70 (fog gone off-path, 2.6x faster), Bicycle360 24.65 -> 24.65 (SSIM +0.002), Bathroom 19.22
+    /// -> 18.59 (all on one held-out photo of a bright patterned window, 16.56 -> 13.83, at weights 0.1 and 0.3 alike);
+    /// the held-out photos' own depth agreed better on every scene. <c>&amp;freespace=0</c> = off.</remarks>
+    public static float FreeSpaceOption { get; set; } = 0.3f;
     /// <summary><c>&amp;freespacemargin=M</c>: in front = closer than (1 - M) x the photo's depth.</summary>
     public static float FreeSpaceMargin { get; set; } = 0.15f;
     /// <summary><c>&amp;freespacecover=1</c>: SplatTrainerGpu.FreeSpaceCover (push scaled by the opacity behind).</summary>
-    public static bool FreeSpaceCover { get; set; }
+    public static bool FreeSpaceCover { get; set; } = true;
     /// <summary><c>&amp;freespacer=R</c>: the photo's surface = the nearest map depth within R map pixels.</summary>
     public static int FreeSpaceRadius { get; set; } = 1;
 

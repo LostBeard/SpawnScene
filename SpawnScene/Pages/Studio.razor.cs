@@ -219,11 +219,11 @@ public partial class Studio : IAsyncDisposable
         // &freespace=X: the free-space loss against the photos' depth maps (SplatTrainerGpu.FreeSpace), weight X;
         // &freespacemargin=M, &freespacer=R.
         if (query.TryGetValue("freespace", out var fsq2) && float.TryParse(fsq2, System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var fsv) && fsv > 0f)
+                System.Globalization.CultureInfo.InvariantCulture, out var fsv))
         {
-            FreeSpaceOption = Math.Clamp(fsv, 0f, 100f);
-            SplatTrainerGpu.FreeSpace = true;
-            MultiViewGenerationService.KeepDepthTargets = true;
+            FreeSpaceOption = Math.Clamp(fsv, 0f, 100f);   // 0 = off (the default is 0.3)
+            SplatTrainerGpu.FreeSpace = FreeSpaceOption > 0f;
+            if (FreeSpaceOption > 0f) MultiViewGenerationService.KeepDepthTargets = true;
         }
         if (query.TryGetValue("freespacemargin", out var fsmq) && float.TryParse(fsmq, System.Globalization.NumberStyles.Float,
                 System.Globalization.CultureInfo.InvariantCulture, out var fsmv)) FreeSpaceMargin = Math.Clamp(fsmv, 0f, 0.9f);

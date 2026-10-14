@@ -1208,7 +1208,8 @@ public class MultiViewGenerationService
     /// <summary>
     /// The DAv3 model the multi-photo path runs (poses, seeds, the free-space maps). It was always the default (Small): the
     /// project's Depth model setting and &amp;depthmodel reached only the single-photo path (2026-10-13: an A/B of Base
-    /// measured Small twice - same 639,154 seeds). Studio sets it from the project setting / &amp;depthmodel per generate.
+    /// measured Small twice - same 639,154 seeds). Studio sets it per generate from &amp;depthmodel only (default Small; Base
+    /// measured worse on the multi-photo path).
     /// </summary>
     public static string MultiViewDepthModelId { get; set; } = DepthEstimationService.DefaultModelId;
 

@@ -672,8 +672,10 @@ public partial class Studio
         if (_activeProject == null) return;
         // The depth input the measured runs used (the dataset path sets it per run; nothing else may leak in).
         DepthEstimationService.SetSquareInput(DepthEstimationService.SafeMultiViewPatches);
-        // The project's depth model drives the multi-photo path too (poses, seeds, free-space maps); &depthmodel wins.
-        var mvModel = DepthModelOverride ?? _activeProject.Settings.DepthModel ?? DepthEstimationService.DefaultModelId;
+        // The multi-photo path runs DAv3 Small unless the harness asks (&depthmodel): the project's Depth model setting is the
+        // SINGLE-photo one (the UI shows it under "Single photo"), and Base measured worse here (pine cone held out 16.30 vs
+        // 16.56, 2026-10-13) - a user choosing Base for single photos must not silently get it for multi-photo scenes.
+        var mvModel = DepthModelOverride ?? DepthEstimationService.DefaultModelId;
         MultiViewGenerationService.MultiViewDepthModelId = DepthEstimationService.AvailableModels.Any(m => m.Id == mvModel)
             ? mvModel : DepthEstimationService.DefaultModelId;
 

@@ -78,7 +78,10 @@ rows: 2.3x as many splats as before in the same memory, a picture 60 dB PSNR fro
     matched still start covered (a phone capture of a bathroom: +1.3 dB on held-out photos);
   - **per-photo exposure**: per-channel gains learned for each photo, so a phone's auto exposure does not end up
     baked into the scene (the same bathroom: +1.7 dB held out);
-  - **floater removal**: a GPU census removes splats that hang in front of what the photos saw;
+  - **floater removal**: a GPU census removes splats that hang in front of what the photos saw, and a **free-space
+    loss** (Quality > Floater cleanup, on by default) pushes down the opacity piled up in front of each photo's own depth
+    map, so faint floaters off the photo path fade while they train (pine cone, held out: 15.64 -> 16.49 dB, LPIPS
+    0.559 -> 0.501; the room is readable when the camera turns around);
   - **solid surfaces**: training over a random background makes the walls the photos saw opaque, so turning around in
     a room no longer shows holes through them (a bathroom: see-through pixels off the photo path 12% -> 5%).
 - **Fast**: a WebGPU subgroup reduction in the backward pass, tile binning that follows each splat's ellipse, and no

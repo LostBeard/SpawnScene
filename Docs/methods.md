@@ -42,7 +42,22 @@ cost).
   (the reference keeps `a` on both, and the image jumps at every densify).
 - **Floater census**: a GPU pass measures each splat's share of blending weight in front of the photos' surfaces
   (the depth at which transmittance falls through 0.5); splats that are mostly in front of what every photo saw are
-  removed while densifying and at the end.
+  removed while densifying and at the end. The census's surface is the render's own, so an opaque floater defines it
+  and survives; the free-space loss below uses the photos' depth maps instead.
+- **Free space** (default since 2026-10-13; Quality > Floater cleanup, `&freespace=0` off): every photo's depth map
+  says the space between its camera and its surface is empty. Per pixel the loss is `1 - T_f`, the opacity piled up in
+  front of that surface (`T_f` = transmittance after the last splat closer than 0.85 x the photo's depth; the surface is
+  the nearest map depth within one map pixel), weight 0.3. A faint floater gets the same push as an opaque one, unlike
+  the depth loss, whose L1 on the blended MEAN inverse depth barely moves for a splat carrying 5% of a pixel. **Cover
+  mode** (on) scales each pixel's term by the opacity behind those splats, so a wrong far depth (a blown-out window)
+  cannot open a see-through hole. The gradient is checked against finite differences (within 2.5%) in the trainer
+  gate. Measured held out (llffhold=8), weight 0.3 vs off: pine cone 15.64 -> 16.49 dB (LPIPS 0.559 -> 0.501), pine cone
+  user path 14.53 -> 14.68, Kitchen 31.71 -> 31.53 (2.6x faster), Bicycle neutral, Bathroom 19.21 -> 18.64 (all on one
+  HDR photo). The High preset grows more floaters without it (62.6% of the weight in front of the held-out photos'
+  depth vs 5.5% with it). Details: `Research/floaters-photo-depth-2026-10-13.md`.
+- **Judging floaters**: supervised PSNR rewards floaters (COLMAP poses: 31.4 dB supervised, 12.4 held out), so the
+  measures are the share of weight in front of the HELD-OUT photos' depth maps (never trained on) and Wander views off
+  the photo path; held-out PSNR second.
 - **Per-photo exposure** (gains only): each photo gets three per-channel gains, learned with the scene and folded into
   it at the end (the reference's appearance model is a full 3x4 affine; its offsets cannot fold into a semi-transparent
   scene and cost fixed-exposure captures 0.2-0.6 dB, so we keep the gains). Used when the photos' EXIF exposure varies

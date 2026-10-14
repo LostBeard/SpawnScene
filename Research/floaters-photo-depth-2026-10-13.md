@@ -79,3 +79,8 @@ Stays opt-in.
 098aca6; the first "Base" run measured Small twice, same 639,154 seeds). DAv3 Base for real (439 MB model storage):
 pine cone 16.30 / 0.698 vs Small 16.56 / 0.711 - worse (it also moves the poses). With 384 vs 672 px maps the same, the
 depth maps' quality is not the lever on this capture; DA3METRIC-LARGE (a second, mono model for the maps only) parked.
+
+**High preset** (pine cone user path, 15K iterations at 1600 px, `&preset=High`, held out): free space off 13.90 / 0.653
+(SSIM ENDS BELOW ITS START 0.664; 62.6% of the weight in front of the held-out photos' depth; 1.32M splats, 772 s) - on
+(the default) 14.24 / 0.681, 5.5% in front, 1.03M splats, 603 s. Higher presets grow more floaters on this capture;
+free space matters more there. `img/pinecone-high-preset-freespace-pan-2026-10-13.jpg` (left off, right on).

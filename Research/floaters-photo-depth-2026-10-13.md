@@ -131,6 +131,6 @@ render (shared with the training loss); not changed.
 
 Also found: `&dumpheld`'s viewer-side render is capped to the VIEWER's SH degree (0 in this run: `Math.Min(trainer, viewer)`),
 i.e. DC-only, so it is not the trainer's render; the new `-evalrender` frames are.
-Fix (uncommitted until built and gated): `eval_sse` clamps; TrainerGate PsnrGateAsync (no gate scored PSNR before: the SSIM
+Fix (65cd9d7; gate green: gpu 14.4992 dB = clamped oracle, unclamped 12.3490; red-check with the clamp removed FAILS by name): `eval_sse` clamps; TrainerGate PsnrGateAsync (no gate scored PSNR before: the SSIM
 case discards it) writes a hostile render (x1.8 and below-0 stripes) into the output buffer and compares with a clamping
 oracle, plus a vacuity check that clamping moves the score > 0.5 dB.

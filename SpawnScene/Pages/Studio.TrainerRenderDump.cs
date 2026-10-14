@@ -146,6 +146,54 @@ public partial class Studio
             float[] rgb;
             try { rgb = await _trainer.RenderForwardAsync(packed, n, c, near, far); }
             finally { _trainer.ActiveShDegree = trainerDegree; }
+            await StashRgbAsync(key, rgb, w, h);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[Dataset] trainer render for {key} failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// <c>&amp;dumpheld=1</c>, at the final score: for every held-out view, the render and the training target that
+    /// <c>EvaluateAsync</c> compared (same <paramref name="packed"/>, same camera), the score the trainer gives that pair, and a
+    /// CPU PSNR of the two frames. 2026-10-14: Bathroom photo 30's dumped viewer render scored 16.62 dB against the photo
+    /// where the run logged 13.92; these frames say which one is the scene, the camera or the target.
+    /// </summary>
+    async Task DumpHeldEvalFramesAsync(MemoryBuffer1D<float, Stride1D.Dense> packed, int n,
+        IReadOnlyList<TrainingView> views, MemoryBuffer1D<uint, Stride1D.Dense> targets, SplatBounds.Aabb box)
+    {
+        var (w, h) = _trainer!.Size;
+        for (int i = 0; i < views.Count; i++)
+        {
+            if (views[i].UsedForSupervision) continue;
+            var cam = views[i].Camera.ScaledTo(w, h);
+            var (near, far) = SplatBounds.DepthRangeFor(box, cam);
+            // CPU transfer: one diagnostic render + target per held-out view, a harness flag only.
+            var render = await _trainer.RenderForwardAsync(packed, n, cam, near, far, readback: true);
+            var (psnr, _) = await _trainer.ScoreAgainstAsync(targets, i);   // scores the render just made
+            var target = await _trainer.ReadTargetAsync();
+            double se = 0;
+            for (int k = 0; k < render.Length; k++) { double d = Math.Clamp(render[k], 0f, 1f) - target[k]; se += d * d; }
+            double cpuPsnr = 10 * Math.Log10(1.0 / Math.Max(se / render.Length, 1e-12));
+            string name = System.IO.Path.GetFileNameWithoutExtension(views[i].ImageName);
+            Console.WriteLine($"[Dataset] HELD-EVAL view {i} {name}: trainer score {psnr:F2} dB, CPU PSNR of that render vs that target " +
+                $"{cpuPsnr:F2} dB, trainer SH degree {_trainer.ActiveShDegree}, viewer SH degree {_gpuRenderer.ShDegree}");
+            await StashRgbAsync($"held-{name}-evalrender", render, w, h);
+            await Task.Delay(1500);   // the harness polls every 500 ms
+            await StashRgbAsync($"held-{name}-target", target, w, h);
+            await Task.Delay(1500);
+        }
+    }
+
+    /// <summary>
+    /// Hands a float RGB frame (w x h x 3, 0-1) to the harness as <c>TRAINER-RENDER key</c> (it saves the hidden canvas as
+    /// <c>...__key.png</c>). Used for the trainer's renders and, with <c>&amp;dumpheld=1</c>, for the training TARGETS too.
+    /// </summary>
+    async Task StashRgbAsync(string key, float[] rgb, int w, int h)
+    {
+        try
+        {
             var px = new byte[w * h * 4];
             for (int i = 0; i < w * h; i++)
             {

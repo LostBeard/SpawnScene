@@ -1922,7 +1922,11 @@ fn eval_sse(
     if (p < dims.x) {
         for (var c = 0u; c < 3u; c = c + 1u) {
             let i = p * 3u + c;
-            let d = rendered[i] - ref_image[dims.y + i];
+            // The render is the raw SH colour and can pass 1 (a blown-out window); a picture, the viewer and every
+            // other scorer (8-bit PNGs) clamp it. Unclamped, Bathroom's HDR window photo scored 13.88 dB while the
+            // same render against the same target is 16.52 dB (2026-10-14, HELD-EVAL), and free space's brighter
+            // window read as a 0.6 dB loss that was only overshoot. The gate's PSNR case guards it.
+            let d = clamp(rendered[i], 0.0, 1.0) - ref_image[dims.y + i];
             e = e + d * d;
         }
     }

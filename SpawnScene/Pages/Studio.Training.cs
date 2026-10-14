@@ -1308,6 +1308,7 @@ public partial class Studio
 
             var fitted = await EvaluateAsync(_trainer, packed, n, views, targets, box, logPerView: true);
             WarnOnEvalOverflow(fitted, views.Count);
+            if (DumpHeldOption) await DumpHeldEvalFramesAsync(packed, n, views, targets, box);
             if (BlobPickOption) await BlobPickAsync(packed, n, views, supervised, targets, box);
             await ReportHeldOutFittedGainsAsync(_trainer, packed, n, views, targets, box);
             await ReportHeldOutCrossMatchAsync(_trainer, packed, n, views, targets, box);

@@ -233,6 +233,7 @@ public partial class Studio
             if (!await LossReadoutGateAsync(packedDc, n, cam, depthNear, depthFar)) return;
 
             if (!await SsimGateAsync(trainer, accel, gpuColour)) return;
+            if (!await PsnrGateAsync(trainer, accel, gpuColour)) return;
 
             // ── Training: fit SH DC + opacity back to a target rendered from KNOWN parameters ──
             // The target is this same scene; the splats are then perturbed. So the optimiser
@@ -1064,6 +1065,75 @@ public partial class Studio
         }
 
         Console.WriteLine("[TrainerGate] SSIM PASS");
+        return true;
+    }
+
+    /// <summary>
+    /// Does the GPU PSNR (<c>eval_sse</c>) score what a PICTURE of the render would score? The render is the raw SH colour
+    /// and passes 1 (a blown-out window) or dips under 0; the viewer, the PNG dump and every other scorer clamp it, and
+    /// this shader did not: Bathroom's HDR window photo read 13.88 dB in-app against 16.52 dB for the same render and
+    /// target on the CPU (2026-10-14, HELD-EVAL), so free space looked 0.6 dB worse than off when only the overshoot
+    /// differed. Until then NO gate scored PSNR at all (the SSIM case discards it).
+    /// A hostile render goes straight into the trainer's output buffer: one stripe x1.8 (over range), one pushed 0.3
+    /// under, the rest as rendered; scored at a NON-ZERO stack slot against a quantised degraded copy.
+    /// </summary>
+    async Task<bool> PsnrGateAsync(
+        SplatTrainerGpu trainer, SpawnDev.ILGPU.WebGPU.WebGPUAccelerator accel, float[] rendered)
+    {
+        int pixels = GateWidth * GateHeight;
+        var hostile = (float[])rendered.Clone();
+        for (int y = 0; y < GateHeight; y++)
+            for (int x = 0; x < GateWidth; x++)
+                for (int c = 0; c < 3; c++)
+                {
+                    int k = (y * GateWidth + x) * 3 + c;
+                    if (x >= GateWidth * 2 / 3) hostile[k] = rendered[k] * 1.8f + 0.2f;
+                    else if (x >= GateWidth / 3) hostile[k] = rendered[k] - 0.3f;
+                }
+
+        var degraded = Degrade(rendered, GateWidth, GateHeight);
+        var packed8 = new uint[pixels * 2];
+        PackRgba8(rendered, packed8, 0, pixels);
+        PackRgba8(degraded, packed8, pixels, pixels);
+        var targetQ = UnpackRgba8(packed8, pixels, pixels);
+        using var stackBuf = accel.Allocate1D<uint>(packed8.Length);
+        stackBuf.CopyFromCPU(packed8);
+
+        double se = 0, seRaw = 0;
+        for (int k = 0; k < hostile.Length; k++)
+        {
+            double a = Math.Clamp(hostile[k], 0f, 1f) - targetQ[k], r = hostile[k] - targetQ[k];
+            se += a * a; seRaw += r * r;
+        }
+        double cpuClamped = 10 * Math.Log10(1.0 / (se / hostile.Length));
+        double cpuRaw = 10 * Math.Log10(1.0 / (seRaw / hostile.Length));
+
+        trainer.RenderedColour!.CopyFromCPU(hostile);
+        await accel.SynchronizeAsync();
+        var (gpu, _) = await trainer.ScoreAgainstAsync(stackBuf, 1, withSsim: false);
+        trainer.RenderedColour!.CopyFromCPU(rendered);   // leave the buffer as the render the later stages expect
+        await accel.SynchronizeAsync();
+
+        Console.WriteLine($"[TrainerGate] PSNR: gpu {gpu:F4} dB, cpu (clamped like a picture) {cpuClamped:F4} dB, " +
+            $"cpu unclamped {cpuRaw:F4} dB (d {Math.Abs(gpu - cpuClamped):E2})");
+        if (double.IsNaN(gpu) || double.IsNaN(cpuClamped))
+        {
+            Console.WriteLine("[TrainerGate] FAIL: PSNR returned NaN");
+            return false;
+        }
+        // The fixture can only catch an unclamped shader if clamping changes the answer by a margin the tolerance cannot hide.
+        if (!(cpuClamped - cpuRaw > 0.5))
+        {
+            Console.WriteLine($"[TrainerGate] FAIL: PSNR fixture is vacuous - clamping moves the score only {cpuClamped - cpuRaw:F3} dB");
+            return false;
+        }
+        if (Math.Abs(gpu - cpuClamped) > 1e-2)
+        {
+            Console.WriteLine($"[TrainerGate] FAIL: GPU PSNR {gpu:F4} dB disagrees with the clamped oracle {cpuClamped:F4} dB " +
+                $"(the unclamped oracle says {cpuRaw:F4} dB)");
+            return false;
+        }
+        Console.WriteLine("[TrainerGate] PSNR PASS");
         return true;
     }
 

@@ -65,3 +65,17 @@ alone). Next batch (tuvok-y.sh): held-out renders on the user path (`&dumpheld`,
 refinement in the log (5135841), and the HELD-OUT photo depth measure (53c9a28) - the held-out photos' own depth maps,
 which never reach training (TJ's idea; the supervised measure partly grades its own homework once free space trains
 against those maps).
+
+## Evening (2026-10-13): depth start and depth model, on today's defaults (free space 0.3 cover)
+
+**Depth seeds, pine cone own SfM held out** (same 10 photos): agreement mode (default) 16.56 / 0.711 (639K seeds);
+uncontradicted `&depthinitmode=free` 16.65 / 0.718 (289K seeds - FEWER: it also drops agreed samples another photo sees
+through); stride 2 16.46 / 0.695 (2.55M seeds: denser hurts); free + stride 2 16.57 / 0.709.
+Uncontradicted across scenes vs the default: pine cone user path 14.68 -> 14.73 (SSIM +0.008, 130 -> 108 s), Bathroom
+18.59 -> 18.61, Kitchen 31.70 -> 31.65, **Bicycle 24.65 -> 24.43** (thin foliage: other photos rightly see through gaps).
+Stays opt-in.
+
+**Depth model:** the multi-photo path always ran DAv3 Small - the Depth model setting reached only single photos (fixed
+098aca6; the first "Base" run measured Small twice, same 639,154 seeds). DAv3 Base for real (439 MB model storage):
+pine cone 16.30 / 0.698 vs Small 16.56 / 0.711 - worse (it also moves the poses). With 384 vs 672 px maps the same, the
+depth maps' quality is not the lever on this capture; DA3METRIC-LARGE (a second, mono model for the maps only) parked.

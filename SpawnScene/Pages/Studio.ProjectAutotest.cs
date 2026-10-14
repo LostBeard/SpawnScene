@@ -20,6 +20,9 @@ public partial class Studio
     /// Speaks the dataset harness's markers ([Dataset] READY-FOR-CAPTURE free-..., DONE, FAIL):
     /// <c>AUTOTEST=project node tools/_cdp_dataset.js NAME ITERS</c>, with COUNT / STRIDE picking the photos.
     /// </remarks>
+    /// <summary>&amp;preset=Draft|Standard|High|Max (harness): the project autotest's preset, applied as the UI applies it.</summary>
+    public static string? AutotestPreset { get; set; }
+
     private async Task RunProjectAutotestAsync(string datasetName, int trainIters, int count, int stride,
         int maxSplats = 3_000_000, int trainRes = 1024, bool pageOnly = false)
     {
@@ -60,9 +63,16 @@ public partial class Studio
             var names = allNames.Where((_, i) => i % Math.Max(1, stride) == 0).Take(count).ToList();
 
             // -- A project, with the photos stored exactly as the file picker stores them --
-            var project = await _projectService.CreateProjectAsync(
-                $"autotest {datasetName} {DateTime.Now:MMdd-HHmmss}",
-                new ProjectSettings { TrainIterations = trainIters, TrainMaxSplats = maxSplats, TrainMaxDimension = trainRes });
+            var settings = new ProjectSettings { TrainIterations = trainIters, TrainMaxSplats = maxSplats, TrainMaxDimension = trainRes };
+            // &preset=High (harness): the preset a user picks, applied as the Preset buttons apply it (iterations, training
+            // size, keypoints, densify bar) - it replaces the harness's train= / resolution.
+            if (AutotestPreset != null && ReconstructionPresets.All.Any(p => p.Name == AutotestPreset))
+            {
+                ReconstructionPresets.Apply(settings, AutotestPreset);
+                trainIters = settings.TrainIterations;   // the checks below compare against what was trained
+                Console.WriteLine($"[Dataset] preset {AutotestPreset}: {settings.TrainIterations} iterations, training size {settings.TrainMaxDimension}");
+            }
+            var project = await _projectService.CreateProjectAsync($"autotest {datasetName} {DateTime.Now:MMdd-HHmmss}", settings);
             var t0 = DateTime.UtcNow;
             if (video != null)
             {

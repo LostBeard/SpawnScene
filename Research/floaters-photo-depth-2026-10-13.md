@@ -84,3 +84,27 @@ depth maps' quality is not the lever on this capture; DA3METRIC-LARGE (a second,
 (SSIM ENDS BELOW ITS START 0.664; 62.6% of the weight in front of the held-out photos' depth; 1.32M splats, 772 s) - on
 (the default) 14.24 / 0.681, 5.5% in front, 1.03M splats, 603 s. Higher presets grow more floaters on this capture;
 free space matters more there. `img/pinecone-high-preset-freespace-pan-2026-10-13.jpg` (left off, right on).
+
+## 2026-10-14: Bathroom photo 30 - the dump and the logged score disagree (CPU-only look, no GPU)
+
+Photo 30 (the HDR window photo) is the whole Bathroom loss for free space (16.56 -> 13.92 logged, hB0 vs hB3). The
+`&dumpheld` renders of both arms (`_shots/dataset/Bathroom__tuvok-hB0/hB3__held-IMG_20260223_133612910_HDR-trainer.png`)
+scored against the photo's JPEG (resized 3120x4160 -> 768x1024, bilinear; numpy, no GPU):
+
+| arm | logged `final view 30` | dump vs JPEG | window box MSE | window pixels > 0.95 |
+|---|---|---|---|---|
+| off (hB0) | 16.56 | 16.65 | 0.0494 | 5% |
+| on (hB3) | 13.92 | **16.62** | 0.0479 | 26% (photo: 29%) |
+
+The OFF arm's dump agrees with its logged score; the ON arm's does not (2.7 dB). So the logged 13.92 is NOT what the
+dumped render looks like against the photo: either the dump (StashTrainerRenderAsync: viewer's packed buffer after the
+end carve, `hv.Camera`, SH degree capped to the viewer's) and the score (EvaluateAsync: the trainer's `packed`, `views[i].Camera`,
+`ScoreAgainstAsync` vs the training target) see different scenes/cameras for this view, or the target differs from the JPEG.
+Checked in code: targets carry no EXIF exposure scaling; both paths call `RenderForwardAsync`. Not yet known which side is
+wrong, so no claim about floaters or the window from either number. Visually (dump): off = hazy grey veil over the
+window's left part; on = the blue pattern and a white band much nearer the photo's contrast (window brightness 0.815
+vs photo 0.726, off 0.773). The "free space costs Bathroom 0.6 dB" row in the table above rests on the logged score.
+
+Next (one 2.5-minute Bathroom 7K run when the GPU is free, not an hour): in the same process log the score of view 30 AND
+write the trainer's render, the training target (ReadTargetAsync) and the dump's render for it, then compare the three
+pixel for pixel. That settles whether the logged held-out number or the dump is the faithful one before more is built on it.

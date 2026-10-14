@@ -108,3 +108,29 @@ vs photo 0.726, off 0.773). The "free space costs Bathroom 0.6 dB" row in the ta
 Next (one 2.5-minute Bathroom 7K run when the GPU is free, not an hour): in the same process log the score of view 30 AND
 write the trainer's render, the training target (ReadTargetAsync) and the dump's render for it, then compare the three
 pixel for pixel. That settles whether the logged held-out number or the dump is the faithful one before more is built on it.
+
+### Resolved (same day, one Bathroom 7K run, `&dumpheld=1`, free space ON): the in-app PSNR does not clamp the render
+
+New `HELD-EVAL` log (Studio.TrainerRenderDump.DumpHeldEvalFramesAsync): for each held-out view, the trainer's score and a CPU
+PSNR of THE SAME render against THE SAME target (frames written as `held-<name>-evalrender.png` / `-target.png`):
+
+| view | trainer score | CPU PSNR, same frames (clamped) |
+|---|---|---|
+| 0 | 17.04 | 17.04 |
+| 8 | 22.10 | 22.10 |
+| 23 | 21.69 | 21.83 |
+| 30 (HDR window) | **13.88** | **16.52** |
+
+`eval_sse` (SplatTrainerShaders) is `rendered - target` with NO clamp on the render, and the render is the raw SH colour; a
+picture, the viewer, and the PNG scorers (gsplat/Brush/`rescore.py`, all 8-bit) clamp it. Only the view whose window blows out
+differs (2.64 dB), and free space's brighter window made the ON arm read as the loss. So **the Bathroom -0.6 dB row was
+overshoot the picture never shows; view 30 on a clamped score is 16.52, level with off (16.56 logged, no overshoot).** Every
+in-app held-out PSNR before this fix is slightly low where a render exceeds 1 (largest on HDR / window captures); the
+parity numbers vs Brush/gsplat were scored from PNGs by `rescore.py` and are unaffected. SSIM still scores the unclamped
+render (shared with the training loss); not changed.
+
+Also found: `&dumpheld`'s viewer-side render is capped to the VIEWER's SH degree (0 in this run: `Math.Min(trainer, viewer)`),
+i.e. DC-only, so it is not the trainer's render; the new `-evalrender` frames are.
+Fix (uncommitted until built and gated): `eval_sse` clamps; TrainerGate PsnrGateAsync (no gate scored PSNR before: the SSIM
+case discards it) writes a hostile render (x1.8 and below-0 stripes) into the output buffer and compares with a clamping
+oracle, plus a vacuity check that clamping moves the score > 0.5 dB.

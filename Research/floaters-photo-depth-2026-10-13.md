@@ -133,3 +133,31 @@ Correction (10-15): an earlier version of this note said the viewer-side `&dumph
 Fix (65cd9d7; gate green: gpu 14.4992 dB = clamped oracle, unclamped 12.3490; red-check with the clamp removed FAILS by name): `eval_sse` clamps; TrainerGate PsnrGateAsync (no gate scored PSNR before: the SSIM
 case discards it) writes a hostile render (x1.8 and below-0 stripes) into the output buffer and compares with a clamping
 oracle, plus a vacuity check that clamping moves the score > 0.5 dB.
+
+## 2026-10-15: the window holes (Bathroom, default Floater cleanup), measured over a magenta background
+
+The Wander views of the default Bathroom run showed large BLACK blobs beside the window (pan-2, pan-3). Captured over
+`&bg=1,0,1` (the viewer's clear colour; holes turn magenta, dark splats stay black) they are **see-through holes**, not
+dark splats. Share of magenta pixels per Wander view, same Bathroom 7K user path, one variable changed (`&freespace=0`):
+
+| view | free space off | default A | default B (repeat) |
+|---|---|---|---|
+| pan-2 (toward the window) | 0.03% | 7.29% | **2.91%** |
+| pan-3 | 0.00% | 1.20% | 0.73% |
+| close-3 / in-3 / low-3 / out-3 (the side no photo faces) | 22.1 / 19.1 / 17.3 / 14.4% | 27.4 / 24.2 / 21.2 / 17.6% | 27.8 / 24.7 / 21.8 / 18.1% |
+| mean over 28 views | 2.64% | 3.56% | 3.44% |
+
+Held out (clamped scorer, 4 photos): off 19.29 / 0.8585, default 19.32 / 0.8533 and 19.29 / 0.8526. So free space is level
+on held-out PSNR here (the earlier -0.6 dB was the unclamped scorer) and a little worse on SSIM (-0.005).
+
+What is solid: with free space on, the side no photo faces has ~3-5 points more see-through (both repeats agree, 27.4 and
+27.8 vs 22.1), and pan-2 / pan-3 have window holes the off arm does not (off has a white veil there instead: the floaters
+it removes were covering the gap). The room that photos did see (walls, shelf, curtain, mirror) is clean in all arms.
+
+**Run-to-run noise is large**: pan-2 of the SAME default flags was 7.29% then 2.91%. A single run per arm cannot rank
+anything near that size. (Held-out PSNR repeats within 0.03 dB; SSIM within 0.001; the see-through shares do not.)
+
+Tried and dropped: `&freespacesat=0.9` (no free-space push where the photo's smallest channel is above 0.9, on the idea
+that blown-out window pixels carry no depth evidence): pan-2 3.09%, pan-3 0.22%, mean 3.24% - inside the noise above; held out
+19.26 / 0.8538. Not kept (the code was reverted, never committed). Open: a fill for directions no photo saw is a separate
+feature (parity first, fill later); free space only makes the honest emptiness visible where the floaters used to hide it.

@@ -184,3 +184,30 @@ magenta share pan-2 **50.85%**, pan-3 18.45%, pan-1 5.76%, low-0 15.46%, low-3 1
 mean over 30 views 4.22% (Bathroom default: 3.4-3.6%). Everything the photos saw is solid. The project page already tells the
 user which directions no photo faces (capture feedback). A fill for those directions is the open feature; it is separate from
 floaters and from parity.
+
+## 2026-10-15: fill unseen directions (the 10-08 prototype) as a user setting, and what was wrong with it
+
+TJ 10-15: "yes, please do fill ... make sure it is an option the user can change". The prototype (`&fillunseen=1`, UnseenFill, big-LaMa
+paints the uncovered pixels of views rendered from the capture centre, painted cells become splats) existed since 10-08 (see
+`quality-roadmap-2026-10-07.md`). Now `ProjectSettings.FillUnseen` + a Quality row "Fill unseen directions" Off | On (Off by default:
+invented content; On = big-LaMa, 208 MB once); `&fillunseen=1` still wins from the URL. Tests: ProjectSettingsFillUnseenTests (red-checked).
+
+Pine cone user path, Standard 7K, over magenta, one variable per step (fl0 none; fl1 the 10-08 schedule):
+
+| arm | mean see-through, 30 Wander views | held out | note |
+|---|---|---|---|
+| fl0 no fill | 2.07% | 14.73 / 0.6777 | low-3 16.95%, out-3 8.24%, over-0 7.39% |
+| fl1 the 10-08 fill (x3) | 0.35% | 14.70 / 0.6773 | 264,791 splats, 36.9 s; the up view 89.6% hole -> painted BLACK |
+| fl2 + pitch +-65 rings | 0.32% | 14.72 / 0.6781 | up view 1.6% hole; but the rings' known context was still black |
+| **fl4 + trainer resize** | **0.36%** | 14.72 / 0.6775 | context is real ceiling colour; black dome gone (over-0 0.00%) |
+| fl3 far-priority depth pyramid (tried) | 0.53% | 14.72 / 0.6780 | no effect on the streaks, over-0 6.97%: dropped |
+| fl5 depth-discontinuity guard (tried) | 0.59% | 14.72 / 0.6772 | no effect on the streaks, over-0 6.74%: dropped |
+
+Root causes found from the fill's own strips (`&filldump=1`: input | painted | depth | mask): (1) the up view was 89.6% hole, so LaMa had no
+context and painted black - fixed by +-65 pitch rings, painted inward; (2) the splats a view pastes rendered as opaque BLACK in the next
+views, because the trainer's per-splat buffers (colour, radius, ...) are sized for the TRAINED splat count and a render of more splats
+cannot store their colours - the fill now resizes the trainer first (`SplatTrainerGpu.SizedSplatCount`). (2) was invisible in the
+see-through measure (black counts as covered), only the strips showed it. Not found: the thin radial streaks seen from far off-centre
+(over / out views) and a few uncovered gaps (low-0: 4.4%): two guesses (far-priority depth, a depth-discontinuity guard) were A/B'd and
+changed nothing. Inside views (pan-*) are clean in every arm. The setting path was checked end to end (`&fillsetting=1`, no URL
+override): `[Inpaint] LaMa loaded`, `[Fill] unseen fill (lama)`. Held out is unchanged by the fill (it paints directions no photo faces).

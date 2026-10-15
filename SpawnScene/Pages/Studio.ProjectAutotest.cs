@@ -184,6 +184,10 @@ public partial class Studio
                 return;
             }
 
+            // &exportcolmap=1: our SfM as COLMAP text (as the sample autotest does) - the 360 pose check compares it with COLMAP's own
+            // spherical reconstruction (tools/compare_pano_poses.py).
+            if (ExportColmapOption) await ExportColmapAsync();
+
             // &dumpheld=1: the trainer's render of every held-out photo's view (held-<name>-trainer.png), as the sample
             // autotest does - the Bathroom's free-space loss sat on ONE held-out photo (2026-10-13) and had to be looked at.
             if (DumpHeldOption)

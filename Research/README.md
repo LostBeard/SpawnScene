@@ -15,6 +15,9 @@ the per-scene optimiser. No surveyed method reports competitive quality without 
   Read this before trusting a number: two wrong components can agree with each other, and on
   2026-09-21 they did, for a whole session.
 - **`datasets.md`** — what data we have, and what question each one can actually answer.
+- **`floaters-photo-depth-2026-10-13.md`** — floaters off the photo path and the free-space loss against the photos'
+  depth maps (the default since 2026-10-13), with the held-out measurements per scene. Also why supervised PSNR rewards
+  floaters, and why the in-app PSNR once read a window photo 2.6 dB low (it did not clamp the render; fixed, gated).
 
 ## 1. Canonical 3DGS — the method we are implementing
 

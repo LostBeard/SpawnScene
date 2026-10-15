@@ -129,8 +129,7 @@ in-app held-out PSNR before this fix is slightly low where a render exceeds 1 (l
 parity numbers vs Brush/gsplat were scored from PNGs by `rescore.py` and are unaffected. SSIM still scores the unclamped
 render (shared with the training loss); not changed.
 
-Also found: `&dumpheld`'s viewer-side render is capped to the VIEWER's SH degree (0 in this run: `Math.Min(trainer, viewer)`),
-i.e. DC-only, so it is not the trainer's render; the new `-evalrender` frames are.
+Correction (10-15): an earlier version of this note said the viewer-side `&dumpheld` render was DC-only (viewer SH degree 0). WRONG: the `viewer SH degree 0` in the HELD-EVAL lines is logged BEFORE the viewer receives the trained bands (`[Train] viewer SH degree 3` comes after). Compared pixel for pixel, the old viewer dump and the new `-evalrender` frame are the same image (mean difference 0.004/255 on all four views), and both score exactly what a clamped CPU PSNR says (16.52 for view 30). So the viewer dump was faithful and the clamp explains the whole 13.88 vs 16.62 gap.
 Fix (65cd9d7; gate green: gpu 14.4992 dB = clamped oracle, unclamped 12.3490; red-check with the clamp removed FAILS by name): `eval_sse` clamps; TrainerGate PsnrGateAsync (no gate scored PSNR before: the SSIM
 case discards it) writes a hostile render (x1.8 and below-0 stripes) into the output buffer and compares with a clamping
 oracle, plus a vacuity check that clamping moves the score > 0.5 dB.

@@ -215,6 +215,7 @@ public partial class Studio : IAsyncDisposable
         if (query.TryGetValue("depthcheck", out var dckq)) DepthCheckOption = dckq is "1" or "true";
         if (DepthCarveOption || DepthCheckOption) MultiViewGenerationService.KeepDepthTargets = true;
         if (query.TryGetValue("preset", out var presetQ) && !string.IsNullOrWhiteSpace(presetQ)) AutotestPreset = presetQ;
+        if (query.TryGetValue("fillsetting", out var fsetQ)) AutotestFillSetting = fsetQ is "1" or "true";
         if (query.TryGetValue("depthinitmode", out var dimq)) MultiViewGenerationService.DepthFusionKeepUncontradicted = dimq == "free";
         if (query.TryGetValue("depthtargetpx", out var dtpq) && int.TryParse(dtpq, out var dtpv))
             MultiViewGenerationService.DepthTargetLongSide = Math.Clamp(dtpv, 64, 4096);
@@ -293,7 +294,7 @@ public partial class Studio : IAsyncDisposable
             if (rbgq == "1") SplatTrainerGpu.BackgroundAmplitude = 1f;
         }
         // &fillunseen=1: after training, paint what no photo saw around the capture position (Studio.Fill, opt-in).
-        if (query.TryGetValue("fillunseen", out var fuq)) FillUnseenOption = fuq is "1" or "true";
+        if (query.TryGetValue("fillunseen", out var fuq)) { FillUnseenOption = fuq is "1" or "true"; FillUnseenFromQuery = true; }
         if (query.TryGetValue("filldump", out var fdmq)) FillDumpOption = fdmq is "1" or "true";
         // &exportcolmap=1 (harness): after Generate, our SfM as COLMAP text for a reference trainer (Studio.ColmapExport).
         if (query.TryGetValue("exportcolmap", out var ecq)) ExportColmapOption = ecq is "1" or "true";

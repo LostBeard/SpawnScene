@@ -221,6 +221,12 @@ public class ProjectSettings
     /// property keeps this initialiser). Research/floaters-photo-depth-2026-10-13.md.
     /// </summary>
     public bool FloaterCleanup { get; set; } = true;
+    /// <summary>
+    /// Fill unseen directions (2+ photos): after training, what no photo faced is painted by big-LaMa and added as splats
+    /// (Studio.Fill, UnseenFill), so turning around in a room does not look into a void. Invented content, so Off for a
+    /// project that does not ask for it (also for projects saved before it existed: a missing property keeps this initialiser).
+    /// </summary>
+    public bool FillUnseen { get; set; }
     public string QualityPreset { get; set; } = "Standard";
     public int Subsample { get; set; } = 2;
     public float EdgeSharpness { get; set; } = 0.3f;

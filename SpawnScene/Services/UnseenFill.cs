@@ -252,8 +252,8 @@ public static class UnseenFill
 
     /// <summary>
     /// Fill the scene on <paramref name="renderer"/> around <paramref name="centre"/>: 8 headings 45 degrees apart at
-    /// pitches 0 / +40 / -40 (60 degree horizontal field) plus straight up and down, rendered by <paramref name="trainer"/>
-    /// at its size.
+    /// pitches 0 / +40 / -40 / +65 / -65 (60 degree horizontal field) plus straight up and down, rendered by
+    /// <paramref name="trainer"/> at its size.
     /// Returns the splats added.
     /// </summary>
     public static async Task<int> FillAsync(Accelerator a, SplatTrainerGpu trainer, GpuGaussianRenderer renderer,
@@ -275,7 +275,9 @@ public static class UnseenFill
         // across, ~47 up and down at 4:3) left the band from ~23 to ~60 degrees above the horizon to no view at all:
         // x2's ceiling kept a magenta stripe there.
         var views = new List<(string Name, Vector3 Fwd, Vector3 Up)>();
-        foreach (int pitch in new[] { 0, 40, -40 })
+        // +-65 rings after +-40 (2026-10-15, pine cone: the up view started 89.6% hole, so big-LaMa had no context and painted
+        // BLACK): each ring's hole now borders content the ring before it pasted, and up / down are small caps.
+        foreach (int pitch in new[] { 0, 40, -40, 65, -65 })
             for (int k = 0; k < 8; k++)
             {
                 float t = k * MathF.PI / 4f, pr = pitch * MathF.PI / 180f;
@@ -300,6 +302,14 @@ public static class UnseenFill
                 var box = await SplatBounds.ComputeAsync(a, packed, n);
                 if (box == null) break;
                 var (near, far) = SplatBounds.DepthRangeFor(box.Value, cam);
+                // The splats pasted by the views before this one are past the trainer's sized count: without room for
+                // their colours they rendered as opaque BLACK context, and big-LaMa continued black from it (2026-10-15:
+                // the pine cone's up view painted black, the +65 ring's known pixels were black).
+                if (n > trainer.SizedSplatCount)
+                {
+                    await trainer.ResizeAsync(w, h, n, trainer.KeysPerSplat);
+                    Console.WriteLine($"[Fill] {name}: trainer resized to the scene's {n:N0} splats (colours of pasted splats)");
+                }
                 await trainer.RenderForwardAsync(packed, n, cam, near, far, readback: false, depth: true);
                 // No splat in view: the raster never ran (T stays cleared to 0 = "covered"), and there is no depth to
                 // place a fill at.

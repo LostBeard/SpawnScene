@@ -83,7 +83,11 @@ rows: 2.3x as many splats as before in the same memory, a picture 60 dB PSNR fro
     map, so faint floaters off the photo path fade while they train (pine cone, held out: 15.64 -> 16.49 dB, LPIPS
     0.559 -> 0.501; the room is readable when the camera turns around);
   - **solid surfaces**: training over a random background makes the walls the photos saw opaque, so turning around in
-    a room no longer shows holes through them (a bathroom: see-through pixels off the photo path 12% -> 5%).
+    a room no longer shows holes through them (a bathroom: see-through pixels off the photo path 12% -> 5%);
+  - **fill unseen directions** (Quality > Fill unseen directions, Off by default): after training, what none of your
+    photos faced (the ceiling, the wall behind you) is painted by big-LaMa and added as splats, so turning around does
+    not look into empty space (a pine cone capture: mean see-through over 30 views 2.1% -> 0.35%, held out unchanged).
+    It is invented content, not a measurement, and downloads a 208 MB inpainting model once.
 - **Fast**: a WebGPU subgroup reduction in the backward pass, tile binning that follows each splat's ellipse, and no
   per-step GPU readback - a 7K benchmark scene in 2-4 minutes on an RTX 4070.
 - **Quality presets** for photo resolution, keypoints, iterations and scene size, sized to your GPU's memory.

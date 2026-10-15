@@ -841,7 +841,9 @@ public partial class Studio
                     Console.WriteLine("[Studio] not training: the pose recovery produced no usable camera poses");
 
                 // &fillunseen=1: paint what no photo saw before the scene is saved (Studio.Fill, UnseenFill).
-                if (FillUnseenOption && trainedIters > 0 && !_partitionSavedStreamed) await FillUnseenAsync(scene);
+                // The project's Fill unseen directions setting (ProjectSettings.FillUnseen); a URL &fillunseen wins.
+                bool fillUnseen = FillUnseenFromQuery ? FillUnseenOption : _activeProject.Settings.FillUnseen;
+                if (fillUnseen && trainedIters > 0 && !_partitionSavedStreamed) await FillUnseenAsync(scene);
 
                 // A partitioned run that saved itself as a streamed scene (Studio.Partition) is saved already.
                 if (_partitionSavedStreamed) _partitionSavedStreamed = false;

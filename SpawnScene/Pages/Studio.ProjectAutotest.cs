@@ -23,6 +23,9 @@ public partial class Studio
     /// <summary>&amp;preset=Draft|Standard|High|Max (harness): the project autotest's preset, applied as the UI applies it.</summary>
     public static string? AutotestPreset { get; set; }
 
+    /// <summary>&amp;fillsetting=1 (harness): the project autotest's project has Fill unseen directions On (ProjectSettings.FillUnseen).</summary>
+    public static bool AutotestFillSetting { get; set; }
+
     private async Task RunProjectAutotestAsync(string datasetName, int trainIters, int count, int stride,
         int maxSplats = 3_000_000, int trainRes = 1024, bool pageOnly = false)
     {
@@ -72,6 +75,9 @@ public partial class Studio
                 trainIters = settings.TrainIterations;   // the checks below compare against what was trained
                 Console.WriteLine($"[Dataset] preset {AutotestPreset}: {settings.TrainIterations} iterations, training size {settings.TrainMaxDimension}");
             }
+            // &fillsetting=1 (harness): the project's own Fill unseen directions setting On, as the UI's On button sets it (no
+            // URL &fillunseen, which would bypass the setting this checks).
+            if (AutotestFillSetting) settings.FillUnseen = true;
             var project = await _projectService.CreateProjectAsync($"autotest {datasetName} {DateTime.Now:MMdd-HHmmss}", settings);
             var t0 = DateTime.UtcNow;
             if (video != null)

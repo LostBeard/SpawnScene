@@ -491,6 +491,11 @@ public partial class Studio
             s.FloaterCleanup ? 1 : 0, v => s.FloaterCleanup = v == 1,
             "Uses each photo's depth map to clear the haze and floaters that hang in front of walls when you move away " +
             "from where the photos were taken. Off trains from the photos' colours alone.");
+        y = AddChoiceRow(parent, x, y, w, "Fill unseen directions",
+            new (string, int)[] { ("Off", 0), ("On", 1) },
+            s.FillUnseen ? 1 : 0, v => s.FillUnseen = v == 1,
+            "After training, paints what none of your photos faced (the ceiling, the wall behind you) so turning around does not " +
+            "show empty space. It is invented content, not a measurement. On downloads an inpainting model (208 MB, once).");
 
         // What these photos would train at under this device's budget, and for how long (TrainingTimeEstimate: the trainer's
         // own sizing rule, and the speed this device measured on its last run).

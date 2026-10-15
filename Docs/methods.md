@@ -68,6 +68,19 @@ cost).
   `--random_background` uses [0, 1], which darkens scenes where some light always passes (sky, thin foliage: Bicycle
   -0.37 dB); ours is zero-mean at half width ([-0.25, 0.25]). Bathroom: see-through pixels off the photo path 12.0% ->
   5.4%, held out 18.82 dB vs 18.45-18.69; Truck neutral; Bicycle -0.04 dB (fair score). Default since 2026-10-08.
+- **Fill unseen directions** (Quality > Fill unseen directions, `ProjectSettings.FillUnseen`, Off by default; `&fillunseen=1`
+  forces it from the URL): after training, from the cameras' centre the trainer renders views all around - 8 headings at
+  pitches 0 / +40 / -40 / +65 / -65 plus straight up and down, 60 degrees across - masks the pixels the scene covers by less
+  than 70%, has big-LaMa paint them, and adds each painted cell as a thin surface-aligned splat at a depth interpolated from
+  the covered pixels around it (push-pull). Each view's fill is pasted before the next view renders, so rings paint inward:
+  every hole borders content the previous ring made. Two bugs found on the pine cone (2026-10-15) and fixed: the up view was
+  89.6% hole so LaMa had no context and painted black (the +-65 rings), and the splats pasted by earlier views rendered as
+  opaque BLACK context in later views because the trainer's per-splat buffers were sized for the trained count only (the fill
+  now resizes the trainer; `SplatTrainerGpu.SizedSplatCount`). Pine cone (user path, Standard 7K): mean see-through over 30 Wander
+  views 2.07% -> 0.32-0.36%, held out 14.73 -> 14.72 dB (unchanged), 52 s and ~283K splats added. **Limits:** it is invented
+  content, seen well from near the capture centre; from far off-centre (outside the rig) the filled shell shows thin radial
+  streaks, and a few uncovered gaps remain (low-0: 4.4%). Tried and dropped (no effect on the streaks): far-priority depth
+  pyramid, a depth-discontinuity guard on the disks. `Research/floaters-photo-depth-2026-10-13.md`.
 - Optional: depth supervision (`&depthloss`, an L1 on rendered inverse depth, gradient checked against finite
   differences), Mip-Splatting's 3D filter (`&mipfilter`), MCMC densification (`&mcmc`).
 - WebGPU has no float atomics: per-splat gradients are reduced per tile in the backward pass and summed with an atomic

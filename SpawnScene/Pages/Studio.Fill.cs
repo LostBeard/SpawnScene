@@ -10,6 +10,9 @@ public partial class Studio
     /// Opt-in (TJ 2026-10-08): invented content. The model is HiddenLayerInpaint's (&amp;inpaintmodel=lama for big-LaMa).</summary>
     public static bool FillUnseenOption { get; set; }
 
+    /// <summary>The URL set <c>&amp;fillunseen</c>: it wins over the project's Fill unseen directions setting (harness A/Bs).</summary>
+    public static bool FillUnseenFromQuery { get; set; }
+
     HiddenLayerInpaint? _unseenInpaint;
 
     /// <summary>&amp;filldump=1 (harness): each painted view's input / painted / depth / mask strip, saved by the dataset
@@ -51,10 +54,20 @@ public partial class Studio
         if (_hudTrainLabel != null) _hudTrainLabel.Text = _trainHudText;
         int before = _gpuRenderer.SplatCount;
         var t0 = DateTime.UtcNow;
-        int added = await UnseenFill.FillAsync(_gpuService.WebGPUAccelerator, _trainer, _gpuRenderer, _unseenInpaint, centre, up,
-            dump: FillDumpOption ? DumpFillViewAsync : null);
+        // The setting means big-LaMa (clearly better than MI-GAN behind objects, Research/quality-roadmap-2026-10-07.md); a URL
+        // &fillunseen / &inpaintmodel keeps the harness's own choice. The single-photo path's model is restored after.
+        string priorModel = HiddenLayerInpaint.Model;
+        if (!FillUnseenFromQuery && priorModel == "migan") HiddenLayerInpaint.Model = "lama";
+        string usedModel = HiddenLayerInpaint.Model;   // logged below: Model is restored by then
+        int added;
+        try
+        {
+            added = await UnseenFill.FillAsync(_gpuService.WebGPUAccelerator, _trainer, _gpuRenderer, _unseenInpaint, centre, up,
+                dump: FillDumpOption ? DumpFillViewAsync : null);
+        }
+        finally { HiddenLayerInpaint.Model = priorModel; }
         if (_sceneManager.ActiveScene != null) _sceneManager.ActiveScene.GpuSplatCount = _gpuRenderer.SplatCount;
-        Console.WriteLine($"[Fill] unseen fill ({HiddenLayerInpaint.Model}) from {centre}: {added:N0} splats added " +
+        Console.WriteLine($"[Fill] unseen fill ({usedModel}) from {centre}: {added:N0} splats added " +
             $"({before:N0} -> {_gpuRenderer.SplatCount:N0}) in {(DateTime.UtcNow - t0).TotalSeconds:F1}s");
     }
 }

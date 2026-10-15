@@ -369,6 +369,13 @@ public sealed partial class SplatTrainerGpu : IDisposable
     /// </summary>
     public int KeysPerSplat { get; private set; }
 
+    /// <summary>
+    /// The splat count the per-splat buffers (colour, radius, SH, ...) were last sized for. A render of MORE splats than this
+    /// (a scene grown outside the trainer, e.g. UnseenFill's pasted splats) cannot store their colours: they read back as
+    /// opaque black. Resize first (UnseenFill does).
+    /// </summary>
+    public int SizedSplatCount { get; private set; }
+
     /// <summary>Keys emitted by the last render. Exceeding capacity is reported, never silent.</summary>
     public int LastKeyCount { get; private set; }
 
@@ -893,6 +900,7 @@ public sealed partial class SplatTrainerGpu : IDisposable
         }
 
         KeysPerSplat = keysPerSplat;
+        SizedSplatCount = splatCount;
         _keyCapacity = Math.Max(1024, splatCount * keysPerSplat);
         if (_keyCapacity > maxKeys)
             throw new InvalidOperationException(

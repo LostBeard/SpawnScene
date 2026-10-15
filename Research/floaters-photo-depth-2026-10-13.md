@@ -161,3 +161,26 @@ Tried and dropped: `&freespacesat=0.9` (no free-space push where the photo's sma
 that blown-out window pixels carry no depth evidence): pan-2 3.09%, pan-3 0.22%, mean 3.24% - inside the noise above; held out
 19.26 / 0.8538. Not kept (the code was reverted, never committed). Open: a fill for directions no photo saw is a separate
 feature (parity first, fill later); free space only makes the honest emptiness visible where the floaters used to hide it.
+
+## 2026-10-15: pine cone (user path) at the MAX preset, free space + cover on (the default), over magenta
+
+One run (`tuvok-mx1`, AOT build 65cd9d7 + clamp): 92 photos at 2048x1365 (this sample's photos are 2048 px on the long side; the Auto 4 GB
+budget allows photos up to 1024 MB, so nothing was shrunk), 30,000 iterations in 1,755 s (17.1 it/s), 1.08M splats at the end.
+
+| preset (pine cone, user path, held out llffhold=8) | PSNR / SSIM | weight in front of held-out depth | train |
+|---|---|---|---|
+| Standard 7K, free space on (10-13) | 14.68 / 0.677 | 4.8% | 130 s |
+| High 15K at 1600 px, free space off (10-13) | 13.90 / 0.653 | 62.6% | 772 s |
+| High 15K at 1600 px, free space on (10-13) | 14.24 / 0.681 | 5.5% | 603 s |
+| **Max 30K at 2048 px, free space on (10-15)** | **14.09 / 0.667** | **5.70%** | 1,755 s |
+
+(The 10-13 rows used the scorer before the clamp fix; the pine cone has little over-range colour, but it was not re-measured.)
+Max does not beat High or Standard on held-out PSNR on this capture, and the floater measure holds (5.7% in front vs 62.6% for
+High with free space off). The end carve removed 15,162 floaters + 331,498 unseen splats (held out 14.127 -> 14.092).
+
+Wander views (turning around in the room, over magenta): the pine cone is sharp (diamond pattern, petals), the room is
+readable (chairs, frames, window) and there is no fog. What is left: SEE-THROUGH VOIDS in directions the capture does not face -
+magenta share pan-2 **50.85%**, pan-3 18.45%, pan-1 5.76%, low-0 15.46%, low-3 14.92%, out-0 7.51%, out-3 7.83%, over-0 5.54%;
+mean over 30 views 4.22% (Bathroom default: 3.4-3.6%). Everything the photos saw is solid. The project page already tells the
+user which directions no photo faces (capture feedback). A fill for those directions is the open feature; it is separate from
+floaters and from parity.

@@ -295,6 +295,10 @@ public partial class Studio : IAsyncDisposable
         }
         // &fillunseen=1: after training, paint what no photo saw around the capture position (Studio.Fill, opt-in).
         if (query.TryGetValue("fillunseen", out var fuq)) { FillUnseenOption = fuq is "1" or "true"; FillUnseenFromQuery = true; }
+        if (query.TryGetValue("filloverlap", out var fovq) && float.TryParse(fovq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var fovv)) UnseenFill.DiskOverlap = Math.Clamp(fovv, 0.5f, 3f);
+        if (query.TryGetValue("fillknown", out var fknq) && float.TryParse(fknq, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var fknv)) UnseenFill.KnownCoverage = Math.Clamp(fknv, 0.05f, 0.99f);
         if (query.TryGetValue("filldump", out var fdmq)) FillDumpOption = fdmq is "1" or "true";
         // &exportcolmap=1 (harness): after Generate, our SfM as COLMAP text for a reference trainer (Studio.ColmapExport).
         if (query.TryGetValue("exportcolmap", out var ecq)) ExportColmapOption = ecq is "1" or "true";

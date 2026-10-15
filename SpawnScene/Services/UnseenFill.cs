@@ -21,6 +21,12 @@ public static class UnseenFill
 {
     public const int S = HiddenLayerInpaint.Size;
 
+    /// <summary>&amp;filloverlap=X (harness): the fill disks' scale factor (1 = the cell footprint).</summary>
+    public static float DiskOverlap { get; set; } = 1f;
+
+    /// <summary>&amp;fillknown=X (harness): coverage (1 - T) at or above which a pixel is the scene's, not a hole (default 0.7).</summary>
+    public static float KnownCoverage { get; set; } = 0.7f;
+
     public struct Params
     {
         public int W, H;              // the render
@@ -32,6 +38,7 @@ public static class UnseenFill
         public int Capacity;
         public float Opacity;
         public float CellStretch;     // longest a cell's disk may grow, in footprints (a parameter: kernels cannot read a mutable static)
+        public float Overlap;         // each disk's scale factor: >1 overlaps the neighbours so seams between disks close
     }
 
     /// <summary>The render resampled to the S x S paint grid: un-premultiplied colour 0..255, mask (255 = the scene's, 0 =
@@ -142,7 +149,7 @@ public static class UnseenFill
         float aa = XMath.Sqrt(ax * ax + ay * ay + az * az);
         float footprint = z * aa * p.Stride * p.W / S / p.Fx;
         float cap = p.CellStretch * footprint;
-        float su = XMath.Min(disk.Su, cap), sv = XMath.Min(disk.Sv, cap);
+        float su = XMath.Min(disk.Su, cap) * p.Overlap, sv = XMath.Min(disk.Sv, cap) * p.Overlap;
         if (!(su > 1e-6f)) su = footprint;
         if (!(sv > 1e-6f)) sv = footprint;
         rows[o + SplatFormat.OffScale] = su;
@@ -257,10 +264,11 @@ public static class UnseenFill
     /// Returns the splats added.
     /// </summary>
     public static async Task<int> FillAsync(Accelerator a, SplatTrainerGpu trainer, GpuGaussianRenderer renderer,
-        HiddenLayerInpaint inpaint, Vector3 centre, Vector3 sceneUp, int stride = 2, float known = 0.7f, float minMasked = 0.01f,
+        HiddenLayerInpaint inpaint, Vector3 centre, Vector3 sceneUp, int stride = 2, float known = -1f, float minMasked = 0.01f,
         Func<string, byte[], int, int, Task>? dump = null)
     {
         Load(a);
+        if (known < 0f) known = KnownCoverage;
         var (w, h) = trainer.Size;
         if (w <= 0 || h <= 0) return 0;
         trainer.EnableDepthRender();
@@ -324,7 +332,7 @@ public static class UnseenFill
                     Fwx = cam.Forward.X, Fwy = cam.Forward.Y, Fwz = cam.Forward.Z,
                     // 3 footprints, not the single-photo layer's 8: seen from the centre the far ceiling is grazing, and
                     // 8 turned its cells into long sawtooth sheets (x2).
-                    Stride = stride, Opacity = 0.95f, CellStretch = 3f,
+                    Stride = stride, Opacity = 0.95f, CellStretch = 3f, Overlap = DiskOverlap,
                 };
                 var scratch = new List<MemoryBuffer1D<float, Stride1D.Dense>>();
                 try

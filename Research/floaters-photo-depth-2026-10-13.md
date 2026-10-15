@@ -211,3 +211,26 @@ see-through measure (black counts as covered), only the strips showed it. Not fo
 (over / out views) and a few uncovered gaps (low-0: 4.4%): two guesses (far-priority depth, a depth-discontinuity guard) were A/B'd and
 changed nothing. Inside views (pan-*) are clean in every arm. The setting path was checked end to end (`&fillsetting=1`, no URL
 override): `[Inpaint] LaMa loaded`, `[Fill] unseen fill (lama)`. Held out is unchanged by the fill (it paints directions no photo faces).
+
+### Fill seams (same day): disk overlap and the "known" threshold - mixed, defaults unchanged
+
+Thin magenta seams remain where the fill meets trained content (Bathroom ceiling contour). Two harness knobs (defaults unchanged: overlap 1.0,
+known 0.7): `&filloverlap=X` (each fill disk's scale) and `&fillknown=X` (coverage 1 - T at or above which a pixel counts as the scene's).
+Measured with the strong-magenta share and a continuous see-through measure (mean of ((R-G)+(B-G))/2 over the 30 Wander views, over magenta):
+
+| scene | arm | strong | continuous | held out |
+|---|---|---|---|---|
+| Bathroom | no fill | 3.323% | 5.348% | 19.32 / 19.29 |
+| Bathroom | fill 1.0 / 0.7 (default) | 0.051% | 1.985% | 19.26 |
+| Bathroom | fill 1.3 / 0.7 | 0.011% | 1.875% | 19.29 |
+| Bathroom | fill 1.3 / 0.9 | 0.030% | 1.677% | 19.32 |
+| Pine cone | no fill | 2.065% | 5.038% | 14.73 |
+| Pine cone | fill 1.0 / 0.7 (default) | 0.321% | 2.722% | 14.72 |
+| Pine cone | fill 1.3 / 0.9 | 0.178% | 1.901% | 14.73 |
+
+Bathroom with 1.3 / 0.9: pan-2's seams are gone and the ceilings are cleaner. Pine cone with 1.3 / 0.9: the metric is better and the PICTURE IS
+WORSE - the radial streak fans around the pine cone's tip and silhouette are much larger (the fringe pixels next to a near object are painted
+at depths that bridge from the object to the far wall; viewed from the side they are sheets). A see-through metric rewards coverage and cannot
+see this; only the Wander images do. So the threshold is not adopted as a default. Open: the bridge surfaces are the cause of the streaks (a
+hole next to a near object should take the BACKGROUND depth, not an interpolation between object and wall); the far-priority pyramid tried
+earlier did not remove them at known 0.7, so the next test is a far-priority depth restricted to the fringe pixels, judged on the images.
